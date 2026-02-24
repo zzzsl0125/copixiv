@@ -1,10 +1,14 @@
 .venv/
+.vscode/
 __pycache__/
+node_modules/
+
 test*
 
 database/
 download/
 logs/
+
 
 pixiv_token
 config.yaml

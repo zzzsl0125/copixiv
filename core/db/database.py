@@ -83,11 +83,11 @@ class Database:
     
     def get_db(self):
         """Generator for dependency injection (e.g. FastAPI)."""
-        db = self.get_session()
+        session = self.SessionLocal()
         try:
-            yield db
+            yield session
         finally:
-            db.close()
+            session.close()
 
     @property
     def novel(self) -> type[Novel]:

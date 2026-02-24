@@ -144,7 +144,7 @@ class NovelQueryBuilder(BaseQueryBuilder):
         """应用分页和排序逻辑。"""
         # 复用基类方法
         id_stmt = self.with_pagination(
-            self.params.get('last_novel'), 
+            self.params.get('cursor'), 
             self.params['order_by'], 
             self.params['order_direction'], 
             apply_to=id_stmt
