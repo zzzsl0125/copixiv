@@ -1,0 +1,195 @@
+import threading
+import logging
+import os
+from pathlib import Path
+from typing import Optional, Dict, Any
+
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from pixivpy3 import models
+
+from core.util import build_path, parse_tags, guess_series_order, has_image_placeholders
+from core.epub_builder import create_epub
+
+logger = logging.getLogger(__name__)
+
+def _get_session() -> requests.Session:
+    session = requests.Session()
+    retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
+    session.mount('http://', HTTPAdapter(max_retries=retries))
+    session.mount('https://', HTTPAdapter(max_retries=retries))
+    session.headers.update({
+        "Referer": "https://www.pixiv.net/",
+        "User-Agent": "PixivIOSApp/7.13.3 (iOS 14.6; iPhone13,2)"
+    })
+    return session
+
+def download_image(url: str, save_path: Path, session: Optional[requests.Session] = None) -> bool:
+
+    if save_path.exists():
+        return True
+    
+    local_session = session or _get_session()
+    should_close = session is None
+    
+    try:
+        response = local_session.get(url, stream=True, timeout=10)
+        response.raise_for_status()
+        with open(save_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to download image {url}: {e}")
+        # 如果下载失败，尝试删除可能残留的不完整文件
+        if save_path.exists():
+            try:
+                os.remove(save_path)
+            except OSError:
+                pass
+        return False
+    finally:
+        if should_close:
+            local_session.close()
+
+def _download_novel_assets(data: Dict[str, Any]) -> None:
+    """
+    下载小说的相关资源（封面、插图），并尝试创建 EPUB。
+    运行在单独的线程中。
+    """
+    base_path = Path(data["path"]).parent
+    novel_id = str(data["id"])
+    images = data.get("images", {})
+    illusts = data.get("illusts", {})
+    cover_url = data.get("cover_url")
+
+    # 记录下载的文件以便清理
+    downloaded_files = []
+    session = _get_session()
+
+    try:
+        # 1. 下载封面
+        if cover_url:
+            ext = Path(cover_url).suffix or ".jpg"
+            save_path = base_path / f"{novel_id}_c_cover{ext}"
+            if download_image(cover_url, save_path, session):
+                downloaded_files.append(save_path)
+
+        # 2. 处理 'images' (uploaded images)
+        if images:
+            for img_id, img_info in images.items():
+                urls = img_info.get("urls", {})
+                url = urls.get("original") or urls.get("large") or urls.get("medium") or urls.get("small")
+                
+                if url:
+                    ext = Path(url).suffix or ".jpg"
+                    save_path = base_path / f"{novel_id}_u_{img_id}{ext}"
+                    if download_image(url, save_path, session):
+                        downloaded_files.append(save_path)
+
+        # 3. 处理 'illusts' (linked illustrations)
+        if illusts:
+            for illust_id, illust_info_wrapper in illusts.items():
+                # 处理数据结构的差异
+                illust_data = illust_info_wrapper.get("illust") if isinstance(illust_info_wrapper, dict) else illust_info_wrapper
+                
+                if isinstance(illust_data, dict):
+                    images_info = illust_data.get("images", {})
+                    url = images_info.get("original") or images_info.get("medium") or images_info.get("small")
+                    
+                    if url:
+                        ext = Path(url).suffix or ".jpg"
+                        save_path = base_path / f"{novel_id}_p_{illust_id}{ext}"
+                        if download_image(url, save_path, session):
+                            downloaded_files.append(save_path)
+        
+        # 4. 创建 EPUB
+        # create_epub 会自行读取目录下的图片和文本文件
+        if create_epub(data):
+            # 如果 EPUB 创建成功，清理下载的图片资源
+            for f in downloaded_files:
+                try:
+                    os.remove(f)
+                except OSError as e:
+                    logger.warning(f"Failed to remove temporary file {f}: {e}")
+                    
+    except Exception as e:
+        logger.error(f"Error processing assets for novel {novel_id}: {e}")
+    finally:
+        session.close()
+
+def process_novel_assets(data: Dict[str, Any], force: bool = False) -> None:  
+    try:
+        path = Path(data["path"]).with_suffix(".epub")
+        if path.exists() and not force: 
+            return print(f'skip assets process for novel {data['id']}')
+        if not data.get("images") and not data.get("illusts"): 
+            return 
+        
+        threading.Thread(
+            target=_download_novel_assets, 
+            args=(data.copy(),),
+            daemon=False
+        ).start()
+    except Exception as e:
+        logger.error(f"Failed to process novel {data.get('id')}: {e}")
+    finally:
+        data.pop("images", None)
+        data.pop("illusts", None)
+        data.pop("cover_url", None)
+    
+def save_novel_text(data: Dict[str, Any], force: bool = False) -> None:
+    """
+    保存小说文本内容。
+    """
+    path = Path(data["path"])
+    if path.exists() and not force:
+        return print(f'skip text download for novel {data['id']}')
+        
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(data["content"], encoding="utf-8")
+        data.pop("content", None)
+    except Exception as e:
+        logger.error(f"Failed to save novel text to {path}: {e}")
+        raise
+
+def handle_novel_data(data: models.WebviewNovel, force: bool = False) -> Dict[str, Any]:
+    """
+    处理来自 Webview 的小说数据：转换为字典，保存文本，并在后台处理资源。
+    """
+    # 构建基础数据字典
+    result = {
+        "id": data.id,
+        "title": data.title,
+        "author_id": data.user_id,
+        "author_name": None,
+        "path": build_path(data.id, data.title),
+        "like": data.rating.like,
+        "view": data.rating.view,
+        "text": len(data.text),
+        "caption": data.caption,
+        "series_id": data.series_id,
+        "series_name": data.series_title,
+        "series_index": guess_series_order(data.series_navigation),
+        "create_time": data.cdate,
+        # 0: Cannot/No need, 1: Needs making, 2: Has epub
+        "has_epub": 1 if has_image_placeholders(data.text) else 0,
+        "tag": parse_tags(data.tags),
+        # temp fields for asset processing under
+        # need to be pop before upsert to database
+        "content": data.text,
+        "images": data.images,
+        "illusts": data.illusts,
+        "cover_url": data.cover_url
+    }
+    
+    # 1. 保存文本文件
+    save_novel_text(result, force)
+    
+    # 2. 异步处理资源（下载图片 + 生成 EPUB）
+    process_novel_assets(result, force)
+    
+    return result
+

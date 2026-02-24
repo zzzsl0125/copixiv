@@ -1,0 +1,17 @@
+path:
+  # pixiv token 的路径
+  token: pixiv_token
+  # 数据库文件的路径
+  database: database/database.db
+  # 保存小说的路径
+  download: download
+pixiv_client:
+  # 请求之间的最小间隔秒数
+  min_interval: 1.5
+  # 请求过于频繁，触发警告后的冷却秒数
+  cooling_duration: 120
+  # 工作者的数量，不必过多
+  max_concurrency: 5
+telegram:
+  token: "..."
+  chat_id: "..."

@@ -1,0 +1,50 @@
+# -*- coding: utf-8 -*-
+
+# Table Names
+TABLE_NOVEL = 'novel'
+TABLE_NOVEL_FTS = 'novel_fts'
+TABLE_AUTHOR = 'author'
+TABLE_SERIES = 'series'
+TABLE_TAG = 'tag'
+TABLE_NOVEL_TAG = 'novel_tag'
+TABLE_FAVOURITE = 'favourite'
+TABLE_FAILED_NOVEL = 'failed_novel'
+TABLE_SEARCH_HISTORY = 'search_history'
+TABLE_AUTHOR_CACHE = 'author_cache'
+TABLE_SERIES_CACHE = 'series_cache'
+TABLE_TASK_HISTORY = 'task_history'
+TABLE_SCHEDULED_TASK = 'scheduled_tasks'
+TABLE_TAG_PREFERENCE = 'tag_preferences'
+TABLE_PROCESSED_PERIOD = 'processed_periods'
+TABLE_NOVEL_EPUB_CONVERSION = 'novel_epub_conversions'
+TABLE_RANDOM_NOVEL_POOL = 'random_novel_pool'
+
+# Column Names
+COL_ID = 'id'
+COL_TITLE = 'title'
+COL_AUTHOR = 'author'
+COL_AUTHOR_ID = 'author_id'
+COL_PATH = 'path'
+COL_SOURCE = 'source'
+COL_TEXTS = 'text'
+COL_LIKES = 'like'
+COL_VIEWS = 'view'
+COL_CAPTION = 'caption'
+COL_SERIES_ID = 'series_id'
+COL_SERIES_NAME = 'series_name'
+COL_SERIES_INDEX = 'series_index'
+COL_CREATE_TIME = 'create_time'
+COL_HAS_EPUB = 'has_epub'
+COL_INDEX = 'index'
+COL_TAGS = 'tags'
+COL_NOVEL_COUNT = 'novel_count'
+
+# Query Fields
+FIELD_KEYWORD = 'keyword'
+FIELD_TAGS = 'tags'
+FIELD_IS_FAVOURITE = 'is_favourite'
+FIELD_IS_SPECIAL_FOLLOW = 'is_special_follow'
+
+# Order By Options
+ORDER_BY_RANDOM = 'random'
+ORDER_BY_NONE = 'none'
