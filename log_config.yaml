@@ -24,3 +24,9 @@ handlers:
 root:
   level: INFO
   handlers: [console, file]
+
+loggers:
+  urllib3.connectionpool:
+    level: ERROR
+    handlers: [console, file]
+    propagate: false

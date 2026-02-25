@@ -65,7 +65,7 @@ class BaseRepository:
             return {c.name: getattr(result, c.name) for c in result.__table__.columns}
         return None
 
-    def _update_summary(self, model_class: Type[ModelType], id_column_name: str, ids: list[int] | int | None = None, extra_columns: list = None):
+    def _update_summary(self, model_class: Type[ModelType], id_column_name: str, ids: set[int] | int | None = None, extra_columns: list = None):
         """
         A generic method to update summary statistics for a given model (e.g., Author, Series).
         If ids is None, updates all records.
@@ -76,8 +76,8 @@ class BaseRepository:
         # Local import to avoid circular dependency
         from .. import models
 
-        if ids is not None and isinstance(ids, list) and not ids:
-             return
+        if not ids:
+            return
 
         pk_col = getattr(model_class, id_column_name)
 
@@ -96,10 +96,7 @@ class BaseRepository:
 
         select_stmt = select(*columns_to_select)
 
-        if ids is not None:
-            if isinstance(ids, int):
-                ids = [ids]
-            select_stmt = select_stmt.where(getattr(models.Novel, id_column_name).in_(ids))
+        select_stmt = select_stmt.where(getattr(models.Novel, id_column_name).in_(ids))
             
         select_stmt = select_stmt.group_by(getattr(models.Novel, id_column_name))
         

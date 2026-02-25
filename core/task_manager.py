@@ -2,7 +2,7 @@ import queue
 import threading
 import time
 import logging
-import io
+import inspect
 import json
 import traceback
 import asyncio
@@ -96,7 +96,7 @@ class TaskExecutor:
 
                 try:
                     # Execute the function
-                    if asyncio.iscoroutinefunction(func):
+                    if inspect.iscoroutinefunction(func):
                         # Use a new loop or run in thread logic? 
                         # Since we are in a thread, we can run asyncio.run()
                         asyncio.run(func(**kwargs))

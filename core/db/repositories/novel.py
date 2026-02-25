@@ -36,7 +36,7 @@ class NovelQueryBuilder(BaseQueryBuilder):
         id_stmt = select(self.main_model.id)
         subquery_wheres = []
 
-        queries = self.params.get('queries') or []
+        queries = self.params.get('queries') or {}
 
         # 1. 处理标准查询 (tags, keywords, fields)
         id_stmt = self._process_standard_queries(queries, subquery_wheres, id_stmt)
@@ -56,6 +56,7 @@ class NovelQueryBuilder(BaseQueryBuilder):
     def _process_standard_queries(self, queries: dict, subquery_wheres: List, id_stmt: Select):
         """处理标签、关键词和其他字段查询。"""
         tags, keywords = set(), set()
+        print(queries)
 
         for value, type in queries.items():
             if not isinstance(value, str):
@@ -267,9 +268,12 @@ class Novel(BaseRepository, RandomPoolMixin, EpubMixin):
         e.g. {"1919810": "id", "114514": "author_id"}
         """
 
-        self._validate_query_field(order_by)
-        for q_type in queries.values():
-            self._validate_query_field(q_type)
+        if order_by:
+            self._validate_query_field(order_by)
+        
+        if queries:
+            for q_type in queries.values():
+                self._validate_query_field(q_type)
         
         params = {
             'queries': queries,

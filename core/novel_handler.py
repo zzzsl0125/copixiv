@@ -2,7 +2,7 @@ import threading
 import logging
 import os
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Union
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -36,9 +36,19 @@ def download_image(url: str, save_path: Path, session: Optional[requests.Session
     try:
         response = local_session.get(url, stream=True, timeout=10)
         response.raise_for_status()
+        
+        expected_size = int(response.headers.get('content-length', 0))
+        downloaded_size = 0
+        
         with open(save_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
+                if chunk:
+                    f.write(chunk)
+                    downloaded_size += len(chunk)
+                    
+        if expected_size and downloaded_size != expected_size:
+            raise Exception(f"Incomplete download: expected {expected_size} bytes, got {downloaded_size} bytes")
+            
         return True
     except Exception as e:
         logger.error(f"Failed to download image {url}: {e}")
@@ -155,18 +165,14 @@ def save_novel_text(data: Dict[str, Any], force: bool = False) -> None:
         logger.error(f"Failed to save novel text to {path}: {e}")
         raise
 
-def handle_novel_data(data: models.WebviewNovel, force: bool = False) -> Dict[str, Any]:
-    """
-    处理来自 Webview 的小说数据：转换为字典，保存文本，并在后台处理资源。
-    """
-    # 构建基础数据字典
-    result = {
+def handle_from_webview(data: models.WebviewNovel, force: bool = False) -> Dict: 
+    data = {
         "id": data.id,
         "title": data.title,
         "author_id": data.user_id,
         "author_name": None,
         "path": build_path(data.id, data.title),
-        "like": data.rating.like,
+        "like": data.rating.bookmark,
         "view": data.rating.view,
         "text": len(data.text),
         "caption": data.caption,
@@ -184,12 +190,39 @@ def handle_novel_data(data: models.WebviewNovel, force: bool = False) -> Dict[st
         "illusts": data.illusts,
         "cover_url": data.cover_url
     }
-    
-    # 1. 保存文本文件
-    save_novel_text(result, force)
-    
-    # 2. 异步处理资源（下载图片 + 生成 EPUB）
-    process_novel_assets(result, force)
-    
-    return result
 
+    save_novel_text(data, force)
+    
+    process_novel_assets(data, force)
+    
+    return data
+
+def handle_from_novelInfo(data: models.NovelInfo, force: bool = False) -> Dict:
+    data = {
+        "id": data.id,
+        "title": data.title,
+        "author_id": data.user.id,
+        "author_name": data.user.name,
+        "path": build_path(data.id, data.title),
+        "like": data.total_bookmarks,
+        "view": data.total_view,
+        "text": data.text_length,
+        "caption": data.caption,
+        "series_id": data.series.id if data.series else None,
+        "series_name": data.series.title if data.series else None,
+        "series_index": None,
+        "create_time": data.create_date,
+        "has_epub": 0,
+        "tag": parse_tags([tag.name for tag in data.tags]),
+        "content": None,
+        "images": data.image_urls,
+        "illusts": None,
+        "cover_url": None
+    }
+
+    if Path(data['path']).exists() and not force:
+        return data
+    else:
+        raise Exception(f'Needs download ({data.id}) via webview method.')
+
+        
