@@ -1,7 +1,9 @@
 from typing import List, Optional, Any, TypeVar, Union
+
 from pixivpy3 import models
 from pixivpy3.models import _to_camel
 import pydantic
+from core.logger import logger
 
 # --- Monkey Patch for WebviewNovel ---
 # Fixes validation errors when API returns dict instead of list for certain fields
@@ -22,7 +24,6 @@ try:
         raise ValueError(msg)
 
     ModelT = TypeVar("ModelT", bound=BaseModel)
-    print("Applying monkey patch for WebviewNovel...")
 
     class PatchedWebviewNovel(BasePixivpyModel):
         if _PYDANTIC_MAJOR_VERSION == 2:
@@ -62,7 +63,94 @@ try:
 
     # Apply the patch
     models.WebviewNovel = PatchedWebviewNovel
-    print("Applied monkey patch for WebviewNovel (permissive mode)")
+    logger.info("Applied monkey patch for WebviewNovel (permissive mode)")
 
 except Exception as e:
-    print(f"Failed to apply monkey patch for WebviewNovel: {e}")
+    logger.error(f"Failed to apply monkey patch for WebviewNovel: {e}")
+
+# --- Monkey Patch for AppPixivAPI.novel_ranking ---
+try:
+    from pixivpy3 import AppPixivAPI
+    from pixivpy3.aapi import _MODE, _FILTER, DateOrStr, ParsedJson
+    
+    def novel_ranking(
+        self,
+        mode: _MODE = "day_r18",
+        filter: _FILTER = "for_ios",
+        date: DateOrStr | None = None,
+        offset: int | str | None = None,
+        req_auth: bool = True,
+    ) -> ParsedJson:
+        url = f"{self.hosts}/v1/novel/ranking"
+        params: dict[str, Any] = {
+            "mode": mode,
+            "filter": filter,
+        }
+        if date:
+            params["date"] = self._format_date(date)
+        if offset:
+            params["offset"] = offset
+        r = self.no_auth_requests_call("GET", url, params=params, req_auth=req_auth)
+        return self.parse_result(r)
+
+    AppPixivAPI.novel_ranking = novel_ranking
+    logger.info("Applied monkey patch for AppPixivAPI.novel_ranking")
+except Exception as e:
+    logger.error(f"Failed to apply monkey patch for AppPixivAPI.novel_ranking: {e}")
+
+
+# --- Monkey Patch for UserInfoDetailed ---
+try:
+    from typing import Optional
+    class PatchedProfile(BasePixivpyModel):
+        webpage: Optional[str]
+        gender: str
+        birth: str
+        birth_day: str
+        birth_year: int
+        region: str
+        address_id: int
+        country_code: str
+        job: str
+        job_id: int
+        total_follow_users: int
+        total_mypixiv_users: int
+        total_illusts: int
+        total_manga: int
+        total_novels: int
+        total_illust_bookmarks_public: int
+        total_illust_series: int
+        total_novel_series: int
+        background_image_url: Optional[str]
+        twitter_account: str
+        twitter_url: Optional[str]
+        pawoo_url: Optional[str]
+        is_premium: bool
+        is_using_custom_profile_image: bool
+    
+    # Apply the patch
+    models.Profile = PatchedProfile
+    logger.info("Applied monkey patch for Profile (permissive mode)")
+
+except Exception as e:
+    logger.error(f"Failed to apply monkey patch for Profile: {e}")
+
+
+# --- Monkey Patch for UserInfoDetailed ---
+try:
+    from pixivpy3.models import UserInfo, ProfilePublicity, Workspace
+    from typing import Optional
+    class PatchedUserInfoDetailed(BasePixivpyModel):
+        user: Optional[UserInfo]
+        profile: Optional[PatchedProfile]
+        profile_publicity: Optional[ProfilePublicity]
+        workspace: Optional[Workspace]
+    
+    # Apply the patch
+    models.UserInfoDetailed = PatchedUserInfoDetailed
+    logger.info("Applied monkey patch for Profile (permissive mode)")
+
+except Exception as e:
+    logger.error(f"Failed to apply monkey patch for Profile: {e}")
+
+

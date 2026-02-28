@@ -1,30 +1,29 @@
 from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
-from typing import List, Optional, Dict, Any
+from typing import Optional, Literal
 import json
+from pathlib import Path
+from urllib.parse import quote
 
 from web_api.deps import get_db
 from core.db.repositories.novel import Novel
+from core.db.models import Novel as NovelModel
 from core.db import constants as C
 
 router = APIRouter()
 
-@router.get("/", response_model=List[dict])
+@router.get("/", response_model=dict)
 def get_novels(
     db: Session = Depends(get_db),
     queries: Optional[str] = Query(None),
-    order_by: str = C.COL_LIKES, 
+    order_by: str = C.ORDER_BY_RANDOM, 
     order_direction: str = "DESC",
     cursor: Optional[str] = None,
     per_page: int = 20,
     min_like: Optional[int] = None,
     min_text: Optional[int] = None,
 ):
-    """
-    Get a list of novels based on filters.
-    Pass 'queries' as a URL-encoded JSON string.
-    Example: ?queries=%7B%22keyword%22%3A%22test%22%7D
-    """
     novel_repo = Novel(db)
     
     try:
@@ -46,3 +45,77 @@ def get_novels(
     )
     
     return results
+
+def get_novel_or_404(novel_id: int, db: Session = Depends(get_db)):
+    novel = db.get(NovelModel, novel_id)
+    if not novel:
+        raise HTTPException(status_code=404, detail="Novel not found")
+    return novel
+
+@router.post("/{novel_id}/favourite", status_code=204)
+async def toggle_favourite(
+    novel_id: int,
+    db_session: Session = Depends(get_db)
+):
+    novel_repo = Novel(db_session)
+    novel_repo.toggle_favourite(novel_id)
+    db_session.commit()
+    return
+
+@router.post("/author/{author_id}/follow", status_code=204)
+async def toggle_special_follow(
+    author_id: int,
+    db_session: Session = Depends(get_db)
+):
+    novel_repo = Novel(db_session)
+    novel_repo.toggle_special_follow(author_id)
+    db_session.commit()
+    return
+
+@router.get("/{novel_id}/download")
+async def download_novel(
+    novel: NovelModel = Depends(get_novel_or_404),
+    db_session: Session = Depends(get_db),
+    format: Literal['txt', 'epub'] = 'txt'
+):
+    if not novel.path:
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Novel#{novel.id} without path."
+        )
+
+    file_path = Path(novel.path).with_suffix('.'+format)
+    media_type = 'text/plain' if format == 'txt' else 'application/epub+zip'
+
+    if not file_path.is_file():
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Novel#{novel.id} not found."
+        )
+
+    headers = {
+        'Content-Disposition': \
+            f"attachment; filename*=UTF-8''{quote(file_path.name)}"
+    }
+    return FileResponse(
+        path=str(file_path),
+        media_type=media_type,
+        headers=headers
+    )
+
+@router.delete("/{novel_id}", status_code=204)
+async def delete_novel(
+    novel: NovelModel = Depends(get_novel_or_404),
+    db_session: Session = Depends(get_db)
+):
+    if novel.path:
+        if Path(novel.path).is_file():
+            try:
+                Path(novel.path).unlink()
+            except OSError:
+                pass
+        
+    novel_repo = Novel(db_session)
+    novel_repo.delete(novel.id)
+    db_session.commit()
+    return

@@ -14,7 +14,7 @@ class TaskHistory(BaseRepository):
         task = models.TaskHistory(
             name=name,
             arguments=json.dumps(args),
-            status="running",
+            status="pending",
             start_time=start_time
         )
         self.session.add(task)
@@ -55,7 +55,7 @@ class ScheduledTask(BaseRepository):
         return self.session.get(models.ScheduledTask, task_id)
 
     def get_all(self) -> list[models.ScheduledTask]:
-        stmt = select(models.ScheduledTask)
+        stmt = select(models.ScheduledTask).order_by(models.ScheduledTask.sort_index.asc(), models.ScheduledTask.id.asc())
         return list(self.session.execute(stmt).scalars().all())
 
     def create(self, task_data) -> models.ScheduledTask:
@@ -75,16 +75,13 @@ class ScheduledTask(BaseRepository):
             config = task_data.config
             is_enabled = task_data.is_enabled
 
-        now = datetime.now().isoformat()
         db_task = models.ScheduledTask(
             name=name,
             task=task,
             cron=cron,
             params=json.dumps(params) if isinstance(params, (dict, list)) else params,
             config=json.dumps(config) if isinstance(config, (dict, list)) else config,
-            is_enabled=is_enabled,
-            created_at=now,
-            updated_at=now
+            is_enabled=is_enabled
         )
         self.session.add(db_task)
         self.session.flush()
@@ -106,7 +103,6 @@ class ScheduledTask(BaseRepository):
                 elif hasattr(db_task, key):
                     setattr(db_task, key, value)
             
-            db_task.updated_at = datetime.now().isoformat()
             self.session.flush()
             self.session.refresh(db_task)
         return db_task
@@ -118,3 +114,16 @@ class ScheduledTask(BaseRepository):
             self.session.flush()
             return True
         return False
+
+    def update_order(self, task_ids: list[int]) -> bool:
+        """Updates the sort_index for a list of task IDs."""
+        try:
+            for index, task_id in enumerate(task_ids):
+                db_task = self.get(task_id)
+                if db_task:
+                    db_task.sort_index = index
+            self.session.flush()
+            return True
+        except Exception as e:
+            # Handle exception if needed, session rollback should be done by the caller (Database context manager)
+            return False

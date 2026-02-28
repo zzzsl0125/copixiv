@@ -1,9 +1,23 @@
 import asyncio
-from typing import Any, Callable, Coroutine, List, Optional, TypeVar, ContextManager, AsyncIterator, AsyncContextManager, Dict, Union
+from typing import Any, Callable, Coroutine, List, Optional, TypeVar, AsyncIterator, Dict, Union, Literal
 from contextlib import asynccontextmanager
+from datetime import date, datetime
+
 from pixivpy3 import AppPixivAPI, models
 from pixivpy3.utils import ParamDict, ParsedJson, Response
-from pixivpy3.aapi import _BOOL, _RESTRICT, _CONTENT_TYPE, _FILTER, _MODE, _SEARCH_TARGET, _SORT, _DURATION, _TYPE, DateOrStr
+try:
+    from pixivpy3.aapi import _BOOL, _RESTRICT, _CONTENT_TYPE, _FILTER, _MODE, _SEARCH_TARGET, _SORT, _DURATION, _TYPE, DateOrStr
+except ImportError:
+    _BOOL = Any
+    _RESTRICT = Any
+    _CONTENT_TYPE = Any
+    _FILTER = Any
+    _MODE = Any
+    _SEARCH_TARGET = Any
+    _SORT = Any
+    _DURATION = Any
+    _TYPE = Any
+    DateOrStr = Union[date, str]
 
 T = TypeVar('T')
 
@@ -16,78 +30,78 @@ class PixivClient:
     @asynccontextmanager
     def account_rule(self, need_premium: bool = False, allow_special: bool = False) -> AsyncIterator['PixivClient']: ...
 
-    def pick(self, index: int) -> 'PixivClient': ...
-
     # Proxy methods from AppPixivAPI
-    async def illust_bookmark_add(self, illust_id: int | str, restrict: _RESTRICT = 'public', tags: str | list[str] | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> ParsedJson:
+    async def illust_bookmark_add(self, illust_id: int | str, restrict: _RESTRICT = 'public', tags: str | list[str] | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> ParsedJson:
         ...
-    async def illust_bookmark_delete(self, illust_id: int | str, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> ParsedJson:
+    async def illust_bookmark_delete(self, illust_id: int | str, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> ParsedJson:
         ...
-    async def illust_bookmark_detail(self, illust_id: int | str, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> ParsedJson:
+    async def illust_bookmark_detail(self, illust_id: int | str, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> ParsedJson:
         ...
-    async def illust_comments(self, illust_id: int | str, offset: int | str | None = None, include_total_comments: str | bool | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> ParsedJson:
+    async def illust_comments(self, illust_id: int | str, offset: int | str | None = None, include_total_comments: str | bool | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> ParsedJson:
         ...
-    async def illust_detail(self, illust_id: int | str, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> ParsedJson:
+    async def illust_detail(self, illust_id: int | str, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> ParsedJson:
         ...
-    async def illust_follow(self, restrict: _RESTRICT = 'public', offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> ParsedJson:
+    async def illust_follow(self, restrict: _RESTRICT = 'public', offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> ParsedJson:
         ...
-    async def illust_new(self, content_type: _CONTENT_TYPE = 'illust', filter: _FILTER = 'for_ios', max_illust_id: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> ParsedJson:
+    async def illust_new(self, content_type: _CONTENT_TYPE = 'illust', filter: _FILTER = 'for_ios', max_illust_id: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> ParsedJson:
         ...
-    async def illust_ranking(self, mode: _MODE = 'day', filter: _FILTER = 'for_ios', date: DateOrStr | None = None, offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> ParsedJson:
+    async def illust_ranking(self, mode: _MODE = 'day', filter: _FILTER = 'for_ios', date: DateOrStr | None = None, offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> ParsedJson:
         ...
-    async def illust_recommended(self, content_type: _CONTENT_TYPE = 'illust', include_ranking_label: bool | str = True, filter: _FILTER = 'for_ios', max_bookmark_id_for_recommend: int | str | None = None, min_bookmark_id_for_recent_illust: int | str | None = None, offset: int | str | None = None, include_ranking_illusts: str | bool | None = None, bookmark_illust_ids: str | list[int | str] | None = None, include_privacy_policy: str | list[int | str] | None = None, viewed: str | list[str] | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> ParsedJson:
+    async def illust_recommended(self, content_type: _CONTENT_TYPE = 'illust', include_ranking_label: bool | str = True, filter: _FILTER = 'for_ios', max_bookmark_id_for_recommend: int | str | None = None, min_bookmark_id_for_recent_illust: int | str | None = None, offset: int | str | None = None, include_ranking_illusts: str | bool | None = None, bookmark_illust_ids: str | list[int | str] | None = None, include_privacy_policy: str | list[int | str] | None = None, viewed: str | list[str] | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> ParsedJson:
         ...
-    async def illust_related(self, illust_id: int | str, filter: _FILTER = 'for_ios', seed_illust_ids: int | str | list[str] | None = None, offset: int | str | None = None, viewed: str | list[str] | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> ParsedJson:
+    async def illust_related(self, illust_id: int | str, filter: _FILTER = 'for_ios', seed_illust_ids: int | str | list[str] | None = None, offset: int | str | None = None, viewed: str | list[str] | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> ParsedJson:
         ...
-    async def novel_comments(self, novel_id: int | str, offset: int | str | None = None, include_total_comments: str | bool | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> models.NovelComments:
+    async def novel_comments(self, novel_id: int | str, offset: int | str | None = None, include_total_comments: str | bool | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> models.NovelComments:
         ...
-    async def novel_detail(self, novel_id: int | str, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> models.NovelInfo:
+    async def novel_detail(self, novel_id: int | str, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> models.NovelInfo:
         ...
-    async def novel_follow(self, restrict: _RESTRICT = 'public', offset: int | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> ParsedJson:
+    async def novel_follow(self, restrict: _RESTRICT = 'public', offset: int | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> ParsedJson:
         ...
-    async def novel_new(self, filter: _FILTER = 'for_ios', max_novel_id: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> ParsedJson:
+    async def novel_new(self, filter: _FILTER = 'for_ios', max_novel_id: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> ParsedJson:
         ...
-    async def novel_recommended(self, include_ranking_label: bool | str = True, filter: _FILTER = 'for_ios', offset: int | str | None = None, include_ranking_novels: str | bool | None = None, already_recommended: str | list[str] | None = None, max_bookmark_id_for_recommend: int | str | None = None, include_privacy_policy: str | list[int | str] | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> ParsedJson:
+    async def novel_ranking(self, mode: Literal = 'day_r18', filter: Literal = 'for_ios', date: Union = None, offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> Any:
         ...
-    async def novel_series(self, series_id: int | str, filter: _FILTER = 'for_ios', last_order: str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> ParsedJson:
+    async def novel_recommended(self, include_ranking_label: bool | str = True, filter: _FILTER = 'for_ios', offset: int | str | None = None, include_ranking_novels: str | bool | None = None, already_recommended: str | list[str] | None = None, max_bookmark_id_for_recommend: int | str | None = None, include_privacy_policy: str | list[int | str] | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> ParsedJson:
         ...
-    async def novel_text(self, novel_id: int | str, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> models.WebviewNovel:
+    async def novel_series(self, series_id: int | str, filter: _FILTER = 'for_ios', last_order: str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> ParsedJson:
         ...
-    async def search_illust(self, word: str, search_target: _SEARCH_TARGET = 'partial_match_for_tags', sort: _SORT = 'date_desc', duration: _DURATION = None, start_date: DateOrStr | None = None, end_date: DateOrStr | None = None, filter: _FILTER = 'for_ios', search_ai_type: Literal[0, 1] | None = None, offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> models.SearchIllustrations:
+    async def novel_text(self, novel_id: int | str, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> models.WebviewNovel:
         ...
-    async def search_novel(self, word: str, search_target: _SEARCH_TARGET = 'partial_match_for_tags', sort: _SORT = 'date_desc', merge_plain_keyword_results: _BOOL = 'true', include_translated_tag_results: _BOOL = 'true', start_date: DateOrStr | None = None, end_date: DateOrStr | None = None, filter: str | None = None, search_ai_type: Literal[0, 1] | None = None, offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> models.SearchNovel:
+    async def search_illust(self, word: str, search_target: _SEARCH_TARGET = 'partial_match_for_tags', sort: _SORT = 'date_desc', duration: _DURATION = None, start_date: DateOrStr | None = None, end_date: DateOrStr | None = None, filter: _FILTER = 'for_ios', search_ai_type: Literal[0, 1] | None = None, offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> models.SearchIllustrations:
         ...
-    async def search_user(self, word: str, sort: _SORT = 'date_desc', duration: _DURATION = None, filter: _FILTER = 'for_ios', offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> ParsedJson:
+    async def search_novel(self, word: str, search_target: _SEARCH_TARGET = 'partial_match_for_tags', sort: _SORT = 'date_desc', merge_plain_keyword_results: _BOOL = 'true', include_translated_tag_results: _BOOL = 'true', start_date: DateOrStr | None = None, end_date: DateOrStr | None = None, filter: str | None = None, search_ai_type: Literal[0, 1] | None = None, offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> models.SearchNovel:
         ...
-    async def user_bookmark_tags_illust(self, user_id: int | str, restrict: _RESTRICT = 'public', offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> ParsedJson:
+    async def search_user(self, word: str, sort: _SORT = 'date_desc', duration: _DURATION = None, filter: _FILTER = 'for_ios', offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> ParsedJson:
         ...
-    async def user_bookmarks_illust(self, user_id: int | str, restrict: _RESTRICT = 'public', filter: _FILTER = 'for_ios', max_bookmark_id: int | str | None = None, tag: str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> models.UserBookmarksIllustrations:
+    async def user_bookmark_tags_illust(self, user_id: int | str, restrict: _RESTRICT = 'public', offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> ParsedJson:
         ...
-    async def user_bookmarks_novel(self, user_id: int | str, restrict: _RESTRICT = 'public', filter: _FILTER = 'for_ios', max_bookmark_id: int | str | None = None, tag: str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> models.UserBookmarksNovel:
+    async def user_bookmarks_illust(self, user_id: int | str, restrict: _RESTRICT = 'public', filter: _FILTER = 'for_ios', max_bookmark_id: int | str | None = None, tag: str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> models.UserBookmarksIllustrations:
         ...
-    async def user_detail(self, user_id: int | str, filter: _FILTER = 'for_ios', req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> models.UserInfoDetailed:
+    async def user_bookmarks_novel(self, user_id: int | str, restrict: _RESTRICT = 'public', filter: _FILTER = 'for_ios', max_bookmark_id: int | str | None = None, tag: str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> models.UserBookmarksNovel:
         ...
-    async def user_edit_ai_show_settings(self, setting: _BOOL, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> ParsedJson:
+    async def user_detail(self, user_id: int | str, filter: _FILTER = 'for_ios', req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> models.UserInfoDetailed:
         ...
-    async def user_follow_add(self, user_id: int | str, restrict: _RESTRICT = 'public', req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> ParsedJson:
+    async def user_edit_ai_show_settings(self, setting: _BOOL, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> ParsedJson:
         ...
-    async def user_follow_delete(self, user_id: int | str, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> ParsedJson:
+    async def user_follow_add(self, user_id: int | str, restrict: _RESTRICT = 'public', req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> ParsedJson:
         ...
-    async def user_follower(self, user_id: int | str, filter: _FILTER = 'for_ios', offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> ParsedJson:
+    async def user_follow_delete(self, user_id: int | str, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> ParsedJson:
         ...
-    async def user_following(self, user_id: int | str, restrict: _RESTRICT = 'public', offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> models.UserFollowing:
+    async def user_follower(self, user_id: int | str, filter: _FILTER = 'for_ios', offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> ParsedJson:
         ...
-    async def user_illusts(self, user_id: int | str, type: _TYPE = 'illust', filter: _FILTER = 'for_ios', offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> models.UserIllustrations:
+    async def user_following(self, user_id: int | str, restrict: _RESTRICT = 'public', offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> models.UserFollowing:
         ...
-    async def user_list(self, user_id: int | str, filter: _FILTER = 'for_ios', offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> ParsedJson:
+    async def user_illusts(self, user_id: int | str, type: _TYPE = 'illust', filter: _FILTER = 'for_ios', offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> models.UserIllustrations:
         ...
-    async def user_mypixiv(self, user_id: int | str, offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> ParsedJson:
+    async def user_list(self, user_id: int | str, filter: _FILTER = 'for_ios', offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> ParsedJson:
         ...
-    async def user_novels(self, user_id: int | str, filter: _FILTER = 'for_ios', offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> models.UserNovels:
+    async def user_mypixiv(self, user_id: int | str, offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> ParsedJson:
         ...
-    async def user_recommended(self, filter: _FILTER = 'for_ios', offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> ParsedJson:
+    async def user_novels(self, user_id: int | str, filter: _FILTER = 'for_ios', offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> models.UserNovels:
         ...
-    async def user_related(self, seed_user_id: int | str, filter: _FILTER = 'for_ios', offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> ParsedJson:
+    async def user_recommended(self, filter: _FILTER = 'for_ios', offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> ParsedJson:
         ...
-    async def webview_novel(self, novel_id: int | str, raw: bool = False, req_auth: bool = True, fetch_all: bool = False, fetch_til: bool = False) -> models.WebviewNovel | str:
+    async def user_related(self, seed_user_id: int | str, filter: _FILTER = 'for_ios', offset: int | str | None = None, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> ParsedJson:
+        ...
+    async def webview_novel(self, novel_id: int | str, raw: bool = False, req_auth: bool = True, fetch_all: bool = False, fetch_til: datetime = None, fetch_minlike: int = 0) -> models.WebviewNovel | str:
         ...

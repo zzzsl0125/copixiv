@@ -1,0 +1,158 @@
+import axios from 'axios';
+
+export const api = axios.create({
+  baseURL: '/api', // Proxy routes it to http://127.0.0.1:9000
+});
+
+export interface Novel {
+  id: number;
+  title: string;
+  author_id?: number;
+  author_name?: string;
+  series_id?: number;
+  series_name?: string;
+  series_index?: number;
+  like: number;
+  view: number;
+  text: number;
+  caption?: string;
+  create_time?: string;
+  has_epub: number;
+  tags: string[];
+  is_favourite: number;
+  is_special_follow: number;
+}
+
+export interface GetNovelsParams {
+  queries?: Record<string, any>;
+  order_by?: string;
+  order_direction?: string;
+  cursor?: Record<string, any>;
+  per_page?: number;
+  min_like?: number;
+  min_text?: number;
+}
+
+export const novelApi = {
+  getNovels: async (params: GetNovelsParams) => {
+    // queries and cursor need to be JSON stringified
+    const queryParams: Record<string, any> = { ...params };
+    
+    if (params.queries) {
+      queryParams.queries = JSON.stringify(params.queries);
+    }
+    if (params.cursor) {
+      queryParams.cursor = JSON.stringify(params.cursor);
+    }
+    
+    const response = await api.get('/novels/', { params: queryParams });
+    return response.data as { novels: Novel[], cursor: Record<string, any> | null };
+  },
+
+  toggleFavourite: async (novelId: number) => {
+    await api.post(`/novels/${novelId}/favourite`);
+  },
+
+  toggleSpecialFollow: async (authorId: number) => {
+    await api.post(`/novels/author/${authorId}/follow`);
+  },
+  
+  downloadNovelUrl: (novelId: number, format: 'txt' | 'epub' = 'txt') => {
+    return `${api.defaults.baseURL || '/api'}/novels/${novelId}/download?format=${format}`;
+  }
+};
+
+// --- Task API ---
+
+export interface ScheduledTask {
+  id: number;
+  name: string;
+  task: string;
+  cron: string;
+  params?: Record<string, any>;
+  config?: Record<string, any>;
+  is_enabled: boolean;
+}
+
+export interface ScheduledTaskCreate {
+  name: string;
+  task: string;
+  cron: string;
+  params?: Record<string, any>;
+  config?: Record<string, any>;
+  is_enabled: boolean;
+}
+
+export interface ScheduledTaskUpdate {
+  name?: string;
+  task?: string;
+  cron?: string;
+  params?: Record<string, any>;
+  config?: Record<string, any>;
+  is_enabled?: boolean;
+}
+
+export interface TaskHistory {
+  id: number;
+  name: string;
+  arguments?: string;
+  status: string;
+  start_time: string;
+  end_time?: string;
+  duration?: number;
+  result?: string;
+}
+
+export interface TaskArgument {
+  name: string;
+  type: string;
+  default?: any;
+  required: boolean;
+}
+
+export interface TaskMethod {
+  name: string;
+  description?: string;
+  arguments: TaskArgument[];
+}
+
+export const taskApi = {
+  getTaskMethods: async () => {
+    const response = await api.get('/tasks/methods');
+    return response.data as TaskMethod[];
+  },
+  getScheduledTasks: async () => {
+    const response = await api.get('/tasks/scheduled');
+    return response.data as ScheduledTask[];
+  },
+  
+  createScheduledTask: async (data: ScheduledTaskCreate) => {
+    const response = await api.post('/tasks/scheduled', data);
+    return response.data as ScheduledTask;
+  },
+  
+  updateScheduledTask: async (id: number, data: ScheduledTaskUpdate) => {
+    const response = await api.put(`/tasks/scheduled/${id}`, data);
+    return response.data as ScheduledTask;
+  },
+  
+  deleteScheduledTask: async (id: number) => {
+    const response = await api.delete(`/tasks/scheduled/${id}`);
+    return response.data;
+  },
+  
+  runScheduledTask: async (id: number) => {
+    const response = await api.post(`/tasks/scheduled/${id}/run`);
+    return response.data;
+  },
+
+  reorderScheduledTasks: async (taskIds: number[]) => {
+    const response = await api.post('/tasks/scheduled/reorder', taskIds);
+    return response.data;
+  },
+
+  getTaskHistory: async (limit = 50, offset = 0) => {
+    const response = await api.get('/tasks/history', { params: { limit, offset } });
+    return response.data as { items: TaskHistory[], total: number };
+  },
+};

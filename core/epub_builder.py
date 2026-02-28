@@ -1,6 +1,4 @@
 import io
-import logging
-import re
 from pathlib import Path
 from typing import Dict, Optional, List
 
@@ -8,8 +6,7 @@ from PIL import Image
 from ebooklib import epub
 
 from core.util import safe_filename, HAS_IMAGE_PATTERN
-
-logger = logging.getLogger(__name__)
+from core.logger import logger
 
 def _add_image_to_epub(image_path: Path, image_id: str, book: epub.EpubBook, compress_quality: int = 75) -> bool:
     """将图片添加到EPUB书籍，并进行压缩"""
@@ -265,9 +262,7 @@ def create_epub(data: dict, compress_quality: int = 75) -> bool:
     
     try:
         epub.write_epub(output_path, book, {})
-        logger.info(f"Successfully created EPUB: {output_path.name}")
-        # data['has_epub'] = True
-        # 此处设值无效，需要额外统一扫描入库
+        logger.info(f'Made Epub: ({data['id']}){data['title']}')
         return True
     except Exception as e:
         logger.error(f"Failed to write EPUB file: {e}")

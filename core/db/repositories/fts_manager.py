@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-import json
 import jieba
 from sqlalchemy.orm import Session
 from sqlalchemy import text, select, func, Table, Column, Integer, String
 from sqlalchemy.dialects.sqlite import insert
 from .. import models
 from .. import constants as C
+
+from core.logger import logger
 
 class FTSManager:
     """
@@ -50,7 +51,7 @@ class FTSManager:
 
     def rebuild_novel_fts(self):
         """Rebuilds the entire Novel FTS table efficiently."""
-        print(f"--- Rebuilding {self.TABLE_NOVEL_FTS} table... ---")
+        logger.info(f"--- Rebuilding {self.TABLE_NOVEL_FTS} table... ---")
 
         # Ensure the FTS virtual table exists
         # Virtual table creation is specific to SQLite and hard to represent purely in generic DDL
@@ -92,7 +93,7 @@ class FTSManager:
         count_stmt = select(func.count()).select_from(self.novel_fts_table)
         count = self.session.execute(count_stmt).scalar() or 0
         
-        print(f"--- Successfully rebuilt {self.TABLE_NOVEL_FTS} with {count} novels. ---")
+        logger.info(f"--- Successfully rebuilt {self.TABLE_NOVEL_FTS} with {count} novels. ---")
 
     def update_novel_fts_index(self, novel_ids: list[int]):
         """

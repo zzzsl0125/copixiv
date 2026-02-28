@@ -7,7 +7,7 @@ from ... import models
 class RandomPoolMixin:
     """
     Mixin for Random Novel Pool operations.
-    Requires self.session and self.logger (optional).
+    Requires self.session.
     """
 
     def get_random_novels(
@@ -26,14 +26,12 @@ class RandomPoolMixin:
                 models.RandomNovelPool.min_likes == min_likes,
                 models.RandomNovelPool.min_texts == min_texts
             )
-            .order_by(func.random()) # Shuffle on the small pool table is fast
+            .order_by(func.random())
             .limit(count)
         )
         random_ids = self.session.execute(random_ids_query).scalars().all()
 
         if not random_ids:
-            if hasattr(self, 'logger'):
-                self.logger.warning(f"No novels found in random pool for min_likes={min_likes}, min_texts={min_texts}")
             return []
 
         # 2. Fetch the full novel data for those IDs
@@ -55,31 +53,23 @@ class RandomPoolMixin:
         # 3. Sort results to match the random order from the pool query
         id_order = {id: i for i, id in enumerate(random_ids)}
         novels.sort(key=lambda n: id_order.get(n['id'], float('inf')))
-        
-        # Use helper method from Repository
-        if hasattr(self, '_process_novel_rows'):
-            return self._process_novel_rows(novels)
+
         return novels
 
     def clear_random_novel_pool(self):
         """Clears the entire random novel pool."""
-        if hasattr(self, 'logger'):
-            self.logger.info("Clearing the entire random novel pool...")
         self.session.query(models.RandomNovelPool).delete()
 
     def populate_random_novel_pool(self, min_likes: int, min_texts: int, limit: int = 1000):
         """
         Populates the random novel pool for a specific criteria combination.
         """
-        if hasattr(self, 'logger'):
-            self.logger.info(f"Populating random novel pool for min_likes={min_likes}, min_texts={min_texts} with limit={limit}...")
-        
         # 1. Fetch all eligible novel IDs for this specific criteria
         eligible_ids_query = (
             select(models.Novel.id)
             .where(
-                func.coalesce(models.Novel.likes, 0) >= min_likes,
-                models.Novel.texts >= min_texts
+                func.coalesce(models.Novel.like, 0) >= min_likes,
+                models.Novel.text >= min_texts
             )
         )
         
@@ -106,6 +96,3 @@ class RandomPoolMixin:
             stmt = sqlite_insert(models.RandomNovelPool).values(pool_data)
             stmt = stmt.on_conflict_do_nothing(index_elements=['novel_id', 'min_likes', 'min_texts'])
             self.session.execute(stmt)
-        
-        if hasattr(self, 'logger'):
-            self.logger.info(f"Successfully populated pool for min_likes={min_likes}, min_texts={min_texts} with {len(eligible_ids)} novels.")

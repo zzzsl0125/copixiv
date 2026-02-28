@@ -65,11 +65,9 @@ def guess_series_order(navigation: Union[models.EmptyObject, dict, None]) -> Opt
 
 CLEAN_PATTERN = re.compile(r"[()]")
 SPLIT_PATTERN = re.compile(r"[/|#、\\]")
-
 def parse_tags(tags: List[Union[str, dict]]) -> List[str]:
 
-    result = []
-    seen = set()
+    result = set()
     
     for tag in tags:
         # 处理可能的标签对象 (pixiv API 有时返回对象列表 {'name': 'tag', ...})
@@ -81,11 +79,30 @@ def parse_tags(tags: List[Union[str, dict]]) -> List[str]:
         # 分割多重标签
         for part in SPLIT_PATTERN.split(cleaned_tag):
             part = part.strip().lower()
-            if part and part not in seen:
-                seen.add(part)
-                result.append(part)
-                
-    return result
+            if part: result.add(part)
+
+    return list(result)
+    
+import langid
+JAPANESE_REGEX = re.compile(r'[\u3040-\u309F\u30A0-\u30FF]')
+CHINESE_TAG_KEYWORDS = {
+    "中文", "中文作品", "中文注意", "简中", "简体中文", "繁体", "繁體", "中文中国语",
+    "中国文", "中文語", "中文语", "中国语", "中国語", "中阈语", "中國语", "中國語",
+    "中国語注意", "中國語注意", "中国语注意", "Chinese", "chinese", "中國", "中国", 
+}
+def is_chinese(data: models.NovelInfo) -> bool:
+
+    if any(tag in CHINESE_TAG_KEYWORDS for tag in parse_tags(data.tags)):
+        return True
+    
+    sample = data.title + data.caption
+    if not sample.strip(): return False
+    if JAPANESE_REGEX.search(sample): return False
+
+    try:
+        return langid.classify(sample)[0] == "zh"
+    except Exception:
+        return False
 
 HAS_IMAGE_PATTERN = re.compile(r'\[(uploadedimage|pixivimage):([\d\-]+)\]')
 def has_image_placeholders(content: str) -> bool:

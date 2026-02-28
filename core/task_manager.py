@@ -14,9 +14,7 @@ from core.db.database import db
 from core.db.repositories.task import TaskHistory, ScheduledTask
 from core.util import import_string
 from core.notifier import notifier
-from core.logger import TaskLogHandler
-
-logger = logging.getLogger(__name__)
+from core.logger import TaskLogHandler, logger
 
 class TaskExecutor:
     _instance = None
@@ -95,16 +93,25 @@ class TaskExecutor:
                     repo.update_task(task_id, "running")
 
                 try:
-                    # Execute the function
+                    # Execute the function with a 30-minute timeout
                     if inspect.iscoroutinefunction(func):
                         # Use a new loop or run in thread logic? 
                         # Since we are in a thread, we can run asyncio.run()
-                        asyncio.run(func(**kwargs))
+                        asyncio.run(asyncio.wait_for(func(**kwargs), timeout=1800))
                     else:
-                        func(**kwargs)
+                        import concurrent.futures
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                            future = pool.submit(func, **kwargs)
+                            future.result(timeout=1800)
                     
                     status = "success"
                     logger.info(f"Task '{name}' (ID: {task_id}) completed successfully.")
+                
+                except (asyncio.TimeoutError, TimeoutError):
+                    status = "success"
+                    error_msg = "Task timed out after 30 minutes"
+                    logger.error(f"Task '{name}' (ID: {task_id}) finish: {error_msg}")
+                    logger.error(traceback.format_exc())
                 
                 except Exception as e:
                     status = "failed"
@@ -172,11 +179,20 @@ class Scheduler:
             except Exception as e:
                 logger.error(f"Error in Scheduler loop: {e}")
             
-            # Check every minute (adjust precision as needed)
-            for _ in range(60):
+            # Calculate time to sleep until the next minute starts
+            now = datetime.now()
+            sleep_seconds = 60 - now.second
+            # Add a small buffer to ensure we are into the next minute
+            sleep_seconds += 0.5
+            
+            # Sleep in small increments to allow stopping
+            for _ in range(int(sleep_seconds)):
                 if not self.running:
                     break
                 time.sleep(1)
+            
+            if self.running and sleep_seconds % 1 > 0:
+                 time.sleep(sleep_seconds % 1)
 
     def _check_tasks(self):
         with db.get_session() as session:

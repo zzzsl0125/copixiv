@@ -8,8 +8,13 @@ from typing import Callable, List, Any, Coroutine, TypeVar, Optional
 from functools import wraps
 from dataclasses import dataclass
 from contextlib import asynccontextmanager
-from pixivpy3 import AppPixivAPI
+
+from pixivpy3 import AppPixivAPI, PixivError
+from pixivpy3.aapi import _MODE, _FILTER, DateOrStr
+from pixivpy3.utils import ParsedJson
+
 from core.config import config
+from core.logger import logger
 from core.pixiv_patch import *  # Apply monkey patch to models
 
 T = TypeVar("T")
@@ -27,7 +32,7 @@ def retry_async(retries: int = 3, backoff_factor: float = 2.0, exceptions: tuple
                     if attempt + 1 == retries:
                         break
                     wait_time = backoff_factor * (2 ** attempt)
-                    print(f"[Retry] {func.__name__} 失败 ({attempt + 1}/{retries}): {e}. {wait_time}s 后重试...")
+                    logger.warning(f"[Retry] {func.__name__} 失败 ({attempt + 1}/{retries}): {e}. {wait_time}s 后重试...")
                     await asyncio.sleep(wait_time)
             raise last_exception or Exception("Unknown Error")
 
@@ -118,13 +123,13 @@ class RequestQueue:
                     self._last_request_time = time.time()
 
                 # 执行任务 (此处的 task.func 已经是带重试逻辑的异步函数)
+                logger.info(f"{self.refresh_token[:4]}... requesting - {task}")
                 result = await task.func(*task.args, **task.kwargs)
-                print(f"{self.refresh_token[:4]}... - {task} 执行成功")
 
                 # 判定 Rate Limit
                 if isinstance(result, dict) and "Rate Limit" in str(result.get("error", {}).get("message", "")):
                     self._cooling_until = time.time() + self.cooling_duration
-                    print(f"!!! [Account Rate Limit] 触发冷却 {self.cooling_duration}s !!!")
+                    logger.warning(f"!!! [Account Rate Limit] 触发冷却 {self.cooling_duration}s !!!")
                     await self.queue.put(task)  # 重新放回
                     continue
 
@@ -175,9 +180,9 @@ class TokenManager:
                                     premium=acc.get("premium", False)
                                 ))
                 except Exception as e:
-                    print(f"Error loading tokens from {token_path}: {e}")
+                    logger.error(f"Error loading tokens from {token_path}: {e}")
             else:
-                print(f"Warning: Token file {token_path} not found.")
+                logger.warning(f"Warning: Token file {token_path} not found.")
 
     @property
     def tokens(self) -> List[TokenInfo]:
@@ -187,17 +192,16 @@ class PixivAccount:
     def __init__(self, token_info: TokenInfo, config: dict):
         self.api = AppPixivAPI()
         self.token_info = token_info
-        self.refresh_token = token_info.token
-        self.queue = RequestQueue(config, self.refresh_token)
+        self.queue = RequestQueue(config, self.token_info.token)
         self.is_auth = False
 
     async def authenticate(self):
         if not self.is_auth:
-            await asyncio.to_thread(self.api.auth, refresh_token=self.refresh_token)
+            await asyncio.to_thread(self.api.auth, refresh_token=self.token_info.token)
             self.is_auth = True
 
     def __str__(self):
-        return f"PixivAccount({self.refresh_token[:4]}...)"
+        return f"PixivAccount({self.token_info.token[:4]}...)"
 
 class PixivClient:
     def __init__(self, config_override: dict = None):
@@ -273,23 +277,13 @@ class PixivClient:
                 pass
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
-    def pick(self, index: int) -> '_AsyncProxy':
-        """指定某个账号进行后续操作（显式、清晰、无状态）"""
-        if not (0 <= index < len(self.accounts)):
-            raise IndexError(f"账号索引 {index} 超出范围")
-        return self._AsyncProxy(self, fixed_account=self.accounts[index])
-
     class _AsyncProxy:
-        def __init__(self, master: 'PixivClient', fixed_account: PixivAccount = None):
+        def __init__(self, master: 'PixivClient'):
             self._master = master
-            self._fixed_account = fixed_account   # pick 用的固定账号（优先级最高）
 
         def _select_account(self) -> PixivAccount:
-            # 1. pick() 指定的 fixed_account
-            # 2. force_account 上下文锁定的账号
-            # 3. 智能调度 (受 strategy 影响)
-            if self._fixed_account:
-                return self._fixed_account
+            # 1. force_account 上下文锁定的账号
+            # 2. 智能调度 (受 strategy 影响)
 
             forced = self._master._forced_account_var.get()
             if forced is not None:
@@ -331,6 +325,9 @@ class PixivClient:
                 original_func = getattr(acc.api, name)
                 try:
                     result = await asyncio.to_thread(original_func, *args, **kwargs)
+                except PixivError as e:
+                    # Allow PixivError to propagate so _worker can handle Rate Limit checks
+                    raise e
                 except Exception as e:
                     raise RuntimeError(f"Error executing {name} with account {acc}: {e}") from e
                 return result
@@ -342,12 +339,15 @@ class PixivClient:
             async def wrapper(*args, **kwargs):
                 fetch_all: bool = kwargs.pop('fetch_all', False)
                 fetch_til: datetime = kwargs.pop('fetch_til', None)
+                fetch_minlike: int = kwargs.pop('fetch_minlike', 0)
 
                 acc = self._select_account()
                 future = await acc.queue.add_task(wrapped_execution, acc, *args, **kwargs)
                 result = await future
+
+                auto_fetch = fetch_til or fetch_minlike or fetch_all
                 
-                while (fetch_til or fetch_all) and result.next_url:
+                while auto_fetch and result.next_url:
                     next_qs = acc.api.parse_qs(result.next_url)
                     acc = self._select_account()
 
@@ -357,16 +357,19 @@ class PixivClient:
                     result.novels.extend(next_result.novels)
                     result.next_url = next_result.next_url
 
-                    if fetch_til and next_result.novels:
+                    if fetch_til:
                         sample = next_result.novels[-1]
-                        if sample.get('cdate'):
-                            target_date = sample['cdate']
-                        else:
-                            target_date = sample.get('create_date')
+                        target_date = sample.get('create_date')
                         if date_parser.parse(target_date) < fetch_til:
+                            break
+                    
+                    if fetch_minlike:
+                        sample = next_result.novels[-1]
+                        like = sample.get('total_bookmarks')
+                        if like < fetch_minlike:
                             break
 
                 return result
 
             return wrapper
-
+        

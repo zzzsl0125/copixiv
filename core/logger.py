@@ -6,11 +6,11 @@ from datetime import datetime
 from pathlib import Path
 
 def setup_logging(
-    default_path='log_config.yaml', 
+    default_path='config.yaml', 
     default_level=logging.INFO, 
     env_key='LOG_CFG',
-    log_dir='logs',
-    app_name='app'
+    log_dir='log',
+    app_name='copixiv'
 ):
     """
     Setup logging configuration
@@ -25,28 +25,31 @@ def setup_logging(
         with open(path, 'rt') as f:
             try:
                 config = yaml.safe_load(f.read())
+                log_config = config.get('logging')
                 
-                # Dynamic log filename
-                timestamp = datetime.now().strftime("%Y-%m-%d")
-                log_filename = f"{app_name}_{timestamp}.log"
-                
-                # Ensure log directory exists
-                log_path = Path(log_dir)
-                log_path.mkdir(parents=True, exist_ok=True)
-                
-                # Update filename in file handler
-                if 'handlers' in config and 'file' in config['handlers']:
-                    config['handlers']['file']['filename'] = str(log_path / log_filename)
-                
-                logging.config.dictConfig(config)
-                logging.info(f"Logging configured from {path}, output to {log_path / log_filename}")
-                return
-
+                if log_config:
+                    # Dynamic log filename
+                    timestamp = datetime.now().strftime("%Y-%m-%d")
+                    log_filename = f"{app_name}_{timestamp}.log"
+                    
+                    # Ensure log directory exists
+                    log_path = Path(log_dir)
+                    log_path.mkdir(parents=True, exist_ok=True)
+                    
+                    # Update filename in file handler
+                    if 'handlers' in log_config and 'file' in log_config['handlers']:
+                        log_config['handlers']['file']['filename'] = str(log_path / log_filename)
+                    
+                    logging.config.dictConfig(log_config)
+                    return
+                else:
+                    print("No 'logging' section found in config.yaml.")
             except Exception as e:
                 print(f"Error loading logging configuration: {e}")
-                # Fallback to basic config if YAML loading fails
-                logging.basicConfig(level=default_level)
-                logging.error(f"Failed to load configuration from {path}. Using default configs.")
+                
+            # Fallback to basic config if YAML loading fails or no logging section
+            logging.basicConfig(level=default_level)
+            logging.error(f"Failed to load logging configuration from {path}. Using default configs.")
     else:
         logging.basicConfig(level=default_level)
         logging.info("Logging configuration file not found. Using default configs.")

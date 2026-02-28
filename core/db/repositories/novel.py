@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
-import logging
-from typing import Any, Literal, List, Set
+from typing import Any, Literal, List, Set, Optional
 from sqlalchemy import select, func, case, and_, or_, Select, Table
 from sqlalchemy.orm import Session
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -56,7 +55,6 @@ class NovelQueryBuilder(BaseQueryBuilder):
     def _process_standard_queries(self, queries: dict, subquery_wheres: List, id_stmt: Select):
         """处理标签、关键词和其他字段查询。"""
         tags, keywords = set(), set()
-        print(queries)
 
         for value, type in queries.items():
             if not isinstance(value, str):
@@ -88,19 +86,15 @@ class NovelQueryBuilder(BaseQueryBuilder):
 
         elif type == C.FIELD_IS_SPECIAL_FOLLOW:
             subquery_wheres.append(self.main_model.author_id.in_((
-                select(self.main_model.author_id)
-                    .join(models.Favourite, self.main_model.id == models.Favourite.novel_id)
-                    .distinct()
+                select(models.SpecialFollow.author_id)
             )))
 
         elif value and type in self.repo.VALID_NOVEL_FIELDS:
             model_field = getattr(self.main_model, type)
             if type in [C.COL_AUTHOR_ID, C.COL_SERIES_ID, C.COL_ID]:
-                subquery_wheres.append(model_field.in_(value))
+                subquery_wheres.append(model_field.in_([value]))
             else:
-                # 不应当进入这个分支
-                like_conditions = [model_field.like(f"%{v}%") for v in value]
-                subquery_wheres.append(or_(*like_conditions))
+                raise Exception('should not enter this if branch.')
 
     def _apply_keyword_search(self, keywords: List[str], id_stmt: Select, subquery_wheres: List):
         """应用全文检索关键词搜索。"""
@@ -167,13 +161,15 @@ class NovelQueryBuilder(BaseQueryBuilder):
             select(
                 *self.main_model.__table__.c,
                 func.group_concat(models.Tag.name, '|||').label(C.COL_TAGS),
-                case((models.Favourite.novel_id != None, 1), else_=0).label(C.FIELD_IS_FAVOURITE)
+                case((models.Favourite.novel_id != None, 1), else_=0).label(C.FIELD_IS_FAVOURITE),
+                case((models.SpecialFollow.author_id != None, 1), else_=0).label(C.FIELD_IS_SPECIAL_FOLLOW)
             )
             .select_from(self.main_model)
             .join(id_filter_subquery, self.main_model.id == id_filter_subquery.c.id)
             .outerjoin(models.NovelTag, self.main_model.id == models.NovelTag.novel_id)
             .outerjoin(models.Tag, models.NovelTag.tag_id == models.Tag.id)
             .outerjoin(models.Favourite, self.main_model.id == models.Favourite.novel_id)
+            .outerjoin(models.SpecialFollow, self.main_model.author_id == models.SpecialFollow.author_id)
             .group_by(self.main_model.id)
         )
 
@@ -188,7 +184,6 @@ class Novel(BaseRepository, RandomPoolMixin, EpubMixin):
 
     def __init__(self, session: Session):
         super().__init__(session)
-        self.logger = logging.getLogger(__name__)
         # 防止动态字段名导致 SQL 注入的白名单
         self.VALID_NOVEL_FIELDS = {c.name for c in models.Novel.__table__.c}
         self.UPDATABLE_NOVEL_FIELDS = list(self.VALID_NOVEL_FIELDS - {C.COL_ID, C.COL_INDEX})
@@ -257,16 +252,23 @@ class Novel(BaseRepository, RandomPoolMixin, EpubMixin):
         queries: dict | None = None,
         order_by: str = C.COL_LIKES,
         order_direction: Literal['ASC', 'DESC'] = 'DESC',
-        cursor: str | None = None,
+        cursor: dict | None = None,
         per_page: int = 50,
         min_like: int | None = None,
         min_text: int | None = None,
-    ) -> list[dict]:
+    ) -> dict:
         """
         queries: {value: type},  
         e.g. {"magical girl": "tag", "illya": "keyword"}  
         e.g. {"1919810": "id", "114514": "author_id"}
         """
+
+        if order_by == 'random' and not queries:
+            novels = self.get_random_novels(per_page, min_like or 0, min_text or 0)
+            return {
+                "cursor": {"random_page": True}, 
+                "novels": self._process_novel_rows(novels)
+            }
 
         if order_by:
             self._validate_query_field(order_by)
@@ -280,7 +282,7 @@ class Novel(BaseRepository, RandomPoolMixin, EpubMixin):
             'order_by': order_by,
             'order_direction': order_direction,
             'cursor': cursor,
-            'per_page': per_page,
+            'per_page': per_page + 1,
             'min_like': min_like,
             'min_text': min_text
         }
@@ -290,10 +292,16 @@ class Novel(BaseRepository, RandomPoolMixin, EpubMixin):
         
         result = self.session.execute(query, params)
         novels = [dict(row._mapping) for row in result.fetchall()]
-        
-        return self._process_novel_rows(novels)
 
-    def get_existing_ids(self, novel_ids: list[int]) -> set[int]:
+        cursor = None
+        if len(novels) > per_page:
+            n = novels.pop()
+            cursor = {'id': n['id'], order_by: n.get(order_by)}
+        
+        novels = self._process_novel_rows(novels)
+        return {"novels": novels, "cursor": cursor}
+
+    def get_existing_ids(self, novel_ids: set[int]) -> set[int]:
         """从小说 ID 列表中，返回数据库中已存在的 ID 集合。"""
         if not novel_ids: return set()
         stmt = select(models.Novel.id).where(models.Novel.id.in_(novel_ids))
@@ -322,6 +330,18 @@ class Novel(BaseRepository, RandomPoolMixin, EpubMixin):
         else:
             new_fav = models.Favourite(novel_id=novel_id)
             self.session.add(new_fav)
+            
+    def toggle_special_follow(self, author_id: int):
+        """切换作者的特别关注状态。"""
+        follow = self.session.query(models.SpecialFollow)\
+                            .filter(models.SpecialFollow.author_id == author_id)\
+                            .one_or_none()
+
+        if follow:
+            self.session.delete(follow)
+        else:
+            new_follow = models.SpecialFollow(author_id=author_id)
+            self.session.add(new_follow)
     
     def get_favourited_author_ids(self) -> list[int]:
         stmt = select(models.Novel.author_id)\

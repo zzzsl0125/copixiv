@@ -64,11 +64,11 @@ class Database:
     def init(self):
         """Initializes the database schema and FTS tables."""
         Base.metadata.create_all(bind=self.engine)
-        # FTS tables are virtual, usually need manual creation or specific hook
-        # But FTSManager.rebuild_novel_fts handles creation.
         with self.get_session() as session:
             FTSManager(session).rebuild_novel_fts()
-
+            self.novel(session).populate_random_novel_pool(0, 0)
+            self.novel(session).populate_random_novel_pool(500, 3000)
+            
     def get_session(self, commit: bool = True):
         """
         Returns a database session.  

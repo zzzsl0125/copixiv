@@ -1,6 +1,5 @@
 import threading
-import logging
-import os
+import os, re
 from pathlib import Path
 from typing import Optional, Dict, Any, Union
 
@@ -9,10 +8,9 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from pixivpy3 import models
 
-from core.util import build_path, parse_tags, guess_series_order, has_image_placeholders
+from core.util import build_path, parse_tags, guess_series_order, has_image_placeholders, is_chinese
 from core.epub_builder import create_epub
-
-logger = logging.getLogger(__name__)
+from core.logger import logger
 
 def _get_session() -> requests.Session:
     session = requests.Session()
@@ -133,7 +131,8 @@ def process_novel_assets(data: Dict[str, Any], force: bool = False) -> None:
     try:
         path = Path(data["path"]).with_suffix(".epub")
         if path.exists() and not force: 
-            return print(f'skip assets process for novel {data['id']}')
+            logger.info(f'skip assets process for novel {data["id"]}')
+            return
         if not data.get("images") and not data.get("illusts"): 
             return 
         
@@ -155,12 +154,14 @@ def save_novel_text(data: Dict[str, Any], force: bool = False) -> None:
     """
     path = Path(data["path"])
     if path.exists() and not force:
-        return print(f'skip text download for novel {data['id']}')
+        logger.info(f'skip text download for novel {data["id"]}')
+        return
         
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(data["content"], encoding="utf-8")
         data.pop("content", None)
+        logger.info(f'Downloaded: ({data['id']}){data['title']}')
     except Exception as e:
         logger.error(f"Failed to save novel text to {path}: {e}")
         raise
@@ -198,6 +199,11 @@ def handle_from_webview(data: models.WebviewNovel, force: bool = False) -> Dict:
     return data
 
 def handle_from_novelInfo(data: models.NovelInfo, force: bool = False) -> Dict:
+
+    data.tags = parse_tags([tag.name for tag in data.tags])
+    if not is_chinese(data):
+        return None
+    
     data = {
         "id": data.id,
         "title": data.title,
@@ -211,9 +217,9 @@ def handle_from_novelInfo(data: models.NovelInfo, force: bool = False) -> Dict:
         "series_id": data.series.id if data.series else None,
         "series_name": data.series.title if data.series else None,
         "series_index": None,
-        "create_time": data.create_date,
+        "create_time": data.create_date[:10],
         "has_epub": 0,
-        "tag": parse_tags([tag.name for tag in data.tags]),
+        "tag": data.tags,
         "content": None,
         "images": data.image_urls,
         "illusts": None,
@@ -224,5 +230,3 @@ def handle_from_novelInfo(data: models.NovelInfo, force: bool = False) -> Dict:
         return data
     else:
         raise Exception(f'Needs download ({data.id}) via webview method.')
-
-        

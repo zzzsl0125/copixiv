@@ -125,6 +125,11 @@ class Favourite(Base):
     novel_id = Column(Integer, ForeignKey(f'{C.TABLE_NOVEL}.id', ondelete='CASCADE'), primary_key=True)
  
 
+class SpecialFollow(Base):
+    __tablename__ = C.TABLE_SPECIAL_FOLLOW
+    author_id = Column(Integer, ForeignKey(f'{C.TABLE_AUTHOR}.author_id', ondelete='CASCADE'), primary_key=True)
+
+
 class ProcessedPeriod(Base):
     __tablename__ = C.TABLE_PROCESSED_PERIOD
     period_type = Column(String(10), primary_key=True)  # 'day', 'month', 'year'
@@ -171,6 +176,7 @@ class ScheduledTask(Base):
     params = Column(JSON, nullable=True)
     is_enabled = Column(Boolean, default=False)
     config = Column(Text, nullable=True, default='{}')
+    sort_index = Column(Integer, default=0)
     
 
 class TagPreference(Base):
