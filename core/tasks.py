@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 
 from core.pixiv_client import PixivClient
 from core.db.database import db
+from core.logger import logger
 
 # add _ prefix to avoid treated as task function.
 from core.novel_handler import handle_from_webview as _handle_from_webview
@@ -11,25 +12,50 @@ from core.util import is_chinese as _is_chinese
 
 client = PixivClient()
 
-def _batch_upsert(novels: list[dict], commit: bool = True):
+def _batch_upsert(novels: list[dict], commit: bool = True) -> int:
     with db.get_session(commit) as session:
-        db.novel(session).upsert_novels(novels)
+        new_count = db.novel(session).upsert_novels(novels) or 0
         db.author(session).update_summary({n['author_id'] for n in novels})
         db.series(session).update_summary({sid for n in novels if (sid := n.get('series_id'))})
+        return new_count
 
-async def _batch_handle(novels: list[dict], redownload: bool = False):
-    ids = {n.id for n in novels if n}
+async def _batch_handle(novels: list[dict], redownload: bool = False, sync_author: bool = True) -> int:
 
-    existing = set()
-    if not redownload:
-        with db.get_session(False) as session:
-            existing = db.novel(session).get_existing_ids(ids)
-        _batch_upsert([_handle_from_novelInfo(n) for n in novels if n.id in existing])
+    ids = {n.id for n in novels}
 
-    resp = await asyncio.gather(*[client.webview_novel(id) for id in ids - existing])
-    _batch_upsert([_handle_from_webview(n) for n in resp])
+    with db.get_session(False) as session:
+        existing = db.novel(session).get_existing_ids(ids)
     
-    await _sync_empty_authors()
+    if not redownload:
+        need_download = ids - existing
+        only_upsert = existing
+    else:
+        need_download = ids
+        only_upsert = set()
+        
+    _batch_upsert([_handle_from_novelInfo(n) for n in novels if n.id in only_upsert])
+
+    resp = await asyncio.gather(
+        *[client.webview_novel(id) for id in need_download], 
+        return_exceptions=True
+    )
+    
+    valid_resp = []
+    for id, res in zip(need_download, resp):
+        if isinstance(res, Exception):
+            logger.error(f"Failed to download novel {id}: {res}")
+            continue
+        try:
+            valid_resp.append(_handle_from_webview(res))
+        except Exception as e:
+            logger.error(f"Failed to handle novel {id}: {e}")
+            
+    new_count = _batch_upsert(valid_resp)
+
+    if sync_author:
+        await _sync_empty_authors()
+        
+    return new_count
 
 from core.util import build_path
 async def _temp_batch_handle_for_recovery(novels: list[dict]):
@@ -51,7 +77,7 @@ async def _temp_author_fetch_for_recovery(author_id: int):
     resp = await client.user_novels(author_id, fetch_all=True)
     await _temp_batch_handle_for_recovery(resp.novels)
 
-async def novel_follow(days: int = 3):
+async def novel_follow(days: int = 3) -> int:
     if days > 10:
         raise Exception('Process in batches for security. e.g. 30 = 10 + 20 + 30')
     
@@ -59,25 +85,25 @@ async def novel_follow(days: int = 3):
         fetch_til = datetime.now().astimezone() - timedelta(days=days)
         resp = await client.novel_follow(fetch_til=fetch_til)
     
-    await _batch_handle(resp.novels)
+    return await _batch_handle([n for n in resp.novels if _is_chinese(n)])
 
-async def novel_ranking(days: int = 3):
+async def novel_ranking(days: int = 3) -> int:
     if days > 10:
         raise Exception('Process in smaller batches for security.')
     elif days < 2:
         raise Exception('Today\'s ranking maybe empty.')
 
+    total_new = 0
     for delta in range(1, days):
         target = datetime.now().astimezone() - timedelta(days=delta)
         resp = await client.novel_ranking(date=target, fetch_all=True)
-        await _batch_handle([n for n in resp.novels if _is_chinese(n)])
+        total_new += await _batch_handle([n for n in resp.novels if _is_chinese(n)])
+    return total_new
     
-async def author_fetch(author_id: int):
+async def author_fetch(author_id: int) -> int:
     resp = await client.user_novels(author_id, fetch_all=True)
-    await _batch_handle(resp.novels)
+    return await _batch_handle(resp.novels)
 
-from sqlalchemy import update as _update, delete as _delete, select as _select
-from core.db.models import Novel, Author, Series
 async def author_check(author_id: int, author_name: str | None = None):
     async with client.force_account(2):
         await client.user_follow_add(author_id)
@@ -86,72 +112,31 @@ async def author_check(author_id: int, author_name: str | None = None):
         resp = await client.user_detail(author_id)
         author_name = resp.user.name
     
-    with db.get_session() as session:
-        session.execute(
-            _update(Novel)
-            .where(Novel.author_id == author_id)
-            .values(author_name=author_name)
-        )
-        
-        session.execute(
-            _update(Author)
-            .where(Author.author_id == author_id)
-            .values(author_name=author_name)
-        )
+    with db.get_session(True) as session:
+        db.author(session).update_author_name(author_id, author_name)
 
 async def author_delete(author_id: int):
-    with db.get_session() as session:
-        novel_ids = session.execute(
-            _select(Novel.id)
-            .where(Novel.author_id == author_id)
-        ).scalars().all()
-        
-        novel_repo = db.novel(session)
-        for nid in novel_ids:
-            novel_repo.delete(nid)
-            
-        session.execute(
-            _delete(Series)
-            .where(Series.author_id == author_id)
-        )
-        
-        session.execute(
-            _delete(Author)
-            .where(Author.author_id == author_id)
-        )
+    with db.get_session(True) as session:
+        db.author(session).delete_author_and_data(author_id)
 
 async def _sync_empty_authors():
     with db.get_session() as session:
-        empty_author_ids = session.execute(
-            _select(Novel.author_id)
-            .where(Novel.author_name.is_(None))
-            .distinct()
-        ).scalars().all()
+        empty_author_ids = db.author(session).get_empty_author_ids()
 
     for author_id in empty_author_ids:
         with db.get_session() as session:
-            author_name = session.execute(
-                _select(Author.author_name)
-                .where(Author.author_id == author_id)
-            ).scalar_one_or_none()
+            author_name = db.author(session).get_author_name(author_id)
 
         if author_name and author_name.strip():
             with db.get_session(True) as session:
-                session.execute(
-                    _update(Novel)
-                    .where(Novel.author_id == author_id)
-                    .values(author_name=author_name)
-                )
+                db.author(session).update_author_name(author_id, author_name)
         else:
             await author_check(author_id)
 
 from pathlib import Path
 async def sync_has_epub():
     with db.get_session() as session:
-        novels = session.execute(
-            _select(Novel.id, Novel.path)
-            .where(Novel.has_epub == 1)
-        ).fetchall()
+        novels = db.novel(session).get_pending_epub_novels()
         
     if not novels:
         return
@@ -165,13 +150,9 @@ async def sync_has_epub():
                 
     if completed_ids:
         with db.get_session(True) as session:
-            session.execute(
-                _update(Novel)
-                .where(Novel.id.in_(completed_ids))
-                .values(has_epub=2)
-            )
+            db.novel(session).update_has_epub_status(completed_ids, 2)
 
-async def novel_search(keyword: str = 'R-18', months: int = 2, minlike: int = 500):
+async def novel_search(keyword: str = 'R-18', months: int = 2, minlike: int = 500) -> int:
     if months < 2:
         raise Exception('Process in smaller batches for security.')
     
@@ -186,7 +167,7 @@ async def novel_search(keyword: str = 'R-18', months: int = 2, minlike: int = 50
         start_date=start_date, end_date=end_date,
         fetch_minlike=minlike,
     )
-    await _batch_handle([n for n in resp.novels if _is_chinese(n)])
+    return await _batch_handle([n for n in resp.novels if _is_chinese(n)])
 
 async def batch_author_process(limit: int = 50):
     file_path = '/home/invocation/copixiv/author_ids.txt'
@@ -230,6 +211,12 @@ async def batch_author_process(limit: int = 50):
             with open(file_path, 'w') as f:
                 f.writelines(lines)
             logger.info(f"Marked author {aid} as completed.")
+        else:
+            lines.append(line)
+            lines[i] = ""
+            with open(file_path, 'w') as f:
+                f.writelines(lines)
+            logger.info(f"Moved failed author {aid} to end of file.")
             
         processed_count += 1
 

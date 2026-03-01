@@ -19,8 +19,25 @@ const emit = defineEmits<{
 const resultModalOpen = ref(false);
 const currentResult = ref('');
 
+const parseResult = (resultStr?: string | null) => {
+  if (!resultStr) return { log: '', new_novels_count: null };
+  try {
+    const parsed = JSON.parse(resultStr);
+    if (parsed && typeof parsed === 'object' && 'log' in parsed) {
+      return { 
+        log: parsed.log || '', 
+        new_novels_count: parsed.new_novels_count 
+      };
+    }
+  } catch (e) {
+    // legacy plain text log
+  }
+  return { log: resultStr, new_novels_count: null };
+};
+
 const showResult = (result: string) => {
-  currentResult.value = result || '无输出日志';
+  const parsed = parseResult(result);
+  currentResult.value = parsed.log || '无输出日志';
   resultModalOpen.value = true;
 };
 
@@ -73,6 +90,9 @@ const formatDate = (dateStr?: string | null) => {
                 <div class="col-span-1 text-xs text-gray-500 flex flex-col justify-center">
                   <span>开始: {{ formatDate(item.start_time) }}</span>
                   <span v-if="item.end_time">结束: {{ formatDate(item.end_time) }}</span>
+                  <span v-if="parseResult(item.result).new_novels_count !== null && parseResult(item.result).new_novels_count !== undefined" class="text-green-600 font-medium mt-0.5">
+                    新增小说: {{ parseResult(item.result).new_novels_count }}
+                  </span>
                 </div>
 
                 <div class="col-span-1 flex items-center justify-end space-x-4">

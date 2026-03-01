@@ -25,10 +25,12 @@ class TelegramNotifier:
         except Exception as e:
             logger.error(f"Failed to send Telegram notification: {e}")
 
-    def send_task_result(self, task_name: str, status: str, duration: float = None, error: str = None):
+    def send_task_result(self, task_name: str, status: str, duration: float = None, error: str = None, new_novels_count: int = None):
         if status == 'success':
             icon = "✅"
             text = f"{icon} *Task Completed*\n*Task:* `{task_name}`\n*Status:* {status}\n*Duration:* `{duration:.2f}s`"
+            if new_novels_count is not None:
+                text += f"\n*New Novels:* `{new_novels_count}`"
         else:
             icon = "❌"
             text = f"{icon} *Task Failed*\n*Task:* `{task_name}`\n*Status:* {status}\n*Error:* `{error}`"

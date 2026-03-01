@@ -14,7 +14,7 @@ from core.db.database import db
 from core.db.repositories.task import TaskHistory, ScheduledTask
 from core.util import import_string
 from core.notifier import notifier
-from core.logger import TaskLogHandler, logger
+from core.logger import capture_logs, logger
 
 class TaskExecutor:
     _instance = None
@@ -59,92 +59,106 @@ class TaskExecutor:
         })
 
     def _worker(self):
-        while self.running:
-            try:
-                # Wait for a task, timeout to allow checking self.running
+        # Create a single event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            while self.running:
                 try:
-                    task_item = self.queue.get(timeout=1.0)
-                except queue.Empty:
-                    continue
+                    # Wait for a task, timeout to allow checking self.running
+                    try:
+                        task_item = self.queue.get(timeout=1.0)
+                    except queue.Empty:
+                        continue
 
-                task_id = task_item['id']
-                name = task_item['name']
-                func = task_item['func']
-                kwargs = task_item['kwargs']
+                    task_id = task_item['id']
+                    name = task_item['name']
+                    func = task_item['func']
+                    kwargs = task_item['kwargs']
 
-                # --- Start Task Execution ---
-                logger.info(f"Starting task '{name}' (ID: {task_id})...")
-                
-                # Setup log capture
-                log_handler = TaskLogHandler()
-                log_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-                
-                # Attach handler to root logger to capture everything
-                root_logger = logging.getLogger()
-                root_logger.addHandler(log_handler)
-                
-                start_time = time.time()
-                status = "running"
-                error_msg = None
-
-                # Update DB status to running
-                with db.get_session() as session:
-                    repo = TaskHistory(session)
-                    repo.update_task(task_id, "running")
-
-                try:
-                    # Execute the function with a 30-minute timeout
-                    if inspect.iscoroutinefunction(func):
-                        # Use a new loop or run in thread logic? 
-                        # Since we are in a thread, we can run asyncio.run()
-                        asyncio.run(asyncio.wait_for(func(**kwargs), timeout=1800))
-                    else:
-                        import concurrent.futures
-                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                            future = pool.submit(func, **kwargs)
-                            future.result(timeout=1800)
+                    # --- Start Task Execution ---
+                    logger.info(f"Starting task '{name}' (ID: {task_id})...")
                     
-                    status = "success"
-                    logger.info(f"Task '{name}' (ID: {task_id}) completed successfully.")
-                
-                except (asyncio.TimeoutError, TimeoutError):
-                    status = "success"
-                    error_msg = "Task timed out after 30 minutes"
-                    logger.error(f"Task '{name}' (ID: {task_id}) finish: {error_msg}")
-                    logger.error(traceback.format_exc())
-                
-                except Exception as e:
-                    status = "failed"
-                    error_msg = str(e)
-                    logger.error(f"Task '{name}' (ID: {task_id}) failed: {e}")
-                    logger.error(traceback.format_exc()) # Log traceback to capture it
-                
-                finally:
-                    duration = time.time() - start_time
-                    
-                    # Detach log handler
-                    root_logger.removeHandler(log_handler)
-                    captured_logs = log_handler.get_logs()
-                    log_handler.close()
+                    start_time = time.time()
+                    status = "running"
+                    error_msg = None
+                    task_result_value = None
 
-                    # Update DB with result and logs
+                    # Update DB status to running
                     with db.get_session() as session:
                         repo = TaskHistory(session)
-                        repo.update_task(task_id, status, result=captured_logs)
+                        repo.update_task(task_id, "running")
 
-                    # Send Notification
-                    notifier.send_task_result(
-                        task_name=name,
-                        status=status,
-                        duration=duration if status == 'success' else None,
-                        error=error_msg
-                    )
+                    with capture_logs() as get_logs:
+                        try:
+                            # Execute the function with a 30-minute timeout
+                            if inspect.iscoroutinefunction(func):
+                                task_result_value = loop.run_until_complete(asyncio.wait_for(func(**kwargs), timeout=1800))
+                            else:
+                                import concurrent.futures
+                                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                                    future = pool.submit(func, **kwargs)
+                                    task_result_value = future.result(timeout=1800)
+                            
+                            status = "success"
+                            logger.info(f"Task '{name}' (ID: {task_id}) completed successfully.")
+                        
+                        except (asyncio.TimeoutError, TimeoutError):
+                            status = "success"
+                            error_msg = "Task timed out after 30 minutes"
+                            logger.error(f"Task '{name}' (ID: {task_id}) finish: {error_msg}")
+                            logger.error(traceback.format_exc())
+                        
+                        except Exception as e:
+                            status = "failed"
+                            error_msg = str(e)
+                            logger.error(f"Task '{name}' (ID: {task_id}) failed: {e}")
+                            logger.error(traceback.format_exc()) # Log traceback to capture it
+                        
+                        finally:
+                            duration = time.time() - start_time
+                            captured_logs = get_logs()
 
-                    self.queue.task_done()
+                            new_novels_count = task_result_value if isinstance(task_result_value, int) else None
 
+                            # Update DB with result and logs
+                            result_data = {
+                                "log": captured_logs,
+                                "new_novels_count": new_novels_count
+                            }
+
+                            with db.get_session() as session:
+                                repo = TaskHistory(session)
+                                repo.update_task(task_id, status, result=json.dumps(result_data))
+
+                            # Send Notification
+                            notifier.send_task_result(
+                                task_name=name,
+                                status=status,
+                                duration=duration if status == 'success' else None,
+                                error=error_msg,
+                                new_novels_count=new_novels_count
+                            )
+
+                            self.queue.task_done()
+
+                except Exception as e:
+                    logger.critical(f"Critical error in TaskExecutor worker: {e}")
+                    time.sleep(1) # Prevent tight loop on crash
+
+        finally:
+            try:
+                # Cancel all pending tasks to gracefully shut down the event loop
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
             except Exception as e:
-                logger.critical(f"Critical error in TaskExecutor worker: {e}")
-                time.sleep(1) # Prevent tight loop on crash
+                logger.error(f"Error closing event loop: {e}")
+            finally:
+                loop.close()
 
 class Scheduler:
     _instance = None
@@ -218,7 +232,10 @@ class Scheduler:
                         
                         # Load function
                         try:
-                            func = import_string(task.task)
+                            task_path = task.task
+                            if '.' not in task_path:
+                                task_path = f"core.tasks.{task_path}"
+                            func = import_string(task_path)
                         except ImportError as e:
                             logger.error(f"Failed to import task function '{task.task}': {e}")
                             continue

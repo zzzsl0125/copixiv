@@ -236,6 +236,8 @@ class Novel(BaseRepository, RandomPoolMixin, EpubMixin):
 
         # Update FTS for new novels
         FTSManager(self.session).update_novel_fts_index(new_novel_ids)
+        
+        return len(new_novel_ids)
 
     def update_field(self, novel_id: int, field: str, value: Any):
         """更新特定小说的单个字段。"""
@@ -314,11 +316,6 @@ class Novel(BaseRepository, RandomPoolMixin, EpubMixin):
         novel = self.session.get(models.Novel, novel_id)
         if novel: self.session.delete(novel)
 
-    def delete_tag(self, tag_id: int):
-        """从数据库中删除标签。"""
-        tag = self.session.get(models.Tag, tag_id)
-        if tag: self.session.delete(tag)
-
     def toggle_favourite(self, novel_id: int):
         """切换小说的收藏状态。"""
         fav = self.session.query(models.Favourite)\
@@ -343,18 +340,21 @@ class Novel(BaseRepository, RandomPoolMixin, EpubMixin):
             new_follow = models.SpecialFollow(author_id=author_id)
             self.session.add(new_follow)
     
-    def get_favourited_author_ids(self) -> list[int]:
-        stmt = select(models.Novel.author_id)\
-                .distinct()\
-                .join(models.Favourite, models.Novel.id == models.Favourite.novel_id)
-        return self.session.execute(stmt).scalars().all()
+    def get_pending_epub_novels(self) -> list[tuple[int, str]]:
+        stmt = select(models.Novel.id, models.Novel.path).where(models.Novel.has_epub == 1)
+        return self.session.execute(stmt).fetchall()
+
+    def update_has_epub_status(self, novel_ids: list[int], status: int = 2):
+        if not novel_ids: return
+        from sqlalchemy import update
+        self.session.execute(
+            update(models.Novel)
+            .where(models.Novel.id.in_(novel_ids))
+            .values(has_epub=status)
+        )
     
     def rebuild_fts(self):
         FTSManager(self.session).rebuild_novel_fts()
-
-    def _fetch_set(self, stmt) -> set:
-        result = self.session.execute(stmt).scalars().all()
-        return set(result) if result else set()
 
     def rewrite_tags(self, novel_id: int, new_tags: set):
         if not new_tags:

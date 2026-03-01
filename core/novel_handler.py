@@ -167,6 +167,7 @@ def save_novel_text(data: Dict[str, Any], force: bool = False) -> None:
         raise
 
 def handle_from_webview(data: models.WebviewNovel, force: bool = False) -> Dict: 
+    
     data = {
         "id": data.id,
         "title": data.title,
@@ -199,10 +200,6 @@ def handle_from_webview(data: models.WebviewNovel, force: bool = False) -> Dict:
     return data
 
 def handle_from_novelInfo(data: models.NovelInfo, force: bool = False) -> Dict:
-
-    data.tags = parse_tags([tag.name for tag in data.tags])
-    if not is_chinese(data):
-        return None
     
     data = {
         "id": data.id,
@@ -219,7 +216,7 @@ def handle_from_novelInfo(data: models.NovelInfo, force: bool = False) -> Dict:
         "series_index": None,
         "create_time": data.create_date[:10],
         "has_epub": 0,
-        "tag": data.tags,
+        "tag": parse_tags([tag.name for tag in data.tags]),
         "content": None,
         "images": data.image_urls,
         "illusts": None,
