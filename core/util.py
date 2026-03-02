@@ -2,9 +2,17 @@ import re
 from pathlib import Path
 from typing import List, Optional, Union
 
-from pixivpy3 import models
+from pixivpy3 import models, PixivError
 
 from core.config import config
+
+class AccountInvalidError(PixivError):
+    """账号永久无效（token失效）"""
+    pass
+
+class RateLimitError(PixivError):
+    """账号被限流"""
+    pass
 
 def safe_filename(text: str, max_length: int = 240) -> str:
 

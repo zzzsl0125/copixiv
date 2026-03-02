@@ -201,7 +201,7 @@ def handle_from_webview(data: models.WebviewNovel, force: bool = False) -> Dict:
 
 def handle_from_novelInfo(data: models.NovelInfo, force: bool = False) -> Dict:
     
-    data = {
+    return {
         "id": data.id,
         "title": data.title,
         "author_id": data.user.id,
@@ -222,8 +222,3 @@ def handle_from_novelInfo(data: models.NovelInfo, force: bool = False) -> Dict:
         "illusts": None,
         "cover_url": None
     }
-
-    if Path(data['path']).exists() and not force:
-        return data
-    else:
-        raise Exception(f'Needs download ({data.id}) via webview method.')

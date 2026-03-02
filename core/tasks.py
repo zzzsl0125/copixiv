@@ -110,8 +110,10 @@ async def author_check(author_id: int, author_name: str | None = None):
 
     if not author_name:
         resp = await client.user_detail(author_id)
-        author_name = resp.user.name
-    
+        try:
+            author_name = resp.user.name
+        except Exception as e:
+            logger.error(f'Failed to check author ({author_id})')
     with db.get_session(True) as session:
         db.author(session).update_author_name(author_id, author_name)
 
