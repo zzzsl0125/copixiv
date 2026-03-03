@@ -1,6 +1,9 @@
 import re
+import asyncio
+from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Callable, Any
+from dataclasses import dataclass
 
 from pixivpy3 import models, PixivError
 
@@ -13,6 +16,20 @@ class AccountInvalidError(PixivError):
 class RateLimitError(PixivError):
     """账号被限流"""
     pass
+
+@dataclass
+class RequestInfo:
+    func: Callable
+    args: tuple
+    kwargs: dict
+    future: asyncio.Future
+    strategy: Optional[Any] = None
+    
+    def __str__(self):
+        args = ', '.join(map(str, self.args))
+        kwargs = ', '.join(f"{k}={v}" for k, v in self.kwargs.items())
+        split = ', ' if self.args and self.kwargs else ''
+        return f'{self.func.__name__}({args}{split}{kwargs})'
 
 def safe_filename(text: str, max_length: int = 240) -> str:
 
@@ -139,5 +156,3 @@ def import_string(dotted_path: str):
         raise ImportError('Module "%s" does not define a "%s" attribute/class' % (
             module_path, class_name)
         ) from err
-
-

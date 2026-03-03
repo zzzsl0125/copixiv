@@ -86,7 +86,7 @@ const likeBorderClass = computed(() => {
   } else if (likes >= 2500) {
     return 'ring-2 ring-yellow-200 border-transparent shadow-[0_0_15px_rgba(234,179,8,0.15)]';
   } else if (likes >= 500) {
-    return 'ring-2 ring-blue-200 border-transparent shadow-[0_0_15px_rgba(59,130,246,0.15)]';
+    return 'ring-2 ring-green-200 border-transparent shadow-[0_0_15px_rgba(59,130,246,0.15)]';
   }
   return 'border-gray-100'; // 默认无效果
 });

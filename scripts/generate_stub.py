@@ -139,10 +139,7 @@ def generate_stub():
         "    def __init__(self, config_override: dict = None) -> None: ...",
         "",
         "    @asynccontextmanager",
-        "    def force_account(self, index: int) -> AsyncIterator['PixivClient']: ...",
-        "",
-        "    @asynccontextmanager",
-        "    def account_rule(self, need_premium: bool = False, allow_special: bool = False) -> AsyncIterator['PixivClient']: ...",
+        "    def account_rule(self, need_premium: bool = False, allow_special: bool = False, force_account: str = None) -> AsyncIterator['PixivClient']: ...",
         "",
         "    # Proxy methods from AppPixivAPI",
     ]

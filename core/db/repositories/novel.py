@@ -130,10 +130,10 @@ class NovelQueryBuilder(BaseQueryBuilder):
 
     def _apply_thresholds(self, subquery_wheres: List):
         """应用最小喜欢数和最小文本数过滤。"""
-        if self.params.get('min_likes') is not None:
-            subquery_wheres.append(func.coalesce(self.main_model.like, 0) >= self.params['min_likes'])
-        if self.params.get('min_texts') is not None:
-            subquery_wheres.append(self.main_model.text >= self.params['min_texts'])
+        if self.params.get('min_like') is not None:
+            subquery_wheres.append(func.coalesce(self.main_model.like, 0) >= self.params['min_like'])
+        if self.params.get('min_text') is not None:
+            subquery_wheres.append(self.main_model.text >= self.params['min_text'])
 
     def _apply_pagination_and_sorting(self, id_stmt):
         """应用分页和排序逻辑。"""

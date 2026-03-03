@@ -73,20 +73,22 @@ class FTSManager:
         
         all_novels = self.session.execute(novels_stmt).fetchall()
 
-        fts_data = []
-        for novel in all_novels:
-            fts_data.append({
-                'rowid': novel.id,
-                self.COL_TITLE: self.tokenize(novel.title),
-                self.COL_AUTHOR: self.tokenize(novel.author_name),
-                self.COL_SERIES_NAME: self.tokenize(novel.series_name),
-                self.COL_TAGS: self.tokenize(getattr(novel, C.COL_TAGS)),
-            })
+        batch_size = 150
+        for i in range(0, len(all_novels), batch_size):
+            batch_novels = all_novels[i:i + batch_size]
+            fts_data = []
+            for novel in batch_novels:
+                fts_data.append({
+                    'rowid': novel.id,
+                    self.COL_TITLE: self.tokenize(novel.title),
+                    self.COL_AUTHOR: self.tokenize(novel.author_name),
+                    self.COL_SERIES_NAME: self.tokenize(novel.series_name),
+                    self.COL_TAGS: self.tokenize(getattr(novel, C.COL_TAGS) or ''),
+                })
 
-        # Use Core INSERT OR REPLACE
-        if fts_data:
-            stmt = insert(self.novel_fts_table).values(fts_data).prefix_with("OR REPLACE")
-            self.session.execute(stmt)
+            if fts_data:
+                stmt = insert(self.novel_fts_table).values(fts_data)
+                self.session.execute(stmt)
         
         # Verify count
         # Using count() function with select

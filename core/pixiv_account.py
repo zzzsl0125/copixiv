@@ -1,33 +1,82 @@
 import asyncio
-from typing import Any
+import time
 from enum import Enum
+from typing import Optional
+from dataclasses import dataclass
 
 from pixivpy3 import AppPixivAPI, PixivError
 
-from core.config import config
 from core.logger import logger
-from core.request_queue import RequestQueue
-from core.pixiv_token import TokenInfo
 from core.util import RateLimitError, AccountInvalidError
 
+@dataclass
+class TokenInfo:
+    token: str
+    username: str
+    special: bool = False
+    premium: bool = False
+
+@dataclass
+class AccountStrategy: 
+    need_premium: bool = False
+    allow_special: bool = False
+    force_account: str = None
+
 class AccountStatus(Enum):
-    """账号状态"""
     INACTIVE = "inactive"       # 待认证
     ACTIVE = "active"           # 工作中
     INVALID = "invalid"         # 已失效
 
 class PixivAccount:
-    """单个Pixiv账号"""
     
-    def __init__(self, token_info: TokenInfo, config: dict = config):
-        self.token_info = token_info
+    def __init__(self, token_info: TokenInfo):
         self.api = self._create_api()
-        self.queue = RequestQueue(self.id, config)
+        self.token_info = token_info
+
         self.status = AccountStatus.INACTIVE
-        self._auth_lock = asyncio.Lock()
+        self.token = token_info.token
+        self.username = token_info.username
         
+        self.last_req_time = 0.0
+        self._cooldown_until = 0.0
+        
+        self._auth_lock = asyncio.Lock()
+        self._req_lock = asyncio.Lock()
+
+        self._auto_inactive_task: Optional[asyncio.Task] = None
+
+    def __str__(self): return f"Account {self.username[:6]}"
+    
+    @property
+    def in_cooldown(self): return time.time() < self._cooldown_until
+
+    @property
+    def cooldown_remaining(self): return max(0, self._cooldown_until - time.time())
+
+    def start_cooldown(self, duration: int = 120): self._cooldown_until = time.time() + duration
+    
+    @property
+    def valid(self): return self.status != AccountStatus.INVALID
+    
+    @property
+    def available(self): return self.valid and not self.in_cooldown
+
+    def set_inactive(self):
+        self.status = AccountStatus.INACTIVE
+        self._cancel_auto_inactive()
+    
+    async def _auto_inactive(self, delay: int = 3500):
+        await asyncio.sleep(delay)
+        if self.status == AccountStatus.ACTIVE:
+            self.set_inactive()
+
+    def _cancel_auto_inactive(self):
+        if self._auto_inactive_task and \
+            not self._auto_inactive_task.done():
+            self._auto_inactive_task.cancel()
+            self._auto_inactive_task = None
+    
     def _create_api(self) -> AppPixivAPI:
-        """创建并配置API实例"""
         api = AppPixivAPI()
         
         def _custom_load_result(res, *args, **kwargs):
@@ -39,45 +88,26 @@ class PixivAccount:
         api.__class__._load_model = classmethod(_custom_load_model)
         
         def _novel_ranking(
-            api_self, mode="day_r18", filter="for_ios",
+            mode="day_r18", filter="for_ios",
             date=None, offset=None, req_auth=True,
         ):
-            url = f"{api_self.hosts}/v1/novel/ranking"
+            url = f"{api.hosts}/v1/novel/ranking"
             params = {"mode": mode, "filter": filter}
             if date:
-                params["date"] = api_self._format_date(date)
+                params["date"] = api._format_date(date)
             if offset:
                 params["offset"] = offset
-            r = api_self.no_auth_requests_call(
+            r = api.no_auth_requests_call(
                 "GET", url, params=params, req_auth=req_auth
             )
-            return api_self.parse_result(r)
+            return api.parse_result(r)
         
         api.novel_ranking = _novel_ranking
         return api
     
-    @property
-    def id(self) -> str:
-        """账号标识"""
-        mark = "[*]" if self.token_info.special else ""
-        return f"Account {mark}{self.token_info.token[:4]}..."
-    
-    def __str__(self): return self.id
-    
-    @property
-    def is_valid(self) -> bool:
-        """账号是否有效"""
-        return self.status != AccountStatus.INVALID
-    
-    @property
-    def is_available(self) -> bool:
-        """账号当前是否可用（有效且不在冷却）"""
-        return self.is_valid and not self.queue.is_in_cooldown
-    
     async def authenticate(self):
-        """认证账号"""
         if self.status == AccountStatus.INVALID:
-            raise AccountInvalidError(self.id)
+            raise AccountInvalidError(self)
             
         if self.status == AccountStatus.ACTIVE:
             return
@@ -85,41 +115,37 @@ class PixivAccount:
         async with self._auth_lock:
             try:
                 await asyncio.to_thread(
-                    self.api.auth, 
-                    refresh_token=self.token_info.token
+                    self.api.auth, refresh_token=self.token
                 )
                 self.status = AccountStatus.ACTIVE
-                logger.info(f"{self.id} 认证成功")
+                logger.info(f"{self} 认证成功")
+
+                self._cancel_auto_inactive()
+                self._auto_inactive_task = asyncio.create_task(
+                    self._auto_inactive()
+                )
+
             except PixivError as e:
                 if e.reason.startswith('[ERROR] auth() failed'):
                     self.status = AccountStatus.INVALID
-                    raise AccountInvalidError(self.id)
+                    raise AccountInvalidError(self)
                 raise
     
-    async def execute(self, method: str, *args, **kwargs) -> Any:
-        """执行API调用"""
+    async def execute(self, method: str, *args, **kwargs):
         await self.authenticate()
         
-        async def _call(*args, **kwargs):
-            try:
-                return await asyncio.to_thread(
-                    getattr(self.api, method), 
-                    *args, **kwargs
-                )
-            except PixivError as e:
-                error_msg = str(e).lower()
-                if "invalid_grant" in error_msg:
-                    self.status = AccountStatus.INVALID
-                    raise AccountInvalidError(self.id) from e
-                
-                if "rate limit" in error_msg or \
-                    "currently restricted" in error_msg:
-                    raise RateLimitError(self.id) from e
-                
-                raise
-
-        _call.__name__ = method
-        
-        future = await self.queue.add_task(_call, *args, **kwargs)
-        return await future
-
+        try:
+            return await asyncio.to_thread(
+                getattr(self.api, method), *args, **kwargs
+            )
+        except PixivError as e:
+            error_msg = str(e).lower()
+            if "invalid_grant" in error_msg:
+                self.status = AccountStatus.INVALID
+                raise AccountInvalidError(self) from e
+            
+            if "rate limit" in error_msg or \
+                "currently restricted" in error_msg:
+                raise RateLimitError(self) from e
+            
+            raise
