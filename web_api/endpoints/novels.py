@@ -8,6 +8,9 @@ from urllib.parse import quote
 
 from web_api.deps import get_db
 from core.db.repositories.novel import Novel
+from core.db.repositories.author import Author
+from core.db.repositories.series import Series
+from core.db.repositories.search_history import SearchHistoryRepository
 from core.db.models import Novel as NovelModel
 from core.db import constants as C
 
@@ -33,6 +36,25 @@ def get_novels(
             cursor = json.loads(cursor)
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail=f"Invalid JSON format")
+    
+    if queries:
+        search_history_repo = SearchHistoryRepository(db)
+        for value, type in queries.items():
+            display_value = None
+            if type == 'author_id':
+                author_repo = Author(db)
+                author = author_repo.get_by_id(int(value))
+                if author:
+                    display_value = author.author_name
+            elif type == 'series_id':
+                series_repo = Series(db)
+                series = series_repo.get_by_id(int(value))
+                if series:
+                    display_value = series.series_name
+            
+            search_history_repo.add_or_update(type, value, display_value)
+        db.commit()
+    
     
     results = novel_repo.get_novels(
         queries=queries,

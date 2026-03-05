@@ -3,7 +3,20 @@ from pydantic import BaseModel
 import subprocess
 import time
 
+from core.config import config
+from web_api.schemas import SystemConfigResponse
+
+
 router = APIRouter()
+
+@router.get("/config", response_model=SystemConfigResponse)
+def get_config():
+    frontend_config = config.get("frontend", {})
+    return SystemConfigResponse(
+        default_min_like=frontend_config.get("default_min_like", 500),
+        default_min_text=frontend_config.get("default_min_text", 3000),
+    )
+
 
 class RestartRequest(BaseModel):
     password: str

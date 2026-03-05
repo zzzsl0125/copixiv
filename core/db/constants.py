@@ -23,7 +23,7 @@ TABLE_RANDOM_NOVEL_POOL = 'random_novel_pool'
 # Column Names
 COL_ID = 'id'
 COL_TITLE = 'title'
-COL_AUTHOR = 'author'
+COL_AUTHOR_NAME = 'author_name'
 COL_AUTHOR_ID = 'author_id'
 COL_PATH = 'path'
 COL_SOURCE = 'source'

@@ -79,6 +79,7 @@ class PixivAccount:
     def _create_api(self) -> AppPixivAPI:
         api = AppPixivAPI()
         
+        # 模型与实际数据有偏差的情况不少，因此直接返回
         def _custom_load_result(res, *args, **kwargs):
             return api.parse_result(res)
         api._load_result = _custom_load_result

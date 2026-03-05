@@ -85,9 +85,9 @@ export function useMasonryLayout<T>(
   });
 
   // 监听数据源变化，重新排版
-  watch(items, () => {
+  watch(() => items.value.length, () => {
     layoutItems();
-  }, { deep: true, immediate: true });
+  }, { immediate: true });
 
   return {
     windowWidth,

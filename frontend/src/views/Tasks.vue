@@ -4,11 +4,15 @@ import { useRouter } from 'vue-router';
 import { taskApi, type ScheduledTask } from '../api';
 import { usePagination } from '../composables/usePagination';
 import { useLocalPagination } from '../composables/useLocalPagination';
-import { RefreshCw, Plus } from 'lucide-vue-next';
+import { RefreshCw, Plus, Menu } from 'lucide-vue-next';
 import ScheduledTaskList from '../components/ScheduledTaskList.vue';
 import TaskHistoryList from '../components/TaskHistoryList.vue';
 import TaskEditModal from '../components/TaskEditModal.vue';
 import AppLogo from '../components/AppLogo.vue';
+
+defineEmits<{
+  (e: 'toggle-sidebar'): void;
+}>();
 
 const router = useRouter();
 
@@ -125,6 +129,9 @@ onMounted(() => {
       <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div class="flex items-center justify-between h-16">
           <div class="flex items-center gap-4">
+            <button @click="$emit('toggle-sidebar')" class="md:hidden p-1 -ml-1 text-gray-500 hover:text-gray-700 focus:outline-none flex-shrink-0">
+              <Menu class="h-6 w-6" />
+            </button>
             <AppLogo @click="goToHome" />
             <span class="text-gray-500">/</span>
             <span class="text-gray-700 font-medium">任务管理</span>

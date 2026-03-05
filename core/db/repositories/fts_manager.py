@@ -15,7 +15,7 @@ class FTSManager:
     """
     TABLE_NOVEL_FTS = C.TABLE_NOVEL_FTS
     COL_TITLE = C.COL_TITLE
-    COL_AUTHOR = C.COL_AUTHOR
+    COL_AUTHOR_NAME = C.COL_AUTHOR_NAME
     COL_SERIES_NAME = C.COL_SERIES_NAME
     COL_TAGS = C.COL_TAGS
 
@@ -29,7 +29,7 @@ class FTSManager:
             models.Base.metadata,
             Column('rowid', Integer, primary_key=True),
             Column(self.COL_TITLE, String),
-            Column(self.COL_AUTHOR, String),
+            Column(self.COL_AUTHOR_NAME, String),
             Column(self.COL_SERIES_NAME, String),
             Column(self.COL_TAGS, String),
             extend_existing=True
@@ -53,11 +53,14 @@ class FTSManager:
         """Rebuilds the entire Novel FTS table efficiently."""
         logger.info(f"--- Rebuilding {self.TABLE_NOVEL_FTS} table... ---")
 
+        
+        self.session.execute(text(f"DROP TABLE IF EXISTS {self.TABLE_NOVEL_FTS}"))
+
         # Ensure the FTS virtual table exists
         # Virtual table creation is specific to SQLite and hard to represent purely in generic DDL
         self.session.execute(text(f"""
-            CREATE VIRTUAL TABLE IF NOT EXISTS {self.TABLE_NOVEL_FTS} USING fts5(
-                {self.COL_TITLE}, {self.COL_AUTHOR}, {self.COL_SERIES_NAME}, {self.COL_TAGS},
+            CREATE VIRTUAL TABLE {self.TABLE_NOVEL_FTS} USING fts5(
+                {self.COL_TITLE}, {self.COL_AUTHOR_NAME}, {self.COL_SERIES_NAME}, {self.COL_TAGS},
                 tokenize = 'porter unicode61'
             );
         """))
@@ -81,7 +84,7 @@ class FTSManager:
                 fts_data.append({
                     'rowid': novel.id,
                     self.COL_TITLE: self.tokenize(novel.title),
-                    self.COL_AUTHOR: self.tokenize(novel.author_name),
+                    self.COL_AUTHOR_NAME: self.tokenize(novel.author_name),
                     self.COL_SERIES_NAME: self.tokenize(novel.series_name),
                     self.COL_TAGS: self.tokenize(getattr(novel, C.COL_TAGS) or ''),
                 })
@@ -125,7 +128,7 @@ class FTSManager:
             {
                 'rowid': novel.id,
                 self.COL_TITLE: self.tokenize(novel.title),
-                self.COL_AUTHOR: self.tokenize(novel.author_name),
+                self.COL_AUTHOR_NAME: self.tokenize(novel.author_name),
                 self.COL_SERIES_NAME: self.tokenize(novel.series_name),
                 self.COL_TAGS: self.tokenize(getattr(novel, C.COL_TAGS) or ''),
             } for novel in novels_to_update

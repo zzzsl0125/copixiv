@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-from sqlalchemy import update as _update, delete as _delete, select as _select
+from sqlalchemy import update as _update, delete as _delete, select as _select, func as _func
 
 from .base_repository import BaseRepository
 from .. import constants as C
@@ -12,7 +12,10 @@ class Author(BaseRepository):
         return super().get_summary_item(models.Author, item_id)
     
     def update_summary(self, author_ids: list[int] | int | None = None):
-        super()._update_summary(models.Author, C.COL_AUTHOR_ID, author_ids)
+        super()._update_summary(
+            models.Author, C.COL_AUTHOR_ID, author_ids, 
+            extra_columns=[_func.max(models.Novel.author_name).label(C.COL_AUTHOR_NAME)]
+        )
 
     def update_author_name(self, author_id: int, author_name: str):
         self.session.execute(
@@ -49,8 +52,8 @@ class Author(BaseRepository):
 
     def get_empty_author_ids(self) -> list[int]:
         return self.session.execute(
-            _select(models.Novel.author_id)
-            .where(models.Novel.author_name.is_(None))
+            _select(models.Author.author_id)
+            .where(models.Author.author_name.is_(None))
             .distinct()
         ).scalars().all()
 
@@ -59,4 +62,9 @@ class Author(BaseRepository):
             _select(models.Author.author_name)
             .where(models.Author.author_id == author_id)
         ).scalar_one_or_none()
+
+    def get_special_follow_author_ids(self) -> list[int]:
+        return self.session.execute(
+            _select(models.SpecialFollow.author_id)
+        ).scalars().all()
 

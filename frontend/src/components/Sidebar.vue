@@ -6,6 +6,8 @@ import RestartModal from './RestartModal.vue';
 const props = defineProps<{
   isOpen: boolean;
   showFilters?: boolean;
+  activeSection: 'novels' | 'favourites' | 'special_follow' | null;
+  configLoadedAndApplied?: boolean;
   filters: {
     keyword: string;
     order_by: string;
@@ -17,8 +19,9 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'close'): void;
-  (e: 'search', keyword?: string): void;
+  (e: 'search', keyword: string | undefined, section: 'novels' | 'favourites' | 'special_follow'): void;
   (e: 'update:filters', filters: any): void;
+  (e: 'reset-to-defaults'): void;
 }>();
 
 const isRestarting = ref(false);
@@ -45,19 +48,6 @@ const handleRestartError = (message: string) => {
 const updateFilter = (key: keyof typeof props.filters, value: any) => {
   const newFilters = { ...props.filters, [key]: value };
   emit('update:filters', newFilters);
-  emit('search');
-};
-
-const resetFilters = () => {
-  emit('update:filters', {
-    ...props.filters,
-    keyword: '',
-    order_by: 'random',
-    order_direction: 'DESC',
-    min_like: undefined,
-    min_text: undefined
-  });
-  emit('search', '');
 };
 
 const btnClass = (isActive: boolean, pxClass = 'px-3') => [
@@ -65,7 +55,10 @@ const btnClass = (isActive: boolean, pxClass = 'px-3') => [
   isActive ? 'bg-blue-500 text-white' : 'bg-gray-50 text-gray-700 hover:bg-gray-100'
 ];
 
-const navItemClass = "group flex items-center justify-center px-3 py-2 text-sm font-medium text-gray-700 hover:text-gray-900 hover:bg-gray-50 rounded-md";
+const navItemClass = (isActive: boolean) => [
+  "group flex items-center justify-center px-3 py-2 text-sm font-medium text-gray-700 hover:text-gray-900 hover:bg-gray-50 rounded-md",
+  isActive ? 'bg-gray-100' : ''
+];
 const navIconClass = "mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500";
 </script>
 
@@ -89,30 +82,34 @@ const navIconClass = "mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500";
     <div class="flex-1 overflow-y-auto px-8 py-6">
       <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">功能</h3>
       <nav class="space-y-2 mb-8">
-        <a href="#" :class="[navItemClass, $route.path === '/' ? 'bg-gray-100' : '']" @click.prevent="() => { if($route.path !== '/') $router.push('/'); resetFilters(); }">
+        <a href="#" :class="navItemClass(activeSection === 'novels')" @click.prevent="() => { if($route.path !== '/') $router.push('/'); $emit('reset-to-defaults'); }">
           <SearchIcon :class="navIconClass" />
           小说列表
         </a>
-        <a href="#" :class="navItemClass" @click.prevent="() => { if($route.path !== '/') $router.push('/'); $emit('search', 'is_favourite:true;'); }">
+        <a href="#" :class="navItemClass(activeSection === 'favourites')" @click.prevent="() => { if($route.path !== '/') $router.push('/'); $emit('search', 'is_favourite:true;', 'favourites'); }">
           <SearchIcon :class="navIconClass" />
           我的收藏
         </a>
-        <a href="#" :class="navItemClass" @click.prevent="() => { if($route.path !== '/') $router.push('/'); $emit('search', 'is_special_follow:true;'); }">
+        <a href="#" :class="navItemClass(activeSection === 'special_follow')" @click.prevent="() => { if($route.path !== '/') $router.push('/'); $emit('search', 'is_special_follow:true;', 'special_follow'); }">
           <SearchIcon :class="navIconClass" />
           特别关注
         </a>
-        <router-link to="/tasks" :class="[navItemClass, $route.path === '/tasks' ? 'bg-gray-100' : '']">
+        <router-link to="/tasks" :class="[navItemClass(false), $route.path === '/tasks' ? 'bg-gray-100' : '']">
           <Settings :class="navIconClass" />
           任务管理
         </router-link>
-        <button @click="handleRestartClick" :disabled="isRestarting" :class="navItemClass + ' w-full'">
+        <router-link to="/tag-management" :class="[navItemClass(false), $route.path === '/tag-management' ? 'bg-gray-100' : '']">
+          <Settings :class="navIconClass" />
+          标签管理
+        </router-link>
+        <button @click="handleRestartClick" :disabled="isRestarting" :class="navItemClass(false) + ' w-full'">
           <Power :class="navIconClass" />
           {{ isRestarting ? '重启中...' : '重启应用' }}
         </button>
       </nav>
 
       <!-- Filter Area (Only show on Novels view) -->
-      <template v-if="showFilters !== false">
+      <template v-if="showFilters !== false && configLoadedAndApplied">
         <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">排序</h3>
       <div class="space-y-3 mb-8">
         <div class="grid grid-cols-3 gap-2">
@@ -154,7 +151,7 @@ const navIconClass = "mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500";
             降序
           </button>
           <button 
-            @click="resetFilters"
+            @click="$emit('reset-to-defaults')"
             :class="btnClass(false)"
           >
             重置

@@ -147,11 +147,14 @@ class FailedNovel(Base):
 class SearchHistory(Base):
     __tablename__ = C.TABLE_SEARCH_HISTORY
     id = Column(Integer, primary_key=True, autoincrement=True)
-    queries = Column(String, nullable=False, unique=True)
-    sort_by = Column(String, nullable=False)
-    sort_order = Column(String, nullable=False)
-    timestamp = Column(String, nullable=False)
-    display_text = Column(String)
+    type = Column(String, nullable=False)
+    value = Column(String, nullable=False)
+    display_value = Column(String, nullable=True)
+    timestamp = Column(String, nullable=False, index=True)
+
+    __table_args__ = (
+        UniqueConstraint('type', 'value', name='uq_search_history_type_value'),
+    )
 
 
 class TaskHistory(Base):
@@ -184,6 +187,8 @@ class TagPreference(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     tag = Column(String, unique=True, index=True, nullable=False)
     preference = Column(Enum(TagPreferenceType), nullable=False)
+    sort_index = Column(Integer, default=0)
+
 
 
 class NovelEpubConversion(Base):

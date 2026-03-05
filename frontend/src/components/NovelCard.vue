@@ -1,24 +1,25 @@
-<script lang="ts">
-import { ref, computed } from 'vue';
-
-const activeCardId = ref<number | string | null>(null);
-
-if (typeof window !== 'undefined') {
-  window.addEventListener('click', () => {
-    activeCardId.value = null;
-  });
-}
-</script>
-
 <script setup lang="ts">
-import { novelApi, type Novel } from '../api';
+import { computed, type PropType } from 'vue';
+import { novelApi, type Novel, type TagPreferenceResponse } from '../api';
 
-const props = defineProps<{
-  novel: Novel;
-}>();
+const props = defineProps({
+  novel: {
+    type: Object as PropType<Novel>,
+    required: true
+  },
+  isActive: {
+    type: Boolean,
+    required: true
+  },
+  tagPreferences: {
+    type: Array as PropType<TagPreferenceResponse[]>,
+    default: () => []
+  }
+});
 
 const emit = defineEmits<{
   (e: 'search', type: 'author' | 'series' | 'tag', value: string | number): void;
+  (e: 'toggle-active', id: number | string): void;
 }>();
 
 const formatNumber = (num?: number) => {
@@ -29,15 +30,11 @@ const formatNumber = (num?: number) => {
   return num.toString();
 };
 
-const showMobileActions = computed(() => activeCardId.value === props.novel.id);
+const showMobileActions = computed(() => props.isActive);
 
 const toggleActions = (e: Event) => {
   e.stopPropagation();
-  if (activeCardId.value === props.novel.id) {
-    activeCardId.value = null;
-  } else {
-    activeCardId.value = props.novel.id;
-  }
+  emit('toggle-active', props.novel.id);
 };
 
 // 阻止事件冒泡以避免触发卡片的 toggle
@@ -90,6 +87,18 @@ const likeBorderClass = computed(() => {
   }
   return 'border-gray-100'; // 默认无效果
 });
+
+const getTagClass = (tag: string) => {
+  const preference = props.tagPreferences.find(p => p.tag === tag)?.preference;
+  if (preference === 'favourite') {
+    return 'bg-blue-100 text-blue-800 font-bold';
+  }
+  if (preference === 'blocked') {
+    return 'line-through text-red-400 bg-gray-50';
+  }
+  return 'bg-gray-100 text-gray-800';
+};
+
 </script>
 
 <template>
@@ -132,7 +141,8 @@ const likeBorderClass = computed(() => {
       
       <div class="flex flex-wrap gap-1">
         <span v-for="(tag, idx) in novel.tags || []" :key="idx" 
-          class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-800 cursor-pointer hover:bg-gray-200 hover:text-blue-600 transition-colors"
+          class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium cursor-pointer hover:bg-gray-200 hover:text-blue-600 transition-colors"
+          :class="getTagClass(tag)"
           @click="stopPropagation($event); emit('search', 'tag', tag)"
         >
           {{ tag }}
@@ -147,7 +157,7 @@ const likeBorderClass = computed(() => {
         <div class="flex items-center gap-3">
           <span class="flex items-center gap-1" title="喜爱">❤️ {{ formatNumber(novel.like) }}</span>
           <span class="flex items-center gap-1" title="字数">📝 {{ formatNumber(novel.text) }}</span>
-          <span class="flex items-center gap-1" title="日期">📝 {{ novel.create_time || '2016-01-01' }}</span>
+          <span class="flex items-center gap-1" title="日期">📝 {{ (novel.create_time || '2016-01-01').substring(0, 10) }}</span>
         </div>
         <span v-if="novel.has_epub" class="px-1.5 py-0.5 rounded bg-green-100 text-green-800 text-[10px] font-bold">EPUB</span>
       </div>

@@ -5,5 +5,6 @@ from .author import Author
 from .series import Series
 from .system import System
 from .task import TaskHistory, ScheduledTask
+from .search_history import SearchHistoryRepository
 from .fts_manager import FTSManager
 from .query_builder import BaseQueryBuilder

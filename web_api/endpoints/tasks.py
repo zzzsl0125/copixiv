@@ -150,9 +150,20 @@ def run_scheduled_task(task_id: int, db: Session = Depends(get_db)):
                 params = {}
         elif isinstance(task.params, dict):
             params = task.params
+
+    # 3. Parse config
+    config = {}
+    if task.config:
+        if isinstance(task.config, str):
+            try:
+                config = json.loads(task.config)
+            except:
+                config = {}
+        elif isinstance(task.config, dict):
+            config = task.config
             
-    # 3. Add to queue
-    TaskExecutor().add_task(task.name, func, **params)
+    # 4. Add to queue
+    TaskExecutor().add_task(task.name, func, config, **params)
     
     return {"ok": True, "message": "Task queued"}
 

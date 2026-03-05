@@ -40,10 +40,15 @@ class TaskExecutor:
             self.worker_thread.join(timeout=5)
             logger.info("TaskExecutor stopped.")
 
-    def add_task(self, name: str, func: Callable, **kwargs):
+    def add_task(self, name: str, func: Callable, config: dict, **kwargs):
         """
         Add a task to the queue.
         """
+        if kwargs is None:
+            kwargs = {}
+        if config is None:
+            config = {}
+
         # 1. Record in DB as pending
         with db.get_session() as session:
             repo = TaskHistory(session)
@@ -55,7 +60,8 @@ class TaskExecutor:
             'id': task_id,
             'name': name,
             'func': func,
-            'kwargs': kwargs
+            'kwargs': kwargs,
+            'config': config
         })
 
     def _worker(self):
@@ -76,6 +82,7 @@ class TaskExecutor:
                     name = task_item['name']
                     func = task_item['func']
                     kwargs = task_item['kwargs']
+                    config = task_item['config']
 
                     # --- Start Task Execution ---
                     logger.info(f"Starting task '{name}' (ID: {task_id})...")
@@ -120,12 +127,24 @@ class TaskExecutor:
                             duration = time.time() - start_time
                             captured_logs = get_logs()
 
-                            new_novels_count = task_result_value if isinstance(task_result_value, int) else None
+                            new_novels_count = 0
+                            new_novel_titles = None
+
+                            if isinstance(task_result_value, list):
+                                new_novel_titles = task_result_value
+                                new_novels_count = len(new_novel_titles)
+                            elif isinstance(task_result_value, int):
+                                new_novels_count = task_result_value
+                            
+                            # By default, send titles if they exist, unless explicitly disabled.
+                            if config.get('notify_on_new_novel') is False:
+                                new_novel_titles = None
 
                             # Update DB with result and logs
                             result_data = {
                                 "log": captured_logs,
-                                "new_novels_count": new_novels_count
+                                "new_novels_count": new_novels_count,
+                                "new_novel_titles": new_novel_titles if new_novel_titles else []
                             }
 
                             with db.get_session() as session:
@@ -138,7 +157,8 @@ class TaskExecutor:
                                 status=status,
                                 duration=duration if status == 'success' else None,
                                 error=error_msg,
-                                new_novels_count=new_novels_count
+                                new_novels_count=new_novels_count,
+                                new_novel_titles=new_novel_titles
                             )
 
                             self.queue.task_done()
@@ -251,8 +271,18 @@ class Scheduler:
                             elif isinstance(task.params, dict):
                                 params = task.params
                         
+                        # Parse config
+                        config = {}
+                        if task.config and isinstance(task.config, str):
+                            try:
+                                config = json.loads(task.config)
+                            except json.JSONDecodeError:
+                                pass
+                        elif isinstance(task.config, dict):
+                            config = task.config
+
                         # Add to executor
-                        TaskExecutor().add_task(task.name, func, **params)
+                        TaskExecutor().add_task(task.name, func, config, **params)
                         
                 except Exception as e:
                     logger.error(f"Error checking task '{task.name}': {e}")

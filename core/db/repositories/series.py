@@ -18,19 +18,14 @@ class Series(BaseRepository):
                 func.max(models.Novel.series_name).label(C.COL_SERIES_NAME)
             ]
         )
-
-    def update_series_name(self, series_id: int, series_name: str):
-        self.session.execute(
-            _update(models.Novel)
-            .where(models.Novel.series_id == series_id)
-            .values(series_name=series_name)
-        )
-        self.session.execute(
-            _update(models.Series)
-            .where(models.Series.series_id == series_id)
-            .values(series_name=series_name)
-        )
-
+    
+    def get_empty_series_ids(self) -> list[int]:
+        return self.session.execute(
+            _select(models.Series.series_id)
+            .where(models.Series.series_name.is_(None))
+            .distinct()
+        ).scalars().all()
+    
     def delete_series_and_data(self, series_id: int):
         novel_ids = self.session.execute(
             _select(models.Novel.id)
@@ -46,5 +41,13 @@ class Series(BaseRepository):
             _delete(models.Series)
             .where(models.Series.series_id == series_id)
         )
+
+    def series_with_empty_index(self) -> list[int]:
+        return self.session.execute(
+            _select(models.Novel.series_id)
+            .where(models.Novel.series_id.is_not(None))
+            .where(models.Novel.series_index.is_(None))
+        ).scalars().all()
+
 
     

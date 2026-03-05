@@ -62,6 +62,38 @@ export const novelApi = {
   }
 };
 
+// --- Tag Preference API ---
+// Note: These functions handle tag preferences.
+
+export interface TagPreferenceResponse {
+  id: number;
+  tag: string;
+  preference: 'favourite' | 'blocked';
+  sort_index: number;
+}
+
+export const tagPreferenceApi = {
+  getTagPreferences: async () => {
+    const response = await api.get('/tag-preferences/');
+    return response.data as TagPreferenceResponse[];
+  },
+
+  setTagPreference: async (tag: string, preference: 'favourite' | 'blocked') => {
+    const response = await api.post('/tag-preferences/', { tag, preference });
+    return response.data;
+  },
+
+  deleteTagPreference: async (tag: string) => {
+    const response = await api.delete(`/tag-preferences/${tag}`);
+    return response.data;
+  },
+
+  reorderTagPreferences: async (tagIds: number[]) => {
+    const response = await api.post('/tag-preferences/reorder', tagIds);
+    return response.data;
+  },
+};
+
 // --- Task API ---
 
 export interface ScheduledTask {
@@ -154,5 +186,42 @@ export const taskApi = {
   getTaskHistory: async (limit = 50, offset = 0) => {
     const response = await api.get('/tasks/history', { params: { limit, offset } });
     return response.data as { items: TaskHistory[], total: number };
+  },
+};
+
+export interface SystemConfig {
+  default_min_like: number;
+  default_min_text: number;
+}
+
+export const systemApi = {
+  getConfig: async () => {
+    const response = await api.get('/system/config');
+    return response.data as SystemConfig;
+  },
+};
+
+// --- Search History API ---
+
+export interface SearchHistory {
+  id: number;
+  type: string;
+  value: string;
+  display_value?: string;
+  timestamp: string;
+}
+
+export const searchHistoryApi = {
+  getSearchHistory: async () => {
+    const response = await api.get('/search-history/');
+    return response.data as SearchHistory[];
+  },
+
+  deleteSearchHistoryItem: async (historyId: number) => {
+    await api.delete(`/search-history/${historyId}`);
+  },
+
+  clearSearchHistory: async () => {
+    await api.delete('/search-history/');
   },
 };

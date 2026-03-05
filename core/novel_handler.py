@@ -7,6 +7,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from pixivpy3 import models
+from pixivpy3.utils import ParsedJson
 
 from core.util import build_path, parse_tags, guess_series_order, has_image_placeholders, is_chinese
 from core.epub_builder import create_epub
@@ -166,21 +167,21 @@ def save_novel_text(data: Dict[str, Any], force: bool = False) -> None:
         logger.error(f"Failed to save novel text to {path}: {e}")
         raise
 
-def handle_from_webview(data: models.WebviewNovel, force: bool = False) -> Dict: 
+def handle_from_webview(data: ParsedJson, force: bool = False) -> Dict: 
     
     data = {
         "id": data.id,
         "title": data.title,
-        "author_id": data.user_id,
+        "author_id": data.userId,
         "author_name": None,
         "path": build_path(data.id, data.title),
         "like": data.rating.bookmark,
         "view": data.rating.view,
         "text": len(data.text),
         "caption": data.caption,
-        "series_id": data.series_id,
-        "series_name": data.series_title,
-        "series_index": guess_series_order(data.series_navigation),
+        "series_id": data.seriesId,
+        "series_name": data.seriesTitle,
+        "series_index": guess_series_order(data.seriesNavigation),
         "create_time": data.cdate,
         # 0: Cannot/No need, 1: Needs making, 2: Has epub
         "has_epub": 1 if has_image_placeholders(data.text) else 0,
@@ -199,7 +200,7 @@ def handle_from_webview(data: models.WebviewNovel, force: bool = False) -> Dict:
     
     return data
 
-def handle_from_novelInfo(data: models.NovelInfo, force: bool = False) -> Dict:
+def handle_from_novelInfo(data: ParsedJson) -> Dict:
     
     return {
         "id": data.id,
@@ -213,7 +214,7 @@ def handle_from_novelInfo(data: models.NovelInfo, force: bool = False) -> Dict:
         "caption": data.caption,
         "series_id": data.series.id if data.series else None,
         "series_name": data.series.title if data.series else None,
-        "series_index": None,
+        "series_index": data.series.index if data.series.index else None, # manually
         "create_time": data.create_date[:10],
         "has_epub": 0,
         "tag": parse_tags([tag.name for tag in data.tags]),

@@ -4,6 +4,9 @@ from sqlalchemy import select, func, case, and_, or_, Select, Table
 from sqlalchemy.orm import Session
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from sqlalchemy.dialects import sqlite
+from core.logger import logger
+
 from .base_repository import BaseRepository
 from .fts_manager import FTSManager
 from .query_builder import BaseQueryBuilder
@@ -108,23 +111,15 @@ class NovelQueryBuilder(BaseQueryBuilder):
 
     def _apply_tag_filter(self, tags: Set[str], id_stmt: Select):
         """应用标签过滤：必须包含所有指定标签。"""
-        if not tags:
-            return id_stmt
-             
-        # 对于每个标签，创建一个EXISTS子查询，确保小说包含该标签
-        for tag in tags:
-            # 子查询：检查当前小说是否有关联的指定标签
-            tag_subquery = (
-                select(1)
-                .select_from(models.NovelTag)
-                .join(models.Tag, models.NovelTag.tag_id == models.Tag.id)
-                .where(
-                    models.NovelTag.novel_id == self.main_model.id,
-                    models.Tag.name == tag
-                )
-                .exists()
+        if tags:
+            # 使用 GROUP BY 和 HAVING COUNT 的方式来确保所有标签都存在
+            id_stmt = (
+                id_stmt.join(models.NovelTag, self.main_model.id == models.NovelTag.novel_id)
+                       .join(models.Tag, models.NovelTag.tag_id == models.Tag.id)
+                       .where(models.Tag.name.in_(tags))
+                       .group_by(self.main_model.id)
+                       .having(func.count(self.main_model.id) == len(tags))
             )
-            id_stmt = id_stmt.where(tag_subquery)
         
         return id_stmt
 
@@ -219,8 +214,10 @@ class Novel(BaseRepository, RandomPoolMixin, EpubMixin):
             existing = self.session.get(models.Novel, novel.get('id'))
             
             if existing:
-                for key in update_fields_set:
-                    setattr(existing, key, novel.get(key))
+                for key, value in filtered_data.items():
+                    if getattr(existing, key, None) is None and value \
+                        or key in update_fields_set:
+                        setattr(existing, key, value)
             else:
                 # Create new novel with all provided fields
                 new_novel = models.Novel(**filtered_data)
@@ -291,6 +288,10 @@ class Novel(BaseRepository, RandomPoolMixin, EpubMixin):
         
         builder = NovelQueryBuilder(self, **params)
         query, params = builder.build()
+        
+        compiled_stmt = query.compile(dialect=sqlite.dialect())
+        logger.info(f"Executing SQL: {compiled_stmt.string}")
+        logger.info(f"With params: {compiled_stmt.params}")
         
         result = self.session.execute(query, params)
         novels = [dict(row._mapping) for row in result.fetchall()]

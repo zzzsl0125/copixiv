@@ -6,6 +6,7 @@ from typing import List, Optional, Union, Callable, Any
 from dataclasses import dataclass
 
 from pixivpy3 import models, PixivError
+from pixivpy3.utils import ParsedJson
 
 from core.config import config
 
@@ -73,20 +74,15 @@ def build_path(id: Union[str, int], name: str) -> str:
     filename = f"{safe_filename(name)}_{id_str}.txt"
     return str(Path(download_dir) / subdir / filename)
 
-def guess_series_order(navigation: Union[models.EmptyObject, dict, None]) -> Optional[int]:
-
+def guess_series_order(navigation: Optional[ParsedJson]) -> Optional[int]:
     try:
-        navigation: dict = navigation.model_extra
+        if prev_novel := navigation.prevNovel:
+            return int(prev_novel.contentOrder) + 1
+        if next_novel := navigation.nextNovel:
+            return int(next_novel.contentOrder) - 1
+        return None
     except Exception:
         return None
-    
-    if prev_novel := navigation.get('prevNovel'):
-        return int(prev_novel.get('contentOrder')) + 1
-    
-    if next_novel := navigation.get('nextNovel'):
-        return int(next_novel.get('contentOrder')) - 1
-    
-    return None
 
 CLEAN_PATTERN = re.compile(r"[()]")
 SPLIT_PATTERN = re.compile(r"[/|#、\\]")
@@ -115,7 +111,7 @@ CHINESE_TAG_KEYWORDS = {
     "中国文", "中文語", "中文语", "中国语", "中国語", "中阈语", "中國语", "中國語",
     "中国語注意", "中國語注意", "中国语注意", "Chinese", "chinese", "中國", "中国", 
 }
-def is_chinese(data: models.NovelInfo) -> bool:
+def is_chinese(data: ParsedJson) -> bool:
 
     if any(tag in CHINESE_TAG_KEYWORDS for tag in parse_tags(data.tags)):
         return True

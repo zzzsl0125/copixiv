@@ -31,7 +31,7 @@ def update_novel_paths(db_path: str, batch_size: int = 1000):
     try:
         # 首先检查需要更新的记录数量
         cursor.execute(
-            "SELECT COUNT(*) FROM novel WHERE path LIKE '/home/invocation/novel_manager/download/%'"
+            "SELECT COUNT(*) FROM novel WHERE path LIKE '/home/invocation/copixiv/download/%'"
         )
         total_count = cursor.fetchone()[0]
         logger.info(f"需要更新的记录总数: {total_count}")
@@ -42,7 +42,7 @@ def update_novel_paths(db_path: str, batch_size: int = 1000):
         
         # 获取需要更新的记录ID和原始路径
         cursor.execute(
-            "SELECT id, path FROM novel WHERE path LIKE '/home/invocation/novel_manager/download/%'"
+            "SELECT id, path FROM novel WHERE path LIKE '/home/invocation/copixiv/download/%'"
         )
         
         updated_count = 0
@@ -52,10 +52,10 @@ def update_novel_paths(db_path: str, batch_size: int = 1000):
             novel_id, old_path = row
             
             # 替换路径前缀
-            if old_path.startswith('/home/invocation/novel_manager/download/'):
+            if old_path.startswith('/home/invocation/copixiv/download/'):
                 new_path = old_path.replace(
-                    '/home/invocation/novel_manager/download/',
                     '/home/invocation/copixiv/download/',
+                    'download/',
                     1  # 只替换第一次出现
                 )
                 batch_data.append((new_path, novel_id))

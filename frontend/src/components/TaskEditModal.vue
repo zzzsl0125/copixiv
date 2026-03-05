@@ -18,12 +18,14 @@ const cronMode = ref<'daily' | 'weekly' | 'monthly' | 'custom'>('daily');
 const cronTime = ref({ hour: 0, minute: 0 });
 const cronWeekDay = ref(0); // 0-6 (Sun-Sat)
 const cronMonthDay = ref(1); // 1-31
+const notifyOnNewNovel = ref(true);
 
 const formState = ref({
   name: '',
   task: '',
   cron: '',
   params: '{}',
+  config: '{}',
   is_enabled: true
 });
 
@@ -126,6 +128,18 @@ watch([cronMode, cronTime, cronWeekDay, cronMonthDay], () => {
 }, { deep: true });
 
 
+// Watch notifyOnNewNovel to update config JSON string
+watch(notifyOnNewNovel, (newVal) => {
+  try {
+    const config = JSON.parse(formState.value.config || '{}');
+    config.notify_on_new_novel = newVal;
+    formState.value.config = JSON.stringify(config, null, 2);
+  } catch (e) {
+    // If config is not valid JSON, create a new one
+    formState.value.config = JSON.stringify({ notify_on_new_novel: newVal }, null, 2);
+  }
+});
+
 watch(() => props.isOpen, (newVal) => {
   if (newVal) {
     if (props.task) {
@@ -134,9 +148,18 @@ watch(() => props.isOpen, (newVal) => {
         task: props.task.task,
         cron: props.task.cron,
         params: props.task.params ? JSON.stringify(props.task.params, null, 2) : '{}',
+        config: props.task.config ? JSON.stringify(props.task.config, null, 2) : '{}',
         is_enabled: props.task.is_enabled
       };
       
+      // Parse config to set initial state of notify checkbox
+      try {
+        const config = JSON.parse(formState.value.config || '{}');
+        notifyOnNewNovel.value = config.notify_on_new_novel !== false; // Default to true if not set
+      } catch {
+        notifyOnNewNovel.value = true;
+      }
+
       // Parse existing cron to UI
       parseCronToUI(props.task.cron);
       
@@ -152,8 +175,10 @@ watch(() => props.isOpen, (newVal) => {
         task: '',
         cron: '0 0 * * *',
         params: '{}',
+        config: '{"notify_on_new_novel": true}',
         is_enabled: true
       };
+      notifyOnNewNovel.value = true;
       cronMode.value = 'daily';
       cronTime.value = { hour: 0, minute: 0 };
       dynamicParams.value = {};
@@ -164,6 +189,7 @@ watch(() => props.isOpen, (newVal) => {
 const handleSave = () => {
   try {
     const paramsObj = JSON.parse(formState.value.params);
+    const configObj = JSON.parse(formState.value.config || '{}');
     
     // Convert types based on method definition
     const method = availableMethods.value.find(m => m.name === formState.value.task);
@@ -187,6 +213,7 @@ const handleSave = () => {
       task: formState.value.task,
       cron: formState.value.cron,
       params: paramsObj,
+      config: configObj,
       is_enabled: formState.value.is_enabled
     };
     
@@ -337,6 +364,14 @@ const weekDays = [
                   <input v-model="formState.is_enabled" id="is_enabled" type="checkbox" class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded" />
                   <label for="is_enabled" class="ml-2 block text-sm text-gray-900">
                     启用此任务
+                  </label>
+                </div>
+
+                <!-- Detailed Notification Toggle -->
+                <div class="flex items-center pt-2">
+                  <input v-model="notifyOnNewNovel" id="notify_on_new_novel" type="checkbox" class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded" />
+                  <label for="notify_on_new_novel" class="ml-2 block text-sm text-gray-900">
+                    详细小说列表通知
                   </label>
                 </div>
 

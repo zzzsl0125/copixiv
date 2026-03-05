@@ -5,65 +5,48 @@ import { useCursorPagination } from './useCursorPagination';
 export function useNovels() {
   const urlParams = new URLSearchParams(window.location.search);
   
-  const filters = reactive({
+  const filters = reactive<{
+    keyword: string;
+    order_by: string;
+    order_direction: string;
+    min_like?: number;
+    min_text?: number;
+  }>({
     keyword: urlParams.get('keyword') || '',
     order_by: urlParams.get('order_by') || 'random',
     order_direction: urlParams.get('order_direction') || 'DESC',
-    min_like: urlParams.get('min_like') ? Number(urlParams.get('min_like')) : 500,
-    min_text: urlParams.get('min_text') ? Number(urlParams.get('min_text')) : 3000,
+    min_like: urlParams.get('min_like') ? Number(urlParams.get('min_like')) : undefined,
+    min_text: urlParams.get('min_text') ? Number(urlParams.get('min_text')) : undefined,
   });
 
   const fetchNovels = async (cursor?: any) => {
     const queries: Record<string, string> = {};
-    const keyword = filters.keyword.trim();
-    let orderBy = filters.order_by;
-    let orderDirection = filters.order_direction;
+    if (filters.keyword.trim()) {
+      const conditions = filters.keyword.split(/[;；]/).filter(cond => cond.trim());
 
-    if (keyword) {
-      const conditions = keyword.split(';').filter(cond => cond.trim());
       for (const condition of conditions) {
         const trimmed = condition.trim();
         const colonIndex = trimmed.indexOf(':');
+        
         if (colonIndex > 0) {
           const type = trimmed.substring(0, colonIndex).trim();
           const value = trimmed.substring(colonIndex + 1).trim();
+          
           if (value) queries[value] = type;
-        } else {
+        } else { 
           queries[trimmed] = 'keyword';
         }
-      }
-
-      let isSpecialCase = false;
-      if (conditions.length === 1 && conditions[0]) {
-        const condition = conditions[0];
-        const colonIndex = condition.indexOf(':');
-        if (colonIndex > 0) {
-          const type = condition.substring(0, colonIndex).trim();
-          if (type === 'author_id' || type === 'author') {
-            orderBy = 'id';
-            orderDirection = 'DESC';
-            isSpecialCase = true;
-          } else if (type === 'series_id' || type === 'series') {
-            orderBy = 'series_index';
-            orderDirection = 'ASC';
-            isSpecialCase = true;
-          }
-        }
-      }
-      if (!isSpecialCase) {
-        orderBy = 'like';
-        orderDirection = 'DESC';
       }
     }
 
     const res = await novelApi.getNovels({
       queries: Object.keys(queries).length > 0 ? queries : undefined,
-      order_by: orderBy,
-      order_direction: orderDirection,
-      min_like: filters.min_like || undefined,
-      min_text: filters.min_text || undefined,
+      order_by: filters.order_by,
+      order_direction: filters.order_direction,
+      min_like: filters.min_like,
+      min_text: filters.min_text,
       cursor: cursor || undefined,
-      per_page: 10
+      per_page: 15
     });
 
     return {
@@ -85,10 +68,60 @@ export function useNovels() {
 
   const loadNovels = (isLoadMore = false) => loadNovelsBase(isLoadMore);
 
-  const handleSearch = (keyword?: string, updateUrl = true) => {
-    if (typeof keyword === 'string') filters.keyword = keyword;
+  const applySearchOrdering = (keyword: string) => {
+    if (!keyword.trim()) {
+      return;
+    }
+
+    const conditions = keyword.split(/[;；]/).filter(cond => cond.trim());
+    let isSpecialCase = false;
+    if (conditions.length === 1 && conditions[0]) {
+      const condition = conditions[0];
+      const colonIndex = condition.indexOf(':');
+      if (colonIndex > 0) {
+        const type = condition.substring(0, colonIndex).trim();
+        if (type === 'author_id' || type === 'author') {
+          filters.order_by = 'id';
+          filters.order_direction = 'DESC';
+          isSpecialCase = true;
+        } else if (type === 'series_id' || type === 'series') {
+          filters.order_by = 'id';
+          filters.order_direction = 'ASC';
+          isSpecialCase = true;
+        } else if (type === 'is_special_follow') {
+          filters.order_by = 'id';
+          filters.order_direction = 'DESC';
+          isSpecialCase = true;
+        }
+      }
+    }
+
+    if (!isSpecialCase) {
+      filters.order_by = 'like';
+      filters.order_direction = 'DESC';
+    }
+  };
+  
+  const resetFilters = () => {
+    filters.keyword = '';
+    filters.order_by = 'random';
+    filters.order_direction = 'DESC';
+    filters.min_like = undefined;
+    filters.min_text = undefined;
+  };
+
+  const handleSearch = (keyword?: string, options?: { updateUrl?: boolean; setOrdering?: boolean }) => {
+    const { updateUrl = true, setOrdering = false } = options || {};
+
+    if (typeof keyword === 'string') {
+      filters.keyword = keyword;
+    }
+
+    if (filters.keyword.trim() && setOrdering) {
+        applySearchOrdering(filters.keyword);
+    }
     
-    reset(); // Reset cursor and clear items
+    reset();
 
     if (updateUrl) {
       const url = new URL(window.location.href);
@@ -118,10 +151,10 @@ export function useNovels() {
     filters.keyword = params.get('keyword') || '';
     filters.order_by = params.get('order_by') || 'random';
     filters.order_direction = params.get('order_direction') || 'DESC';
-    filters.min_like = params.get('min_like') ? Number(params.get('min_like')) : 500;
-    filters.min_text = params.get('min_text') ? Number(params.get('min_text')) : 3000;
+    filters.min_like = params.get('min_like') ? Number(params.get('min_like')) : undefined;
+    filters.min_text = params.get('min_text') ? Number(params.get('min_text')) : undefined;
     
-    handleSearch(undefined, false);
+    handleSearch(undefined, { updateUrl: false });
   };
 
   onMounted(() => {
@@ -140,7 +173,7 @@ export function useNovels() {
     
     const formattedValue = typeof value === 'string' && value.toString().includes(' ') ? `"${value}"` : value;
     filters.keyword = `${field}:${formattedValue};`;
-handleSearch();
+    handleSearch(undefined, { setOrdering: true });
   };
 
   return {
@@ -153,6 +186,7 @@ handleSearch();
     loadNovels,
     handleSearch,
     handleLoadMore,
-    handleCardSearch
+    handleCardSearch,
+    resetFilters
   };
 }

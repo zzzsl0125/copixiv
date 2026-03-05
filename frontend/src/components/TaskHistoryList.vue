@@ -16,30 +16,40 @@ const emit = defineEmits<{
   (e: 'loadMore'): void;
 }>();
 
-const resultModalOpen = ref(false);
-const currentResult = ref('');
+const logModalOpen = ref(false);
+const currentLog = ref('');
+const titlesModalOpen = ref(false);
+const currentTitles = ref('');
 
 const parseResult = (resultStr?: string | null) => {
-  if (!resultStr) return { log: '', new_novels_count: null };
+  if (!resultStr) return { log: '', new_novels_count: null, new_novel_titles: [] };
   try {
     const parsed = JSON.parse(resultStr);
-    if (parsed && typeof parsed === 'object' && 'log' in parsed) {
+    if (parsed && typeof parsed === 'object') {
       return { 
         log: parsed.log || '', 
-        new_novels_count: parsed.new_novels_count 
+        new_novels_count: parsed.new_novels_count,
+        new_novel_titles: parsed.new_novel_titles || []
       };
     }
   } catch (e) {
     // legacy plain text log
   }
-  return { log: resultStr, new_novels_count: null };
+  return { log: resultStr, new_novels_count: null, new_novel_titles: [] };
 };
 
-const showResult = (result: string) => {
+const showLog = (result: string) => {
   const parsed = parseResult(result);
-  currentResult.value = parsed.log || '无输出日志';
-  resultModalOpen.value = true;
+  currentLog.value = parsed.log || '无输出日志';
+  logModalOpen.value = true;
 };
+
+const showTitles = (result: string) => {
+  const parsed = parseResult(result);
+  currentTitles.value = parsed.new_novel_titles.join('\n');
+  titlesModalOpen.value = true;
+};
+
 
 const formatDate = (dateStr?: string | null) => {
   if (!dateStr) return '-';
@@ -99,10 +109,18 @@ const formatDate = (dateStr?: string | null) => {
                   <span v-if="typeof item.duration === 'number'" class="text-xs text-gray-500 whitespace-nowrap">耗时: {{ item.duration.toFixed(2) }}s</span>
                   <StatusBadge :status="item.status" />
                   
-                  <div class="w-28 flex justify-end">
+                  <div class="w-48 flex justify-end space-x-2">
+                    <button 
+                      v-if="parseResult(item.result).new_novel_titles && parseResult(item.result).new_novel_titles.length > 0"
+                      @click="showTitles(item.result || '')" 
+                      class="inline-flex items-center px-2.5 py-1.5 border border-gray-300 shadow-sm text-xs font-medium rounded text-gray-700 bg-white hover:bg-gray-50 focus:outline-none transition-colors"
+                    >
+                      <FileText class="w-3.5 h-3.5 mr-1" />
+                      清单
+                    </button>
                     <button 
                       v-if="item.result || item.status === 'FAILED'" 
-                      @click="showResult(item.result || '')" 
+                      @click="showLog(item.result || '')" 
                       class="inline-flex items-center px-2.5 py-1.5 border border-gray-300 shadow-sm text-xs font-medium rounded text-gray-700 bg-white hover:bg-gray-50 focus:outline-none transition-colors"
                     >
                       <FileText class="w-3.5 h-3.5 mr-1" />
@@ -125,10 +143,10 @@ const formatDate = (dateStr?: string | null) => {
       @load-more="emit('loadMore')" 
     />
 
-    <!-- Modal for Execution Result -->
-    <div v-if="resultModalOpen" class="fixed inset-0 z-50 overflow-hidden" aria-labelledby="modal-title" role="dialog" aria-modal="true">
+    <!-- Modal for Execution Log -->
+    <div v-if="logModalOpen" class="fixed inset-0 z-50 overflow-hidden" aria-labelledby="modal-title" role="dialog" aria-modal="true">
       <div class="absolute inset-0 overflow-hidden">
-        <div class="absolute inset-0 bg-gray-500 bg-opacity-75 transition-opacity" @click="resultModalOpen = false" aria-hidden="true"></div>
+        <div class="absolute inset-0 bg-gray-500 bg-opacity-75 transition-opacity" @click="logModalOpen = false" aria-hidden="true"></div>
 
         <div class="pointer-events-none fixed inset-y-0 right-0 flex max-w-full pl-0 sm:pl-10">
           <div class="pointer-events-auto w-screen max-w-4xl transform transition duration-500 ease-in-out sm:duration-700">
@@ -136,7 +154,7 @@ const formatDate = (dateStr?: string | null) => {
                <!-- Header with close button -->
                <div class="px-4 py-3 sm:px-6 bg-gray-50 border-b border-gray-200 flex justify-between items-center">
                   <h3 class="text-lg font-medium text-gray-900">执行日志</h3>
-                  <button @click="resultModalOpen = false" class="rounded-md text-gray-400 hover:text-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  <button @click="logModalOpen = false" class="rounded-md text-gray-400 hover:text-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500">
                     <span class="sr-only">Close panel</span>
                     <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
                       <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -147,8 +165,40 @@ const formatDate = (dateStr?: string | null) => {
                <!-- Log Viewer Content -->
                <div class="relative flex-1 overflow-hidden bg-[#1e1e1e]">
                   <LogViewer 
-                    :log="currentResult" 
-                    :title="currentResult ? 'Log Output' : 'No logs'" 
+                    :log="currentLog" 
+                    :title="'Log Output'" 
+                  />
+               </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal for Novel Titles -->
+    <div v-if="titlesModalOpen" class="fixed inset-0 z-50 overflow-hidden" aria-labelledby="modal-title" role="dialog" aria-modal="true">
+      <div class="absolute inset-0 overflow-hidden">
+        <div class="absolute inset-0 bg-gray-500 bg-opacity-75 transition-opacity" @click="titlesModalOpen = false" aria-hidden="true"></div>
+
+        <div class="pointer-events-none fixed inset-y-0 right-0 flex max-w-full pl-0 sm:pl-10">
+          <div class="pointer-events-auto w-screen max-w-4xl transform transition duration-500 ease-in-out sm:duration-700">
+            <div class="flex h-full flex-col bg-white shadow-xl">
+               <!-- Header with close button -->
+               <div class="px-4 py-3 sm:px-6 bg-gray-50 border-b border-gray-200 flex justify-between items-center">
+                  <h3 class="text-lg font-medium text-gray-900">新增小说清单</h3>
+                  <button @click="titlesModalOpen = false" class="rounded-md text-gray-400 hover:text-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <span class="sr-only">Close panel</span>
+                    <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+               </div>
+               
+               <!-- Log Viewer Content for Titles -->
+               <div class="relative flex-1 overflow-hidden bg-[#1e1e1e]">
+                  <LogViewer 
+                    :log="currentTitles" 
+                    :title="'Novel Titles'"
                   />
                </div>
             </div>

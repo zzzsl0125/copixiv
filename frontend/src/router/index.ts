@@ -10,6 +10,11 @@ const routes = [
     path: '/tasks',
     name: 'tasks',
     component: () => import('../views/Tasks.vue')
+  },
+  {
+    path: '/tag-management',
+    name: 'tag-management',
+    component: () => import('../views/TagManagement.vue')
   }
 ]
 

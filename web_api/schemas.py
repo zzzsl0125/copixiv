@@ -1,6 +1,25 @@
 from pydantic import BaseModel, ConfigDict
 from typing import List, Optional, Any, Dict
 
+from core.db.models import TagPreferenceType
+
+class TagPreferenceResponse(BaseModel):
+    id: int
+    tag: str
+    preference: TagPreferenceType
+    sort_index: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+class SearchHistoryResponse(BaseModel):
+    id: int
+    type: str
+    value: str
+    display_value: Optional[str] = None
+    timestamp: str
+
+    model_config = ConfigDict(from_attributes=True)
+
 class NovelBase(BaseModel):
     id: int
     title: str
@@ -66,6 +85,10 @@ class TaskArgument(BaseModel):
     type: str
     default: Optional[Any] = None
     required: bool
+
+class SystemConfigResponse(BaseModel):
+    default_min_like: int
+    default_min_text: int
 
 class TaskMethod(BaseModel):
     name: str

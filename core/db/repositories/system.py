@@ -153,6 +153,43 @@ class System(BaseRepository):
         except (ValueError, KeyError) as e:
             raise ValueError(f"Invalid date string '{date_str}' for target '{target}'. Expected format: {formats.get(target)}") from e
 
+    def get_tag_preferences(self) -> list[models.TagPreference]:
+        """Retrieves all tag preferences."""
+        stmt = select(models.TagPreference).order_by(models.TagPreference.sort_index.asc(), models.TagPreference.id.asc())
+        result = self.session.execute(stmt).scalars().all()
+        return result
+
+    def set_tag_preference(self, tag: str, preference: models.TagPreferenceType):
+        """Adds or updates a tag preference."""
+        stmt = sqlite_insert(models.TagPreference).values(
+            tag=tag,
+            preference=preference
+        ).on_conflict_do_update(
+            index_elements=['tag'],
+            set_={'preference': preference}
+        )
+        self.session.execute(stmt)
+
+    def delete_tag_preference(self, tag: str):
+        """Deletes a tag preference."""
+        stmt = delete(models.TagPreference).where(models.TagPreference.tag == tag)
+        self.session.execute(stmt)
+
+    def update_tag_preference_order(self, tag_ids: list[int]) -> bool:
+        """Updates the sort_index for a list of tag preference IDs."""
+        try:
+            for index, tag_id in enumerate(tag_ids):
+                stmt = (
+                    models.TagPreference.__table__.update()
+                    .where(models.TagPreference.id == tag_id)
+                    .values(sort_index=index)
+                )
+                self.session.execute(stmt)
+            self.session.flush()
+            return True
+        except Exception as e:
+            return False
+
     def vacuum_database(self):
         """Vacuums the database to reclaim space."""
         # Execute VACUUM in autocommit mode

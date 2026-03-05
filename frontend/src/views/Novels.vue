@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ref, toRef } from 'vue';
+import { ref, toRef, onMounted } from 'vue';
 import NovelCard from '../components/NovelCard.vue';
 import NovelHeader from '../components/NovelHeader.vue';
 import LoadMore from '../components/LoadMore.vue';
 import EmptyState from '../components/EmptyState.vue';
 import { useMasonryLayout } from '../composables/useMasonryLayout';
-import type { Novel } from '../api';
+import type { Novel, TagPreferenceResponse } from '../api';
+import { tagPreferenceApi } from '../api';
 
 const props = defineProps<{
   isSidebarOpen: boolean;
@@ -22,23 +23,45 @@ const emit = defineEmits<{
   (e: 'card-search', type: string, value: string | number): void;
   (e: 'update:filters', filters: any): void;
   (e: 'load-more'): void;
+  (e: 'logo-click'): void;
 }>();
 
 const columnRefs = ref<HTMLElement[]>([]);
+const activeCardId = ref<number | string | null>(null);
+const tagPreferences = ref<TagPreferenceResponse[]>([]);
 
 const { columns } = useMasonryLayout(
-  toRef(props, 'novels'), 
+  toRef(props, 'novels'),
   columnRefs
 );
+
+const fetchTagPreferences = async () => {
+  try {
+    tagPreferences.value = await tagPreferenceApi.getTagPreferences();
+  } catch (error) {
+    console.error('Failed to fetch tag preferences', error);
+  }
+};
+
+onMounted(fetchTagPreferences);
+
+const handleToggleActive = (id: number | string) => {
+  if (activeCardId.value === id) {
+    activeCardId.value = null;
+  } else {
+    activeCardId.value = id;
+  }
+};
 </script>
 
 <template>
-  <div class="flex-1 flex flex-col min-w-0 h-full">
+  <div class="flex-1 flex flex-col min-w-0 h-full" @click="activeCardId = null">
     <NovelHeader 
       :filters="props.filters" 
       @search="() => emit('search')" 
       @update:filters="emit('update:filters', $event)" 
       @toggle-sidebar="emit('toggle-sidebar')"
+      @logo-click="emit('logo-click')"
     />
 
     <!-- Main Content -->
@@ -61,7 +84,15 @@ const { columns } = useMasonryLayout(
     <!-- Novel Grid -->
     <div v-if="props.novels.length > 0" class="flex gap-6 items-start">
       <div v-for="(col, colIndex) in columns" :key="colIndex" :ref="el => { if (el) columnRefs[colIndex] = el as HTMLElement }" class="flex-1 flex flex-col gap-6 w-full min-w-0">
-        <NovelCard v-for="novel in col" :key="novel.id" :novel="novel" @search="(type, value) => emit('card-search', type, value)" />
+        <NovelCard 
+          v-for="novel in col" 
+          :key="novel.id" 
+          :novel="novel"
+          :is-active="activeCardId === novel.id"
+          :tag-preferences="tagPreferences"
+          @toggle-active="handleToggleActive"
+          @search="(type, value) => emit('card-search', type, value)" 
+        />
       </div>
     </div>
     
