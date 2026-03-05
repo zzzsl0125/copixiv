@@ -1,0 +1,13 @@
+croniter==6.0.0
+ebooklib==0.20
+fastapi==0.135.1
+jieba==0.42.1
+langid==1.1.6
+Pillow==12.1.1
+pixivpy3==3.7.5
+pydantic==2.12.5
+python_dateutil==2.9.0.post0
+Requests==2.32.5
+SQLAlchemy==2.0.48
+urllib3==2.6.3
+uvicorn==0.41.0
