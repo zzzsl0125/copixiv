@@ -1,0 +1,14 @@
+path:
+  token: pixiv_token
+  database: database/database.db
+  download: download
+pixiv_client:
+  min_interval: 2
+  cooling_duration: 120
+  max_concurrency: 5
+telegram:
+  token: "..."
+  chat_id: "..."
+frontend:
+  default_min_like: 500
+  default_min_text: 3000
