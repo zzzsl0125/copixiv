@@ -290,8 +290,8 @@ class Novel(BaseRepository, RandomPoolMixin, EpubMixin):
         query, params = builder.build()
         
         compiled_stmt = query.compile(dialect=sqlite.dialect())
-        logger.info(f"Executing SQL: {compiled_stmt.string}")
-        logger.info(f"With params: {compiled_stmt.params}")
+        # logger.info(f"Executing SQL: {compiled_stmt.string}")
+        # logger.info(f"With params: {compiled_stmt.params}")
         
         result = self.session.execute(query, params)
         novels = [dict(row._mapping) for row in result.fetchall()]

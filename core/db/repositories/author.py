@@ -8,6 +8,9 @@ from .. import models
 
 class Author(BaseRepository):
 
+    def get_by_id(self, item_id: int) -> models.Author | None:
+        return super().get_by_id(models.Author, item_id)
+
     def get_summary_item(self, item_id: int) -> dict | None:
         return super().get_summary_item(models.Author, item_id)
     

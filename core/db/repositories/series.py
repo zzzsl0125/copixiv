@@ -6,6 +6,9 @@ from .. import constants as C
 from .. import models
 
 class Series(BaseRepository):
+    def get_by_id(self, item_id: int) -> models.Series | None:
+        return super().get_by_id(models.Series, item_id)
+
     def get_summary_item(self, item_id: int) -> dict | None:
         return super().get_summary_item(models.Series, item_id)
     

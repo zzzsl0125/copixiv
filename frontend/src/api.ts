@@ -45,6 +45,9 @@ export const novelApi = {
       queryParams.cursor = JSON.stringify(params.cursor);
     }
     
+    const url = api.getUri({ url: '/novels/', params: queryParams });
+    console.log("Request URL:", url);
+
     const response = await api.get('/novels/', { params: queryParams });
     return response.data as { novels: Novel[], cursor: Record<string, any> | null };
   },
