@@ -9,7 +9,7 @@ from pathlib import Path
 from core.config import config
 
 def get_database_url():
-    db_path = config.get('path', {}).get('database') or "database/database.db"    
+    db_path = config.path.database or "database/database.db"    
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     return f"sqlite:///{db_path}"
 

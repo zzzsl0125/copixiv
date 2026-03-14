@@ -3,7 +3,7 @@ import contextvars
 from dateutil import parser as date_parser
 from contextlib import asynccontextmanager
 
-from core.config import config
+from core.config import config, Config
 from core.util import RequestInfo
 from core.pixiv_account import  AccountStrategy
 from core.request_queue import RequestManager
@@ -18,7 +18,7 @@ class PixivClient:
             cls._instance._initialized = False
         return cls._instance
     
-    def __init__(self, config: dict = config):
+    def __init__(self, config: Config = config):
         if getattr(self, '_initialized', False):
             return
             
@@ -53,15 +53,9 @@ class PixivClient:
 
         strategy = self._strategy.get()
         request = RequestInfo(
-            func=lambda *a, **k: None, 
+            method=method, 
             args=args, kwargs=kwargs, future=None, strategy=strategy
         )
-        
-        class FuncWrapper:
-            __name__ = method
-            def __call__(self, *a, **k):
-                raise NotImplementedError("Should not be called directly")
-        request.func = FuncWrapper()
         
         future = await self.manager.add_task(request)
         result = await future

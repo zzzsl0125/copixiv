@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import List, Optional
 from dataclasses import dataclass
 
-from core.config import config
+from core.config import config, Config
 from core.logger import logger
 from core.pixiv_account import PixivAccount, TokenInfo, AccountStrategy
 from core.util import RateLimitError, AccountInvalidError, RequestInfo
@@ -36,7 +36,7 @@ class AccountManager:
 
 class RequestManager:
     
-    def __init__(self, config: dict = config):
+    def __init__(self, config: Config = config):
 
         accounts = [
             PixivAccount(token_info)
@@ -46,10 +46,9 @@ class RequestManager:
             raise ValueError('Without valid account.')
         self.accounts = AccountManager(accounts)
 
-        cfg = config.get('pixiv_client', {})
-        self.cooling_duration = cfg.get("cooling_duration", 120)
-        self.max_workers = cfg.get("max_concurrency", 5)
-        self.min_interval = cfg.get("min_interval", 2.0)
+        self.cooling_duration = config.pixiv_client.cooling_duration
+        self.max_workers = config.pixiv_client.max_concurrency
+        self.min_interval = config.pixiv_client.min_interval
 
         self.queue = asyncio.Queue()
         self.workers: List[asyncio.Task] = []
@@ -58,15 +57,14 @@ class RequestManager:
         self._queue_lock = asyncio.Lock()
         self._worker_lock = asyncio.Lock()
     
-    def _load_tokens(self, config):
-        path_cfg = config.get("path", {}).get("token")
-        if not path_cfg: 
+    def _load_tokens(self, config: Config):
+        if not config.path.token: 
             logger.warning(f'Without valid token.')
             return
         
         try:
             tokens = list()
-            with open(path_cfg, "r", encoding="utf-8") as f:
+            with open(config.path.token, "r", encoding="utf-8") as f:
                 for name, acc in json.load(f).items():
                     if acc.get("token"):
                         tokens.append(TokenInfo(
@@ -148,7 +146,7 @@ class RequestManager:
 
                 logger.info(f"{acc} - {task}")
                 result = await acc.execute(
-                    task.func.__name__, *task.args, **task.kwargs
+                    task.method, *task.args, **task.kwargs
                 )
                 if not task.future.done():
                     task.future.set_result(result)

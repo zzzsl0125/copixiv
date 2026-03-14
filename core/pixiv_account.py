@@ -3,6 +3,7 @@ import time
 from enum import Enum
 from typing import Optional
 from dataclasses import dataclass
+from asgiref.sync import sync_to_async
 
 from pixivpy3 import AppPixivAPI, PixivError
 
@@ -15,6 +16,7 @@ class TokenInfo:
     username: str
     special: bool = False
     premium: bool = False
+    valid: bool = True
 
 @dataclass
 class AccountStrategy: 
@@ -115,9 +117,7 @@ class PixivAccount:
         
         async with self._auth_lock:
             try:
-                await asyncio.to_thread(
-                    self.api.auth, refresh_token=self.token
-                )
+                await sync_to_async(self.api.auth)(refresh_token=self.token)
                 self.status = AccountStatus.ACTIVE
                 logger.info(f"{self} 认证成功")
 
@@ -136,9 +136,8 @@ class PixivAccount:
         await self.authenticate()
         
         try:
-            return await asyncio.to_thread(
-                getattr(self.api, method), *args, **kwargs
-            )
+            func = getattr(self.api, method)
+            return await sync_to_async(func)(*args, **kwargs)
         except PixivError as e:
             error_msg = str(e).lower()
             if "invalid_grant" in error_msg:

@@ -1,8 +1,10 @@
-croniter==6.0.0
+apscheduler==3.11.2
+asgiref==3.8.1
 ebooklib==0.20
 fastapi==0.135.1
 jieba==0.42.1
 langid==1.1.6
+loguru==0.7.3
 Pillow==12.1.1
 pixivpy3==3.13.0 # pip install git+https://github.com/upbit/pixivpy
 pydantic==2.12.5

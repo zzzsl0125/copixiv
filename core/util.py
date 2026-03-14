@@ -20,7 +20,7 @@ class RateLimitError(PixivError):
 
 @dataclass
 class RequestInfo:
-    func: Callable
+    method: str
     args: tuple
     kwargs: dict
     future: asyncio.Future
@@ -30,7 +30,7 @@ class RequestInfo:
         args = ', '.join(map(str, self.args))
         kwargs = ', '.join(f"{k}={v}" for k, v in self.kwargs.items())
         split = ', ' if self.args and self.kwargs else ''
-        return f'{self.func.__name__}({args}{split}{kwargs})'
+        return f'{self.method}({args}{split}{kwargs})'
 
 def safe_filename(text: str, max_length: int = 240) -> str:
 
@@ -61,9 +61,8 @@ def safe_filename(text: str, max_length: int = 240) -> str:
     return clean_text.strip()
 
 def build_path(id: Union[str, int], name: str) -> str:
-
-    # 从配置获取下载路径，默认为 "downloads"
-    download_dir = config.get('path', {}).get('download') or "downloads"
+    
+    download_dir = config.path.download or "downloads"
     
     id_str = str(id)
     # 根据 ID 分组目录，避免单目录下文件过多

@@ -11,10 +11,9 @@ router = APIRouter()
 
 @router.get("/config", response_model=SystemConfigResponse)
 def get_config():
-    frontend_config = config.get("frontend", {})
     return SystemConfigResponse(
-        default_min_like=frontend_config.get("default_min_like", 500),
-        default_min_text=frontend_config.get("default_min_text", 3000),
+        default_min_like=config.frontend.default_min_like,
+        default_min_text=config.frontend.default_min_text,
     )
 
 

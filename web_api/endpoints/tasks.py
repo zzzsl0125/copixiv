@@ -14,7 +14,7 @@ from core.db.repositories.task import ScheduledTask, TaskHistory
 import json
 import inspect
 from core import tasks as core_tasks
-from core.task_manager import TaskExecutor
+from core.task_manager import task_executor, scheduler
 from web_api.schemas import (
     ScheduledTaskCreate,
     ScheduledTaskUpdate,
@@ -92,6 +92,8 @@ def create_scheduled_task(task_in: ScheduledTaskCreate, db: Session = Depends(ge
     if isinstance(task.config, str):
         try: task.config = json.loads(task.config)
         except: task.config = {}
+    
+    scheduler.reload_cron_jobs()
     return task
 
 @router.put("/scheduled/{task_id}", response_model=ScheduledTaskResponse)
@@ -108,6 +110,8 @@ def update_scheduled_task(task_id: int, task_in: ScheduledTaskUpdate, db: Sessio
     if isinstance(task.config, str):
         try: task.config = json.loads(task.config)
         except: task.config = {}
+    
+    scheduler.reload_cron_jobs()
     return task
 
 @router.delete("/scheduled/{task_id}")
@@ -116,6 +120,7 @@ def delete_scheduled_task(task_id: int, db: Session = Depends(get_db)):
     if not repo.delete(task_id):
         raise HTTPException(status_code=404, detail="Task not found")
     db.commit()
+    scheduler.reload_cron_jobs()
     return {"ok": True}
 
 @router.post("/scheduled/reorder")
@@ -124,6 +129,7 @@ def reorder_scheduled_tasks(task_ids: List[int], db: Session = Depends(get_db)):
     if not repo.update_order(task_ids):
         raise HTTPException(status_code=500, detail="Failed to reorder tasks")
     db.commit()
+    scheduler.reload_cron_jobs()
     return {"ok": True}
 
 @router.post("/scheduled/{task_id}/run")
@@ -163,7 +169,7 @@ def run_scheduled_task(task_id: int, db: Session = Depends(get_db)):
             config = task.config
             
     # 4. Add to queue
-    TaskExecutor().add_task(task.name, func, config, **params)
+    task_executor.add_task(task.name, func, config, **params)
     
     return {"ok": True, "message": "Task queued"}
 

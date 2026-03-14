@@ -6,8 +6,8 @@ from core.logger import logger
 
 class TelegramNotifier:
     def __init__(self):
-        self.token = config.get('telegram', {}).get('token')
-        self.chat_id = config.get('telegram', {}).get('chat_id')
+        self.token = config.telegram.token
+        self.chat_id = config.telegram.chat_id
         self.message_api_url = f"https://api.telegram.org/bot{self.token}/sendMessage"
         self.document_api_url = f"https://api.telegram.org/bot{self.token}/sendDocument"
 
