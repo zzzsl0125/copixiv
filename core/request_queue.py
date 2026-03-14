@@ -146,7 +146,7 @@ class RequestManager:
                         await asyncio.sleep(self.min_interval - elapsed)
                     acc.last_req_time = time.time()
 
-                logger.info(f"{acc} requesting - {task}")
+                logger.info(f"{acc} - {task}")
                 result = await acc.execute(
                     task.func.__name__, *task.args, **task.kwargs
                 )

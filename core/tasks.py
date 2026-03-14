@@ -1,10 +1,11 @@
 import asyncio
 from pathlib import Path
 from datetime import datetime, timedelta
-from sqlalchemy import select
+from sqlalchemy import select as _select
 
 from core.pixiv_client import PixivClient
 from core.db.database import db
+import core.db.constants as C 
 from core.db import models
 from core.logger import logger
 
@@ -22,11 +23,7 @@ def _batch_upsert(novels: list[dict], commit: bool = True, force_update: list[st
         db.series(session).update_summary({sid for n in novels if (sid := n.get('series_id'))})
         return new_count
 
-async def _batch_handle(
-        novels: list[dict], 
-        redownload: bool = False,    # 强制重新下载文件
-        sync_author: bool = True,    # 自行获取缺失的作者名
-) -> list[str]:
+async def _batch_handle(novels: list[dict], redownload: bool = False) -> list[str]:
     
     if not novels: return []
 
@@ -71,8 +68,7 @@ async def _batch_handle(
     new_titles = [n['title'] for n in valid_resp]
     _batch_upsert(valid_resp)
 
-    if sync_author:
-        await sync_empty_name()
+    await sync_empty_name()
         
     return new_titles
 
@@ -80,19 +76,30 @@ async def novel_fetch(id: int, redownload: bool = True):
     resp = await client.webview_novel(id)
     return _batch_upsert([_handle_from_webview(resp, redownload)], True)
 
+async def _download(resp):
+    if not resp.novels: return list()
+    return await _batch_handle([n for n in resp.novels if _is_chinese(n)])
+    
+async def _handle_author(resp):
+    if not resp.novels: return list()
+    authors = {n.user.id for n in resp.novels if _is_chinese(n)}
+    async with client.account_rule():
+        results = await asyncio.gather(*[author_fetch(a) for a in authors])
+    return [title for r in results for title in r]
+
 async def novel_follow(days: int = 3) :
     async with client.account_rule(force_account="carriegriggs78@gmail.com"):
         fetch_til = datetime.now().astimezone() - timedelta(days=days)
-        resp = await client.novel_follow(fetch_til=fetch_til)
-    return await _batch_handle([n for n in resp.novels if _is_chinese(n)])
+        resp = await client.novel_follow(fetch_til=fetch_til, handler=_download)
+    return resp.handler_results
 
 async def novel_ranking(mode: str = 'day_r18', days: int = 3):
-    total_new = list()
+    titles = list()
     for delta in range(1, max(2, days)):
         target = datetime.now().astimezone() - timedelta(days=delta)
-        resp = await client.novel_ranking(mode=mode, date=target, fetch_all=True)
-        total_new.extend(await _batch_handle([n for n in resp.novels if _is_chinese(n)]))
-    return total_new
+        resp = await client.novel_ranking(mode=mode, date=target, fetch_all=True, handler=_handle_author)
+        titles.extend(resp.handler_results)
+    return titles
     
 async def novel_search(keyword: str = 'R-18', months: int = 1, minlike: int = 500):
 
@@ -106,13 +113,27 @@ async def novel_search(keyword: str = 'R-18', months: int = 1, minlike: int = 50
         resp = await client.search_novel(
             keyword, 'keyword', 'popular_desc', 
             start_date=start_date, end_date=end_date,
-            fetch_minlike=minlike,
+            fetch_minlike=minlike, handler=_handle_author
         )
-    return await _batch_handle([n for n in resp.novels if _is_chinese(n)])
 
-async def author_fetch(author_id: int):
-    resp = await client.user_novels(author_id, fetch_all=True)
-    return await _batch_handle(resp.novels)
+    return resp.handler_results
+
+async def author_fetch(author_id: int, force: bool = False):
+    new_author = list()
+    with db.get_session() as session:
+        if not force and not db.author(session).need_update(author_id):
+            logger.debug(f"Skip for Author {author_id}.")
+            return []
+        if not db.author(session).get_by_id(author_id):
+            new_author.append(author_id)
+    await asyncio.gather(*[_author_follow(a) for a in new_author])
+
+    resp = await client.user_novels(author_id, fetch_all=True, handler=_download)
+    
+    with db.get_session(True) as session:
+        db.author(session).update_last_update(author_id)
+        
+    return resp.handler_results
 
 async def _author_follow(author_id: int):
     async with client.account_rule(
@@ -128,17 +149,32 @@ async def author_delete(author_id: int):
     ): return await client.user_follow_delete(author_id)
 
 async def sync_empty_name():
+    author_novels = {}
     with db.get_session() as session:
-        stmt = select(models.Novel).where(models.Novel.author_name.is_(None))
-        ids = [n.id for n in session.execute(stmt).scalars().all()]
-
-    novels = list()
-    for id in ids:
-        resp = await client.novel_detail(id)
-        novels.append(_handle_from_novelInfo(resp))
-    _batch_upsert(novels)
-
+        stmt = _select(models.Novel).where(models.Novel.author_name.is_(None))
+        for n in session.execute(stmt).scalars().all():
+            author_novels.setdefault(n.author_id, []).append(n.id)
+    if not author_novels: return
+        
+    author_names = {}
     with db.get_session() as session:
+        for a in author_novels.keys():
+            author = db.author(session).get_by_id(a)
+            if author and author.author_name:
+                author_names[a] = author.author_name
+                
+    for a in author_novels.keys():
+        if a not in author_names:
+            r = await client.user_detail(a)
+            author_names[a] = r.user.name
+            
+    with db.get_session(True) as session:
+        for a, novels in author_novels.items():
+            name = author_names.get(a)
+            if not name: continue
+            for n in novels: 
+                db.novel(session).update_field(n, C.COL_AUTHOR_NAME, name)
+
         db.author(session).update_summary(db.author(session).get_empty_author_ids())
         db.series(session).update_summary(db.series(session).get_empty_series_ids())
 

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from sqlalchemy import update as _update, delete as _delete, select as _select, func as _func
+from datetime import datetime
 
 from .base_repository import BaseRepository
 from .. import constants as C
@@ -10,6 +11,13 @@ class Author(BaseRepository):
 
     def get_by_id(self, item_id: int) -> models.Author | None:
         return super().get_by_id(models.Author, item_id)
+
+    def need_update(self, author_id: int) -> bool:
+        author = self.get_by_id(author_id)
+        if author and author.last_update:
+            last = datetime.strptime(author.last_update, '%Y-%m-%d').date()
+            return (datetime.now().date() - last).days > 0
+        return True
 
     def get_summary_item(self, item_id: int) -> dict | None:
         return super().get_summary_item(models.Author, item_id)
@@ -30,6 +38,13 @@ class Author(BaseRepository):
             _update(models.Author)
             .where(models.Author.author_id == author_id)
             .values(author_name=author_name)
+        )
+
+    def update_last_update(self, author_id: int):
+        self.session.execute(
+            _update(models.Author)
+            .where(models.Author.author_id == author_id)
+            .values(last_update=datetime.now().date())
         )
 
     def delete_author_and_data(self, author_id: int):

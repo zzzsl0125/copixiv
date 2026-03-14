@@ -132,7 +132,7 @@ def process_novel_assets(data: Dict[str, Any], force: bool = False) -> None:
     try:
         path = Path(data["path"]).with_suffix(".epub")
         if path.exists() and not force: 
-            logger.info(f'skip assets process for novel {data["id"]}')
+            logger.debug(f'skip assets process for novel {data["id"]}')
             return
         if not data.get("images") and not data.get("illusts"): 
             return 
@@ -155,7 +155,7 @@ def save_novel_text(data: Dict[str, Any], force: bool = False) -> None:
     """
     path = Path(data["path"])
     if path.exists() and not force:
-        logger.info(f'skip text download for novel {data["id"]}')
+        logger.debug(f'skip text download for novel {data["id"]}')
         return
         
     try:

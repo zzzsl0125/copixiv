@@ -58,7 +58,7 @@ const handleToggleActive = (id: number | string) => {
   <div class="flex-1 flex flex-col min-w-0 h-full" @click="activeCardId = null">
     <NovelHeader 
       :filters="props.filters" 
-      @search="() => emit('search')" 
+      @search="(keyword?: string) => emit('search', keyword)" 
       @update:filters="emit('update:filters', $event)" 
       @toggle-sidebar="emit('toggle-sidebar')"
       @logo-click="emit('logo-click')"

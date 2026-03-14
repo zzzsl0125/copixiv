@@ -45,7 +45,7 @@ class PixivAccount:
 
         self._auto_inactive_task: Optional[asyncio.Task] = None
 
-    def __str__(self): return f"Account {self.username[:6]}"
+    def __str__(self): return f"[{self.username[:6]}]"
     
     @property
     def in_cooldown(self): return time.time() < self._cooldown_until

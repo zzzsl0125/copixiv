@@ -1,3 +1,4 @@
+import asyncio
 import contextvars
 from dateutil import parser as date_parser
 from contextlib import asynccontextmanager
@@ -48,6 +49,7 @@ class PixivClient:
         fetch_all = kwargs.pop('fetch_all', None)
         fetch_til = kwargs.pop('fetch_til', None)
         fetch_minlike = kwargs.pop('fetch_minlike', None)
+        handler = kwargs.pop('handler', None)
 
         strategy = self._strategy.get()
         request = RequestInfo(
@@ -63,9 +65,24 @@ class PixivClient:
         
         future = await self.manager.add_task(request)
         result = await future
+
+        handler_tasks = []
+        def trigger_handler(res):
+            if handler and res:
+                handler_tasks.append(asyncio.create_task(handler(res)))
+
+        trigger_handler(result)
+        async def _before_return(result):
+            if handler_tasks:
+                results_list = await asyncio.gather(*handler_tasks)
+                result.handler_results = [item for sublist in results_list for item in (sublist or [])]
+            else:
+                result.handler_results = []
+            return result
         
         continue_fetch = fetch_all or fetch_til or fetch_minlike
-        if not continue_fetch: return result
+        if not continue_fetch: 
+            return await _before_return(result)
         
         while result.next_url:
             account = self.manager.accounts.select(request.strategy)
@@ -78,7 +95,10 @@ class PixivClient:
             next_result = await future
 
             result.next_url = next_result.next_url
-            result.novels += next_result.novels
+            if not handler:
+                result.novels += next_result.novels
+            
+            trigger_handler(next_result)
             
             if next_result.novels:
                 last_item = next_result.novels[-1]
@@ -91,7 +111,7 @@ class PixivClient:
                     if last_item['total_bookmarks'] < fetch_minlike:
                         break
             
-        return result
+        return await _before_return(result)
 
 class _Proxy:
     

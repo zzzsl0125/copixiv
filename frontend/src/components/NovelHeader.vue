@@ -14,7 +14,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  (e: 'search'): void;
+  (e: 'search', keyword?: string): void;
   (e: 'update:filters', filters: any): void;
   (e: 'toggle-sidebar'): void;
   (e: 'logo-click'): void;
@@ -27,8 +27,7 @@ watch(() => props.filters.keyword, (newKeyword) => {
 });
 
 const performSearch = () => {
-  emit('update:filters', { ...props.filters, keyword: localKeyword.value });
-  emit('search');
+  emit('search', localKeyword.value);
 };
 
 

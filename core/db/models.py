@@ -31,6 +31,7 @@ class Author(Base):
     like = Column(Integer, default=0)
     view = Column(Integer, default=0)
     text = Column(Integer, default=0)
+    last_update = Column(String, nullable=True)
     
     # Relationships
     novels = relationship("Novel", back_populates="author_rel")
