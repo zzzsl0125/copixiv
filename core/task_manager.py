@@ -5,10 +5,8 @@ import asyncio
 import time
 import concurrent.futures
 from typing import Callable, Any, Tuple, List
-from asgiref.sync import async_to_sync
 
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.executors.pool import ThreadPoolExecutor
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED, EVENT_JOB_MAX_INSTANCES
 
@@ -18,19 +16,18 @@ from core.util import import_string
 from core.notifier import notifier
 from core.logger import capture_logs, logger
 
-def _execute_func(func: Callable, kwargs: dict) -> Any:
+async def _execute_func(func: Callable, kwargs: dict) -> Any:
     """
     Executes a synchronous or asynchronous function with a 30-minute timeout.
-    Uses asgiref.sync.async_to_sync to manage the event loop lifecycle seamlessly.
+    Runs asynchronously within the main event loop.
+    Synchronous functions are executed in a ThreadPoolExecutor.
     """
     if inspect.iscoroutinefunction(func):
-        async def _run_with_timeout():
-            return await asyncio.wait_for(func(**kwargs), timeout=1800)
-        return async_to_sync(_run_with_timeout)()
+        return await asyncio.wait_for(func(**kwargs), timeout=1800)
     else:
+        loop = asyncio.get_running_loop()
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(func, **kwargs)
-            return future.result(timeout=1800)
+            return await asyncio.wait_for(loop.run_in_executor(pool, lambda: func(**kwargs)), timeout=1800)
 
 def _parse_task_result(result_val: Any, config: dict) -> Tuple[List[str], int]:
     """Extracts the number of novels and titles from a task's return value."""
@@ -47,7 +44,7 @@ def _parse_task_result(result_val: Any, config: dict) -> Tuple[List[str], int]:
         
     return titles, count
 
-def run_task_wrapper(task_id: int, name: str, func: Callable, config: dict, kwargs: dict):
+async def run_task_wrapper(task_id: int, name: str, func: Callable, config: dict, kwargs: dict):
     """
     APScheduler job wrapper: Handles state tracking, logging, error handling, and notifications.
     """
@@ -55,12 +52,16 @@ def run_task_wrapper(task_id: int, name: str, func: Callable, config: dict, kwar
     start_time = time.time()
     status, error_msg, result_val = "running", None, None
 
-    with db.get_session() as session:
-        TaskHistory(session).update_task(task_id, "running")
+    # Run sync DB op in executor to avoid blocking the loop
+    loop = asyncio.get_running_loop()
+    def _update_running():
+        with db.get_session() as session:
+            TaskHistory(session).update_task(task_id, "running")
+    await loop.run_in_executor(None, _update_running)
 
     with capture_logs(task_id=task_id) as get_logs:
         try:
-            result_val = _execute_func(func, kwargs)
+            result_val = await _execute_func(func, kwargs)
             status = "success"
             logger.info(f"Task '{name}' (ID: {task_id}) completed successfully.")
         except (asyncio.TimeoutError, TimeoutError):
@@ -83,25 +84,29 @@ def run_task_wrapper(task_id: int, name: str, func: Callable, config: dict, kwar
         "new_novel_titles": titles
     }
 
-    with db.get_session() as session:
-        TaskHistory(session).update_task(task_id, status, result=json.dumps(result_data))
+    def _update_finish():
+        with db.get_session() as session:
+            TaskHistory(session).update_task(task_id, status, result=json.dumps(result_data))
+    await loop.run_in_executor(None, _update_finish)
 
-    notifier.send_task_result(
+    # notifier.send_task_result is sync right now but makes network requests. We should probably run it in executor too
+    # but for now let's just run it synchronously as before or in executor
+    await loop.run_in_executor(None, lambda: notifier.send_task_result(
         task_name=name,
         status=status,
         duration=duration if status == 'success' else None,
         error=error_msg,
         new_novels_count=count,
         new_novel_titles=titles if titles else None
-    )
+    ))
 
 class TaskManagerSystem:
     """
     Manages background tasks and scheduled cron jobs using APScheduler.
-    Replaces the old thread+queue and sleep-loop implementations.
+    Uses AsyncIOScheduler to run everything on the main asyncio event loop.
     """
     def __init__(self):
-        self.scheduler = BackgroundScheduler(executors={'default': ThreadPoolExecutor(1)})
+        self.scheduler = AsyncIOScheduler()
         self.scheduler.add_listener(self._on_job_error, EVENT_JOB_ERROR | EVENT_JOB_MISSED | EVENT_JOB_MAX_INSTANCES)
         self.running = False
 
@@ -113,7 +118,7 @@ class TaskManagerSystem:
             self.running = True
             self.scheduler.start()
             self._load_cron_jobs()
-            logger.info("TaskManagerSystem (APScheduler) started.")
+            logger.info("TaskManagerSystem (APScheduler) started in main event loop.")
 
     def stop(self):
         self.running = False
@@ -161,7 +166,8 @@ class TaskManagerSystem:
                         id=f'cron_{task.id}',
                         args=(task.name, func, config, params),
                         replace_existing=True,
-                        max_instances=1
+                        max_instances=1,
+                        misfire_grace_time=60
                     )
                     logger.debug(f"Registered cron job: {task.name} ('{task.cron}')")
                     
