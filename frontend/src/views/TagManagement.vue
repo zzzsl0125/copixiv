@@ -1,17 +1,12 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue';
-import { useRouter } from 'vue-router';
 import { tagPreferenceApi, type TagPreferenceResponse } from '../api';
-import AppLogo from '../components/AppLogo.vue';
 import DraggableTagList from '../components/DraggableTagList.vue';
-import { Menu } from 'lucide-vue-next';
+import PageHeader from '../components/PageHeader.vue';
 
 defineEmits<{
   (e: 'toggle-sidebar'): void;
 }>();
-
-const router = useRouter();
-const goHome = () => router.push('/');
 
 const allTags = ref<TagPreferenceResponse[]>([]);
 const newFavouriteTag = ref('');
@@ -72,20 +67,7 @@ onMounted(fetchTagPreferences);
 
 <template>
   <div class="flex-1 flex flex-col min-w-0 h-full bg-gray-50">
-    <div class="bg-white shadow-sm border-b border-gray-200 z-10 sticky top-0">
-      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div class="flex items-center justify-between h-16">
-          <div class="flex items-center gap-4">
-            <button @click="$emit('toggle-sidebar')" class="md:hidden p-1 -ml-1 text-gray-500 hover:text-gray-700 focus:outline-none flex-shrink-0">
-              <Menu class="h-6 w-6" />
-            </button>
-            <AppLogo @click="goHome" />
-            <span class="text-gray-500">/</span>
-            <span class="text-gray-700 font-medium">标签管理</span>
-          </div>
-        </div>
-      </div>
-    </div>
+    <PageHeader title="标签管理" @toggle-sidebar="$emit('toggle-sidebar')" />
 
     <main class="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 flex-grow">
       <div class="grid grid-cols-1 md:grid-cols-2 gap-8">

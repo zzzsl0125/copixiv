@@ -228,3 +228,58 @@ export const searchHistoryApi = {
     await api.delete('/search-history/');
   },
 };
+
+// --- Token API ---
+
+export interface Token {
+  id: number;
+  name: string;
+  token: string;
+  premium: boolean;
+  special: boolean;
+  valid: boolean;
+}
+
+export interface TokenCreate {
+  name: string;
+  token: string;
+  premium?: boolean;
+  special?: boolean;
+  valid?: boolean;
+}
+
+export interface TokenUpdate {
+  name?: string;
+  token?: string;
+  premium?: boolean;
+  special?: boolean;
+  valid?: boolean;
+}
+
+export const tokenApi = {
+  getTokens: async () => {
+    const response = await api.get('/tokens');
+    return response.data as Token[];
+  },
+
+  createToken: async (data: TokenCreate) => {
+    const response = await api.post('/tokens', data);
+    return response.data as Token;
+  },
+
+  updateToken: async (id: number, data: TokenUpdate) => {
+    const response = await api.put(`/tokens/${id}`, data);
+    return response.data as Token;
+  },
+
+  deleteToken: async (id: number) => {
+    const response = await api.delete(`/tokens/${id}`);
+    return response.data;
+  },
+
+  reorderTokens: async (tokenIds: number[]) => {
+    const response = await api.post('/tokens/reorder', tokenIds);
+    return response.data;
+  },
+};
+

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from core.config import config, Config
 from core.logger import logger
+from core.token_manager import token_manager
 from core.pixiv_account import PixivAccount, TokenInfo, AccountStrategy
 from core.util import RateLimitError, AccountInvalidError, RequestInfo
 
@@ -58,26 +59,12 @@ class RequestManager:
         self._worker_lock = asyncio.Lock()
     
     def _load_tokens(self, config: Config):
-        if not config.path.token: 
-            logger.warning(f'Without valid token.')
-            return
         
-        try:
-            tokens = list()
-            with open(config.path.token, "r", encoding="utf-8") as f:
-                for name, acc in json.load(f).items():
-                    if acc.get("token"):
-                        tokens.append(TokenInfo(
-                            token=acc["token"],
-                            username=name,
-                            special=acc.get("special", False),
-                            premium=acc.get("premium", False)
-                        ))
-            logger.info(f"Loaded {len(tokens)} tokens")
-        except Exception as e:
-            logger.error(f"Error loading tokens: {e}")
-            raise
-
+        tokens = token_manager.get_valid_tokens()
+        if not tokens:
+            logger.warning(f'Without valid token.')
+        else:
+            logger.info(f"Loaded {len(tokens)} valid tokens")
         return tokens
         
     async def add_task(self, request: RequestInfo) -> asyncio.Future:
@@ -159,6 +146,7 @@ class RequestManager:
                 continue
             except AccountInvalidError:
                 logger.error(f"{acc} invalid, switching...")
+                token_manager.mark_invalid(acc.username)
                 task.account = self.accounts.select(task.strategy)
                 await self.queue.put(task)
                 self.queue.task_done()

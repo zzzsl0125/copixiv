@@ -19,6 +19,7 @@ TABLE_TAG_PREFERENCE = 'tag_preferences'
 TABLE_PROCESSED_PERIOD = 'processed_periods'
 TABLE_NOVEL_EPUB_CONVERSION = 'novel_epub_conversions'
 TABLE_RANDOM_NOVEL_POOL = 'random_novel_pool'
+TABLE_TOKEN = 'tokens'
 
 # Column Names
 COL_ID = 'id'

@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { ref, watch, onMounted, computed } from 'vue';
 import { type ScheduledTask, type TaskMethod, taskApi } from '../api';
+import BaseModal from './BaseModal.vue';
+import AppInput from './AppInput.vue';
+import AppCheckbox from './AppCheckbox.vue';
 
 const props = defineProps<{
   isOpen: boolean;
@@ -241,153 +244,124 @@ const weekDays = [
 </script>
 
 <template>
-  <div v-if="isOpen" class="fixed inset-0 z-50 overflow-y-auto" aria-labelledby="modal-title" role="dialog" aria-modal="true">
-    <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
-      <div class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" @click="emit('close')" aria-hidden="true"></div>
+  <BaseModal
+    :is-open="isOpen"
+    :title="task ? '编辑计划任务' : '新增计划任务'"
+    @close="emit('close')"
+    @confirm="handleSave"
+  >
+    <!-- Task Name -->
+    <AppInput
+      v-model="formState.name"
+      label="任务名称"
+      placeholder="给任务起个名字"
+    />
 
-      <span class="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
-      
-      <div class="inline-block align-bottom bg-white rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full">
-        <div class="bg-white px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
-          <div class="sm:flex sm:items-start">
-            <div class="mt-3 text-center sm:mt-0 sm:ml-4 sm:text-left w-full">
-              <h3 class="text-lg leading-6 font-medium text-gray-900" id="modal-title">
-                {{ task ? '编辑计划任务' : '新增计划任务' }}
-              </h3>
-              
-              <div class="mt-6 space-y-6">
-                <!-- Task Name -->
-                <div>
-                  <label class="block text-sm font-medium text-gray-700">任务名称</label>
-                  <input v-model="formState.name" type="text" class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm" placeholder="给任务起个名字" />
-                </div>
+    <!-- Task Method Selection -->
+    <div>
+      <label class="block text-sm font-medium text-gray-700">任务方法</label>
+      <select v-model="formState.task" class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm bg-white">
+        <option value="" disabled>选择一个任务方法</option>
+        <option v-for="method in availableMethods" :key="method.name" :value="method.name">
+          {{ method.name }}
+        </option>
+      </select>
+      <p v-if="formState.task" class="mt-1 text-xs text-gray-500">
+        {{ availableMethods.find(m => m.name === formState.task)?.description || '无描述' }}
+      </p>
+    </div>
 
-                <!-- Task Method Selection -->
-                <div>
-                  <label class="block text-sm font-medium text-gray-700">任务方法</label>
-                  <select v-model="formState.task" class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm bg-white">
-                    <option value="" disabled>选择一个任务方法</option>
-                    <option v-for="method in availableMethods" :key="method.name" :value="method.name">
-                      {{ method.name }}
-                    </option>
-                  </select>
-                  <p v-if="formState.task" class="mt-1 text-xs text-gray-500">
-                    {{ availableMethods.find(m => m.name === formState.task)?.description || '无描述' }}
-                  </p>
-                </div>
-
-                <!-- Dynamic Parameters -->
-                <div v-if="selectedMethodArgs.length > 0" class="bg-gray-50 p-3 rounded-md border border-gray-200">
-                  <h4 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">参数设置</h4>
-                  <div v-for="arg in selectedMethodArgs" :key="arg.name" class="flex items-center mb-3 last:mb-0">
-                    <label class="w-1/3 text-sm font-medium text-gray-700">
-                      {{ arg.name }} 
-                      <span class="text-xs text-gray-400 font-normal">({{ arg.type }})</span>
-                      <span v-if="arg.required" class="text-red-500">*</span>
-                    </label>
-                    
-                    <div class="w-2/3">
-                      <!-- Boolean Input -->
-                      <div v-if="arg.type === 'bool'" class="flex items-center">
-                         <input v-model="dynamicParams[arg.name]" type="checkbox" class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded" />
-                         <span class="ml-2 text-sm text-gray-600">{{ dynamicParams[arg.name] ? 'Yes' : 'No' }}</span>
-                      </div>
-                      
-                      <!-- Number Input -->
-                      <input v-else-if="arg.type === 'int' || arg.type === 'float'" 
-                             v-model.number="dynamicParams[arg.name]" 
-                             type="number" 
-                             :step="arg.type === 'float' ? '0.1' : '1'"
-                             class="block w-full border border-gray-300 rounded-md shadow-sm py-1.5 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm" />
-                      
-                      <!-- String/Default Input -->
-                      <input v-else 
-                             v-model="dynamicParams[arg.name]" 
-                             type="text" 
-                             class="block w-full border border-gray-300 rounded-md shadow-sm py-1.5 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm" />
-                    </div>
-                  </div>
-                </div>
-
-                <!-- Frequency / Time -->
-                <div>
-                   <label class="block text-sm font-medium text-gray-700 mb-2">执行频率</label>
-                   
-                   <div class="flex items-center space-x-4 bg-gray-50 p-3 rounded-md border border-gray-200">
-                     <!-- Mode Selector (Part 1) -->
-                     <div class="flex-shrink-0">
-                       <select v-model="cronMode" class="block w-28 border border-gray-300 rounded-md shadow-sm py-1.5 px-2 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm bg-white">
-                         <option value="daily">每天</option>
-                         <option value="weekly">每周</option>
-                         <option value="monthly">每月</option>
-                         <option value="custom">自定义</option>
-                       </select>
-                     </div>
-                     
-                     <!-- Separator line if not custom -->
-                     <div v-if="cronMode !== 'custom'" class="h-6 w-px bg-gray-300"></div>
-                     
-                     <!-- Day/Condition Selector (Part 2) -->
-                     <div v-if="cronMode === 'weekly' || cronMode === 'monthly'" class="flex items-center">
-                        <div v-if="cronMode === 'weekly'" class="flex items-center">
-                          <select v-model="cronWeekDay" class="block w-24 border border-gray-300 rounded-md shadow-sm py-1.5 px-2 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm bg-white">
-                            <option v-for="d in weekDays" :key="d.val" :value="d.val">{{ d.label }}</option>
-                          </select>
-                        </div>
-  
-                        <div v-if="cronMode === 'monthly'" class="flex items-center">
-                          <input v-model.number="cronMonthDay" type="number" min="1" max="31" class="block w-16 border border-gray-300 rounded-md shadow-sm py-1.5 px-2 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm text-center" />
-                          <span class="ml-2 text-sm text-gray-600">日</span>
-                        </div>
-                     </div>
-                     
-                     <!-- Separator line if week/month -->
-                     <div v-if="cronMode === 'weekly' || cronMode === 'monthly'" class="h-6 w-px bg-gray-300"></div>
-
-                     <!-- Time Selector (Part 3) -->
-                     <div v-if="cronMode !== 'custom'" class="flex items-center">
-                        <input v-model.number="cronTime.hour" type="number" min="0" max="23" class="block w-16 border border-gray-300 rounded-md shadow-sm py-1.5 px-2 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm text-center" placeholder="HH" />
-                        <span class="mx-1 font-bold text-gray-500">:</span>
-                        <input v-model.number="cronTime.minute" type="number" min="0" max="59" class="block w-16 border border-gray-300 rounded-md shadow-sm py-1.5 px-2 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm text-center" placeholder="MM" />
-                     </div>
-                     
-                     <!-- Custom Input (replaces 2 and 3) -->
-                     <div v-if="cronMode === 'custom'" class="flex-1">
-                       <input v-model="formState.cron" type="text" class="block w-full border border-gray-300 rounded-md shadow-sm py-1.5 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm font-mono" placeholder="* * * * *" />
-                     </div>
-                   </div>
-                   <p v-if="cronMode === 'custom'" class="mt-1 text-xs text-gray-500">Cron 格式: 分 时 日 月 周</p>
-                </div>
-                
-                <!-- Enable Toggle -->
-                <div class="flex items-center pt-2">
-                  <input v-model="formState.is_enabled" id="is_enabled" type="checkbox" class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded" />
-                  <label for="is_enabled" class="ml-2 block text-sm text-gray-900">
-                    启用此任务
-                  </label>
-                </div>
-
-                <!-- Detailed Notification Toggle -->
-                <div class="flex items-center pt-2">
-                  <input v-model="notifyOnNewNovel" id="notify_on_new_novel" type="checkbox" class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded" />
-                  <label for="notify_on_new_novel" class="ml-2 block text-sm text-gray-900">
-                    详细小说列表通知
-                  </label>
-                </div>
-
-              </div>
-            </div>
+    <!-- Dynamic Parameters -->
+    <div v-if="selectedMethodArgs.length > 0" class="bg-gray-50 p-3 rounded-md border border-gray-200">
+      <h4 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">参数设置</h4>
+      <div v-for="arg in selectedMethodArgs" :key="arg.name" class="flex items-center mb-3 last:mb-0">
+        <label class="w-1/3 text-sm font-medium text-gray-700">
+          {{ arg.name }} 
+          <span class="text-xs text-gray-400 font-normal">({{ arg.type }})</span>
+          <span v-if="arg.required" class="text-red-500">*</span>
+        </label>
+        
+        <div class="w-2/3">
+          <!-- Boolean Input -->
+          <div v-if="arg.type === 'bool'" class="flex items-center">
+            <AppCheckbox v-model="dynamicParams[arg.name]" />
+            <span class="ml-2 text-sm text-gray-600">{{ dynamicParams[arg.name] ? 'Yes' : 'No' }}</span>
           </div>
-        </div>
-        <div class="bg-gray-50 px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse">
-          <button @click="handleSave" type="button" class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-blue-600 text-base font-medium text-white hover:bg-blue-700 focus:outline-none sm:ml-3 sm:w-auto sm:text-sm transition-colors">
-            保存
-          </button>
-          <button @click="emit('close')" type="button" class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none sm:mt-0 sm:ml-3 sm:w-auto sm:text-sm transition-colors">
-            取消
-          </button>
+          
+          <!-- Number Input -->
+          <input v-else-if="arg.type === 'int' || arg.type === 'float'" 
+                  v-model.number="dynamicParams[arg.name]" 
+                  type="number" 
+                  :step="arg.type === 'float' ? '0.1' : '1'"
+                  class="block w-full border border-gray-300 rounded-md shadow-sm py-1.5 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm" />
+          
+          <!-- String/Default Input -->
+          <input v-else 
+                  v-model="dynamicParams[arg.name]" 
+                  type="text" 
+                  class="block w-full border border-gray-300 rounded-md shadow-sm py-1.5 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm" />
         </div>
       </div>
     </div>
-  </div>
+
+    <!-- Frequency / Time -->
+    <div>
+        <label class="block text-sm font-medium text-gray-700 mb-2">执行频率</label>
+        
+        <div class="flex items-center space-x-4 bg-gray-50 p-3 rounded-md border border-gray-200">
+          <!-- Mode Selector (Part 1) -->
+          <div class="flex-shrink-0">
+            <select v-model="cronMode" class="block w-28 border border-gray-300 rounded-md shadow-sm py-1.5 px-2 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm bg-white">
+              <option value="daily">每天</option>
+              <option value="weekly">每周</option>
+              <option value="monthly">每月</option>
+              <option value="custom">自定义</option>
+            </select>
+          </div>
+          
+          <!-- Separator line if not custom -->
+          <div v-if="cronMode !== 'custom'" class="h-6 w-px bg-gray-300"></div>
+          
+          <!-- Day/Condition Selector (Part 2) -->
+          <div v-if="cronMode === 'weekly' || cronMode === 'monthly'" class="flex items-center">
+            <div v-if="cronMode === 'weekly'" class="flex items-center">
+              <select v-model="cronWeekDay" class="block w-24 border border-gray-300 rounded-md shadow-sm py-1.5 px-2 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm bg-white">
+                <option v-for="d in weekDays" :key="d.val" :value="d.val">{{ d.label }}</option>
+              </select>
+            </div>
+
+            <div v-if="cronMode === 'monthly'" class="flex items-center">
+              <input v-model.number="cronMonthDay" type="number" min="1" max="31" class="block w-16 border border-gray-300 rounded-md shadow-sm py-1.5 px-2 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm text-center" />
+              <span class="ml-2 text-sm text-gray-600">日</span>
+            </div>
+          </div>
+          
+          <!-- Separator line if week/month -->
+          <div v-if="cronMode === 'weekly' || cronMode === 'monthly'" class="h-6 w-px bg-gray-300"></div>
+
+          <!-- Time Selector (Part 3) -->
+          <div v-if="cronMode !== 'custom'" class="flex items-center">
+            <input v-model.number="cronTime.hour" type="number" min="0" max="23" class="block w-16 border border-gray-300 rounded-md shadow-sm py-1.5 px-2 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm text-center" placeholder="HH" />
+            <span class="mx-1 font-bold text-gray-500">:</span>
+            <input v-model.number="cronTime.minute" type="number" min="0" max="59" class="block w-16 border border-gray-300 rounded-md shadow-sm py-1.5 px-2 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm text-center" placeholder="MM" />
+          </div>
+          
+          <!-- Custom Input (replaces 2 and 3) -->
+          <div v-if="cronMode === 'custom'" class="flex-1">
+            <input v-model="formState.cron" type="text" class="block w-full border border-gray-300 rounded-md shadow-sm py-1.5 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm font-mono" placeholder="* * * * *" />
+          </div>
+        </div>
+        <p v-if="cronMode === 'custom'" class="mt-1 text-xs text-gray-500">Cron 格式: 分 时 日 月 周</p>
+    </div>
+    
+    <!-- Enable Toggle -->
+    <div class="pt-2">
+      <AppCheckbox v-model="formState.is_enabled" label="启用此任务" />
+    </div>
+
+    <!-- Detailed Notification Toggle -->
+    <div class="pt-2">
+      <AppCheckbox v-model="notifyOnNewNovel" label="详细小说列表通知" />
+    </div>
+  </BaseModal>
 </template>

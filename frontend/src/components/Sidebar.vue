@@ -102,6 +102,10 @@ const navIconClass = "mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500";
           <Settings :class="navIconClass" />
           标签管理
         </router-link>
+        <router-link to="/tokens" :class="[navItemClass(false), $route.path === '/tokens' ? 'bg-gray-100' : '']">
+          <Settings :class="navIconClass" />
+          账号管理
+        </router-link>
         <button @click="handleRestartClick" :disabled="isRestarting" :class="navItemClass(false) + ' w-full'">
           <Power :class="navIconClass" />
           {{ isRestarting ? '重启中...' : '重启应用' }}

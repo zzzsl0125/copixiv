@@ -94,3 +94,27 @@ class TaskMethod(BaseModel):
     name: str
     description: Optional[str] = None
     arguments: List[TaskArgument]
+
+# Token Management Schemas
+
+class TokenBase(BaseModel):
+    name: str
+    token: str
+    premium: bool = False
+    special: bool = False
+    valid: bool = True
+
+class TokenCreate(TokenBase):
+    pass
+
+class TokenUpdate(BaseModel):
+    name: Optional[str] = None
+    token: Optional[str] = None
+    premium: Optional[bool] = None
+    special: Optional[bool] = None
+    valid: Optional[bool] = None
+
+class TokenResponse(TokenBase):
+    id: int
+    
+    model_config = ConfigDict(from_attributes=True)

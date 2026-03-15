@@ -210,3 +210,15 @@ class RandomNovelPool(Base):
         UniqueConstraint('novel_id', 'min_likes', 'min_texts', name='uq_random_pool_novel'),
         Index('idx_random_pool_criteria', 'min_likes', 'min_texts'),
     )
+
+
+class Token(Base):
+    __tablename__ = C.TABLE_TOKEN
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(255), unique=True, nullable=False)
+    token = Column(String(255), nullable=False)
+    premium = Column(Boolean, default=False)
+    special = Column(Boolean, default=False)
+    valid = Column(Boolean, default=True)
+    sort_index = Column(Integer, default=0)

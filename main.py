@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from core.task_manager import task_executor, scheduler
-from web_api.endpoints import novels, tasks, system, tag_preferences, search_history
+from web_api.endpoints import novels, tasks, system, tag_preferences, search_history, tokens
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -30,6 +30,7 @@ app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
 app.include_router(system.router, prefix="/api/system", tags=["system"])
 app.include_router(tag_preferences.router, prefix="/api/tag-preferences", tags=["tag_preferences"])
 app.include_router(search_history.router, prefix="/api/search-history", tags=["search_history"])
+app.include_router(tokens.router, prefix="/api/tokens", tags=["tokens"])
 
 if __name__ == "__main__":
     import uvicorn
