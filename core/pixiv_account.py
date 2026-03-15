@@ -117,7 +117,9 @@ class PixivAccount:
         
         async with self._auth_lock:
             try:
-                await sync_to_async(self.api.auth)(refresh_token=self.token)
+                await sync_to_async(
+                    self.api.auth, thread_sensitive=False
+                )(refresh_token=self.token)
                 self.status = AccountStatus.ACTIVE
                 logger.info(f"{self} 认证成功")
 
