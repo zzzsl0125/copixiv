@@ -12,11 +12,13 @@ from core.logger import logger
 # add _ prefix to avoid treated as task function.
 from core.novel_handler import handle_from_webview as _handle_from_webview
 from core.novel_handler import handle_from_novelInfo as _handle_from_novelInfo
-from core.util import is_chinese as _is_chinese, build_path as _build_path
+from core.util import is_chinese as _is_chinese
 
 client = PixivClient()
 
 def _batch_upsert(novels: list[dict], commit: bool = True, force_update: list[str] = []) -> int:
+    novels = [n for n in novels if n]
+    if not novels: return 0
     with db.get_session(commit) as session:
         new_count = db.novel(session).upsert_novels(novels, force_update) or 0
         db.author(session).update_summary({n['author_id'] for n in novels})
@@ -78,7 +80,8 @@ async def novel_fetch(id: int, redownload: bool = True):
 
 async def _download(resp):
     if not resp.novels: return list()
-    return await _batch_handle([n for n in resp.novels if _is_chinese(n)])
+    async with client.account_rule():
+        return await _batch_handle([n for n in resp.novels if _is_chinese(n)])
     
 async def _handle_author(resp):
     if not resp.novels: return list()
@@ -190,23 +193,48 @@ async def sync_series_index():
             resp.novels[i].series['index'] = i + 1
         await _batch_handle(resp.novels)
 
-async def sync_has_epub():
+async def check_epub():
     with db.get_session() as session:
-        novels = db.novel(session).get_pending_epub_novels()
+        # Get all novels that are supposed to have epub (either pending or completed)
+        stmt = _select(models.Novel.id, models.Novel.path, models.Novel.has_epub).where(models.Novel.has_epub > 0)
+        novels = session.execute(stmt).fetchall()
         
     if not novels:
         return
         
     completed_ids = []
-    for novel_id, path_str in novels:
+    revert_ids = []
+    pending_ids = []
+    
+    for novel_id, path_str, has_epub_status in novels:
         if path_str:
             epub_path = Path(path_str).with_suffix(".epub")
             if epub_path.exists():
-                completed_ids.append(novel_id)
+                if has_epub_status == 1:
+                    completed_ids.append(novel_id)
+            else:
+                if has_epub_status == 2:
+                    revert_ids.append(novel_id)
+                elif has_epub_status == 1:
+                    pending_ids.append(novel_id)
+        else:
+            if has_epub_status == 2:
+                revert_ids.append(novel_id)
+            elif has_epub_status == 1:
+                pending_ids.append(novel_id)
                 
     if completed_ids:
         with db.get_session(True) as session:
             db.novel(session).update_has_epub_status(completed_ids, 2)
+            
+    if revert_ids:
+        with db.get_session(True) as session:
+            db.novel(session).update_has_epub_status(revert_ids, 1)
+            
+    # Process pending ones
+    if pending_ids:
+        for novel_id in pending_ids:
+            await novel_fetch(novel_id, redownload=True)
 
 async def author_special_follow():
     with db.get_session() as session:

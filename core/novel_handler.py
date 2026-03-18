@@ -168,7 +168,9 @@ def save_novel_text(data: Dict[str, Any], force: bool = False) -> None:
         raise
 
 def handle_from_webview(data: ParsedJson, force: bool = False) -> Dict: 
-    
+    if not data:
+        return {}
+        
     data = {
         "id": data.id,
         "title": data.title,

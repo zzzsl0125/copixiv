@@ -100,6 +100,9 @@ export function useNovels() {
       filters.order_by = 'like';
       filters.order_direction = 'DESC';
     }
+
+    filters.min_like = 0;
+    filters.min_text = 0;
   };
   
   const resetFilters = () => {

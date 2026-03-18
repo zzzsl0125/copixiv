@@ -169,8 +169,8 @@ const navIconClass = "mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500";
           <label class="block text-sm text-gray-700 mb-2">最低字数</label>
           <div class="grid grid-cols-4 gap-2">
             <button 
-              @click="updateFilter('min_text', undefined)"
-              :class="btnClass(filters.min_text === undefined, 'px-1')"
+              @click="updateFilter('min_text', 0)"
+              :class="btnClass(filters.min_text === undefined || filters.min_text === 0, 'px-1')"
             >
               不限
             </button>
@@ -199,8 +199,8 @@ const navIconClass = "mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500";
           <label class="block text-sm text-gray-700 mb-2">最低点赞</label>
           <div class="grid grid-cols-4 gap-2">
             <button 
-              @click="updateFilter('min_like', undefined)"
-              :class="btnClass(filters.min_like === undefined, 'px-1')"
+              @click="updateFilter('min_like', 0)"
+              :class="btnClass(filters.min_like === undefined || filters.min_like === 0, 'px-1')"
             >
               不限
             </button>

@@ -121,10 +121,15 @@ class TaskManagerSystem:
             logger.info("TaskManagerSystem (APScheduler) started in main event loop.")
 
     def stop(self):
+        if not self.running:
+            return
         self.running = False
         if self.scheduler.running:
-            self.scheduler.shutdown(wait=True)
-            logger.info("TaskManagerSystem stopped.")
+            try:
+                self.scheduler.shutdown(wait=False)
+            except Exception as e:
+                logger.error(f"Error shutting down scheduler: {e}")
+        logger.info("TaskManagerSystem stopped.")
 
     def add_task(self, name: str, func: Callable, config: dict = None, **kwargs):
         """Adds a manual task to run immediately in the background worker queue."""

@@ -8,6 +8,8 @@ from core.util import RequestInfo
 from core.pixiv_account import  AccountStrategy
 from core.request_queue import RequestManager
 
+import core.pixiv_patch
+
 class PixivClient:
     
     _instance = None
@@ -67,6 +69,8 @@ class PixivClient:
 
         trigger_handler(result)
         async def _before_return(result):
+            if result is None:
+                return None
             if handler_tasks:
                 results_list = await asyncio.gather(*handler_tasks)
                 result.handler_results = [item for sublist in results_list for item in (sublist or [])]
@@ -75,7 +79,7 @@ class PixivClient:
             return result
         
         continue_fetch = fetch_all or fetch_til or fetch_minlike
-        if not continue_fetch: 
+        if not continue_fetch or result is None: 
             return await _before_return(result)
         
         while result.next_url:

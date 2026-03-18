@@ -174,7 +174,7 @@ const getTagClass = (tag: string) => {
       >
         <div class="flex-1 flex gap-2 h-full">
           <a 
-            :href="novelApi.downloadNovelUrl(novel.id, 'txt')"
+            :href="novelApi.downloadNovelUrl(novel.id, novel.has_epub ? 'epub' : 'txt')"
             target="_blank"
             class="flex-1 flex items-center justify-center text-xs font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors cursor-pointer"
             @click="stopPropagation"

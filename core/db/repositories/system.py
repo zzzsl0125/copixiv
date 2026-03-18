@@ -17,20 +17,21 @@ class System(BaseRepository):
     """
     def record_failure(self, novel, failure_type: str, error_message: str):
         """Records a failure for a novel download or processing."""
-        # Assuming novel is an object with id and title attributes
-        novel_id = getattr(novel, 'id', None)
-        novel_title = getattr(novel, 'title', None)
-        
-        timestamp = datetime.now().isoformat()
+        # Assuming novel is an object with id and title attributes, or just an id
+        novel_id = getattr(novel, 'id', novel) if not isinstance(novel, int) else novel
         
         stmt = sqlite_insert(models.FailedNovel).values(
             novel_id=novel_id,
-            novel_title=novel_title,
             failure_type=failure_type,
             error_message=str(error_message),
-            failed_at=timestamp
-        ).on_conflict_do_nothing(
-            index_elements=['novel_id', 'failure_type']
+            failed_times=1
+        ).on_conflict_do_update(
+            index_elements=['novel_id'],
+            set_={
+                'failure_type': failure_type,
+                'error_message': str(error_message),
+                'failed_times': models.FailedNovel.failed_times + 1
+            }
         )
         self.session.execute(stmt)
 
