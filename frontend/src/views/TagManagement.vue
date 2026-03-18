@@ -1,38 +1,54 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue';
 import { tagPreferenceApi, type TagPreferenceResponse } from '../api';
-import DraggableTagList from '../components/DraggableTagList.vue';
 import PageHeader from '../components/PageHeader.vue';
+import SectionHeader from '../components/SectionHeader.vue';
+import DraggableTable, { type TableColumn } from '../components/DraggableTable.vue';
+import BaseModal from '../components/BaseModal.vue';
+import AppInput from '../components/AppInput.vue';
 
 defineEmits<{
   (e: 'toggle-sidebar'): void;
 }>();
 
 const allTags = ref<TagPreferenceResponse[]>([]);
-const newFavouriteTag = ref('');
-const newBlockedTag = ref('');
+const loading = ref(true);
 
-const favouriteTags = computed(() => allTags.value.filter(t => t.preference === 'favourite'));
-const blockedTags = computed(() => allTags.value.filter(t => t.preference === 'blocked'));
+const activeTab = ref<'favourite' | 'blocked'>('favourite');
+
+const showModal = ref(false);
+const saving = ref(false);
+const currentTag = ref('');
+
+const filteredTags = computed(() => {
+  return allTags.value
+    .filter(t => t.preference === activeTab.value)
+    .sort((a, b) => a.sort_index - b.sort_index);
+});
 
 async function fetchTagPreferences() {
-  allTags.value = await tagPreferenceApi.getTagPreferences();
-  console.log('Fetched tags:', allTags.value);
+  loading.value = true;
+  try {
+    allTags.value = await tagPreferenceApi.getTagPreferences();
+  } catch (error) {
+    console.error('Failed to fetch tags:', error);
+  } finally {
+    loading.value = false;
+  }
 }
 
-async function addTag(tag: string, preference: 'favourite' | 'blocked') {
-  if (!tag) return;
+async function saveTag() {
+  if (!currentTag.value.trim()) return;
+  saving.value = true;
   try {
-    await tagPreferenceApi.setTagPreference(tag, preference);
-    fetchTagPreferences();
-    if (preference === 'favourite') {
-      newFavouriteTag.value = '';
-    } else {
-      newBlockedTag.value = '';
-    }
+    await tagPreferenceApi.setTagPreference(currentTag.value.trim(), activeTab.value);
+    await fetchTagPreferences();
+    closeModal();
   } catch (error) {
-    console.error(`Failed to add ${preference} tag:`, error);
+    console.error(`Failed to add ${activeTab.value} tag:`, error);
     alert('添加失败');
+  } finally {
+    saving.value = false;
   }
 }
 
@@ -40,20 +56,25 @@ async function removeTag(tag: TagPreferenceResponse) {
   if (!confirm(`确定要删除标签 "${tag.tag}" 吗？`)) return;
   try {
     await tagPreferenceApi.deleteTagPreference(tag.tag);
-    fetchTagPreferences();
+    await fetchTagPreferences();
   } catch (error) {
     console.error('Failed to remove tag:', error);
     alert('删除失败');
   }
 }
 
-async function reorderTags(updatedTags: TagPreferenceResponse[], preference: 'favourite' | 'blocked') {
+async function onDragEnd(updatedTags: TagPreferenceResponse[]) {
+  const preference = activeTab.value;
   const otherTags = allTags.value.filter(t => t.preference !== preference).sort((a, b) => a.sort_index - b.sort_index);
+  
+  // Combine updated tags with the other preference tags
+  // The backend might depend on the overall order of all tags, but the API accepts all ids.
   const newOrderedTags = preference === 'favourite' ? [...updatedTags, ...otherTags] : [...otherTags, ...updatedTags];
 
   try {
     const tagIds = newOrderedTags.map(t => t.id);
     await tagPreferenceApi.reorderTagPreferences(tagIds);
+    // Locally update without full fetch to keep it snappy if possible, but fetch is safer.
     await fetchTagPreferences();
   } catch (error) {
     console.error('Failed to reorder tags:', error);
@@ -62,32 +83,78 @@ async function reorderTags(updatedTags: TagPreferenceResponse[], preference: 'fa
   }
 }
 
-onMounted(fetchTagPreferences);
+const openModal = () => {
+  currentTag.value = '';
+  showModal.value = true;
+};
+
+const closeModal = () => {
+  showModal.value = false;
+  currentTag.value = '';
+};
+
+onMounted(() => {
+  fetchTagPreferences();
+});
+
+const columns: TableColumn[] = [
+  { key: 'tag', label: '标签名称' },
+  { key: 'actions', label: '操作', align: 'right' }
+];
 </script>
 
 <template>
   <div class="flex-1 flex flex-col min-w-0 h-full bg-gray-50">
     <PageHeader title="标签管理" @toggle-sidebar="$emit('toggle-sidebar')" />
 
-    <main class="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 flex-grow">
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
-        <div>
-          <h2 class="text-xl font-semibold mb-4 text-gray-800">喜爱的标签</h2>
-          <div class="flex mb-4">
-            <input v-model="newFavouriteTag" @keyup.enter="addTag(newFavouriteTag, 'favourite')" class="border-gray-300 shadow-sm p-2 flex-grow rounded-l-md focus:ring-blue-500 focus:border-blue-500" type="text" placeholder="添加喜爱的标签">
-            <button @click="addTag(newFavouriteTag, 'favourite')" class="bg-blue-600 text-white p-2 rounded-r-md hover:bg-blue-700 font-semibold">添加</button>
-          </div>
-          <DraggableTagList :tags="favouriteTags" @reorder="(tags) => reorderTags(tags, 'favourite')" @delete="removeTag" />
-        </div>
-        <div>
-          <h2 class="text-xl font-semibold mb-4 text-gray-800">厌恶的标签</h2>
-          <div class="flex mb-4">
-            <input v-model="newBlockedTag" @keyup.enter="addTag(newBlockedTag, 'blocked')" class="border-gray-300 shadow-sm p-2 flex-grow rounded-l-md focus:ring-blue-500 focus:border-blue-500" type="text" placeholder="添加厌恶的标签">
-            <button @click="addTag(newBlockedTag, 'blocked')" class="bg-blue-600 text-white p-2 rounded-r-md hover:bg-blue-700 font-semibold">添加</button>
-          </div>
-          <DraggableTagList :tags="blockedTags" @reorder="(tags) => reorderTags(tags, 'blocked')" @delete="removeTag" />
-        </div>
-      </div>
+    <main class="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-grow overflow-auto">
+      <SectionHeader 
+        :tabs="[
+          { name: 'favourite', label: '喜爱的标签' },
+          { name: 'blocked', label: '厌恶的标签' }
+        ]"
+        :active-tab="activeTab"
+        @update:active-tab="activeTab = $event as 'favourite' | 'blocked'"
+        :add-button-text="activeTab === 'favourite' ? '添加喜爱标签' : '添加厌恶标签'"
+        :show-refresh="true"
+        :loading="loading"
+        @add="openModal()"
+        @refresh="fetchTagPreferences()"
+      >
+      </SectionHeader>
+
+      <DraggableTable 
+        :items="filteredTags" 
+        :columns="columns"
+        :loading="loading"
+        empty-text="暂无标签"
+        @reorder="onDragEnd"
+      >
+        <template #tag="{ item: tag }">
+          <span class="text-sm font-medium text-gray-900">{{ tag.tag }}</span>
+        </template>
+        
+        <template #actions="{ item: tag }">
+          <button @click="removeTag(tag)" class="text-red-600 hover:text-red-900 text-sm font-medium">删除</button>
+        </template>
+      </DraggableTable>
     </main>
+
+    <!-- Add Modal -->
+    <BaseModal
+      :is-open="showModal"
+      :title="activeTab === 'favourite' ? '添加喜爱标签' : '添加厌恶标签'"
+      :loading="saving"
+      @close="closeModal"
+      @confirm="saveTag"
+    >
+      <AppInput 
+        :model-value="currentTag"
+        @update:model-value="currentTag = $event"
+        label="标签名称" 
+        required 
+        @keyup.enter="saveTag"
+      />
+    </BaseModal>
   </div>
 </template>
