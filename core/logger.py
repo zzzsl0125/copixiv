@@ -51,7 +51,7 @@ def setup_logging(log_dir='log'):
         rotation="10 MB",
         retention="3 days",
         encoding="utf-8",
-        filter=lambda record: record["extra"].get("name") != "frontend"
+        filter=lambda record: record["extra"].get("name") != "frontend" and record["name"] != "uvicorn.access" and record["name"] != "logging"
     )
 
     # Frontend log file handler
@@ -71,7 +71,23 @@ def setup_logging(log_dir='log'):
     # Set specific third-party library log levels to avoid noise
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("apscheduler").setLevel(logging.WARNING)
-    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    
+    # Configure uvicorn loggers to intercept
+    for logger_name in ["uvicorn", "uvicorn.error", "uvicorn.access"]:
+        uv_logger = logging.getLogger(logger_name)
+        uv_logger.handlers = [InterceptHandler()]
+        uv_logger.propagate = False
+        
+    # We want access logs to show in access.log
+    logger.add(
+        log_dir / "access.log",
+        format=log_format,
+        level="INFO",
+        rotation="10 MB",
+        retention="3 days",
+        encoding="utf-8",
+        filter=lambda record: record["name"] == "uvicorn.access" or record["name"] == "logging"
+    )
 
 setup_logging()
 
