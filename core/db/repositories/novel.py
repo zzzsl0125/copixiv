@@ -11,6 +11,7 @@ from .base_repository import BaseRepository
 from .fts_manager import FTSManager
 from .query_builder import BaseQueryBuilder
 from .mixins import RandomPoolMixin, EpubMixin
+from .tag_alias import TagAliasRepository
 from .. import models
 from .. import constants as C
 
@@ -192,13 +193,17 @@ class Novel(BaseRepository, RandomPoolMixin, EpubMixin):
         if not novels: 
             return
 
+        # Fetch tag aliases to map tags automatically
+        alias_map = TagAliasRepository(self.session).get_alias_map()
+
         # Prepare a map of id -> tags
         novel_tags_map = {}
         processed_novels = []
 
         # First pass: Extract tags and prepare clean novel data
         for n in novels:
-            novel_tags_map[n.get('id')] = n.pop('tag', [])
+            mapped_tags = {alias_map.get(t, t) for t in n.pop('tag', [])}
+            novel_tags_map[n.get('id')] = mapped_tags
             processed_novels.append(n)
 
         # Fields that should be updated if the novel already exists
@@ -356,6 +361,29 @@ class Novel(BaseRepository, RandomPoolMixin, EpubMixin):
     
     def rebuild_fts(self):
         FTSManager(self.session).rebuild_novel_fts()
+
+    def apply_tag_alias_retroactively(self, source: str, target: str) -> int:
+        """当添加新的标签别名时，追溯库中已包含该源标签的小说并将其替换为目标标签。"""
+        stmt = select(models.NovelTag.novel_id).join(models.Tag).where(models.Tag.name == source)
+        novel_ids = self.session.execute(stmt).scalars().all()
+
+        if not novel_ids:
+            return 0
+
+        for nid in novel_ids:
+            existing = self.session.execute(
+                select(models.Tag.name)
+                .join(models.NovelTag, models.Tag.id == models.NovelTag.tag_id)
+                .where(models.NovelTag.novel_id == nid)
+            ).scalars().all()
+            
+            tags = set(existing)
+            if source in tags:
+                tags.remove(source)
+                tags.add(target)
+                self.rewrite_tags(nid, tags)
+                
+        return len(novel_ids)
 
     def rewrite_tags(self, novel_id: int, new_tags: set):
         if not new_tags:

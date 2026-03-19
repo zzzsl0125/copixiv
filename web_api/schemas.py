@@ -11,6 +11,31 @@ class TagPreferenceResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+class TagAliasBase(BaseModel):
+    source: str
+    target: str
+
+class TagAliasCreate(TagAliasBase):
+    pass
+
+class TagAliasResponse(TagAliasBase):
+    id: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+class TagCandidate(BaseModel):
+    id: int
+    name: str
+    reference_count: int
+
+class TagAliasSuggestResponse(BaseModel):
+    target: TagCandidate
+    candidates: List[TagCandidate]
+
+class TagAliasSuggestListResponse(BaseModel):
+    items: List[TagAliasSuggestResponse]
+    next_offset: int
+
 class SearchHistoryResponse(BaseModel):
     id: int
     type: str

@@ -97,6 +97,57 @@ export const tagPreferenceApi = {
   },
 };
 
+// --- Tag Alias API ---
+// Note: These functions handle tag aliases mapping.
+
+export interface TagAlias {
+  id: number;
+  source: string;
+  target: string;
+}
+
+export interface TagCandidate {
+  id: number;
+  name: string;
+  reference_count: number;
+}
+
+export interface TagAliasSuggest {
+  target: TagCandidate;
+  candidates: TagCandidate[];
+}
+
+export interface TagAliasSuggestList {
+  items: TagAliasSuggest[];
+  next_offset: number;
+}
+
+export const tagAliasApi = {
+  getTagAliases: async () => {
+    const response = await api.get('/tag-aliases/');
+    return response.data as TagAlias[];
+  },
+
+  suggestTagAliases: async (limit: number = 5, offset: number = 0, targetTag?: string) => {
+    const params: any = { limit, offset };
+    if (targetTag) {
+      params.target_tag = targetTag;
+    }
+    const response = await api.get('/tag-aliases/suggest', { params });
+    return response.data as TagAliasSuggestList;
+  },
+
+  createTagAlias: async (source: string, target: string) => {
+    const response = await api.post('/tag-aliases/', { source, target });
+    return response.data as TagAlias;
+  },
+
+  deleteTagAlias: async (id: number) => {
+    const response = await api.delete(`/tag-aliases/${id}`);
+    return response.data;
+  },
+};
+
 // --- Task API ---
 
 export interface ScheduledTask {

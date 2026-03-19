@@ -191,6 +191,15 @@ class TagPreference(Base):
     sort_index = Column(Integer, default=0)
 
 
+class TagAlias(Base):
+    __tablename__ = C.TABLE_TAG_ALIAS
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source = Column(String, unique=True, index=True, nullable=False)
+    target = Column(String, index=True, nullable=False)
+
+    def __repr__(self):
+        return f"<TagAlias(source='{self.source}', target='{self.target}')>"
+
 
 class NovelEpubConversion(Base):
     __tablename__ = C.TABLE_NOVEL_EPUB_CONVERSION

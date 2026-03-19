@@ -8,3 +8,4 @@ from .task import TaskHistory, ScheduledTask
 from .search_history import SearchHistoryRepository
 from .fts_manager import FTSManager
 from .query_builder import BaseQueryBuilder
+from .tag_alias import TagAliasRepository as TagAlias

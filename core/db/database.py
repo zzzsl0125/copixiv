@@ -33,7 +33,8 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 from .repositories import (
     Novel, Author, Series, 
     System, TaskHistory, 
-    ScheduledTask, FTSManager
+    ScheduledTask, FTSManager,
+    TagAlias
 )
 
 class SessionContextManager:
@@ -110,6 +111,10 @@ class Database:
     @property
     def scheduled_task(self) -> type[ScheduledTask]:
         return ScheduledTask
+
+    @property
+    def tag_alias(self) -> type[TagAlias]:
+        return TagAlias
 
 db = Database()
 db.init()
