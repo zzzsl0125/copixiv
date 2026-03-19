@@ -12,6 +12,7 @@ from pixivpy3.utils import ParsedJson
 from core.util import build_path, parse_tags, guess_series_order, has_image_placeholders, is_chinese
 from core.epub_builder import create_epub
 from core.logger import logger
+from core.config import config
 
 def _get_session() -> requests.Session:
     session = requests.Session()
@@ -33,7 +34,8 @@ def download_image(url: str, save_path: Path, session: Optional[requests.Session
     should_close = session is None
     
     try:
-        response = local_session.get(url, stream=True, timeout=10)
+        proxies = {'http': config.proxy.http, 'https': config.proxy.https}
+        response = local_session.get(url, stream=True, timeout=10, proxies=proxies)
         response.raise_for_status()
         
         expected_size = int(response.headers.get('content-length', 0))

@@ -8,6 +8,7 @@ from asgiref.sync import sync_to_async
 from pixivpy3 import AppPixivAPI, PixivError
 
 from core.logger import logger
+from core.config import config, Config
 from core.util import RateLimitError, AccountInvalidError
 
 @dataclass
@@ -31,7 +32,9 @@ class AccountStatus(Enum):
 
 class PixivAccount:
     
-    def __init__(self, token_info: TokenInfo):
+    def __init__(self, token_info: TokenInfo, config: Config = config):
+        self.config = config
+
         self.api = self._create_api()
         self.token_info = token_info
 
@@ -79,7 +82,11 @@ class PixivAccount:
             self._auto_inactive_task = None
     
     def _create_api(self) -> AppPixivAPI:
-        api = AppPixivAPI()
+        proxies = {
+            'http':self.config.proxy.http, 
+            'https':self.config.proxy.https
+        }
+        api = AppPixivAPI(proxies=proxies)
         
         # 模型与实际数据有偏差的情况不少，因此直接返回
         def _custom_load_result(res, *args, **kwargs):

@@ -10,6 +10,7 @@ class TelegramNotifier:
         self.chat_id = config.telegram.chat_id
         self.message_api_url = f"https://api.telegram.org/bot{self.token}/sendMessage"
         self.document_api_url = f"https://api.telegram.org/bot{self.token}/sendDocument"
+        self.proxies = {'http':config.proxy.http, 'https':config.proxy.https}
 
     def send_message(self, text: str):
         if not self.token or not self.chat_id:
@@ -22,7 +23,7 @@ class TelegramNotifier:
                 'text': text,
                 'parse_mode': 'Markdown'
             }
-            response = requests.post(self.message_api_url, json=payload, timeout=10)
+            response = requests.post(self.message_api_url, json=payload, timeout=10, proxies=self.proxies)
             response.raise_for_status()
             logger.info("Telegram notification sent successfully.")
         except Exception as e:
@@ -41,7 +42,7 @@ class TelegramNotifier:
                 'caption': caption,
                 'parse_mode': 'Markdown'
             }
-            response = requests.post(self.document_api_url, data=payload, files=files, timeout=20)
+            response = requests.post(self.document_api_url, data=payload, files=files, timeout=20, proxies=self.proxies)
             response.raise_for_status()
             logger.info("Telegram document sent successfully.")
         except Exception as e:

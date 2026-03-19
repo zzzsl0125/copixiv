@@ -18,15 +18,15 @@ class Config_Pixiv_client:
 
 class Config_Telegram:
     token: str
-    chat_id: str
+    chat_id: int
 
 class Config_Frontend:
     default_min_like: int
     default_min_text: int
 
-class Config_Task:
-    notify_on_new_novel: bool
-    timeout: int
+class Config_Proxy:
+    http: str
+    https: str
 
 class Config:
     config_path: str
@@ -39,6 +39,6 @@ class Config:
     pixiv_client: 'Config_Pixiv_client'
     telegram: 'Config_Telegram'
     frontend: 'Config_Frontend'
-    task: 'Config_Task'
+    proxy: 'Config_Proxy'
 
 config: Config

@@ -12,3 +12,6 @@ telegram:
 frontend:
   default_min_like: 500
   default_min_text: 3000
+proxy:
+  http: 127.0.0.1:20172
+  https: 127.0.0.1:20172

@@ -40,7 +40,7 @@ class RequestManager:
     def __init__(self, config: Config = config):
 
         accounts = [
-            PixivAccount(token_info)
+            PixivAccount(token_info, config)
             for token_info in self._load_tokens(config)
         ]
         if not accounts:
