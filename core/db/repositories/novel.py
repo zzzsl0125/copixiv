@@ -86,12 +86,14 @@ class NovelQueryBuilder(BaseQueryBuilder):
         self.repo._validate_query_field(type)
         
         if type == C.FIELD_IS_FAVOURITE:
-            subquery_wheres.append(self.main_model.id.in_(select(models.Favourite.novel_id)))
+            subquery_wheres.append(
+                select(1).where(models.Favourite.novel_id == self.main_model.id).exists()
+            )
 
         elif type == C.FIELD_IS_SPECIAL_FOLLOW:
-            subquery_wheres.append(self.main_model.author_id.in_((
-                select(models.SpecialFollow.author_id)
-            )))
+            subquery_wheres.append(
+                select(1).where(models.SpecialFollow.author_id == self.main_model.author_id).exists()
+            )
 
         elif value and type in self.repo.VALID_NOVEL_FIELDS:
             model_field = getattr(self.main_model, type)
