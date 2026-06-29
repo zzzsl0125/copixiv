@@ -1,0 +1,48 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.pyc
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# === Node / Frontend ===
+node_modules/
+frontend/dist/
+frontend/dist-ssr/
+*.local
+
+# === Database (local data, not source) ===
+database/database.db
+database/database.db-shm
+database/database.db-wal
+database/backups/
+
+# === Sensitive configuration ===
+config.yaml
+
+# === IDE / Editor ===
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# === Tool local data ===
+.ccg/
+
+# === OS ===
+.directory

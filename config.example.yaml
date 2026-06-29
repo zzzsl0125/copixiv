@@ -1,0 +1,19 @@
+path:
+  token: pixiv_token
+  database: database/database.db
+  download: download
+pixiv_client:
+  min_interval: 2
+  cooling_duration: 120
+  max_concurrency: 5
+telegram:
+  token: "YOUR_TELEGRAM_BOT_TOKEN"
+  chat_id: "YOUR_TELEGRAM_CHAT_ID"
+frontend:
+  default_min_like: 500
+  default_min_text: 3000
+proxy:
+  http: "127.0.0.1:20172"
+  https: "127.0.0.1:20172"
+pixiv_accounts:
+  follow: "YOUR_PIXIV_EMAIL"
