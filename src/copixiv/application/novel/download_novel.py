@@ -1,7 +1,6 @@
 """Use case: download a single novel from Pixiv."""
 
 import asyncio
-import logging
 
 from copixiv.domain.services.novel_factory import build_from_webview
 from copixiv.infrastructure.repositories.novel import NovelRepository
@@ -10,7 +9,7 @@ from copixiv.infrastructure.repositories.series import SeriesRepository
 from copixiv.infrastructure.storage.file_storage import FileStorage
 from copixiv.infrastructure.storage.image_downloader import ImageDownloader
 
-logger = logging.getLogger("copixiv")
+from copixiv.app.logger import logger
 
 
 class DownloadNovelUseCase:

@@ -19,8 +19,7 @@ from copixiv.infrastructure.database import constants as C
 from copixiv.domain.services.archive import build_batch_zip
 from copixiv.infrastructure.storage.file_storage import FileStorage
 
-import logging
-logger = logging.getLogger("copixiv")
+from copixiv.app.logger import logger
 
 router = APIRouter()
 

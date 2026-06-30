@@ -37,3 +37,10 @@ async def delete_token(token_id: int, db: Session = Depends(get_db)):
     if not await repo.delete(token_id):
         raise HTTPException(status_code=404)
     return {"ok": True}
+
+
+@router.post("/reorder/")
+async def reorder_tokens(ids: list[int], db: Session = Depends(get_db)):
+    repo = TokenRepository(db)
+    await repo.reorder(ids)
+    return {"ok": True}

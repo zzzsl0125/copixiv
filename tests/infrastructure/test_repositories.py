@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from copixiv.infrastructure.database.models import (
     Base, Novel, Author, Tag, TagAlias, Favourite,
+    TaskHistory, ScheduledTask,
 )
 from copixiv.infrastructure.database.engine import create_session_factory
 from copixiv.infrastructure.repositories.novel import NovelRepository
@@ -176,6 +177,97 @@ class TestTagRepository:
             session.commit()
         session.rollback()
 
+    def test_suggest_aliases_finds_similar_tags(self, session):
+        """suggest_aliases should find pairs of tags with similar names."""
+        repo = TagRepository(session)
+
+        # Create tags with varying reference counts and similarity
+        from copixiv.infrastructure.database.models import Tag as TagModel
+        tag_data = [
+            ("Fate/Grand Order", 100),
+            ("Fate Grand Order", 50),
+            ("NTR", 80),
+            ("ntr", 40),
+            ("completely-unrelated", 10),
+            ("completely-different", 5),
+        ]
+        for name, rc in tag_data:
+            session.add(TagModel(name=name, reference_count=rc))
+        session.commit()
+
+        result = asyncio.run(repo.suggest_aliases(limit=10, offset=0))
+
+        assert "items" in result
+        assert "next_offset" in result
+
+        # "Fate/Grand Order" should pair with "Fate Grand Order"
+        # "NTR" should pair with "ntr"
+        items = result["items"]
+        assert len(items) >= 2, f"Expected at least 2 suggestions, got {len(items)}"
+
+        targets = {item["target"]["name"] for item in items}
+        assert "Fate/Grand Order" in targets or "Fate Grand Order" in targets
+        assert "NTR" in targets or "ntr" in targets
+
+    def test_suggest_aliases_excludes_aliased_tags(self, session):
+        """Tags already in an alias mapping should be excluded from suggestions."""
+        repo = TagRepository(session)
+
+        from copixiv.infrastructure.database.models import Tag as TagModel
+        tag_data = [
+            ("already-mapped-source", 50),
+            ("already-mapped-target", 50),
+            ("already-mapped-free", 40),
+            ("Already Free Tag", 30),
+        ]
+        for name, rc in tag_data:
+            session.add(TagModel(name=name, reference_count=rc))
+        session.commit()
+
+        ids = self._ensure_tags(session, "already-mapped-source",
+                                "already-mapped-target")
+        session.add(TagAlias(source=ids["already-mapped-source"],
+                             target=ids["already-mapped-target"]))
+        session.commit()
+
+        result = asyncio.run(repo.suggest_aliases(limit=10, offset=0))
+
+        # Neither already-mapped-source nor already-mapped-target should appear
+        all_names: set[str] = set()
+        for item in result["items"]:
+            all_names.add(item["target"]["name"])
+            for c in item["candidates"]:
+                all_names.add(c["name"])
+        assert "already-mapped-source" not in all_names
+        assert "already-mapped-target" not in all_names
+        # Free tags starting with "a" should appear
+        assert "already-mapped-free" in all_names or "Already Free Tag" in all_names
+
+    def test_suggest_aliases_with_target_tag_filter(self, session):
+        """When target_tag is specified, only suggestions for that tag return."""
+        repo = TagRepository(session)
+
+        from copixiv.infrastructure.database.models import Tag as TagModel
+        tag_data = [
+            ("NTR", 100),
+            ("ntr", 50),
+            ("R-18", 80),
+            ("R18", 40),
+        ]
+        for name, rc in tag_data:
+            session.add(TagModel(name=name, reference_count=rc))
+        session.commit()
+
+        result = asyncio.run(
+            repo.suggest_aliases(limit=10, offset=0, target_tag="NTR")
+        )
+
+        items = result["items"]
+        assert len(items) == 1
+        assert items[0]["target"]["name"] == "NTR"
+        cand_names = [c["name"] for c in items[0]["candidates"]]
+        assert "ntr" in cand_names
+
 
 @pytest.mark.slow
 class TestConcurrentAccess:
@@ -237,3 +329,181 @@ class TestConcurrentAccess:
         assert not errors, f"Concurrent reads failed: {errors}"
         assert all(r == 10 for r in results[:9]), \
             f"Expected 10 novels per page, got {results}"
+
+
+class TestTaskRepository:
+    def test_add_and_update_task_sync(self, session):
+        from copixiv.infrastructure.repositories.task import TaskRepository
+
+        repo = TaskRepository(session)
+
+        # Add
+        task_id = repo.add_task_sync("test-task", {"key": "value"})
+        session.commit()
+        assert task_id > 0
+
+        # Update status
+        repo.update_task_sync(task_id, "running")
+        session.commit()
+
+        # Verify
+        task = session.get(TaskHistory, task_id)
+        assert task is not None
+        assert task.name == "test-task"
+        assert task.status == "running"
+
+    def test_update_task_with_result_and_duration(self, session):
+        from copixiv.infrastructure.repositories.task import TaskRepository
+        import json
+
+        repo = TaskRepository(session)
+        task_id = repo.add_task_sync("dur-test", {"a": 1})
+        session.commit()
+
+        result = json.dumps({"log": "ok", "new_novels_count": 5})
+        repo.update_task_sync(task_id, "success", result=result, duration=12.5)
+        session.commit()
+
+        task = session.get(TaskHistory, task_id)
+        assert task.status == "success"
+        assert task.duration == 12.5
+        assert "new_novels_count" in task.result
+
+    def test_get_scheduled_tasks_sync(self, session):
+        from copixiv.infrastructure.repositories.task import TaskRepository
+
+        repo = TaskRepository(session)
+        # Insert a couple of scheduled tasks
+        models = __import__(
+            "copixiv.infrastructure.database.models", fromlist=["ScheduledTask"]
+        )
+        session.add(ScheduledTask(
+            name="daily", task="novel_follow", cron="0 3 * * *",
+            is_enabled=True, sort_index=0,
+        ))
+        session.add(ScheduledTask(
+            name="weekly", task="novel_search", cron="20 4 * * 1",
+            is_enabled=False, sort_index=1,
+        ))
+        session.commit()
+
+        tasks = repo.get_scheduled_tasks_sync()
+        assert len(tasks) == 2
+        assert tasks[0].name == "daily"
+        assert tasks[1].name == "weekly"
+
+    def test_crud_scheduled_task(self, session):
+        from copixiv.infrastructure.repositories.task import TaskRepository
+
+        repo = TaskRepository(session)
+
+        # Create
+        t = session.begin_nested()
+        created = asyncio.run(repo.create_scheduled({
+            "name": "crud-test", "task": "novel_follow",
+            "cron": "0 6 * * *", "is_enabled": True, "sort_index": 2,
+        }))
+        session.commit()
+        assert created.id > 0
+
+        # Update
+        updated = asyncio.run(repo.update_scheduled(created.id, {
+            "is_enabled": False, "sort_index": 99,
+        }))
+        session.commit()
+        fetched = asyncio.run(repo.get_scheduled_tasks())
+        t = next(t for t in fetched if t.id == created.id)
+        assert t.is_enabled == False
+        assert t.sort_index == 99
+
+        # Delete
+        deleted = asyncio.run(repo.delete_scheduled(created.id))
+        session.commit()
+        assert deleted is True
+        assert asyncio.run(repo.delete_scheduled(9999)) is False
+
+    def test_reorder_scheduled(self, session):
+        from copixiv.infrastructure.repositories.task import TaskRepository
+
+        repo = TaskRepository(session)
+        t1 = ScheduledTask(name="a", task="x", cron="* * * * *", sort_index=0)
+        t2 = ScheduledTask(name="b", task="y", cron="* * * * *", sort_index=1)
+        session.add_all([t1, t2])
+        session.commit()
+
+        asyncio.run(repo.reorder_scheduled([t2.id, t1.id]))
+        session.commit()
+
+        tasks = repo.get_scheduled_tasks_sync()
+        assert tasks[0].sort_index == 0
+        assert tasks[1].sort_index == 1
+        # Order should be reversed from original
+        assert tasks[0].name == "b"
+        assert tasks[1].name == "a"
+
+
+class TestTaskManagerHelpers:
+    """Unit tests for TaskManagerSystem helper methods (no scheduler needed)."""
+
+    def test_parse_json_string(self):
+        from copixiv.tasks.manager import TaskManagerSystem as TMS
+        assert TMS._parse_json('{"a": 1}') == {"a": 1}
+        assert TMS._parse_json("not json") == {}
+
+    def test_parse_json_dict_passthrough(self):
+        from copixiv.tasks.manager import TaskManagerSystem as TMS
+        assert TMS._parse_json({"a": 1}) == {"a": 1}
+        assert TMS._parse_json(None) == {}
+
+    def test_parse_result_list(self):
+        from copixiv.tasks.manager import TaskManagerSystem as TMS
+        titles, count = TMS._parse_result(["t1", "t2", "t3"], {})
+        assert count == 3
+        assert titles == []  # notify_on_new_novel not set
+
+    def test_parse_result_list_with_notify(self):
+        from copixiv.tasks.manager import TaskManagerSystem as TMS
+        titles, count = TMS._parse_result(
+            ["t1", "t2"], {"notify_on_new_novel": True}
+        )
+        assert count == 2
+        assert titles == ["t1", "t2"]
+
+    def test_parse_result_int(self):
+        from copixiv.tasks.manager import TaskManagerSystem as TMS
+        titles, count = TMS._parse_result(42, {})
+        assert count == 42
+        assert titles == []
+
+    def test_parse_result_none(self):
+        from copixiv.tasks.manager import TaskManagerSystem as TMS
+        titles, count = TMS._parse_result(None, {})
+        assert count == 0
+        assert titles == []
+
+    def test_construction_strips_none_deps(self):
+        from copixiv.tasks.manager import TaskManagerSystem
+
+        tms = TaskManagerSystem(
+            session_factory=lambda: None,
+            client="cli",
+            file_storage=None,
+            image_downloader=None,
+            epub_builder=None,
+            config=None,
+        )
+        assert tms._deps == {"client": "cli"}
+
+    def test_construction_keeps_all_deps(self):
+        from copixiv.tasks.manager import TaskManagerSystem
+
+        tms = TaskManagerSystem(
+            session_factory=lambda: None,
+            client="a", file_storage="b", image_downloader="c",
+            epub_builder="d", config="e",
+        )
+        assert tms._deps == {
+            "client": "a", "file_storage": "b",
+            "image_downloader": "c", "epub_builder": "d", "config": "e",
+        }
+

@@ -1,0 +1,16 @@
+{
+    "account1@example.com":
+    {
+        "id":111111111,
+        "password":"your_password_here",
+        "premium":true,
+        "token":"your_oauth_token_here"
+    },
+    "account2@example.com":
+    {
+        "id":222222222,
+        "password":"another_password",
+        "premium":false,
+        "token":"another_oauth_token_here"
+    }
+}

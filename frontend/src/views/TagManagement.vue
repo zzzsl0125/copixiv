@@ -136,8 +136,11 @@ const openModal = () => {
 }
 
 const openEditModal = (group: GroupedAlias) => {
-  suggestTarget.value = group.target
-  showSuggestModal.value = true
+  isEditingAlias.value = true
+  editingAliasOriginalTarget.value = group.target
+  aliasTarget.value = group.target
+  aliasSource.value = group.sources.join(', ')
+  showModal.value = true
 }
 
 const closeModal = () => {

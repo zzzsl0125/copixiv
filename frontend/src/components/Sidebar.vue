@@ -98,7 +98,7 @@ const navIconClass = 'mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500'
       <!-- Batch Download -->
       <template v-if="showFilters !== false && filters.keyword.trim()">
         <div class="my-6 border-t border-gray-200"></div>
-        <button @click="isBatchModalOpen = true" class="w-full flex items-center justify-center px-3 py-2 text-sm font-medium text-gray-700 hover:text-gray-900 hover:bg-gray-50 rounded-md transition-colors">
+        <button @click="isBatchModalOpen = true; console.log('[Sidebar] 打包下载 clicked, keyword:', props.filters.keyword)" class="w-full flex items-center justify-center px-3 py-2 text-sm font-medium text-gray-700 hover:text-gray-900 hover:bg-gray-50 rounded-md transition-colors">
           <Download class="mr-3 h-5 w-5 text-gray-400" /> 打包下载
         </button>
       </template>

@@ -44,3 +44,10 @@ class TokenRepository(BaseRepository):
             return False
         self.session.delete(token)
         return True
+
+    async def reorder(self, ids: list[int]) -> bool:
+        for idx, token_id in enumerate(ids):
+            token = self.session.get(models.Token, token_id)
+            if token is not None:
+                token.sort_index = idx
+        return True

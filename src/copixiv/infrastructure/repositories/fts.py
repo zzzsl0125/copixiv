@@ -8,7 +8,6 @@ Features:
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
 
 from sqlalchemy import text as _text, select, delete as _delete
@@ -20,7 +19,7 @@ from copixiv.infrastructure.database import constants as C
 if TYPE_CHECKING:
     pass
 
-logger = logging.getLogger("copixiv.fts")
+from copixiv.app.logger import logger
 
 
 class FTSManager:

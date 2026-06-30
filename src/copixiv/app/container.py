@@ -7,7 +7,6 @@ via constructor injection.
 
 from __future__ import annotations
 
-import logging
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -28,7 +27,7 @@ from copixiv.infrastructure.storage.image_downloader import ImageDownloader
 from copixiv.infrastructure.epub.builder import EpubBuilder
 from copixiv.infrastructure.repositories.fts import FTSManager
 
-logger = logging.getLogger("copixiv")
+from copixiv.app.logger import logger
 
 
 class Container:
@@ -108,6 +107,17 @@ class Container:
             min_interval=self.config.pixiv_client.min_interval,
         )
 
+        # Task manager (background scheduler)
+        from copixiv.tasks.manager import TaskManagerSystem
+        self._task_manager = TaskManagerSystem(
+            session_factory=self._session_factory,
+            client=self._client,
+            file_storage=self._file_storage,
+            image_downloader=self._image_downloader,
+            epub_builder=self._epub_builder,
+            config=self.config,
+        )
+
         logger.info("Container built successfully.")
 
     # ------------------------------------------------------------------
@@ -137,9 +147,22 @@ class Container:
             app.state.image_downloader = self._image_downloader
             app.state.epub_builder = self._epub_builder
             app.state.account_pool = self._account_pool
+            app.state.task_manager = self._task_manager
+
+            # Pre-authenticate all accounts in parallel so the first API
+            # call on each doesn't pay the ~2s auth cost individually.
+            logger.info(
+                "Authenticating %d accounts in parallel...",
+                len(self._account_pool.accounts),
+            )
+            await self._account_pool.authenticate_all()
+            logger.info("All accounts authenticated.")
+
+            self._task_manager.start()
             yield
             # Shutdown
             logger.info("Shutting down copixiv v2...")
+            self._task_manager.stop()
             self._image_downloader.shutdown()
 
         app = FastAPI(title="Novel Database API", lifespan=lifespan)
@@ -184,17 +207,18 @@ class Container:
 
     @staticmethod
     def _should_auto_backup(db_path: Path) -> bool:
-        """Return True if today's backup doesn't already exist."""
+        """Return True if this week's backup doesn't already exist."""
         backup_dir = db_path.parent / "backups"
-        today_backup = backup_dir / f"{date.today().isoformat()}.db"
-        return not today_backup.exists()
+        this_week = date.today().strftime("%G-W%V")
+        week_backup = backup_dir / f"{this_week}.db"
+        return not week_backup.exists()
 
     @staticmethod
     def _maybe_backup(db_path: Path) -> None:
-        """Create a daily backup and clean up old ones."""
+        """Create a weekly backup and remove older ones (keep only the latest)."""
         try:
             backup_database(str(db_path))
-            cleanup_old_backups(str(db_path), keep_days=7)
+            cleanup_old_backups(str(db_path))
         except Exception:
             logger.exception("Backup failed — continuing without backup.")
 

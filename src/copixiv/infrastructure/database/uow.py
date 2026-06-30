@@ -125,6 +125,16 @@ class SqlUnitOfWork:
             if self._owns_session and self._session is not None:
                 self._session.close()
                 self._session = None
+                # Clear cached repositories — they hold a reference to the
+                # now-closed session and must be re-created for the next
+                # begin() cycle.
+                self._novels = None
+                self._authors = None
+                self._series = None
+                self._tags = None
+                self._tokens = None
+                self._tasks = None
+                self._search_history = None
 
     async def commit(self) -> None:
         if self._session is not None:

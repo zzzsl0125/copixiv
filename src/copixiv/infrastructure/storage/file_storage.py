@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 from copixiv.domain.services.filename import build_path
+from copixiv.app.logger import logger
 
 
 class FileStorage:
@@ -28,9 +29,13 @@ class FileStorage:
         """Write novel text to disk. Returns the file path."""
         path = self.novel_text_path(novel_id, title)
         if path.exists() and not force:
+            logger.debug(f"下载: #{novel_id} \"{title}\" 已存在，跳过")
             return path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
+        logger.info(
+            f"下载: #{novel_id} \"{title}\" → {path} ({len(content)} 字符)",
+        )
         return path
 
     def delete_novel_files(self, novel_path: str) -> None:

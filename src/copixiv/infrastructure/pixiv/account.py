@@ -1,7 +1,6 @@
 """Single Pixiv account — wraps pixivpy3 AppPixivAPI with auth and rate-limiting."""
 
 import asyncio
-import logging
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -10,7 +9,7 @@ from pixivpy3 import AppPixivAPI, PixivError
 
 from copixiv.domain.services.parsing import safe_get
 
-logger = logging.getLogger("copixiv")
+from copixiv.app.logger import logger
 
 
 @dataclass
@@ -31,6 +30,14 @@ class AccountStatus(Enum):
     INACTIVE = "inactive"
     ACTIVE = "active"
     INVALID = "invalid"
+
+
+def _fmt_args(args: tuple, kwargs: dict) -> str:
+    """Format API call arguments for logging — compact, one-line."""
+    parts = [str(a) for a in args]
+    parts.extend(f"{k}={v!r}" for k, v in kwargs.items())
+    joined = ", ".join(parts)
+    return joined if len(joined) <= 120 else joined[:117] + "..."
 
 
 class RateLimitError(PixivError):
@@ -61,7 +68,13 @@ class PixivAccount:
         self.status = AccountStatus.INACTIVE
         self.username = token_info.username
 
+        # last_req_time is for LRU account selection — set by select()
+        # to mark the account as "reserved" so concurrent callers skip it.
         self.last_req_time: float = 0.0
+        # _last_call_end is for per-account rate limiting — set after
+        # each API call completes so the next call on this account
+        # respects min_interval.
+        self._last_call_end: float = 0.0
         self._cooldown_until: float = 0.0
         self.min_interval = min_interval
         self.cooling_duration = cooling_duration
@@ -104,7 +117,7 @@ class PixivAccount:
 
     def _create_api(self, proxy_http: str, proxy_https: str) -> AppPixivAPI:
         proxies = {"http": proxy_http, "https": proxy_https}
-        return AppPixivAPI(proxies=proxies)
+        return AppPixivAPI(proxies=proxies, timeout=30)
 
     async def authenticate(self) -> None:
         if self.status == AccountStatus.INVALID:
@@ -130,16 +143,19 @@ class PixivAccount:
         """Call an API method on this account, handling auth and rate limits."""
         await self.authenticate()
 
-        # Rate limiting — ensure min_interval between calls
+        # Per-account rate limiting: ensure min_interval since the
+        # *last completed* API call on this account (not since select).
         async with self._req_lock:
-            elapsed = time.time() - self.last_req_time
+            elapsed = time.time() - self._last_call_end
             if elapsed < self.min_interval:
                 await asyncio.sleep(self.min_interval - elapsed)
 
             try:
                 func = getattr(self.api, method)
+                logger.info(f"{self} API → {method}({_fmt_args(args, kwargs)})")
                 result = await asyncio.to_thread(func, *args, **kwargs)
-                self.last_req_time = time.time()
+                self._last_call_end = time.time()
+                logger.debug(f"{self} {method} completed.")
                 return result
             except PixivError as e:
                 error_msg = str(e).lower()

@@ -28,8 +28,19 @@ database/database.db-shm
 database/database.db-wal
 database/backups/
 
+# === Log files ===
+log/
+
+# === Downloaded novels (local data, not source) ===
+download/
+
 # === Sensitive configuration ===
 config.yaml
+pixiv_token
+pixiv_token.py
+
+# === Test environment ===
+test_env/
 
 # === IDE / Editor ===
 .vscode/

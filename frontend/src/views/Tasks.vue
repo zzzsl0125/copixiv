@@ -30,16 +30,20 @@ const {
 } = usePagination((offset, limit) => taskApi.getTaskHistory(limit, offset))
 
 const openModal = (task?: ScheduledTask) => {
+  console.log('[Tasks] openModal called, task:', task?.name || 'null (create)')
   editingTask.value = task || null
   isModalOpen.value = true
 }
 
 const closeModal = () => {
+  console.log('[Tasks] closeModal called')
+  console.trace('[Tasks] closeModal stack trace')
   isModalOpen.value = false
   editingTask.value = null
 }
 
 const saveTask = async (payload: Record<string, unknown>) => {
+  console.log('[Tasks] saveTask called, payload:', payload)
   try {
     if (editingTask.value) {
       await taskApi.updateScheduledTask(editingTask.value.id, payload as unknown as Parameters<typeof taskApi.updateScheduledTask>[1])

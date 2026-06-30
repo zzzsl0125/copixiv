@@ -1,9 +1,9 @@
 """Database backup using SQLite VACUUM INTO (SQLite 3.27+).
 
-Provides daily backup creation and retention cleanup (7 days).
+Provides weekly backup creation — keeps only the single most recent backup.
 """
 
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 from sqlalchemy import text
@@ -16,6 +16,8 @@ def backup_database(
     engine: Engine | None = None,
 ) -> str:
     """Create a backup of the SQLite database using VACUUM INTO.
+
+    The backup file is named after the current ISO week (e.g. ``2026-W27.db``).
 
     Args:
         database_path: Path to the source SQLite database file.
@@ -32,10 +34,10 @@ def backup_database(
     backup_path = Path(backup_dir)
     backup_path.mkdir(parents=True, exist_ok=True)
 
-    today = date.today().isoformat()
-    dest = backup_path / f"{today}.db"
+    this_week = date.today().strftime("%G-W%V")
+    dest = backup_path / f"{this_week}.db"
 
-    # Remove existing same-day backup so VACUUM INTO can write fresh
+    # Remove existing same-week backup so VACUUM INTO can write fresh
     if dest.exists():
         dest.unlink()
 
@@ -53,14 +55,14 @@ def backup_database(
 
 def cleanup_old_backups(
     database_path: str,
-    keep_days: int = 7,
+    keep_count: int = 1,
     backup_dir: str | None = None,
 ) -> list[str]:
-    """Remove backup files older than *keep_days*.
+    """Remove old backup files, keeping only the most recent *keep_count*.
 
     Args:
         database_path: Path to the source database file (used to locate backups).
-        keep_days: Number of days of backups to retain.
+        keep_count: Number of most-recent backups to retain (default 1).
         backup_dir: Directory for backups.  Defaults to ``<db_dir>/backups/``.
 
     Returns:
@@ -74,17 +76,14 @@ def cleanup_old_backups(
     if not backup_path.exists():
         return []
 
-    cutoff = date.today() - timedelta(days=keep_days)
+    backups = sorted(backup_path.glob("*.db"), key=lambda f: f.name, reverse=True)
     removed = []
 
-    for f in backup_path.glob("*.db"):
+    for f in backups[keep_count:]:
         try:
-            file_date = date.fromisoformat(f.stem)
-            if file_date < cutoff:
-                f.unlink()
-                removed.append(str(f))
-        except (ValueError, OSError):
-            # f.stem is not a date — skip
+            f.unlink()
+            removed.append(str(f))
+        except OSError:
             pass
 
     return removed

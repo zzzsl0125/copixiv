@@ -2,7 +2,6 @@
 
 import html
 import io
-import logging
 from pathlib import Path
 
 from PIL import Image
@@ -11,7 +10,7 @@ from ebooklib import epub
 from copixiv.domain.services.filename import safe_filename
 from copixiv.domain.services.language import has_image_placeholders
 
-logger = logging.getLogger("copixiv")
+from copixiv.app.logger import logger
 
 # Pattern for embedded image placeholders — keep in sync with domain.services.language
 _HAS_IMAGE_PATTERN = __import__("re").compile(

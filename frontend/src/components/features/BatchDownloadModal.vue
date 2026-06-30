@@ -48,6 +48,7 @@ const orderByDisplay = computed(() => {
 })
 
 watch(() => props.isOpen, async (open) => {
+  console.log('[BatchDownloadModal] isOpen changed:', open, 'keyword:', props.keyword)
   if (!open) return
   totalCount.value = 0
   downloadLimit.value = 50
@@ -55,14 +56,17 @@ watch(() => props.isOpen, async (open) => {
   countLoading.value = true
   try {
     const queries = buildQueries(props.keyword)
+    console.log('[BatchDownloadModal] built queries:', queries)
     const result = await novelApi.countNovels({
       queries: Object.keys(queries).length > 0 ? queries : undefined,
       min_like: props.min_like,
       min_text: props.min_text,
     })
+    console.log('[BatchDownloadModal] count result:', result)
     totalCount.value = result.total
     if (downloadLimit.value > result.total) downloadLimit.value = result.total || 1
-  } catch {
+  } catch (err) {
+    console.error('[BatchDownloadModal] count failed:', err)
     totalCount.value = 0
   } finally {
     countLoading.value = false

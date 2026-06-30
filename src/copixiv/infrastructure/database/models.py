@@ -98,7 +98,8 @@ class Novel(Base):
     __table_args__ = (
         Index("idx_novel_author_likes", "author_id", "like"),
         Index("idx_novel_series_likes", "series_id", "like"),
-        Index("idx_novel_like_id", "like", "id"),
+        Index("idx_novel_like_text_id", "like", "text", "id"),
+        Index("idx_novel_author_id", "author_id", "id"),
     )
 
     def __repr__(self) -> str:
@@ -255,26 +256,6 @@ class NovelEpubConversion(Base):
     )
     status = Column(String, nullable=False, default="pending")
     last_processed = Column(String)
-
-
-class RandomNovelPool(Base):
-    __tablename__ = C.TABLE_RANDOM_NOVEL_POOL
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    novel_id = Column(
-        Integer,
-        ForeignKey(f"{C.TABLE_NOVEL}.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    min_likes = Column(Integer, nullable=False, default=0)
-    min_texts = Column(Integer, nullable=False, default=0)
-
-    __table_args__ = (
-        UniqueConstraint(
-            "novel_id", "min_likes", "min_texts",
-            name="uq_random_pool_novel",
-        ),
-        Index("idx_random_pool_criteria", "min_likes", "min_texts"),
-    )
 
 
 class Token(Base):

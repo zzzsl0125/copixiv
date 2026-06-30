@@ -27,10 +27,3 @@ class NovelEpubConversion(BaseModel):
     last_processed: str | None = None
 
 
-class RandomNovelPool(BaseModel):
-    """A novel in the random-selection pool for a criteria tier."""
-
-    id: int = 0
-    novel_id: int
-    min_likes: int = 0
-    min_texts: int = 0

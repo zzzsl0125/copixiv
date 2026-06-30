@@ -104,8 +104,7 @@ class ImageDownloader:
 
     def _download_assets(self, data: dict) -> None:
         """Synchronous asset download + EPUB creation (runs in thread pool)."""
-        import logging
-        logger = logging.getLogger("copixiv")
+        from copixiv.app.logger import logger
 
         base_path = Path(data["path"]).parent
         novel_id = str(data["id"])
@@ -119,13 +118,18 @@ class ImageDownloader:
         try:
             # Cover
             if cover_url:
+                logger.debug(f"下载: #{novel_id} 封面 → {cover_url}")
                 ext = Path(cover_url).suffix or ".jpg"
                 path = base_path / f"{novel_id}_c_cover{ext}"
                 if self.download_image(cover_url, path, session):
                     downloaded_files.append(path)
+                    logger.debug(f"下载: #{novel_id} 封面 OK")
 
             # Uploaded images
             if images:
+                logger.debug(
+                    f"下载: #{novel_id} 内嵌图片 {len(images)} 张",
+                )
                 for img_id, img_info in images.items():
                     urls = img_info.get("urls", {})
                     url = (
@@ -142,6 +146,9 @@ class ImageDownloader:
 
             # Linked illustrations
             if illusts:
+                logger.debug(
+                    f"下载: #{novel_id} 关联插图 {len(illusts)} 张",
+                )
                 for illust_id, wrapper in illusts.items():
                     illust_data = (
                         wrapper.get("illust")
@@ -163,6 +170,10 @@ class ImageDownloader:
 
             # EPUB
             if self._epub_builder and self._epub_builder.create_epub(data):
+                logger.info(
+                    f"下载: #{novel_id} EPUB 完成 "
+                    f"(已清理 {len(downloaded_files)} 张临时图片)",
+                )
                 for f in downloaded_files:
                     try:
                         os.remove(f)

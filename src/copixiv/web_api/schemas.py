@@ -1,8 +1,9 @@
 """Web API Pydantic schemas — kept identical to v1 for frontend compatibility."""
 
+import json
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from copixiv.infrastructure.database.models import TagPreferenceORM
 
@@ -99,9 +100,22 @@ class ScheduledTaskUpdate(BaseModel):
     sort_index: int | None = None
 
 
+def _parse_json_str(v: Any) -> Any:
+    """Parse a JSON string to dict, or return the value as-is."""
+    if isinstance(v, str):
+        try:
+            return json.loads(v)
+        except (json.JSONDecodeError, TypeError):
+            return v
+    return v
+
+
 class ScheduledTaskResponse(ScheduledTaskCreate):
     id: int
     model_config = ConfigDict(from_attributes=True)
+
+    _parse_config = field_validator("config", mode="before")(_parse_json_str)
+    _parse_params = field_validator("params", mode="before")(_parse_json_str)
 
 
 class TaskHistoryResponse(BaseModel):
@@ -114,6 +128,9 @@ class TaskHistoryResponse(BaseModel):
     duration: float | None = None
     result: dict | None = None
     model_config = ConfigDict(from_attributes=True)
+
+    _parse_arguments = field_validator("arguments", mode="before")(_parse_json_str)
+    _parse_result = field_validator("result", mode="before")(_parse_json_str)
 
 
 class TaskHistoryListResponse(BaseModel):

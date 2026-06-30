@@ -7,7 +7,7 @@ from .tag import Tag, TagPreference, TagAlias, TagPreferenceType
 from .task import TaskHistory, ScheduledTask, TaskStatus
 from .token import Token
 from .search import SearchHistory
-from .misc import FailedNovel, ProcessedPeriod, NovelEpubConversion, RandomNovelPool
+from .misc import FailedNovel, ProcessedPeriod, NovelEpubConversion
 
 __all__ = [
     "Novel",
@@ -27,6 +27,5 @@ __all__ = [
     "FailedNovel",
     "ProcessedPeriod",
     "NovelEpubConversion",
-    "RandomNovelPool",
     "SpecialFollow",
 ]

@@ -34,10 +34,12 @@ const formState = ref({
 })
 
 onMounted(async () => {
+  console.log('[TaskEditModal] mounted, fetching task methods...')
   try {
     availableMethods.value = await taskApi.getTaskMethods()
+    console.log('[TaskEditModal] loaded methods:', availableMethods.value.length)
   } catch (err) {
-    console.error('Failed to load task methods:', err)
+    console.error('[TaskEditModal] Failed to load task methods:', err)
   }
 })
 
@@ -105,8 +107,11 @@ watch(notifyOnNewNovel, (newVal) => {
 })
 
 watch(() => props.isOpen, (newVal) => {
+  console.log('[TaskEditModal] isOpen changed:', newVal, 'task:', props.task?.name || 'null (create mode)')
   if (newVal) {
+    console.log('[TaskEditModal] availableMethods count:', availableMethods.value.length)
     if (props.task) {
+      console.log('[TaskEditModal] editing task data:', JSON.parse(JSON.stringify(props.task)))
       formState.value = {
         name: props.task.name,
         task: props.task.task,
@@ -115,6 +120,7 @@ watch(() => props.isOpen, (newVal) => {
         config: props.task.config ? JSON.stringify(props.task.config, null, 2) : '{}',
         is_enabled: props.task.is_enabled,
       }
+      console.log('[TaskEditModal] formState set:', { ...formState.value, params: '(see above)' })
       try {
         const config = JSON.parse(formState.value.config || '{}')
         notifyOnNewNovel.value = config.notify_on_new_novel !== false
@@ -132,6 +138,7 @@ watch(() => props.isOpen, (newVal) => {
 })
 
 const handleSave = () => {
+  console.log('[TaskEditModal] handleSave called')
   try {
     const paramsObj = JSON.parse(formState.value.params)
     const configObj = JSON.parse(formState.value.config || '{}')

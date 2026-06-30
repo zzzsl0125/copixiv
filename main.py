@@ -4,7 +4,11 @@ import os
 import signal
 import subprocess
 
+from copixiv.app.logger import setup_logging
 from copixiv.app.container import Container
+
+# Configure logging before anything else so all log output is captured.
+setup_logging()
 
 
 def kill_port(port: int) -> None:

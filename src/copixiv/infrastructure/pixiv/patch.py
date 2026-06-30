@@ -8,14 +8,13 @@ explicitly via ``apply()``, never as an import-time side effect.
 from __future__ import annotations
 
 import json
-import logging
+from importlib.metadata import version
 from typing import Any
 
+from copixiv.app.logger import logger
 from pixivpy3 import AppPixivAPI
 from pixivpy3.aapi import ParsedJson, _MODE, _FILTER, DateOrStr
 from pixivpy3.utils import PixivError
-
-logger = logging.getLogger("copixiv")
 
 _patches_applied: bool = False
 

@@ -1,8 +1,7 @@
-"""Account pool — manages multiple Pixiv accounts with selection strategy."""
+"""Account pool — manages multiple Pixiv accounts with LRU selection."""
 
 import asyncio
-import logging
-import random
+import time
 from contextvars import ContextVar
 
 from .account import (
@@ -12,14 +11,18 @@ from .account import (
     RateLimitError,
 )
 
-logger = logging.getLogger("copixiv")
+from copixiv.app.logger import logger
 
 
 class AccountPool:
-    """A pool of Pixiv accounts with strategy-based selection.
+    """A pool of Pixiv accounts with Least-Recently-Used (LRU) selection.
+
+    Each call to ``select()`` picks the non-cooldown account with the
+    smallest ``last_req_time`` — the one that has been idle the longest.
+    This naturally distributes load evenly without needing a manual index.
 
     Strategy is carried via a ``ContextVar`` so nested calls can
-    temporarily override the account selection without threading issues.
+    temporarily override the account selection.
     """
 
     def __init__(self):
@@ -36,7 +39,11 @@ class AccountPool:
         return self._accounts
 
     def select(self, strategy: AccountStrategy | None = None) -> PixivAccount:
-        """Select the best available account according to *strategy*."""
+        """Select the least-recently-used non-cooldown account.
+
+        Accounts do not need to be pre-authenticated — ``execute()``
+        triggers ``authenticate()`` on first use of an inactive account.
+        """
         strat = strategy or self._strategy.get()
 
         candidates = [a for a in self._accounts if a.valid]
@@ -59,21 +66,33 @@ class AccountPool:
                 or a.token_info.username == strat.force_account
             ]
             if forced:
-                candidates = forced
+                return forced[0]
 
-        # Pick an available (non-cooldown, authenticated) account
-        available = [a for a in candidates if a.available]
-        if not available:
-            # All in cooldown — pick the one with shortest remaining time
+        # LRU over all non-cooldown candidates (not just "available" /
+        # ACTIVE).  Unauthenticated accounts have last_req_time == 0.0,
+        # so they naturally get picked before any used account.
+        ready = [a for a in candidates if not a.in_cooldown]
+        if not ready:
+            # All in cooldown — pick the one that recovers soonest
             best = min(candidates, key=lambda a: a.cooldown_remaining)
             wait = best.cooldown_remaining
             if wait > 0:
                 logger.warning(
-                    f"All accounts in cooldown, waiting {wait:.0f}s for {best}"
+                    f"All accounts in cooldown, waiting {wait:.0f}s for {best}",
                 )
             return best
 
-        return random.choice(available)
+        # LRU: pick the account used least recently.
+        # Update last_req_time immediately so concurrent selectors won't
+        # pick the same account (V1's pattern).
+        chosen = min(ready, key=lambda a: a.last_req_time)
+        idle = time.time() - chosen.last_req_time if chosen.last_req_time else -1
+        chosen.last_req_time = time.time()
+        logger.debug(
+            f"Account LRU: {chosen} (was idle {idle:.0f}s, "
+            f"{len(ready)}/{len(candidates)} ready)",
+        )
+        return chosen
 
     async def authenticate_all(self) -> None:
         """Authenticate all accounts in parallel."""

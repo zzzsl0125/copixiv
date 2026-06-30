@@ -60,38 +60,62 @@ class NovelRepository(BaseRepository):
             for q_type in queries.values():
                 self._validate_query_field(q_type)
 
-        # Random pool shortcut
+        # Random pool shortcut — first page only (no cursor with seed)
         if order_by == "random" and not queries:
-            novels = self._get_random_novels(
-                per_page, min_like or 0, min_text or 0
-            )
-            return {
-                "cursor": {"random_page": True},
-                "novels": self._process_novel_rows(novels),
-            }
+            if not cursor or "random_seed" not in cursor:
+                import random as _random
+                novels = self._get_random_novels(
+                    per_page, min_like or 0, min_text or 0
+                )
+                cursor_out = None
+                if novels and len(novels) >= per_page:
+                    seed = _random.randint(1, 2**31 - 1)
+                    last = novels[-1]
+                    hash_val = self._compute_random_sort_key(last["id"], seed)
+                    cursor_out = {
+                        "random_seed": seed,
+                        "random": hash_val,
+                        "id": last["id"],
+                    }
+                return {"cursor": cursor_out, "novels": novels}
+            # else: has random_seed → fall through to query builder below
 
         params = {
             "queries": queries,
             "order_by": order_by,
             "order_direction": order_direction,
             "cursor": cursor,
-            "per_page": per_page + 1,
+            "per_page": per_page + 1,  # +1 to detect if there are more pages
             "min_like": min_like,
             "min_text": min_text,
         }
 
         builder = NovelQueryBuilder(self, **params)
-        query, query_params = builder.build()
+        query, _query_params = builder.build()
 
-        result = self.session.execute(query, query_params)
+        result = self.session.execute(query)
         novels = [dict(row._mapping) for row in result.fetchall()]
 
         cursor_out = None
         if len(novels) > per_page:
             n = novels.pop()
-            cursor_out = {"id": n["id"], order_by: n.get(order_by)}
+            if order_by == "random":
+                seed = (cursor or {}).get("random_seed", 0)
+                hash_val = self._compute_random_sort_key(n["id"], seed)
+                cursor_out = {
+                    "random_seed": seed,
+                    "random": hash_val,
+                    "id": n["id"],
+                }
+            else:
+                cursor_out = {"id": n["id"], order_by: n.get(order_by)}
 
-        novels = self._process_novel_rows(novels)
+        # Batch-load tags and merge into each novel dict
+        novel_ids = [n[C.COL_ID] for n in novels]
+        tag_map = self._load_tags(novel_ids)
+        for novel in novels:
+            novel[C.COL_TAGS] = tag_map.get(novel[C.COL_ID], [])
+
         return {"novels": novels, "cursor": cursor_out}
 
     async def count_novels(
@@ -110,9 +134,14 @@ class NovelRepository(BaseRepository):
             "min_text": min_text,
         }
         builder = NovelQueryBuilder(self, **params)
-        id_subq = builder._build_id_filter_subquery(count_mode=True)
-        count_stmt = select(func.count()).select_from(id_subq)
-        result = self.session.execute(count_stmt, builder.params)
+        count_stmt = builder.build_count()
+        if count_stmt is None:
+            # No filters — cheap COUNT(*) on the whole table
+            result = self.session.execute(
+                select(func.count()).select_from(models.Novel)
+            )
+        else:
+            result = self.session.execute(count_stmt)
         return result.scalar() or 0
 
     # ---- write ---------------------------------------------------------------
@@ -184,6 +213,12 @@ class NovelRepository(BaseRepository):
                 new_ids.append(novel.get("id"))
 
         self.session.flush()
+
+        from copixiv.app.logger import logger
+        logger.info(
+            f"upsert_novels: {len(new_ids)} new, {len(fts_dirty_ids)} updated "
+            f"(out of {len(processed)} total, {len(all_ids)} IDs queried)"
+        )
 
         # Tags
         for nid, tag_list in novel_tags_map.items():
@@ -301,74 +336,70 @@ class NovelRepository(BaseRepository):
             .values(reference_count=models.Tag.reference_count + delta)
         )
 
-    # ---- random pool ---------------------------------------------------------
+    # ---- random selection ----------------------------------------------------
+
+    # Hash constants for deterministic pseudo-random ordering (same as
+    # BaseQueryBuilder._RAND_* — kept in sync manually to avoid a circular
+    # import between the repository and query_builder modules).
+    _RAND_A: int = 393555900037
+    _RAND_B: int = 1728364729
+    _RAND_MASK: int = 0x7FFFFFFFFFFFFFFF
+    _RAND_MOD: int = 9223372036854775783
+
+    @staticmethod
+    def _compute_random_sort_key(novel_id: int, seed: int) -> int:
+        """Deterministic pseudo-random sort key for cursor construction."""
+        return (
+            (novel_id * NovelRepository._RAND_A + seed * NovelRepository._RAND_B)
+            & NovelRepository._RAND_MASK
+        ) % NovelRepository._RAND_MOD
 
     def _get_random_novels(
         self, limit: int, min_likes: int, min_texts: int
     ) -> list[dict]:
-        stmt = (
-            select(models.RandomNovelPool.novel_id)
+        """Return *limit* novels matching criteria, ordered randomly.
+
+        Two-phase approach for speed:
+
+        1. Index-only scan of ``idx_novel_like_text_id(like, text, id)``
+           with ``ORDER BY random()`` — the index covers all WHERE
+           columns and the ``id`` primary key, so SQLite never touches
+           the main table.  ~10 ms for 58K qualifying rows.
+
+        2. Fetch full rows by primary key (~1 ms for 20 lookups).
+
+        Without any criteria (all 223K novels) the index scan takes
+        ~37 ms — still well within acceptable range.
+        """
+        # Phase 1 — index-only scan for IDs (id is the rowid, always in
+        # every index implicitly).
+        id_rows = self.session.execute(
+            select(models.Novel.id)
             .where(
-                models.RandomNovelPool.min_likes == min_likes,
-                models.RandomNovelPool.min_texts == min_texts,
+                models.Novel.like >= min_likes,
+                models.Novel.text >= min_texts,
             )
             .order_by(func.random())
             .limit(limit)
-        )
-        ids = [row[0] for row in self.session.execute(stmt).all()]
+        ).all()
+
+        ids = [row[0] for row in id_rows]
         if not ids:
             return []
+
+        # Phase 2 — fetch full rows by primary key.
         novels = self.session.execute(
             select(models.Novel).where(models.Novel.id.in_(ids))
         ).scalars().all()
+
         novel_dicts = [self._row_to_dict(n) for n in novels]
 
-        # Load tags so _process_novel_rows can split them (same shape as the
-        # GROUP_CONCAT label produced by _build_main_query).
-        tag_query = (
-            select(
-                models.NovelTag.novel_id,
-                func.group_concat(models.Tag.name, "|||").label(C.COL_TAGS),
-            )
-            .join(models.Tag, models.NovelTag.tag_id == models.Tag.id)
-            .where(models.NovelTag.novel_id.in_(ids))
-            .group_by(models.NovelTag.novel_id)
-        )
-        tag_map = {
-            row[0]: row[1]
-            for row in self.session.execute(tag_query).all()
-        }
+        # Batch-load tags as clean lists (no delimiter round-trip).
+        tag_map = self._load_tags(ids)
         for nd in novel_dicts:
-            nd[C.COL_TAGS] = tag_map.get(nd[C.COL_ID])
+            nd[C.COL_TAGS] = tag_map.get(nd[C.COL_ID], [])
 
         return novel_dicts
-
-    async def populate_random_novel_pool(
-        self, min_likes: int, min_texts: int
-    ) -> None:
-        existing_ids = set(
-            row[0] for row in self.session.execute(
-                select(models.RandomNovelPool.novel_id).where(
-                    models.RandomNovelPool.min_likes == min_likes,
-                    models.RandomNovelPool.min_texts == min_texts,
-                )
-            ).all()
-        )
-        stmt = select(models.Novel.id).where(
-            models.Novel.like >= min_likes,
-            models.Novel.text >= min_texts,
-        )
-        if existing_ids:
-            stmt = stmt.where(models.Novel.id.notin_(existing_ids))
-        new_ids = [row[0] for row in self.session.execute(stmt).all()]
-        if new_ids:
-            self.session.execute(
-                sqlite_insert(models.RandomNovelPool),
-                [
-                    {"novel_id": nid, "min_likes": min_likes, "min_texts": min_texts}
-                    for nid in new_ids
-                ],
-            )
 
     # ---- helpers -------------------------------------------------------------
 
@@ -379,16 +410,26 @@ class NovelRepository(BaseRepository):
     def _row_to_dict(self, obj: Any) -> dict:
         return {c.name: getattr(obj, c.name) for c in obj.__table__.columns}
 
-    def _process_novel_rows(self, novels: list[dict]) -> list[dict]:
-        for novel in novels:
-            tags_str = novel.get(C.COL_TAGS)
-            if tags_str and isinstance(tags_str, str):
-                if "|||" in tags_str:
-                    novel[C.COL_TAGS] = tags_str.split("|||")
-                elif "," in tags_str:
-                    novel[C.COL_TAGS] = tags_str.split(",")
-                else:
-                    novel[C.COL_TAGS] = [tags_str]
-            else:
-                novel[C.COL_TAGS] = []
-        return novels
+    def _load_tags(self, novel_ids: list[int]) -> dict[int, list[str]]:
+        """Batch-load tags for a set of novel IDs.
+
+        Returns a mapping of ``{novel_id: [tag_name, ...]}`` with tag names
+        sorted alphabetically. Novels without tags are absent from the dict.
+        """
+        if not novel_ids:
+            return {}
+
+        rows = self.session.execute(
+            select(
+                models.NovelTag.novel_id,
+                models.Tag.name,
+            )
+            .join(models.Tag, models.NovelTag.tag_id == models.Tag.id)
+            .where(models.NovelTag.novel_id.in_(novel_ids))
+            .order_by(models.NovelTag.novel_id, models.Tag.name)
+        ).all()
+
+        tag_map: dict[int, list[str]] = {}
+        for novel_id, tag_name in rows:
+            tag_map.setdefault(novel_id, []).append(tag_name)
+        return tag_map

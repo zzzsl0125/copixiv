@@ -179,6 +179,107 @@ class TagRepository(BaseRepository):
         self.session.delete(alias)
         return True
 
+    async def suggest_aliases(
+        self, limit: int = 5, offset: int = 0, target_tag: str | None = None
+    ) -> dict:
+        """Suggest alias mappings by finding tags with similar names.
+
+        Tags are ranked by ``reference_count`` descending.  For each tag,
+        candidates with similar names are found via SQL ILIKE queries
+        (same-first-character prefix or substring containment).  Tags
+        already participating in any alias mapping are excluded.
+
+        Mirrors the v1 ``TagAliasRepository.get_suggestions`` algorithm.
+        """
+        # -- tag IDs already used in aliases -----------------------------------
+        alias_rows = self.session.execute(
+            select(models.TagAlias.source, models.TagAlias.target)
+        ).all()
+        excluded_ids: set[int] = set()
+        for src_id, tgt_id in alias_rows:
+            excluded_ids.add(src_id)
+            excluded_ids.add(tgt_id)
+
+        # -- target-tag mode --------------------------------------------------
+        if target_tag:
+            tag = self.session.execute(
+                select(models.Tag).where(models.Tag.name == target_tag)
+            ).scalar_one_or_none()
+            if not tag or tag.id in excluded_ids:
+                return {"items": [], "next_offset": 0}
+            candidates = self._find_similar_tags(tag, excluded_ids)
+            item = self._make_suggest_item(tag, candidates)
+            return {"items": [item] if candidates else [], "next_offset": 0}
+
+        # -- general mode: paginate through tags by reference_count ------------
+        results: list[dict] = []
+        current_offset = offset
+
+        while len(results) < limit:
+            tags = self.session.execute(
+                select(models.Tag)
+                .order_by(models.Tag.reference_count.desc())
+                .offset(current_offset).limit(50)
+            ).scalars().all()
+            if not tags:
+                break
+
+            for tag in tags:
+                current_offset += 1
+                if tag.id in excluded_ids or tag.reference_count == 0:
+                    continue
+
+                candidates = self._find_similar_tags(tag, excluded_ids)
+                if candidates:
+                    results.append(self._make_suggest_item(tag, candidates))
+                    if len(results) >= limit:
+                        break
+
+        return {"items": results, "next_offset": current_offset}
+
+    # ------------------------------------------------------------------
+    # suggest helpers
+    # ------------------------------------------------------------------
+
+    def _find_similar_tags(self, tag, excluded_ids: set[int]) -> list[dict]:
+        """Return up to 50 tags whose names are similar to *tag*.
+
+        Candidates match when they share the same first character (prefix)
+        or contain *tag.name* as a substring.  Tags whose IDs appear in
+        *excluded_ids* are filtered out.
+        """
+        first_char = tag.name[0] if tag.name else ""
+        if not first_char:
+            return []
+
+        candidates = self.session.execute(
+            select(models.Tag)
+            .where(
+                models.Tag.name.ilike(f"{first_char}%")
+                | models.Tag.name.ilike(f"%{tag.name}%")
+            )
+            .where(models.Tag.id != tag.id)
+            .order_by(models.Tag.reference_count.desc())
+            .limit(50)
+        ).scalars().all()
+
+        return [
+            {"id": c.id, "name": c.name, "reference_count": c.reference_count}
+            for c in candidates
+            if c.id not in excluded_ids
+        ]
+
+    @staticmethod
+    def _make_suggest_item(tag, candidates) -> dict:
+        return {
+            "target": {
+                "id": tag.id,
+                "name": tag.name,
+                "reference_count": tag.reference_count,
+            },
+            "candidates": candidates,
+        }
+
     async def apply_alias_retroactively(self, source: str, target: str) -> int:
         """Replace all occurrences of *source* tag with *target* tag on novels.
 

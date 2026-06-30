@@ -25,7 +25,7 @@ export function useNovels() {
       min_like: filters.min_like,
       min_text: filters.min_text,
       cursor: (cursor as Record<string, unknown>) || undefined,
-      per_page: 15,
+      per_page: 30,
     })
 
     return {
