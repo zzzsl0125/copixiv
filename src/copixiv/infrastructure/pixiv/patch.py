@@ -8,8 +8,8 @@ explicitly via ``apply()``, never as an import-time side effect.
 from __future__ import annotations
 
 import json
-from importlib.metadata import version
-from typing import Any
+from functools import wraps
+from typing import Any, Callable
 
 from copixiv.app.logger import logger
 from pixivpy3 import AppPixivAPI
@@ -17,6 +17,23 @@ from pixivpy3.aapi import ParsedJson, _MODE, _FILTER, DateOrStr
 from pixivpy3.utils import PixivError
 
 _patches_applied: bool = False
+
+
+def safe_patch(name: str) -> Callable:
+    """Decorator that wraps a patch function in try/except with logging.
+
+    Eliminates the copy-pasted try/except boilerplate that was previously
+    duplicated in all four ``_patch_*`` functions.
+    """
+    def decorator(fn: Callable) -> Callable:
+        @wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> None:
+            try:
+                fn(*args, **kwargs)
+            except Exception:
+                logger.exception(f"Failed to patch {name}")
+        return wrapper
+    return decorator
 
 
 def apply() -> None:
@@ -36,50 +53,46 @@ def apply() -> None:
 # Patch: parse_result fallback
 # -----------------------------------------------------------------------
 
+@safe_patch("parse_result")
 def _patch_parse_result() -> None:
-    try:
-        _original = AppPixivAPI.parse_result
+    _original = AppPixivAPI.parse_result
 
-        def _permissive(self, req):
+    def _permissive(self, req):
+        try:
+            return _original(self, req)
+        except Exception as e:
+            logger.debug(
+                f"Pydantic validation failed, falling back to ParsedJson: {e}"
+            )
             try:
-                return _original(self, req)
-            except Exception as e:
-                logger.debug(
-                    f"Pydantic validation failed, falling back to ParsedJson: {e}"
+                return ParsedJson(json.loads(req.text))
+            except Exception:
+                return ParsedJson(
+                    json.loads(req.content.decode("utf-8", "ignore"))
                 )
-                try:
-                    return ParsedJson(json.loads(req.text))
-                except Exception:
-                    return ParsedJson(
-                        json.loads(req.content.decode("utf-8", "ignore"))
-                    )
 
-        AppPixivAPI.parse_result = _permissive
-    except Exception:
-        logger.exception("Failed to patch parse_result")
+    AppPixivAPI.parse_result = _permissive
 
 
 # -----------------------------------------------------------------------
 # Patch: webview_novel error handling
 # -----------------------------------------------------------------------
 
+@safe_patch("webview_novel")
 def _patch_webview_novel() -> None:
-    try:
-        _original = AppPixivAPI.webview_novel
+    _original = AppPixivAPI.webview_novel
 
-        def _patched(self, *args, **kwargs):
-            try:
-                return _original(self, *args, **kwargs)
-            except PixivError as e:
-                if "extract novel content" in str(e).lower():
-                    novel_id = args[0] if args else kwargs.get("novel_id")
-                    logger.error(f"Failed to fetch novel#{novel_id}: {e}")
-                    return None
-                raise
+    def _patched(self, *args, **kwargs):
+        try:
+            return _original(self, *args, **kwargs)
+        except PixivError as e:
+            if "extract novel content" in str(e).lower():
+                novel_id = args[0] if args else kwargs.get("novel_id")
+                logger.error(f"Failed to fetch novel#{novel_id}: {e}")
+                return None
+            raise
 
-        AppPixivAPI.webview_novel = _patched
-    except Exception:
-        logger.exception("Failed to patch webview_novel")
+    AppPixivAPI.webview_novel = _patched
 
 
 # -----------------------------------------------------------------------
@@ -98,8 +111,12 @@ def _sanitize_none_to_str(data: Any) -> Any:
 def _permissive_model_construct(json_data: Any, model: type) -> Any:
     """Try model_validate, retry with None→'' sanitise, then fall back."""
     if isinstance(json_data, dict) and "error" in json_data:
-        error_msg = json_data["error"].get("message", str(json_data["error"]))
-        logger.error(f"API error for {model.__name__}: {error_msg}")
+        error_data = json_data["error"]
+        if isinstance(error_data, dict):
+            error_msg = error_data.get("message", str(error_data))
+        else:
+            error_msg = str(error_data)
+        logger.warning(f"API error for {model.__name__}: {error_msg}")
         return json_data
 
     try:
@@ -119,49 +136,45 @@ def _permissive_model_construct(json_data: Any, model: type) -> Any:
                 return json_data
 
 
+@safe_patch("_load_result/_load_model")
 def _patch_load_result_and_model() -> None:
-    try:
-        _original_load_result = AppPixivAPI._load_result
-        _original_load_model = AppPixivAPI._load_model
+    _original_load_result = AppPixivAPI._load_result
+    _original_load_model = AppPixivAPI._load_model
 
-        def _load_result(self, res, model):
-            return _permissive_model_construct(self.parse_result(res), model)
+    def _load_result(self, res, model):
+        return _permissive_model_construct(self.parse_result(res), model)
 
-        def _load_model(cls, data, model):
-            return _permissive_model_construct(data, model)
+    def _load_model(cls, data, model):
+        return _permissive_model_construct(data, model)
 
-        AppPixivAPI._load_result = _load_result
-        AppPixivAPI._load_model = _load_model
-    except Exception:
-        logger.exception("Failed to patch _load_result/_load_model")
+    AppPixivAPI._load_result = _load_result
+    AppPixivAPI._load_model = _load_model
 
 
 # -----------------------------------------------------------------------
 # Patch: novel_ranking (missing from pixivpy3)
 # -----------------------------------------------------------------------
 
+@safe_patch("novel_ranking")
 def _patch_novel_ranking() -> None:
-    try:
 
-        def novel_ranking(
-            self,
-            mode: _MODE = "day_r18",
-            filter: _FILTER = "for_ios",
-            date: DateOrStr | None = None,
-            offset: int | str | None = None,
-            req_auth: bool = True,
-        ) -> ParsedJson:
-            url = f"{self.hosts}/v1/novel/ranking"
-            params: dict[str, Any] = {"mode": mode, "filter": filter}
-            if date:
-                params["date"] = self._format_date(date)
-            if offset:
-                params["offset"] = offset
-            r = self.no_auth_requests_call(
-                "GET", url, params=params, req_auth=req_auth
-            )
-            return self.parse_result(r)
+    def novel_ranking(
+        self,
+        mode: _MODE = "day_r18",
+        filter: _FILTER = "for_ios",
+        date: DateOrStr | None = None,
+        offset: int | str | None = None,
+        req_auth: bool = True,
+    ) -> ParsedJson:
+        url = f"{self.hosts}/v1/novel/ranking"
+        params: dict[str, Any] = {"mode": mode, "filter": filter}
+        if date:
+            params["date"] = self._format_date(date)
+        if offset:
+            params["offset"] = offset
+        r = self.no_auth_requests_call(
+            "GET", url, params=params, req_auth=req_auth
+        )
+        return self.parse_result(r)
 
-        AppPixivAPI.novel_ranking = novel_ranking
-    except Exception:
-        logger.exception("Failed to patch novel_ranking")
+    AppPixivAPI.novel_ranking = novel_ranking

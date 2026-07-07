@@ -1,8 +1,8 @@
 """Application configuration — Pydantic Settings with YAML + env support.
 
 Load order: defaults → YAML file → environment variables (prefix ``COPIXIV_``).
-The config is created as a module-level singleton via ``_load_config()``,
-exactly matching the old project's convention so imports stay unchanged.
+The config is accessed via :func:`get_config`, which lazily loads and caches
+the ``AppConfig`` singleton on first call.
 """
 
 import os
@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 class PathConfig(BaseModel):
     """Filesystem paths for data and tokens."""
 
-    token: str = "pixiv_token"
+    token: str = "pixiv_token.py"
     database: str = "database/database.db"
     download: str = "download"
 
@@ -71,7 +71,6 @@ class AppConfig(BaseModel):
     pixiv_accounts: PixivAccountsConfig = Field(
         default_factory=PixivAccountsConfig
     )
-    notify_on_new_novel: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +107,7 @@ def _deep_merge(base: dict, overrides: dict) -> dict:
     return base
 
 
-def _load_config(config_path: str | None = None) -> AppConfig:
+def load_config(config_path: str | None = None) -> AppConfig:
     """Load configuration from YAML file (if present), then apply env overrides.
 
     Raises:
@@ -135,6 +134,31 @@ def _load_config(config_path: str | None = None) -> AppConfig:
         ) from e
 
 
-# Module-level singleton — same convention as the old project so call sites
-# that do ``from copixiv.app.config import config`` continue to work.
-config: AppConfig = _load_config()
+# Lazy singleton — loaded on first access instead of at import time.
+# This allows tests to import the module without a config.yaml file.
+_config: AppConfig | None = None
+
+
+def get_config(config_path: str | None = None) -> AppConfig:
+    """Return the cached ``AppConfig`` singleton, loading it lazily.
+
+    The first call triggers the YAML read; subsequent calls return the
+    cached instance.  Pass *config_path* to load a non-default file.
+    """
+    global _config
+    if _config is None:
+        _config = load_config(config_path)
+    return _config
+
+
+def __getattr__(name: str):
+    """Lazy module-level ``config`` alias for backwards compatibility.
+
+    Allows ``from copixiv.app.config import config`` to work without
+    triggering the YAML load at import time (which would raise
+    ``SystemExit`` if ``config.yaml`` is missing, breaking test imports).
+    The load is deferred until the first actual access of ``config``.
+    """
+    if name == "config":
+        return get_config()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

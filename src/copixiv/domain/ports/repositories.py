@@ -3,7 +3,7 @@
 from typing import Protocol, runtime_checkable
 from collections.abc import Sequence
 
-from copixiv.domain.models.novel import Novel, Favourite
+from copixiv.domain.models.novel import Novel
 from copixiv.domain.models.author import Author
 from copixiv.domain.models.series import Series
 from copixiv.domain.models.tag import Tag, TagPreference, TagAlias

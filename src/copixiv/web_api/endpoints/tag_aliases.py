@@ -1,19 +1,23 @@
 """Tag alias API endpoints."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from copixiv.web_api.deps import get_db
 from copixiv.infrastructure.repositories.tag import TagRepository
-from copixiv.web_api.schemas import TagAliasSuggestListResponse
+from copixiv.web_api.schemas import TagAliasCreate, TagAliasSuggestListResponse
+from copixiv.application.tag import (
+    ListAliasesUseCase, SuggestAliasesUseCase,
+    CreateAliasUseCase, DeleteAliasUseCase,
+)
 
 router = APIRouter()
 
 
 @router.get("/")
 async def get_tag_aliases(db: Session = Depends(get_db)):
-    repo = TagRepository(db)
-    return await repo.get_aliases()
+    use_case = ListAliasesUseCase(TagRepository(db))
+    return await use_case.execute()
 
 
 @router.get("/suggest", response_model=TagAliasSuggestListResponse)
@@ -23,47 +27,21 @@ async def suggest_tag_aliases(
     target_tag: str | None = Query(None),
     db: Session = Depends(get_db),
 ):
-    """Suggest alias mappings by finding tags with similar names.
-
-    Tags are ranked by ``reference_count`` descending.  For each
-    high-reference tag the endpoint looks for other tags whose
-    normalized names are similar and returns them as candidates.
-    Tags already participating in an existing alias mapping are
-    excluded from the results.
-    """
-    repo = TagRepository(db)
-    return await repo.suggest_aliases(
-        limit=limit, offset=offset, target_tag=target_tag,
-    )
+    use_case = SuggestAliasesUseCase(TagRepository(db))
+    return await use_case.execute(limit=limit, offset=offset, target_tag=target_tag)
 
 
 @router.post("/")
-async def create_tag_alias(data: dict, db: Session = Depends(get_db)):
-    if data.get("source") == data.get("target"):
-        raise HTTPException(status_code=400, detail="原标签不能和目标标签相同")
-    repo = TagRepository(db)
-    try:
-        alias = await repo.create_alias(data)
-        await repo.apply_alias_retroactively(data["source"], data["target"])
-        db.commit()
-        return alias
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e)) from e
+async def create_tag_alias(data: TagAliasCreate, db: Session = Depends(get_db)):
+    use_case = CreateAliasUseCase(TagRepository(db))
+    alias = await use_case.execute(data.model_dump())
+    db.commit()
+    return alias
 
 
 @router.delete("/{alias_id}")
 async def delete_tag_alias(alias_id: int, db: Session = Depends(get_db)):
-    repo = TagRepository(db)
-    try:
-        if not await repo.delete_alias(alias_id):
-            raise HTTPException(status_code=404)
-        db.commit()
-        return {"ok": True}
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e)) from e
+    use_case = DeleteAliasUseCase(TagRepository(db))
+    await use_case.execute(alias_id)
+    db.commit()
+    return {"ok": True}

@@ -41,14 +41,20 @@ def backup_database(
     if dest.exists():
         dest.unlink()
 
+    own_engine = False
     if engine is None:
         from sqlalchemy import create_engine
         engine = create_engine(f"sqlite:///{database_path}")
+        own_engine = True
 
-    with engine.connect() as conn:
-        conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
-        conn.execute(text(f"VACUUM INTO '{dest}'"))
-        conn.commit()
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+            conn.execute(text(f"VACUUM INTO '{dest}'"))
+            conn.commit()
+    finally:
+        if own_engine:
+            engine.dispose()
 
     return str(dest)
 

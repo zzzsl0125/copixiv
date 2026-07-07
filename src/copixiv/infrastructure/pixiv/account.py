@@ -18,6 +18,8 @@ class TokenInfo:
     username: str
     premium: bool = False
     valid: bool = True
+    id: int = 0
+    password: str = ""
 
 
 @dataclass
@@ -79,8 +81,17 @@ class PixivAccount:
         self.min_interval = min_interval
         self.cooling_duration = cooling_duration
 
+        # Track when the last successful auth() happened so we can
+        # re-authenticate before the Pixiv access token expires (~1 h).
+        self._last_auth_time: float = 0.0
+
         self._auth_lock = asyncio.Lock()
         self._req_lock = asyncio.Lock()
+
+    # Access tokens from Pixiv typically expire after 1 hour.
+    # Re-authenticate if the last auth was more than 50 minutes ago
+    # to avoid using an expired token.
+    _AUTH_TTL: float = 50 * 60  # 50 minutes
 
     def __str__(self) -> str:
         return f"[{self.username[:6]}]"
@@ -89,11 +100,11 @@ class PixivAccount:
 
     @property
     def in_cooldown(self) -> bool:
-        return time.time() < self._cooldown_until
+        return time.monotonic() < self._cooldown_until
 
     @property
     def cooldown_remaining(self) -> float:
-        return max(0.0, self._cooldown_until - time.time())
+        return max(0.0, self._cooldown_until - time.monotonic())
 
     @property
     def valid(self) -> bool:
@@ -105,7 +116,7 @@ class PixivAccount:
             return False
         if (
             self.status == AccountStatus.ACTIVE
-            and time.time() - self.last_req_time > 3500
+            and time.monotonic() - self.last_req_time > 3500
         ):
             self.status = AccountStatus.INACTIVE
         return self.status == AccountStatus.ACTIVE
@@ -113,7 +124,7 @@ class PixivAccount:
     # -- actions -------------------------------------------------------------
 
     def start_cooldown(self, duration: float | None = None) -> None:
-        self._cooldown_until = time.time() + (duration or self.cooling_duration)
+        self._cooldown_until = time.monotonic() + (duration or self.cooling_duration)
 
     def _create_api(self, proxy_http: str, proxy_https: str) -> AppPixivAPI:
         proxies = {"http": proxy_http, "https": proxy_https}
@@ -123,15 +134,29 @@ class PixivAccount:
         if self.status == AccountStatus.INVALID:
             raise AccountInvalidError(str(self))
 
-        if self.status == AccountStatus.ACTIVE:
+        # If we authenticated recently the access token is still valid;
+        # skip re-auth to avoid unnecessary OAuth round-trips.
+        if (
+            self.status == AccountStatus.ACTIVE
+            and time.monotonic() - self._last_auth_time < self._AUTH_TTL
+        ):
             return
 
         async with self._auth_lock:
+            # Double-checked locking: another coroutine may have
+            # refreshed the token while we were waiting for the lock.
+            if (
+                self.status == AccountStatus.ACTIVE
+                and time.monotonic() - self._last_auth_time < self._AUTH_TTL
+            ):
+                return
+
             try:
                 await asyncio.to_thread(
                     self.api.auth, refresh_token=self.token_info.token
                 )
                 self.status = AccountStatus.ACTIVE
+                self._last_auth_time = time.monotonic()
                 logger.info(f"{self} 认证成功")
             except PixivError as e:
                 if "auth() failed" in str(e).lower():
@@ -146,7 +171,7 @@ class PixivAccount:
         # Per-account rate limiting: ensure min_interval since the
         # *last completed* API call on this account (not since select).
         async with self._req_lock:
-            elapsed = time.time() - self._last_call_end
+            elapsed = time.monotonic() - self._last_call_end
             if elapsed < self.min_interval:
                 await asyncio.sleep(self.min_interval - elapsed)
 
@@ -154,7 +179,33 @@ class PixivAccount:
                 func = getattr(self.api, method)
                 logger.info(f"{self} API → {method}({_fmt_args(args, kwargs)})")
                 result = await asyncio.to_thread(func, *args, **kwargs)
-                self._last_call_end = time.time()
+                self._last_call_end = time.monotonic()
+
+                # -- Safety net: detect auth errors returned in the response
+                # body rather than raised as exceptions.  The pixivpy3
+                # monkey-patches in ``patch.py`` may return an error dict
+                # (``{"error": {...}}``) instead of letting pixivpy3 raise.
+                if isinstance(result, dict) and "error" in result:
+                    error_data = result["error"]
+                    error_msg = (
+                        error_data.get("message", "")
+                        if isinstance(error_data, dict)
+                        else str(error_data)
+                    )
+                    if any(
+                        kw in error_msg.lower()
+                        for kw in ("oauth", "invalid_grant", "access token")
+                    ):
+                        logger.warning(
+                            f"{self} API returned auth error in body, "
+                            f"re-authenticating: {error_msg}",
+                        )
+                        # Force re-auth and retry once with a fresh token.
+                        self.status = AccountStatus.INACTIVE
+                        await self.authenticate()
+                        result = await asyncio.to_thread(func, *args, **kwargs)
+                        self._last_call_end = time.monotonic()
+
                 logger.debug(f"{self} {method} completed.")
                 return result
             except PixivError as e:

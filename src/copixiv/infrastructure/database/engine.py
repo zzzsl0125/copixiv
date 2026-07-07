@@ -22,8 +22,9 @@ def create_database_engine(
         database_path: Path to the SQLite database file.
         echo: If True, log all SQL statements.
 
-    Pool config: QueuePool(pool_size=1, max_overflow=3) — one persistent
-    connection plus up to 3 overflow connections for concurrent reads.
+    Pool config: QueuePool(pool_size=3, max_overflow=5) — three persistent
+    connections for concurrent reads (WAL mode supports multiple readers)
+    plus up to 5 overflow connections for bursts.
     """
     db_path = Path(database_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -33,9 +34,8 @@ def create_database_engine(
         connect_args={"check_same_thread": False},
         echo=echo,
         poolclass=QueuePool,
-        pool_size=1,
-        max_overflow=3,
-        pool_pre_ping=True,
+        pool_size=3,
+        max_overflow=5,
     )
 
     @event.listens_for(engine, "connect")

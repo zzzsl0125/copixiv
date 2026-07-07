@@ -17,12 +17,54 @@ from __future__ import annotations
 from typing import Any
 
 from sqlalchemy import (
-    select, func, case, Select, text as _text, literal_column,
+    select, func, case, Select, text as _text, literal_column, exists as _exists,
+    table, column, Integer, tuple_ as _tuple,
 )
 from sqlalchemy.orm import Session
 
 from copixiv.infrastructure.database import models
 from copixiv.infrastructure.database import constants as C
+
+# ------------------------------------------------------------------
+# FTS availability cache — checked once per process lifetime.
+# The FTS virtual table is created at database init and persists, so
+# there is no need to probe it on every single keyword query.
+# ------------------------------------------------------------------
+_fts_available: bool | None = None
+
+
+# Lightweight table reference for the FTS5 virtual table so SQLAlchemy's
+# ORM compile state can handle subqueries that select from it (TextClause
+# lacks a .selectable attribute and causes AttributeError).
+_fts_table = table(
+    C.TABLE_NOVEL_FTS,
+    column("rowid", Integer),
+)
+
+
+def reset_fts_cache() -> None:
+    """Reset the FTS availability cache (call after FTS index rebuild)."""
+    global _fts_available
+    _fts_available = None
+
+
+def _check_fts_available(session: Session) -> bool:
+    """Return True if the FTS virtual table exists in the database.
+
+    The result is cached at module level — the check runs at most once
+    per process lifetime (unless ``reset_fts_cache()`` is called).
+    """
+    global _fts_available
+    if _fts_available is not None:
+        return _fts_available
+    try:
+        session.execute(
+            _text(f"SELECT 1 FROM {C.TABLE_NOVEL_FTS} LIMIT 0")
+        )
+        _fts_available = True
+    except Exception:
+        _fts_available = False
+    return _fts_available
 
 
 class BaseQueryBuilder:
@@ -68,71 +110,76 @@ class BaseQueryBuilder:
         if not tokens:
             return ""
 
+        # Escape single-quotes by doubling them — the FTS query is embedded
+        # in a SQL string literal so unescaped quotes break the query.
         return " AND ".join(
-            f'"{t}"' if " " in t else t for t in tokens
+            f'"{t}"' if " " in t else t.replace("'", "''") for t in tokens
         )
-
-    # ------------------------------------------------------------------
-    # Hash-based pseudo-random sort key (deterministic, seed-driven)
-    # ------------------------------------------------------------------
-    # Uses a multiplicative hash so that "random" ordering is repeatable
-    # across pages: same seed → same global order.  The formula is
-    #   ((id * A + seed * B) & MASK) % MOD
-    # with large primes to produce good dispersion without overflow.
-    _RAND_A: int = 393555900037
-    _RAND_B: int = 1728364729
-    _RAND_MASK: int = 0x7FFFFFFFFFFFFFFF   # clear sign bit (63-bit)
-    _RAND_MOD: int = 9223372036854775783   # a large prime
-
-    def _hash_sort_key(self, seed: int):
-        """Return a SQLAlchemy expression for the deterministic sort key."""
-        inner = (
-            self.main_model.id * self._RAND_A
-            + seed * self._RAND_B
-        )
-        masked = inner.op("&")(self._RAND_MASK)
-        return masked.op("%")(self._RAND_MOD)
 
     def _apply_cursor(
         self, stmt: Select, cursor: dict | None, order_by: str,
+        order_direction: str = "DESC",
     ) -> Select:
-        """Apply cursor-based keyset pagination."""
+        """Apply cursor-based keyset pagination.
+
+        Uses ``<`` for DESC (next page = smaller values) and ``>`` for ASC
+        (next page = larger values).  Secondary-sorts on ``id`` to avoid
+        skipping or duplicating rows that share the same sort-column value.
+        """
         if not cursor:
             return stmt
 
-        # Pseudo-random ordering — compare hash sort keys
-        if order_by == "random" and "random" in cursor and "id" in cursor:
-            seed = cursor.get("random_seed", 0)
-            sort_key = self._hash_sort_key(seed)
-            last_hash = cursor["random"]
+        # Precomputed shuffle column for random ordering — seek on index
+        if order_by == "random" and "shuffle" in cursor and "id" in cursor:
+            last_shuffle = cursor["shuffle"]
             last_id = cursor["id"]
             return stmt.where(
-                (sort_key > last_hash)
-                | ((sort_key == last_hash) & (self.main_model.id > last_id))
+                _tuple(self.main_model.shuffle, self.main_model.id)
+                > _tuple(last_shuffle, last_id)
             )
 
         col = getattr(self.main_model, order_by, None)
         if col is not None:
-            stmt = stmt.where(col < cursor[order_by])
+            # Tiebreaker: when multiple rows share the same sort-column
+            # value, secondary-sort by id so no row is skipped or
+            # duplicated across pages.
+            #
+            # Use row-value tuple comparison (col, id) < (cursor_val, cursor_id)
+            # instead of (col < cursor_val) OR (col = cursor_val AND id < cursor_id).
+            # The tuple form lets SQLite use a single index range scan on a
+            # composite (col, id) index — the OR form forces a UNION of two
+            # separate seeks, which is dramatically slower on page 2 (the first
+            # page with a cursor) because it cannot terminate early after LIMIT
+            # rows and must exhaust both OR branches.
+            descending = order_direction.upper() == "DESC"
+            cursor_val = cursor[order_by]
+            cursor_id = cursor["id"]
+            if descending:
+                stmt = stmt.where(
+                    _tuple(col, self.main_model.id) < _tuple(cursor_val, cursor_id)
+                )
+            else:
+                stmt = stmt.where(
+                    _tuple(col, self.main_model.id) > _tuple(cursor_val, cursor_id)
+                )
         return stmt
 
     def _apply_ordering(
         self, stmt: Select, order_by: str, order_direction: str,
     ) -> Select:
         """Apply ORDER BY clause."""
-        # Pseudo-random ordering — sort by hash(id, seed), then id
+        # Precomputed shuffle column — walk index, no temp B-Tree.
         if order_by == "random":
-            cursor = self.params.get("cursor") or {}
-            seed = cursor.get("random_seed", 0)
-            sort_key = self._hash_sort_key(seed)
-            return stmt.order_by(sort_key.asc(), self.main_model.id.asc())
+            return stmt.order_by(
+                self.main_model.shuffle.asc(), self.main_model.id.asc(),
+            )
 
         col = getattr(self.main_model, order_by, None)
         if col is not None:
             if order_direction.upper() == "DESC":
-                return stmt.order_by(col.desc())
+                return stmt.order_by(col.desc(), self.main_model.id.desc())
             else:
-                return stmt.order_by(col.asc())
+                return stmt.order_by(col.asc(), self.main_model.id.asc())
         return stmt
 
     def _apply_limit(self, stmt: Select, limit: int) -> Select:
@@ -191,9 +238,11 @@ class NovelQueryBuilder(BaseQueryBuilder):
         # Filter JOINs for favourite / special_follow (WHERE-IN subqueries)
         main = self._join_field_filter_tables(main, field_filters)
 
-        # WHERE-IN filters for tags and FTS (independent subqueries)
-        main = self._where_tag_filter(main, tags)
-        main = self._where_fts_filter(main, keywords)
+        # Tag and FTS filters — use EXISTS for list queries so SQLite
+        # can walk the covering index for ORDER BY + LIMIT without a
+        # temporary B-Tree (benchmarked: 347 ms → 1 ms).
+        main = self._where_tag_filter(main, tags, use_exists=True)
+        main = self._where_fts_filter(main, keywords, use_exists=True)
 
         # WHERE conditions on novel columns
         main = self._where_field_filters(main, field_filters)
@@ -202,6 +251,7 @@ class NovelQueryBuilder(BaseQueryBuilder):
         # Pagination, ordering, limit — applied last so indexes can serve ORDER BY
         main = self._apply_cursor(
             main, self.params.get("cursor"), self.params["order_by"],
+            self.params.get("order_direction", "DESC"),
         )
         main = self._apply_ordering(
             main, self.params["order_by"], self.params["order_direction"],
@@ -229,8 +279,11 @@ class NovelQueryBuilder(BaseQueryBuilder):
 
         stmt = select(func.count()).select_from(self.main_model)
         stmt = self._join_field_filter_tables(stmt, field_filters)
-        stmt = self._where_tag_filter(stmt, tags)
-        stmt = self._where_fts_filter(stmt, keywords)
+        # COUNT queries keep WHERE-IN for tags/FTS: EXISTS evaluates the
+        # correlated subquery once per row (22 s for 58 K rows), whereas
+        # WHERE-IN materialises once (317 ms).
+        stmt = self._where_tag_filter(stmt, tags, use_exists=False)
+        stmt = self._where_fts_filter(stmt, keywords, use_exists=False)
         stmt = self._where_field_filters(stmt, field_filters)
         stmt = self._where_thresholds(stmt)
         return stmt
@@ -244,11 +297,14 @@ class NovelQueryBuilder(BaseQueryBuilder):
         skip_favourite_join: bool = False,
         skip_special_follow_join: bool = False,
     ) -> Select:
-        """Build the SELECT clause with all novel columns + display flags.
+        """Build the SELECT clause with all novel columns + display flags + tags.
 
         When the query already filters by *is_favourite* or
         *is_special_follow*, the corresponding OUTER JOIN can be skipped
         because the flag value is statically known (1).
+
+        Tags are fetched inline via a correlated scalar subquery —
+        no second database round-trip needed (``_load_tags`` is gone).
         """
         cols: list = list(self.main_model.__table__.c)
 
@@ -269,6 +325,18 @@ class NovelQueryBuilder(BaseQueryBuilder):
                     (models.SpecialFollow.author_id != None, 1), else_=0,
                 ).label(C.FIELD_IS_SPECIAL_FOLLOW),
             )
+
+        # Tags: correlated scalar subquery — walks covering index on
+        # novel_tag(novel_id, tag_id), no GROUP BY on the outer query.
+        tags_subq = (
+            select(func.coalesce(func.group_concat(models.Tag.name, '|'), ''))
+            .select_from(models.NovelTag)
+            .join(models.Tag, models.NovelTag.tag_id == models.Tag.id)
+            .where(models.NovelTag.novel_id == self.main_model.id)
+            .correlate(self.main_model)
+            .scalar_subquery()
+        ).label(C.COL_TAGS)
+        cols.append(tags_subq)
 
         stmt = select(*cols).select_from(self.main_model)
 
@@ -307,49 +375,77 @@ class NovelQueryBuilder(BaseQueryBuilder):
         return tags, keywords, field_filters
 
     # ------------------------------------------------------------------
-    # Internal: tag filter — WHERE novel.id IN (independent subquery)
+    # Internal: tag filter — WHERE-IN (count) or EXISTS (list)
     # ------------------------------------------------------------------
 
-    def _where_tag_filter(self, stmt: Select, tag_names: set[str]) -> Select:
-        """Add ``WHERE novel.id IN (tag_subquery)`` for each tag.
+    def _where_tag_filter(
+        self, stmt: Select, tag_names: set[str], use_exists: bool = False,
+    ) -> Select:
+        """Add tag filter conditions.
 
-        Uses independent (non-correlated) subqueries so SQLite can still
-        use covering indexes on the novel table for ORDER BY + LIMIT.
+        Two strategies depending on the caller:
 
-        Single tag: ``WHERE novel.id IN (SELECT novel_id FROM novel_tag
-        JOIN tag WHERE tag.name = 'X')``
+        *use_exists=True* (list queries with ORDER BY + LIMIT):
+            ``WHERE EXISTS (SELECT 1 FROM novel_tag JOIN tag
+            WHERE novel_tag.novel_id = novel.id AND tag.name = 'X')``
 
-        Multiple tags: one IN subquery per tag (intersection via chained
-        WHERE-IN clauses).  INTERSECT is also viable but WHERE-IN chains
-        are simpler and let SQLite choose the best index strategy.
+            The correlated subquery lets SQLite walk the covering index
+            (e.g. ``idx_novel_like_text_id``) for ORDER BY + LIMIT and
+            probe each novel for the tag — early termination after ~55
+            rows for popular tags.  Benchmark: **1 ms** vs 347 ms.
+
+        *use_exists=False* (COUNT and filter-only queries):
+            ``WHERE novel.id IN (SELECT novel_id FROM novel_tag JOIN tag
+            WHERE tag.name = 'X')``
+
+            The independent subquery is materialised once, which is much
+            faster when every matching row must be visited (COUNT has no
+            LIMIT to stop early).  Benchmark: **317 ms** vs 22 424 ms.
+
+        Multiple tags use chained conditions (AND semantics).
         """
         if not tag_names:
             return stmt
 
         for tag_name in tag_names:
-            tag_ids_subq = (
-                select(models.NovelTag.novel_id)
-                .join(models.Tag, models.NovelTag.tag_id == models.Tag.id)
-                .where(models.Tag.name == tag_name)
-            )
-            stmt = stmt.where(self.main_model.id.in_(tag_ids_subq))
+            if use_exists:
+                exists_subq = _exists(
+                    select(literal_column("1"))
+                    .select_from(models.NovelTag)
+                    .join(models.Tag, models.NovelTag.tag_id == models.Tag.id)
+                    .where(
+                        models.NovelTag.novel_id == self.main_model.id,
+                        models.Tag.name == tag_name,
+                    )
+                )
+                stmt = stmt.where(exists_subq)
+            else:
+                tag_ids_subq = (
+                    select(models.NovelTag.novel_id)
+                    .join(models.Tag, models.NovelTag.tag_id == models.Tag.id)
+                    .where(models.Tag.name == tag_name)
+                )
+                stmt = stmt.where(self.main_model.id.in_(tag_ids_subq))
         return stmt
 
     # ------------------------------------------------------------------
-    # Internal: FTS / keyword filter — WHERE novel.id IN (fts subquery)
+    # Internal: FTS / keyword filter — WHERE-IN (count) or EXISTS (list)
     # ------------------------------------------------------------------
 
     def _where_fts_filter(
-        self, stmt: Select, keywords: set[str],
+        self, stmt: Select, keywords: set[str], use_exists: bool = False,
     ) -> Select:
-        """Add ``WHERE novel.id IN (SELECT rowid FROM novel_fts WHERE
-        novel_fts MATCH 'query')``.
+        """Add FTS keyword filter.
 
-        Uses raw SQL for the FTS virtual table because it may not be
-        registered in SQLAlchemy's MetaData (created via raw DDL).
+        Two strategies (same trade-off as ``_where_tag_filter``):
 
-        The subquery is independent — does NOT reference the outer
-        ``novel.id`` — so SQLite materialises it once.
+        *use_exists=True* (list queries):
+            ``WHERE EXISTS (SELECT 1 FROM novel_fts
+            WHERE novel_fts MATCH 'q' AND rowid = novel.id)``
+
+        *use_exists=False* (COUNT / filter-only):
+            ``WHERE novel.id IN (SELECT rowid FROM novel_fts
+            WHERE novel_fts MATCH 'q')``
         """
         if not keywords:
             return stmt
@@ -361,25 +457,34 @@ class NovelQueryBuilder(BaseQueryBuilder):
         fts_query = self._build_fts_query_string(keyword_string)
         self._fts_query = fts_query
 
-        # Check that the FTS virtual table exists in the database
-        try:
-            self.session.execute(
-                _text(f"SELECT 1 FROM {C.TABLE_NOVEL_FTS} LIMIT 0")
-            )
-        except Exception:
+        # Check that the FTS virtual table exists in the database.
+        # Result is cached at module level — only probes DB once per process.
+        if not _check_fts_available(self.session):
             return stmt
 
-        # Build: WHERE novel.id IN (SELECT rowid FROM novel_fts WHERE novel_fts MATCH '...')
-        # Using raw text because novel_fts is a virtual table that may not
-        # be in SQLAlchemy MetaData, and its columns (rowid) aren't ORM-mapped.
-        inner = (
-            select(literal_column("rowid"))
-            .select_from(_text(C.TABLE_NOVEL_FTS))
-            .where(
-                _text(f"{C.TABLE_NOVEL_FTS} MATCH '{fts_query}'")
+        if use_exists:
+            # Use _fts_table (a sqlalchemy.table() reference) instead of
+            # _text() for the FROM clause — _text() creates a TextClause
+            # which lacks .selectable and crashes the ORM compile state.
+            exists_subq = _exists(
+                select(literal_column("1"))
+                .select_from(_fts_table)
+                .where(
+                    _text(f"{C.TABLE_NOVEL_FTS} MATCH '{fts_query}'"),
+                    _fts_table.c.rowid == self.main_model.id,
+                )
             )
-        )
-        return stmt.where(self.main_model.id.in_(inner))
+            stmt = stmt.where(exists_subq)
+        else:
+            inner = (
+                select(literal_column("rowid"))
+                .select_from(_text(C.TABLE_NOVEL_FTS))
+                .where(
+                    _text(f"{C.TABLE_NOVEL_FTS} MATCH '{fts_query}'")
+                )
+            )
+            stmt = stmt.where(self.main_model.id.in_(inner))
+        return stmt
 
     # ------------------------------------------------------------------
     # Internal: field filter tables (favourite, special_follow)
@@ -441,11 +546,16 @@ class NovelQueryBuilder(BaseQueryBuilder):
     # ------------------------------------------------------------------
 
     def _where_thresholds(self, stmt: Select) -> Select:
-        """Add WHERE conditions for min_like / min_text thresholds."""
+        """Add WHERE conditions for min_like / min_text thresholds.
+
+        Uses bare column comparisons (no COALESCE) so SQLite can do a
+        direct index range scan.  The ``novel.like`` column has zero NULL
+        values in this dataset, and ``NULL >= 500`` evaluates to NULL
+        (falsy) in any case, so COALESCE is unnecessary.
+        """
         if self.params.get("min_like") is not None:
             stmt = stmt.where(
-                func.coalesce(self.main_model.like, 0)
-                >= self.params["min_like"]
+                self.main_model.like >= self.params["min_like"]
             )
         if self.params.get("min_text") is not None:
             stmt = stmt.where(

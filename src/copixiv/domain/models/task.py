@@ -1,6 +1,8 @@
 """Task domain entities."""
 
+from datetime import datetime
 from enum import StrEnum
+
 from pydantic import BaseModel
 
 
@@ -18,8 +20,8 @@ class TaskHistory(BaseModel):
     name: str
     arguments: dict | None = None
     status: str = TaskStatus.PENDING
-    start_time: str
-    end_time: str | None = None
+    start_time: datetime
+    end_time: datetime | None = None
     duration: float | None = None
     result: dict | None = None
 

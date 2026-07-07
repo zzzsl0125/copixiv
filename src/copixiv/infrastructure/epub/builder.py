@@ -2,6 +2,7 @@
 
 import html
 import io
+import re
 from pathlib import Path
 
 from PIL import Image
@@ -13,7 +14,7 @@ from copixiv.domain.services.language import has_image_placeholders
 from copixiv.app.logger import logger
 
 # Pattern for embedded image placeholders — keep in sync with domain.services.language
-_HAS_IMAGE_PATTERN = __import__("re").compile(
+_HAS_IMAGE_PATTERN = re.compile(
     r"\[(uploadedimage|pixivimage):([\d\-]+)\]"
 )
 

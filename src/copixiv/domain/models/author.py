@@ -1,5 +1,7 @@
 """Author domain entity."""
 
+from datetime import datetime
+
 from pydantic import BaseModel
 
 
@@ -12,4 +14,4 @@ class Author(BaseModel):
     like: int = 0
     view: int = 0
     text: int = 0
-    last_update: str | None = None
+    last_update: datetime | None = None

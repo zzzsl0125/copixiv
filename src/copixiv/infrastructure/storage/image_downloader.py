@@ -1,5 +1,6 @@
 """Image downloader — fetches cover/illustration images in a thread pool."""
 
+import atexit
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -38,6 +39,14 @@ class ImageDownloader:
     ):
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
         self._epub_builder = epub_builder
+        atexit.register(self.shutdown)
+
+    def __del__(self) -> None:
+        """Best-effort cleanup — atexit is the primary safety net."""
+        try:
+            self._executor.shutdown(wait=False)
+        except Exception:
+            pass
 
     def download_image(
         self, url: str, save_path: Path, session: requests.Session | None = None

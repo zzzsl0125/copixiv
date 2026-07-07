@@ -36,7 +36,6 @@ download/
 
 # === Sensitive configuration ===
 config.yaml
-pixiv_token
 pixiv_token.py
 
 # === Test environment ===

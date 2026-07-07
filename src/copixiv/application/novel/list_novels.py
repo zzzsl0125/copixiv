@@ -17,7 +17,11 @@ class ListNovelsRequest:
 
 
 class ListNovelsUseCase:
-    """Retrieve a paginated, filtered list of novels."""
+    """Retrieve a paginated, filtered list of novels.
+
+    Also returns the parsed queries dict so the endpoint can schedule
+    search-history recording in a background task.
+    """
 
     def __init__(self, novel_repo: NovelRepository):
         self._repo = novel_repo

@@ -1,77 +1,57 @@
 """Task API endpoints — identical contract to v1."""
 
-import inspect
-
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from copixiv.web_api.schemas import (
-    ScheduledTaskCreate,
-    ScheduledTaskUpdate,
-    ScheduledTaskResponse,
-    TaskHistoryListResponse,
-    TaskHistoryResponse,
-    TaskMethod,
-    TaskArgument,
+    ScheduledTaskCreate, ScheduledTaskUpdate, ScheduledTaskResponse,
+    TaskHistoryListResponse, TaskMethod, TaskArgument,
 )
 from copixiv.web_api.deps import get_db
 from copixiv.infrastructure.repositories.task import TaskRepository
-from copixiv.tasks.registry import list_tasks
-import copixiv.tasks.novel_tasks  # ensure task @register decorators fire at import time  # noqa: F401
+from copixiv.application.task import (
+    GetMethodsUseCase, ListScheduledUseCase, CreateScheduledUseCase,
+    UpdateScheduledUseCase, DeleteScheduledUseCase, ReorderScheduledUseCase,
+    RunScheduledUseCase, GetHistoryUseCase,
+)
+import copixiv.tasks.novel_tasks  # noqa: F401 — ensure @register decorators fire
 
 router = APIRouter()
 
 
 @router.get("/methods", response_model=list[TaskMethod])
 def get_task_methods():
+    use_case = GetMethodsUseCase()
+    raw_methods = use_case.execute()
     methods = []
-    for name, func in list_tasks().items():
-        sig = inspect.signature(func)
-        arguments = []
-        for param_name, param in sig.parameters.items():
-            # Skip injected dependencies (keyword-only) and catch-all **_ kwargs
-            if param.kind not in (
-                inspect.Parameter.POSITIONAL_ONLY,
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            ):
-                continue
-            param_type = "str"
-            if param.annotation != inspect.Parameter.empty:
-                if param.annotation is int:
-                    param_type = "int"
-                elif param.annotation is bool:
-                    param_type = "bool"
-                elif param.annotation is float:
-                    param_type = "float"
-
-            default_val = None
-            required = True
-            if param.default != inspect.Parameter.empty:
-                default_val = param.default
-                required = False
-
-            arguments.append(TaskArgument(
-                name=param_name, type=param_type, default=default_val, required=required
-            ))
-        methods.append(TaskMethod(name=name, description=func.__doc__, arguments=arguments))
+    for m in raw_methods:
+        arguments = [
+            TaskArgument(name=a["name"], type=a["type"],
+                         default=a["default"], required=a["required"])
+            for a in m["arguments"]
+        ]
+        methods.append(TaskMethod(
+            name=m["name"], description=m["description"], arguments=arguments,
+        ))
     return methods
 
 
 @router.get("/scheduled", response_model=list[ScheduledTaskResponse])
 async def get_scheduled_tasks(db: Session = Depends(get_db)):
-    repo = TaskRepository(db)
-    tasks = await repo.get_scheduled_tasks()
-    return tasks
+    use_case = ListScheduledUseCase(TaskRepository(db))
+    return await use_case.execute()
 
 
 @router.post("/scheduled", response_model=ScheduledTaskResponse)
 async def create_scheduled_task(
-    task_in: ScheduledTaskCreate, db: Session = Depends(get_db), request: Request = None,
+    task_in: ScheduledTaskCreate, db: Session = Depends(get_db),
+    request: Request = None,
 ):
-    repo = TaskRepository(db)
-    task = await repo.create_scheduled(task_in.model_dump())
+    use_case = CreateScheduledUseCase(
+        TaskRepository(db), task_manager=request.app.state.task_manager,
+    )
+    task = await use_case.execute(task_in.model_dump())
     db.commit()
-    request.app.state.task_manager.reload_cron_jobs()
     return task
 
 
@@ -80,12 +60,11 @@ async def update_scheduled_task(
     task_id: int, task_in: ScheduledTaskUpdate,
     db: Session = Depends(get_db), request: Request = None,
 ):
-    repo = TaskRepository(db)
-    task = await repo.update_scheduled(task_id, task_in.model_dump(exclude_none=True))
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    use_case = UpdateScheduledUseCase(
+        TaskRepository(db), task_manager=request.app.state.task_manager,
+    )
+    task = await use_case.execute(task_id, task_in.model_dump(exclude_none=True))
     db.commit()
-    request.app.state.task_manager.reload_cron_jobs()
     return task
 
 
@@ -93,11 +72,11 @@ async def update_scheduled_task(
 async def delete_scheduled_task(
     task_id: int, db: Session = Depends(get_db), request: Request = None,
 ):
-    repo = TaskRepository(db)
-    if not await repo.delete_scheduled(task_id):
-        raise HTTPException(status_code=404, detail="Task not found")
+    use_case = DeleteScheduledUseCase(
+        TaskRepository(db), task_manager=request.app.state.task_manager,
+    )
+    await use_case.execute(task_id)
     db.commit()
-    request.app.state.task_manager.reload_cron_jobs()
     return {"ok": True}
 
 
@@ -105,20 +84,18 @@ async def delete_scheduled_task(
 async def reorder_scheduled_tasks(
     task_ids: list[int], db: Session = Depends(get_db), request: Request = None,
 ):
-    repo = TaskRepository(db)
-    if not await repo.reorder_scheduled(task_ids):
-        raise HTTPException(status_code=500, detail="Failed to reorder tasks")
+    use_case = ReorderScheduledUseCase(
+        TaskRepository(db), task_manager=request.app.state.task_manager,
+    )
+    await use_case.execute(task_ids)
     db.commit()
-    request.app.state.task_manager.reload_cron_jobs()
     return {"ok": True}
 
 
 @router.post("/scheduled/{task_id}/run")
 async def run_scheduled_task(task_id: int, request: Request):
-    try:
-        request.app.state.task_manager.run_task_now(task_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    use_case = RunScheduledUseCase(request.app.state.task_manager)
+    use_case.execute(task_id)
     return {"ok": True}
 
 
@@ -128,7 +105,5 @@ async def get_task_history(
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
-    repo = TaskRepository(db)
-    history = await repo.get_history(limit=limit, offset=offset)
-    total = await repo.count_history()
-    return {"items": history, "total": total}
+    use_case = GetHistoryUseCase(TaskRepository(db))
+    return await use_case.execute(limit=limit, offset=offset)

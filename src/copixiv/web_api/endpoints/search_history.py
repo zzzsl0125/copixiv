@@ -1,10 +1,11 @@
 """Search history API endpoints."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from copixiv.web_api.deps import get_db
 from copixiv.infrastructure.repositories.search_history import SearchHistoryRepository
+from copixiv.application.search_history import ListHistoryUseCase, DeleteHistoryUseCase
 
 router = APIRouter()
 
@@ -15,13 +16,13 @@ async def get_search_history(
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
-    repo = SearchHistoryRepository(db)
-    return await repo.get_all(limit=limit, offset=offset)
+    use_case = ListHistoryUseCase(SearchHistoryRepository(db))
+    return await use_case.execute(limit=limit, offset=offset)
 
 
 @router.delete("/{history_id}")
 async def delete_search_history(history_id: int, db: Session = Depends(get_db)):
-    repo = SearchHistoryRepository(db)
-    if not await repo.delete(history_id):
-        raise HTTPException(status_code=404)
+    use_case = DeleteHistoryUseCase(SearchHistoryRepository(db))
+    await use_case.execute(history_id)
+    db.commit()
     return {"ok": True}

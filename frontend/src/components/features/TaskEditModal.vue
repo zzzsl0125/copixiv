@@ -22,7 +22,6 @@ const cronMode = ref<'daily' | 'weekly' | 'monthly' | 'custom'>('daily')
 const cronTime = ref({ hour: 0, minute: 0 })
 const cronWeekDay = ref(0)
 const cronMonthDay = ref(1)
-const notifyOnNewNovel = ref(true)
 
 const formState = ref({
   name: '',
@@ -96,16 +95,6 @@ watch([cronMode, cronTime, cronWeekDay, cronMonthDay], () => {
   if (cronMode.value !== 'custom') formState.value.cron = buildCronFromUI()
 }, { deep: true })
 
-watch(notifyOnNewNovel, (newVal) => {
-  try {
-    const config = JSON.parse(formState.value.config || '{}')
-    config.notify_on_new_novel = newVal
-    formState.value.config = JSON.stringify(config, null, 2)
-  } catch {
-    formState.value.config = JSON.stringify({ notify_on_new_novel: newVal }, null, 2)
-  }
-})
-
 watch(() => props.isOpen, (newVal) => {
   console.log('[TaskEditModal] isOpen changed:', newVal, 'task:', props.task?.name || 'null (create mode)')
   if (newVal) {
@@ -121,15 +110,10 @@ watch(() => props.isOpen, (newVal) => {
         is_enabled: props.task.is_enabled,
       }
       console.log('[TaskEditModal] formState set:', { ...formState.value, params: '(see above)' })
-      try {
-        const config = JSON.parse(formState.value.config || '{}')
-        notifyOnNewNovel.value = config.notify_on_new_novel !== false
-      } catch { notifyOnNewNovel.value = true }
       parseCronToUI(props.task.cron)
       if (props.task.params) dynamicParams.value = { ...props.task.params }
     } else {
-      formState.value = { name: '', task: '', cron: '0 0 * * *', params: '{}', config: '{"notify_on_new_novel": true}', is_enabled: true }
-      notifyOnNewNovel.value = true
+      formState.value = { name: '', task: '', cron: '0 0 * * *', params: '{}', config: '{}', is_enabled: true }
       cronMode.value = 'daily'
       cronTime.value = { hour: 0, minute: 0 }
       dynamicParams.value = {}
@@ -211,7 +195,7 @@ const weekDays = [
     <div>
       <label class="block text-sm font-medium text-gray-700 mb-2">执行频率</label>
       <div class="flex items-center space-x-4 bg-gray-50 p-3 rounded-md border border-gray-200">
-        <div class="flex-shrink-0">
+        <div class="shrink-0">
           <select v-model="cronMode" class="block w-28 border border-gray-300 rounded-md shadow-sm py-1.5 px-2 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm bg-white">
             <option value="daily">每天</option>
             <option value="weekly">每周</option>
@@ -243,6 +227,5 @@ const weekDays = [
     </div>
 
     <div class="pt-2"><AppCheckbox v-model="formState.is_enabled" label="启用此任务" /></div>
-    <div class="pt-2"><AppCheckbox v-model="notifyOnNewNovel" label="详细小说列表通知" /></div>
   </BaseModal>
 </template>

@@ -3,24 +3,56 @@
 from typing import Any
 
 
-def safe_get(data: Any, key: str, default: Any = None) -> Any:
-    """Read a field from a Pydantic model or dict without throwing.
+def safe_get(data: Any, path: str, default: Any = None) -> Any:
+    """Read a (possibly nested) field from a Pydantic model or dict.
 
-    Returns *default* if *data* is ``None`` or the key is missing.
+    Supports dotted paths: ``safe_get(novel, "user.name")`` is equivalent to
+    ``safe_get(safe_get(novel, "user"), "name")``.
+
+    Returns *default* if *data* is ``None``, any intermediate key is missing,
+    or the final key is missing.  A terminal ``None`` value is NOT treated as
+    missing — if the final field exists and is ``None``, ``None`` is returned.
     """
     if data is None:
         return default
-    if isinstance(data, dict):
-        return data.get(key, default)
-    return getattr(data, key, default)
+    keys = path.split(".")
+    for i, key in enumerate(keys):
+        if data is None:
+            return default
+        is_last = i == len(keys) - 1
+        if isinstance(data, dict):
+            if is_last:
+                return data.get(key, default)
+            data = data.get(key)
+        else:
+            if is_last:
+                return getattr(data, key, default)
+            data = getattr(data, key, None)
+    return default
 
 
-def safe_set(data: Any, key: str, value: Any) -> None:
-    """Set a field on a Pydantic model or dict."""
+def safe_set(data: Any, path: str, value: Any) -> None:
+    """Set a (possibly nested) field on a Pydantic model or dict.
+
+    Dotted paths traverse through intermediate keys, creating missing dicts
+    along the way.  For Pydantic model attributes, intermediate attributes
+    must already exist.
+    """
+    if data is None:
+        raise ValueError("Cannot set on None")
+    keys = path.split(".")
+    for key in keys[:-1]:
+        if isinstance(data, dict):
+            if key not in data:
+                data[key] = {}
+            data = data[key]
+        else:
+            data = getattr(data, key)
+    last = keys[-1]
     if isinstance(data, dict):
-        data[key] = value
+        data[last] = value
     else:
-        setattr(data, key, value)
+        setattr(data, last, value)
 
 
 def guess_series_order(navigation: Any) -> int | None:

@@ -88,6 +88,7 @@ class Novel(Base):
     series_index = Column(Integer, nullable=True)
     create_time = Column(String, index=True)
     has_epub = Column(Integer, default=0, index=True)
+    shuffle = Column(Integer, default=0, index=True)
 
     author_rel = relationship("Author", back_populates="novels")
     series_rel = relationship("Series", back_populates="novels")

@@ -107,6 +107,10 @@ class Container:
             min_interval=self.config.pixiv_client.min_interval,
         )
 
+        # Telegram notifier
+        from copixiv.infrastructure.notifier.telegram import TelegramNotifier
+        self._notifier = TelegramNotifier(self.config)
+
         # Task manager (background scheduler)
         from copixiv.tasks.manager import TaskManagerSystem
         self._task_manager = TaskManagerSystem(
@@ -116,6 +120,7 @@ class Container:
             image_downloader=self._image_downloader,
             epub_builder=self._epub_builder,
             config=self.config,
+            notifier=self._notifier,
         )
 
         logger.info("Container built successfully.")
@@ -166,6 +171,16 @@ class Container:
             self._image_downloader.shutdown()
 
         app = FastAPI(title="Novel Database API", lifespan=lifespan)
+
+        # -- Domain exception handler ------------------------------------------
+        from copixiv.domain.exceptions import DomainError
+        from fastapi.responses import JSONResponse
+
+        @app.exception_handler(DomainError)
+        async def _domain_error_handler(request, exc: DomainError):
+            return JSONResponse(
+                status_code=exc.status_code, content={"detail": exc.detail},
+            )
 
         app.add_middleware(
             CORSMiddleware,
@@ -262,11 +277,11 @@ class Container:
         # Fallback: load from the token file
         try:
             from pathlib import Path
-            token_path = Path(self.config.path.token or "pixiv_token")
-            if token_path and (token_path_py := Path(str(token_path) + ".py")).exists():
+            token_path = Path(self.config.path.token or "pixiv_token.py")
+            if token_path and token_path.exists():
                 import importlib.util
                 spec = importlib.util.spec_from_file_location(
-                    "token_module", token_path_py
+                    "token_module", token_path
                 )
                 if spec and spec.loader:
                     mod = importlib.util.module_from_spec(spec)

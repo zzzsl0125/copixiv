@@ -2,6 +2,10 @@
 
 Port of V1's ``core/task_manager.py`` adapted to V2's dependency-injection
 architecture.  Uses APScheduler's AsyncIOScheduler on the main event loop.
+
+Tasks return :class:`TaskResult` so the manager (and downstream notifier)
+knows whether a task discovered novels or performed maintenance — no more
+guessing based on ``isinstance(result, list)``.
 """
 
 from __future__ import annotations
@@ -23,11 +27,12 @@ from apscheduler.events import (
     EVENT_JOB_MAX_INSTANCES,
 )
 
+from copixiv.domain.models.task_result import TaskResult
 from copixiv.infrastructure.database.uow import SqlUnitOfWork
 from copixiv.tasks.registry import get_task
 import copixiv.tasks.novel_tasks  # ensure @register decorators fire  # noqa: F401
 
-from copixiv.app.logger import logger
+from copixiv.app.logger import logger, capture_logs
 
 
 class TaskManagerSystem:
@@ -38,7 +43,10 @@ class TaskManagerSystem:
     dispatched through this manager so that history is recorded consistently.
 
     Dependencies (PixivClient, FileStorage, etc.) are captured at construction
-    time and injected into task functions automatically.
+    time and injected into task functions automatically by matching parameter
+    names.  Only dependencies that a task actually declares are injected —
+    there is no ``**kwargs`` catch-all in task signatures, so a typo in a
+    dependency name is a hard error instead of silent failure.
     """
 
     def __init__(
@@ -49,8 +57,10 @@ class TaskManagerSystem:
         image_downloader=None,
         epub_builder=None,
         config=None,
+        notifier=None,
     ):
         self._session_factory = session_factory
+        self._notifier = notifier
         self._deps = {
             "client": client,
             "file_storage": file_storage,
@@ -122,14 +132,13 @@ class TaskManagerSystem:
                     continue
 
                 params = self._parse_json(task.params)
-                config = self._parse_json(task.config)
 
                 try:
                     self.scheduler.add_job(
                         self._trigger_cron_job,
                         trigger=CronTrigger.from_crontab(task.cron),
                         id=f"cron_{task.id}",
-                        args=(task.name, func, config, params),
+                        args=(task.name, func, params),
                         replace_existing=True,
                         max_instances=1,
                         misfire_grace_time=60,
@@ -148,11 +157,11 @@ class TaskManagerSystem:
                     )
 
     def _trigger_cron_job(
-        self, name: str, func: Callable, config: dict, params: dict
+        self, name: str, func: Callable, params: dict
     ) -> None:
         """Fires when a cron trigger is hit.  Enqueues via :meth:`run_task`."""
         logger.info("Cron triggered: {}", name)
-        self.run_task(name, func, config, params)
+        self.run_task(name, func, params)
 
     # ------------------------------------------------------------------
     # Task execution
@@ -162,7 +171,6 @@ class TaskManagerSystem:
         self,
         name: str,
         func: Callable,
-        config: dict | None = None,
         params: dict | None = None,
     ) -> None:
         """Enqueue a task for immediate background execution.
@@ -171,7 +179,6 @@ class TaskManagerSystem:
         runs.  The task is scheduled as a one-shot APScheduler job so that
         history recording and error handling happen in the wrapper.
         """
-        config = config or {}
         params = params or {}
 
         with self._session_factory() as session:
@@ -183,7 +190,7 @@ class TaskManagerSystem:
 
         self.scheduler.add_job(
             self._run_task_wrapper,
-            args=(task_id, name, func, config, params),
+            args=(task_id, name, func, params),
             id=f"manual_{task_id}",
             max_instances=1,
         )
@@ -206,10 +213,9 @@ class TaskManagerSystem:
             if func is None:
                 raise ValueError(f"Unknown task function: {task.task}")
 
-            config = self._parse_json(task.config)
             params = self._parse_json(task.params)
 
-        self.run_task(task.name, func, config, params)
+        self.run_task(task.name, func, params)
 
     # ------------------------------------------------------------------
     # Internal: wrapper that records history + injects deps
@@ -220,10 +226,9 @@ class TaskManagerSystem:
         task_id: int,
         name: str,
         func: Callable,
-        config: dict,
         params: dict,
     ) -> None:
-        """Execute a task, record history, and handle errors."""
+        """Execute a task, record history, and send notifications."""
         logger.info("Starting task '{}' (id={})...", name, task_id)
         start_time = time.time()
         status: str = "running"
@@ -233,52 +238,59 @@ class TaskManagerSystem:
         # --- Update status to "running" ---
         self._update_history(task_id, "running")
 
-        try:
-            # Build a Unit of Work and inject all dependencies
-            uow = SqlUnitOfWork(self._session_factory)
+        # Capture all loguru output during task execution
+        with capture_logs(task_id=task_id) as get_logs:
+            try:
+                # Build a Unit of Work and inject matching dependencies
+                uow = SqlUnitOfWork(self._session_factory)
 
-            # Collect deps that the function actually accepts
-            sig = inspect.signature(func)
-            injected: dict[str, Any] = {}
-            for dep_name, dep_value in self._deps.items():
-                if dep_name in sig.parameters:
-                    injected[dep_name] = dep_value
-            if "uow" in sig.parameters:
-                injected["uow"] = uow
+                sig = inspect.signature(func)
+                injected: dict[str, Any] = {}
+                for dep_name, dep_value in self._deps.items():
+                    if dep_name in sig.parameters:
+                        injected[dep_name] = dep_value
+                if "uow" in sig.parameters:
+                    injected["uow"] = uow
 
-            result_val = await self._execute_func(func, params, injected)
-            status = "success"
-            logger.info("Task '{}' (id={}) completed successfully.", name, task_id)
+                result_val = await self._execute_func(func, params, injected)
+                status = "success"
+                logger.info("Task '{}' (id={}) completed successfully.", name, task_id)
 
-        except (asyncio.TimeoutError, TimeoutError):
-            status = "failed"
-            error_msg = "Task timed out after 30 minutes"
-            logger.error("Task '{}' (id={}) timed out.", name, task_id)
-        except Exception as exc:
-            status = "failed"
-            error_msg = str(exc)
-            logger.error("Task '{}' (id={}) failed: {}", name, task_id, exc)
-            logger.error(traceback.format_exc())
+            except (asyncio.TimeoutError, TimeoutError):
+                status = "failed"
+                error_msg = "Task timed out after 30 minutes"
+                logger.error("Task '{}' (id={}) timed out.", name, task_id)
+            except Exception as exc:
+                status = "failed"
+                error_msg = str(exc)
+                logger.error("Task '{}' (id={}) failed: {}", name, task_id, exc)
+                logger.error(traceback.format_exc())
+
+            log_output = get_logs()
 
         duration = time.time() - start_time
-        titles, count = self._parse_result(result_val, config)
+        result = self._normalize_result(result_val)
 
         result_data = json.dumps(
             {
-                "log": "",
-                "new_novels_count": count,
-                "new_novel_titles": titles,
+                "log": log_output,
+                "summary": result.summary,
+                "new_novels_count": result.new_novel_count,
+                "new_novel_titles": result.new_novel_titles,
             },
             ensure_ascii=False,
         )
 
         self._update_history(task_id, status, result=result_data, duration=duration)
 
-        # --- Optional: Telegram notification (placeholder) ---
-        # When a NotifierPort implementation exists, wire it here.
-        if status == "failed" and error_msg:
-            logger.error(
-                "Task '%s' error: %s (duration: %.1fs)", name, error_msg, duration
+        # --- Telegram notification ---
+        if self._notifier is not None:
+            await self._notifier.send_task_result(
+                task_name=name,
+                status=status,
+                duration=duration,
+                error=error_msg,
+                result=result,
             )
 
     # ------------------------------------------------------------------
@@ -304,20 +316,29 @@ class TaskManagerSystem:
                 )
 
     @staticmethod
-    def _parse_result(result_val: Any, config: dict) -> tuple[list[str], int]:
-        """Extract novel titles and count from a task's return value."""
-        titles: list[str] = []
-        count = 0
+    def _normalize_result(result_val: Any) -> TaskResult:
+        """Convert a task's return value into a :class:`TaskResult`.
+
+        Supports both the new ``TaskResult`` return type and legacy tasks
+        that still return ``list`` or ``int``.
+        """
+        if isinstance(result_val, TaskResult):
+            return result_val
+        if result_val is None:
+            return TaskResult(summary="完成")
+        # Backward compat: legacy tasks returning list or int
         if isinstance(result_val, list):
             titles = [str(t) for t in result_val]
-            count = len(titles)
-        elif isinstance(result_val, int):
-            count = result_val
-
-        if not config.get("notify_on_new_novel"):
-            titles = []
-
-        return titles, count
+            return TaskResult(
+                summary=f"完成，处理 {len(titles)} 项",
+                new_novel_titles=titles,
+            )
+        if isinstance(result_val, int):
+            return TaskResult(
+                summary=f"完成，处理 {result_val} 项",
+                new_novel_count=result_val,
+            )
+        return TaskResult(summary=str(result_val))
 
     def _update_history(
         self,
@@ -349,8 +370,16 @@ class TaskManagerSystem:
     # ------------------------------------------------------------------
 
     def _on_job_error(self, event) -> None:
+        code_names = {
+            EVENT_JOB_ERROR: "JOB_ERROR",
+            EVENT_JOB_MISSED: "JOB_MISSED",
+            EVENT_JOB_MAX_INSTANCES: "JOB_MAX_INSTANCES",
+        }
+        code_label = code_names.get(event.code, f"UNKNOWN({event.code})")
         logger.error(
-            "APScheduler job error: job_id=%s, exception=%s",
+            "APScheduler event: type={}, job_id={}, exception={}, scheduled_run_time={}",
+            code_label,
             event.job_id,
-            getattr(event, "exception", "N/A"),
+            getattr(event, "exception", None),
+            getattr(event, "scheduled_run_time", None),
         )

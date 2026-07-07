@@ -1,20 +1,83 @@
 """Web API Pydantic schemas — kept identical to v1 for frontend compatibility."""
 
+from __future__ import annotations
+
+import enum
 import json
-from typing import Any
+from enum import IntEnum
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-from copixiv.infrastructure.database.models import TagPreferenceORM
 
+# ---------------------------------------------------------------------------
+# Domain enums (will move to domain/models/ in Priority 3)
+# ---------------------------------------------------------------------------
+
+class EpubStatus(IntEnum):
+    """EPUB conversion status for a novel."""
+    NO = 0
+    PENDING = 1
+    DONE = 2
+
+
+class TagPreferenceType(str, enum.Enum):
+    favourite = "favourite"
+    blocked = "blocked"
+
+
+# ---------------------------------------------------------------------------
+# Shared validators
+# ---------------------------------------------------------------------------
+
+def _parse_json_str(v: Any) -> Any:
+    """Parse a JSON string to dict, or return the value as-is."""
+    if isinstance(v, str):
+        try:
+            return json.loads(v)
+        except (json.JSONDecodeError, TypeError):
+            return v
+    return v
+
+
+def _int_to_bool(v: Any) -> bool | None:
+    """Coerce int (0/1) to bool for backwards-compat with DB int columns."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, int):
+        return bool(v)
+    return v
+
+
+# ---------------------------------------------------------------------------
+# Tag Preferences
+# ---------------------------------------------------------------------------
 
 class TagPreferenceResponse(BaseModel):
     id: int
     tag: str
-    preference: TagPreferenceORM
+    preference: str  # "favourite" | "blocked"
     sort_index: int
     model_config = ConfigDict(from_attributes=True)
 
+
+class TagPreferenceCreate(BaseModel):
+    tag: str
+    preference: Literal["favourite", "blocked"]
+    sort_index: int = 0
+
+
+class TagPreferenceUpdate(BaseModel):
+    tag: str | None = None
+    preference: Literal["favourite", "blocked"] | None = None
+    sort_index: int | None = None
+
+
+# ---------------------------------------------------------------------------
+# Tag Aliases
+# ---------------------------------------------------------------------------
 
 class TagAliasBase(BaseModel):
     source: str
@@ -46,6 +109,10 @@ class TagAliasSuggestListResponse(BaseModel):
     next_offset: int
 
 
+# ---------------------------------------------------------------------------
+# Search History
+# ---------------------------------------------------------------------------
+
 class SearchHistoryResponse(BaseModel):
     id: int
     type: str
@@ -54,6 +121,10 @@ class SearchHistoryResponse(BaseModel):
     timestamp: str
     model_config = ConfigDict(from_attributes=True)
 
+
+# ---------------------------------------------------------------------------
+# Novels
+# ---------------------------------------------------------------------------
 
 class NovelBase(BaseModel):
     id: int
@@ -64,14 +135,21 @@ class NovelBase(BaseModel):
     text: int = 0
     caption: str | None = None
     create_time: str | None = None
-    has_epub: int = 0
+    has_epub: EpubStatus = EpubStatus.NO
     tags: list[str] = []
-    is_favourite: int = 0
-    is_special_follow: int = 0
+    is_favourite: bool = False
+    is_special_follow: bool = False
     series_id: int | None = None
     series_name: str | None = None
     series_index: int | None = None
     model_config = ConfigDict(from_attributes=True)
+
+    # Coerce int columns from DB into proper types
+    _coerce_has_epub = field_validator("has_epub", mode="before")(
+        lambda v: EpubStatus(v) if v is not None else EpubStatus.NO
+    )
+    _coerce_is_favourite = field_validator("is_favourite", mode="before")(_int_to_bool)
+    _coerce_is_special_follow = field_validator("is_special_follow", mode="before")(_int_to_bool)
 
 
 class NovelListResponse(BaseModel):
@@ -79,7 +157,10 @@ class NovelListResponse(BaseModel):
     cursor: dict | None = None
 
 
+# ---------------------------------------------------------------------------
 # Task Management
+# ---------------------------------------------------------------------------
+
 class ScheduledTaskCreate(BaseModel):
     name: str
     task: str
@@ -98,16 +179,6 @@ class ScheduledTaskUpdate(BaseModel):
     config: dict[str, Any] | None = None
     is_enabled: bool | None = None
     sort_index: int | None = None
-
-
-def _parse_json_str(v: Any) -> Any:
-    """Parse a JSON string to dict, or return the value as-is."""
-    if isinstance(v, str):
-        try:
-            return json.loads(v)
-        except (json.JSONDecodeError, TypeError):
-            return v
-    return v
 
 
 class ScheduledTaskResponse(ScheduledTaskCreate):
@@ -145,29 +216,43 @@ class TaskArgument(BaseModel):
     required: bool
 
 
-class SystemConfigResponse(BaseModel):
-    default_min_like: int
-    default_min_text: int
-
-
 class TaskMethod(BaseModel):
     name: str
     description: str | None = None
     arguments: list[TaskArgument]
 
 
+# ---------------------------------------------------------------------------
+# System
+# ---------------------------------------------------------------------------
+
+class SystemConfigResponse(BaseModel):
+    default_min_like: int
+    default_min_text: int
+
+
+class RestartRequest(BaseModel):
+    sudo_password: SecretStr
+
+
+# ---------------------------------------------------------------------------
 # Batch Download
+# ---------------------------------------------------------------------------
+
 class BatchDownloadRequest(BaseModel):
     queries: str | None = None
-    order_by: str = "id"
-    order_direction: str = "DESC"
+    order_by: Literal["id", "like", "view", "text", "create_time", "random"] = "id"
+    order_direction: Literal["ASC", "DESC"] = "DESC"
     min_like: int | None = None
     min_text: int | None = None
-    limit: int = 50
-    format_mode: str = "txt"
+    limit: int = Field(default=50, ge=1, le=200)
+    format_mode: Literal["txt", "prefer_epub"] = "txt"
 
 
+# ---------------------------------------------------------------------------
 # Token Management
+# ---------------------------------------------------------------------------
+
 class TokenBase(BaseModel):
     name: str
     token: str

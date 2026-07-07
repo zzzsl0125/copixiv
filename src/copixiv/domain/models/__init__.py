@@ -1,18 +1,17 @@
 """Pure domain entities — Pydantic models with no ORM coupling."""
 
-from .novel import Novel, NovelTag, Favourite, SpecialFollow
+from .novel import Novel, EpubStatus
 from .author import Author
 from .series import Series
 from .tag import Tag, TagPreference, TagAlias, TagPreferenceType
 from .task import TaskHistory, ScheduledTask, TaskStatus
+from .task_result import TaskResult
 from .token import Token
 from .search import SearchHistory
-from .misc import FailedNovel, ProcessedPeriod, NovelEpubConversion
 
 __all__ = [
     "Novel",
-    "NovelTag",
-    "Favourite",
+    "EpubStatus",
     "Author",
     "Series",
     "Tag",
@@ -22,10 +21,7 @@ __all__ = [
     "TaskHistory",
     "ScheduledTask",
     "TaskStatus",
+    "TaskResult",
     "Token",
     "SearchHistory",
-    "FailedNovel",
-    "ProcessedPeriod",
-    "NovelEpubConversion",
-    "SpecialFollow",
 ]

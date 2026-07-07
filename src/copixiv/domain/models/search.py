@@ -1,5 +1,7 @@
 """Search history domain entity."""
 
+from datetime import datetime
+
 from pydantic import BaseModel
 
 
@@ -10,4 +12,4 @@ class SearchHistory(BaseModel):
     type: str
     value: str
     display_value: str | None = None
-    timestamp: str
+    timestamp: datetime

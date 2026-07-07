@@ -1,7 +1,16 @@
 """Novel domain entities — pure Pydantic models."""
 
 from datetime import datetime
+from enum import IntEnum
+
 from pydantic import BaseModel, Field
+
+
+class EpubStatus(IntEnum):
+    """EPUB conversion status for a novel."""
+    NO = 0
+    PENDING = 1
+    DONE = 2
 
 
 class Novel(BaseModel):
@@ -19,29 +28,10 @@ class Novel(BaseModel):
     series_id: int | None = None
     series_name: str | None = None
     series_index: int | None = None
-    create_time: str | None = None
-    has_epub: int = 0  # 0=no, 1=pending, 2=done
+    create_time: datetime | None = None
+    has_epub: EpubStatus = EpubStatus.NO
 
     # Transient — not persisted directly, joined from other tables
     tags: list[str] = Field(default_factory=list)
-    is_favourite: int = 0
-    is_special_follow: int = 0
-
-
-class NovelTag(BaseModel):
-    """Join table: novel <-> tag."""
-
-    novel_id: int
-    tag_id: int
-
-
-class Favourite(BaseModel):
-    """A favourited novel."""
-
-    novel_id: int
-
-
-class SpecialFollow(BaseModel):
-    """A specially followed author."""
-
-    author_id: int
+    is_favourite: bool = False
+    is_special_follow: bool = False

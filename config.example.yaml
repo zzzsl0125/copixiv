@@ -1,5 +1,5 @@
 path:
-  token: pixiv_token
+  token: pixiv_token.py
   database: database/database.db
   download: download
 pixiv_client:

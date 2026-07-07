@@ -44,10 +44,10 @@ export interface ScheduledTaskUpdate {
 export interface TaskHistory {
   id: number
   name: string
-  arguments?: string
+  arguments?: Record<string, unknown> | null
   status: string
   start_time: string
   end_time?: string
   duration?: number
-  result?: string
+  result?: Record<string, unknown> | null
 }

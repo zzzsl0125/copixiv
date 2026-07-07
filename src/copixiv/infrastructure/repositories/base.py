@@ -20,6 +20,76 @@ def models_to_dicts(objs: list[Any]) -> list[dict]:
     return [model_to_dict(o) for o in objs]
 
 
+def update_summary(
+    session: Session,
+    model_class: type[ModelType],
+    id_column_name: str,
+    ids: set[int] | int | None = None,
+    extra_columns: list | None = None,
+) -> None:
+    """Update aggregate stats (count/views/likes/texts) on author/series rows.
+
+    Queries the Novel table grouped by *id_column_name* and upserts the
+    computed aggregates into *model_class*.  This is a standalone helper
+    used by :class:`AuthorRepository` and :class:`SeriesRepository` — it
+    does not belong in ``BaseRepository`` because it hardcodes ``Novel``
+    as the source table.
+    """
+    from ..database import models
+
+    if ids is None:
+        return
+    if isinstance(ids, int):
+        ids = {ids}
+    if len(ids) == 0:
+        return
+
+    pk_col = getattr(model_class, id_column_name)
+
+    columns_to_select = [
+        getattr(models.Novel, id_column_name),
+        func.count(models.Novel.id).label(C.COL_NOVEL_COUNT),
+        func.sum(models.Novel.view).label(C.COL_VIEWS),
+        func.sum(models.Novel.like).label(C.COL_LIKES),
+        func.sum(models.Novel.text).label(C.COL_TEXTS),
+    ]
+    if extra_columns:
+        columns_to_select.extend(extra_columns)
+
+    select_stmt = (
+        select(*columns_to_select)
+        .where(getattr(models.Novel, id_column_name).in_(ids))
+        .group_by(getattr(models.Novel, id_column_name))
+    )
+
+    results = session.execute(select_stmt).all()
+
+    for row in results:
+        mapping = row._mapping
+        target_id = mapping[id_column_name]
+        if target_id is None:
+            continue
+
+        values = {
+            C.COL_NOVEL_COUNT: mapping[C.COL_NOVEL_COUNT],
+            C.COL_VIEWS: mapping[C.COL_VIEWS],
+            C.COL_LIKES: mapping[C.COL_LIKES],
+            C.COL_TEXTS: mapping[C.COL_TEXTS],
+        }
+
+        for key, val in mapping.items():
+            if key != id_column_name and key not in values and val is not None:
+                values[key] = val
+
+        insert_values = {pk_col.name: target_id, **values}
+        stmt = (
+            sqlite_insert(model_class)
+            .values(insert_values)
+            .on_conflict_do_update([pk_col], set_=values)
+        )
+        session.execute(stmt)
+
+
 class BaseRepository:
     """Common database operations shared by all repositories."""
 
@@ -37,7 +107,7 @@ class BaseRepository:
 
     def count(self, model_class: type[ModelType]) -> int:
         stmt = select(func.count()).select_from(model_class)
-        return self.session.execute(stmt).scalar() or 0
+        return self.session.execute(stmt).scalar()
 
     def get_summary_item(
         self, model_class: type[ModelType], item_id: int
@@ -46,65 +116,3 @@ class BaseRepository:
         stmt = select(model_class).where(pk_col == item_id)
         result = self.session.execute(stmt).scalar_one_or_none()
         return model_to_dict(result) if result else None
-
-    def _update_summary(
-        self,
-        model_class: type[ModelType],
-        id_column_name: str,
-        ids: set[int] | int | None = None,
-        extra_columns: list | None = None,
-    ) -> None:
-        from ..database import models
-
-        if ids is None:
-            # caller intends to update ALL — but this method needs a concrete ID set
-            return
-        if isinstance(ids, int):
-            ids = {ids}
-        if len(ids) == 0:
-            return
-
-        pk_col = getattr(model_class, id_column_name)
-
-        columns_to_select = [
-            getattr(models.Novel, id_column_name),
-            func.count(models.Novel.id).label(C.COL_NOVEL_COUNT),
-            func.sum(models.Novel.view).label(C.COL_VIEWS),
-            func.sum(models.Novel.like).label(C.COL_LIKES),
-            func.sum(models.Novel.text).label(C.COL_TEXTS),
-        ]
-        if extra_columns:
-            columns_to_select.extend(extra_columns)
-
-        select_stmt = (
-            select(*columns_to_select)
-            .where(getattr(models.Novel, id_column_name).in_(ids))
-            .group_by(getattr(models.Novel, id_column_name))
-        )
-
-        results = self.session.execute(select_stmt).all()
-
-        for row in results:
-            mapping = row._mapping
-            target_id = mapping[id_column_name]
-            if target_id is None:
-                continue
-
-            values = {
-                C.COL_NOVEL_COUNT: mapping[C.COL_NOVEL_COUNT],
-                C.COL_VIEWS: mapping[C.COL_VIEWS],
-                C.COL_LIKES: mapping[C.COL_LIKES],
-                C.COL_TEXTS: mapping[C.COL_TEXTS],
-            }
-
-            for key, val in mapping.items():
-                if key != id_column_name and key not in values and val is not None:
-                    values[key] = val
-
-            insert_values = {pk_col.name: target_id, **values}
-            stmt = (
-                sqlite_insert(model_class)
-                .values(insert_values)
-                .on_conflict_do_update([pk_col], set_=values)
-            )
-            self.session.execute(stmt)

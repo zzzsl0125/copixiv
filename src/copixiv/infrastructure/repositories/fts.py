@@ -85,7 +85,7 @@ class FTSManager:
 
         No-op if FTS table missing or *novel_ids* is empty.  Uses
         FTS5 delete command (safe for content-synced tables) then
-        re-inserts for each affected row.
+        batch re-inserts all affected rows.
         """
         if not novel_ids:
             return
@@ -116,10 +116,11 @@ class FTSManager:
             ).where(models.Novel.id.in_(novel_ids))
         ).all()
 
-        for nid, title, author, series_name in novels:
-            self._insert_fts_entry(
-                nid, title or "", author or "", series_name or ""
-            )
+        if novels:
+            self._batch_insert_fts_entries([
+                (nid, title or "", author or "", series_name or "")
+                for nid, title, author, series_name in novels
+            ])
 
     def delete_novel_fts(self, novel_id: int) -> None:
         """Remove an FTS entry for a deleted novel.
@@ -268,20 +269,35 @@ class FTSManager:
         tokens = list(self.jieba.cut(text, HMM=True))
         return " ".join(t for t in tokens if t.strip())
 
+    def _batch_insert_fts_entries(
+        self, rows: list[tuple[int, str, str, str]],
+    ) -> None:
+        """Insert multiple FTS entries in a single batch.
+
+        Tokenizes each row individually (jieba can't run inside SQLite) but
+        issues a single multi-row INSERT for efficiency.
+        """
+        fts_t = models.Base.metadata.tables.get(C.TABLE_NOVEL_FTS)
+        if fts_t is None or not rows:
+            return
+        values = [
+            {
+                "id": nid,
+                "title": self._tokenize(title),
+                "author_name": self._tokenize(author),
+                "series_name": self._tokenize(series),
+            }
+            for nid, title, author, series in rows
+        ]
+        self.session.execute(fts_t.insert(), values)
+
     def _insert_fts_entry(
         self, novel_id: int, title: str, author: str, series: str
     ) -> None:
-        fts_t = models.Base.metadata.tables.get(C.TABLE_NOVEL_FTS)
-        if fts_t is None:
-            return
-        self.session.execute(
-            fts_t.insert().values(
-                id=novel_id,
-                title=self._tokenize(title),
-                author_name=self._tokenize(author),
-                series_name=self._tokenize(series),
-            )
-        )
+        """Insert a single FTS entry (convenience wrapper)."""
+        self._batch_insert_fts_entries([
+            (novel_id, title, author, series),
+        ])
 
     def _batch_insert_all_novels(self) -> int:
         """Insert all novels from the novel table into FTS in one bulk operation.
@@ -301,9 +317,9 @@ class FTSManager:
         if not novels:
             return 0
 
-        for nid, title, author, series_name in novels:
-            self._insert_fts_entry(
-                nid, title or "", author or "", series_name or ""
-            )
+        self._batch_insert_fts_entries([
+            (nid, title or "", author or "", series_name or "")
+            for nid, title, author, series_name in novels
+        ])
 
         return len(novels)

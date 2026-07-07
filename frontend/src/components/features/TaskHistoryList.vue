@@ -19,13 +19,21 @@ const currentLog = ref('')
 const titlesModalOpen = ref(false)
 const currentTitles = ref('')
 
-const parseResult = (resultStr?: string | null) => {
+const parseResult = (resultStr?: string | Record<string, any> | null) => {
   if (!resultStr) return { log: '', new_novels_count: null, new_novel_titles: [] as string[] }
+  // Handle the case where the API already returns a parsed object (not a JSON string)
+  if (typeof resultStr === 'object') {
+    return {
+      log: typeof resultStr.log === 'string' ? resultStr.log : '',
+      new_novels_count: resultStr.new_novels_count ?? null,
+      new_novel_titles: resultStr.new_novel_titles || [],
+    }
+  }
   try {
     const parsed = JSON.parse(resultStr)
     if (parsed && typeof parsed === 'object') {
       return {
-        log: parsed.log || '',
+        log: typeof parsed.log === 'string' ? parsed.log : '',
         new_novels_count: parsed.new_novels_count,
         new_novel_titles: parsed.new_novel_titles || [],
       }
@@ -34,13 +42,13 @@ const parseResult = (resultStr?: string | null) => {
   return { log: resultStr, new_novels_count: null, new_novel_titles: [] as string[] }
 }
 
-const showLog = (result: string) => {
+const showLog = (result: string | Record<string, any> | null | undefined) => {
   const parsed = parseResult(result)
   currentLog.value = parsed.log || '无输出日志'
   logModalOpen.value = true
 }
 
-const showTitles = (result: string) => {
+const showTitles = (result: string | Record<string, any> | null | undefined) => {
   const parsed = parseResult(result)
   currentTitles.value = parsed.new_novel_titles.join('\n')
   titlesModalOpen.value = true
@@ -63,7 +71,7 @@ const formatDate = (dateStr?: string | null) => {
         <li v-for="item in history" :key="item.id" class="px-6 py-4 hover:bg-gray-50 transition-colors">
           <div class="flex items-center justify-between w-full">
             <div class="flex items-center min-w-0 flex-1">
-              <div class="flex-shrink-0 mr-4">
+              <div class="shrink-0 mr-4">
                 <div v-if="item.status === 'SUCCESS'" class="text-green-500"><CheckCircle class="w-8 h-8" /></div>
                 <div v-else-if="item.status === 'FAILED'" class="text-red-500"><XCircle class="w-8 h-8" /></div>
                 <div v-else-if="item.status === 'RUNNING'" class="text-blue-500 animate-spin"><RefreshCw class="w-8 h-8" /></div>
@@ -73,7 +81,7 @@ const formatDate = (dateStr?: string | null) => {
               <div class="min-w-0 flex-1 ml-4 grid grid-cols-3 gap-4 items-center">
                 <div class="col-span-1">
                   <p class="text-sm font-medium text-gray-900 truncate">{{ item.name }}</p>
-                  <p class="text-xs text-gray-500 mt-1 font-mono truncate max-w-lg" :title="item.arguments">args: {{ item.arguments || 'None' }}</p>
+                  <p class="text-xs text-gray-500 mt-1 font-mono truncate max-w-lg" :title="item.arguments ? JSON.stringify(item.arguments) : 'None'">args: {{ item.arguments ? JSON.stringify(item.arguments) : 'None' }}</p>
                 </div>
                 <div class="col-span-1 text-xs text-gray-500 flex flex-col justify-center">
                   <span>开始: {{ formatDate(item.start_time) }}</span>

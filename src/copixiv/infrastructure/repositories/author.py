@@ -3,11 +3,12 @@
 from datetime import datetime, date
 
 from sqlalchemy import update as _update, delete as _delete, select as _select, func
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from copixiv.infrastructure.database import models
 from copixiv.infrastructure.database import constants as C
-from .base import BaseRepository
+from .base import BaseRepository, model_to_dict, update_summary
 from .fts import FTSManager
 
 
@@ -17,11 +18,23 @@ class AuthorRepository(BaseRepository):
     def __init__(self, session: Session):
         super().__init__(session)
 
+    def ensure_exists(self, author_ids: set[int]) -> None:
+        """INSERT OR IGNORE placeholder rows so FK constraints are satisfied."""
+        if not author_ids:
+            return
+        for aid in author_ids:
+            self.session.execute(
+                sqlite_insert(models.Author)
+                .values(author_id=aid)
+                .on_conflict_do_nothing()
+            )
+        self.session.flush()
+
     async def get_by_id(self, author_id: int) -> dict | None:
         author = self.session.get(models.Author, author_id)
         if author is None:
             return None
-        return {c.name: getattr(author, c.name) for c in author.__table__.columns}
+        return model_to_dict(author)
 
     async def need_update(self, author_id: int) -> bool:
         author = self.session.get(models.Author, author_id)
@@ -31,8 +44,8 @@ class AuthorRepository(BaseRepository):
         return True
 
     async def update_summary(self, author_ids: set[int] | None = None) -> None:
-        super()._update_summary(
-            models.Author, C.COL_AUTHOR_ID, author_ids,
+        update_summary(
+            self.session, models.Author, C.COL_AUTHOR_ID, author_ids,
             extra_columns=[
                 func.max(models.Novel.author_name).label(C.COL_AUTHOR_NAME)
             ],

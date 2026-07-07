@@ -11,7 +11,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from copixiv.infrastructure.database import models
 from copixiv.infrastructure.database import constants as C
-from .base import BaseRepository
+from .base import BaseRepository, model_to_dict
 from .fts import FTSManager
 from .tag import TagRepository
 from .query_builder import NovelQueryBuilder
@@ -35,7 +35,7 @@ class NovelRepository(BaseRepository):
 
     async def get_by_id(self, novel_id: int) -> dict | None:
         novel = self.session.get(models.Novel, novel_id)
-        return self._row_to_dict(novel) if novel else None
+        return model_to_dict(novel) if novel else None
 
     async def get_existing_ids(self, novel_ids: set[int]) -> set[int]:
         if not novel_ids:
@@ -60,25 +60,25 @@ class NovelRepository(BaseRepository):
             for q_type in queries.values():
                 self._validate_query_field(q_type)
 
-        # Random pool shortcut — first page only (no cursor with seed)
+        # Random browsing — use precomputed shuffle column for fast index seek.
+        # First page: pick a random starting point in the shuffle space so
+        # each visit shows a different slice.  Wrap around if the tail
+        # doesn't have enough rows.
         if order_by == "random" and not queries:
-            if not cursor or "random_seed" not in cursor:
-                import random as _random
-                novels = self._get_random_novels(
-                    per_page, min_like or 0, min_text or 0
+            import random as _random
+            if not cursor:
+                novels = self._get_random_novels_shuffle(
+                    per_page, min_like or 0, min_text or 0,
                 )
                 cursor_out = None
                 if novels and len(novels) >= per_page:
-                    seed = _random.randint(1, 2**31 - 1)
                     last = novels[-1]
-                    hash_val = self._compute_random_sort_key(last["id"], seed)
                     cursor_out = {
-                        "random_seed": seed,
-                        "random": hash_val,
+                        "shuffle": last.get("shuffle", 0),
                         "id": last["id"],
                     }
                 return {"cursor": cursor_out, "novels": novels}
-            # else: has random_seed → fall through to query builder below
+            # else: has cursor → fall through to query builder below
 
         params = {
             "queries": queries,
@@ -100,21 +100,17 @@ class NovelRepository(BaseRepository):
         if len(novels) > per_page:
             n = novels.pop()
             if order_by == "random":
-                seed = (cursor or {}).get("random_seed", 0)
-                hash_val = self._compute_random_sort_key(n["id"], seed)
                 cursor_out = {
-                    "random_seed": seed,
-                    "random": hash_val,
+                    "shuffle": n.get("shuffle", 0),
                     "id": n["id"],
                 }
             else:
                 cursor_out = {"id": n["id"], order_by: n.get(order_by)}
 
-        # Batch-load tags and merge into each novel dict
-        novel_ids = [n[C.COL_ID] for n in novels]
-        tag_map = self._load_tags(novel_ids)
+        # Tags come inline from the scalar subquery — split pipe-delimited string
         for novel in novels:
-            novel[C.COL_TAGS] = tag_map.get(novel[C.COL_ID], [])
+            tags_str: str = novel.get(C.COL_TAGS) or ""
+            novel[C.COL_TAGS] = tags_str.split("|") if tags_str else []
 
         return {"novels": novels, "cursor": cursor_out}
 
@@ -142,55 +138,94 @@ class NovelRepository(BaseRepository):
             )
         else:
             result = self.session.execute(count_stmt)
-        return result.scalar() or 0
+        return result.scalar()
 
     # ---- write ---------------------------------------------------------------
 
     async def upsert_novels(
         self, novels: list[dict], force_update: list[str] | None = None
     ) -> int:
+        """Insert or update novels, then sync tags and FTS index."""
         if not novels:
             return 0
 
         force_update = force_update or []
+
+        # 1. Resolve tag aliases
+        novel_tags_map = self._resolve_tag_aliases(novels)
+
+        # 2. Batch-fetch existing novels
+        existing_map = self._fetch_existing_novels(novels)
+
+        # 3. Upsert rows
+        new_ids, fts_dirty_ids = self._upsert_rows(
+            novels, existing_map, force_update,
+        )
+
+        # 4. Sync tags
+        for nid, tag_list in novel_tags_map.items():
+            self.rewrite_tags(nid, set(tag_list))
+
+        # 5. Update FTS index
+        fts = FTSManager(self.session)
+        fts.update_novel_fts_index(list(set(new_ids + fts_dirty_ids)))
+
+        return len(new_ids)
+
+    # ---- upsert helpers -----------------------------------------------------
+
+    def _resolve_tag_aliases(
+        self, novels: list[dict],
+    ) -> dict[int, set[str]]:
+        """Pop tags from each novel dict and apply alias mapping."""
         tag_repo = TagRepository(self.session)
         alias_map = tag_repo.get_alias_map_sync()
-
         novel_tags_map: dict[int, set[str]] = {}
-        processed: list[dict] = []
-
         for n in novels:
             mapped_tags = {alias_map.get(t, t) for t in n.pop("tag", [])}
             nid = n.get("id")
             if nid is not None:
                 novel_tags_map[nid] = mapped_tags
-            processed.append(n)
+        return novel_tags_map
 
+    def _fetch_existing_novels(
+        self, novels: list[dict],
+    ) -> dict[int, Any]:
+        """Return a mapping of novel_id → ORM instance for all IDs in *novels*."""
+        all_ids = [int(n["id"]) for n in novels if n.get("id")]
+        if not all_ids:
+            return {}
+        stmt = select(models.Novel).where(models.Novel.id.in_(all_ids))
+        return {
+            n.id: n
+            for n in self.session.execute(stmt).scalars().all()
+        }
+
+    def _upsert_rows(
+        self,
+        novels: list[dict],
+        existing_map: dict[int, Any],
+        force_update: list[str],
+    ) -> tuple[list[int], list[int]]:
+        """Insert new or update existing novel rows.
+
+        Returns ``(new_ids, fts_dirty_ids)``.
+        """
         update_fields_set = set([
             "like", "view", "title", "text", "caption",
             "series_id", "series_name", "series_index", "create_time",
         ] + force_update)
 
-        # Batch-fetch existing
-        all_ids = [int(n["id"]) for n in processed if n.get("id")]
-        existing_map: dict[int, Any] = {}
-        if all_ids:
-            stmt = select(models.Novel).where(models.Novel.id.in_(all_ids))
-            existing_map = {
-                n.id: n
-                for n in self.session.execute(stmt).scalars().all()
-            }
-
         new_ids: list[int] = []
         fts_dirty_ids: list[int] = []
 
-        for novel in processed:
+        for novel in novels:
             filtered = {
                 k: v for k, v in novel.items()
                 if k in self.VALID_NOVEL_FIELDS
             }
-            nid = int(novel["id"]) if novel.get("id") else None
-            existing = existing_map.get(nid) if nid else None
+            nid = int(novel["id"]) if novel.get("id") is not None else None
+            existing = existing_map.get(nid)
 
             for int_field in ("id", "author_id", "series_id", "series_index"):
                 if int_field in filtered and filtered[int_field] is not None:
@@ -209,26 +244,22 @@ class NovelRepository(BaseRepository):
                     fts_dirty_ids.append(nid)
             else:
                 new_novel = models.Novel(**filtered)
+                if "shuffle" not in filtered or not filtered["shuffle"]:
+                    import random as _random
+                    new_novel.shuffle = _random.randint(0, 2**31 - 1)
                 self.session.add(new_novel)
                 new_ids.append(novel.get("id"))
 
         self.session.flush()
 
         from copixiv.app.logger import logger
+        all_ids = [int(n["id"]) for n in novels if n.get("id")]
         logger.info(
             f"upsert_novels: {len(new_ids)} new, {len(fts_dirty_ids)} updated "
-            f"(out of {len(processed)} total, {len(all_ids)} IDs queried)"
+            f"(out of {len(novels)} total, {len(all_ids)} IDs queried)"
         )
 
-        # Tags
-        for nid, tag_list in novel_tags_map.items():
-            self.rewrite_tags(nid, set(tag_list))
-
-        # FTS
-        fts = FTSManager(self.session)
-        fts.update_novel_fts_index(list(set(new_ids + fts_dirty_ids)))
-
-        return len(new_ids)
+        return new_ids, fts_dirty_ids
 
     async def update_field(self, novel_id: int, field: str, value: Any) -> None:
         if field not in self.UPDATABLE_NOVEL_FIELDS:
@@ -281,7 +312,7 @@ class NovelRepository(BaseRepository):
     def rewrite_tags(self, novel_id: int, new_tags: set[str]) -> None:
         if not new_tags:
             self.session.execute(
-                delete(models.NovelTag).where(
+                _delete(models.NovelTag).where(
                     models.NovelTag.novel_id == novel_id
                 )
             )
@@ -301,7 +332,7 @@ class NovelRepository(BaseRepository):
                 models.Tag.name.in_(to_remove)
             )
             self.session.execute(
-                delete(models.NovelTag).where(
+                _delete(models.NovelTag).where(
                     models.NovelTag.novel_id == novel_id,
                     models.NovelTag.tag_id.in_(tag_ids_stmt),
                 )
@@ -338,98 +369,82 @@ class NovelRepository(BaseRepository):
 
     # ---- random selection ----------------------------------------------------
 
-    # Hash constants for deterministic pseudo-random ordering (same as
-    # BaseQueryBuilder._RAND_* — kept in sync manually to avoid a circular
-    # import between the repository and query_builder modules).
-    _RAND_A: int = 393555900037
-    _RAND_B: int = 1728364729
-    _RAND_MASK: int = 0x7FFFFFFFFFFFFFFF
-    _RAND_MOD: int = 9223372036854775783
-
-    @staticmethod
-    def _compute_random_sort_key(novel_id: int, seed: int) -> int:
-        """Deterministic pseudo-random sort key for cursor construction."""
-        return (
-            (novel_id * NovelRepository._RAND_A + seed * NovelRepository._RAND_B)
-            & NovelRepository._RAND_MASK
-        ) % NovelRepository._RAND_MOD
-
-    def _get_random_novels(
+    def _get_random_novels_shuffle(
         self, limit: int, min_likes: int, min_texts: int
     ) -> list[dict]:
-        """Return *limit* novels matching criteria, ordered randomly.
+        """Return *limit* novels in shuffle order, starting from a random offset.
 
-        Two-phase approach for speed:
+        Uses the precomputed ``shuffle`` column and its index for O(1)
+        keyset-style performance.  A random starting threshold is picked so
+        each visit shows a different slice; if the tail doesn't have enough
+        rows the query wraps around from ``shuffle >= 0``.
 
-        1. Index-only scan of ``idx_novel_like_text_id(like, text, id)``
-           with ``ORDER BY random()`` — the index covers all WHERE
-           columns and the ``id`` primary key, so SQLite never touches
-           the main table.  ~10 ms for 58K qualifying rows.
-
-        2. Fetch full rows by primary key (~1 ms for 20 lookups).
-
-        Without any criteria (all 223K novels) the index scan takes
-        ~37 ms — still well within acceptable range.
+        The index ``ix_novel_shuffle`` is walked in ascending order and
+        each row is probed for the like/text thresholds — with permissive
+        filters (the common case) the first *limit* rows pass immediately.
         """
-        # Phase 1 — index-only scan for IDs (id is the rowid, always in
-        # every index implicitly).
-        id_rows = self.session.execute(
-            select(models.Novel.id)
+        import random as _random
+
+        # Query the max shuffle value so the random start is within range.
+        max_shuffle = self.session.scalar(
+            select(func.coalesce(func.max(models.Novel.shuffle), 0)),
+        ) or 0
+
+        novels: list[dict] = []
+        start = _random.randint(0, max_shuffle) if max_shuffle > 0 else 0
+
+        # Tags scalar subquery — same inline pattern as QueryBuilder._base_select
+        tags_subq = (
+            select(func.coalesce(func.group_concat(models.Tag.name, '|'), ''))
+            .select_from(models.NovelTag)
+            .join(models.Tag, models.NovelTag.tag_id == models.Tag.id)
+            .where(models.NovelTag.novel_id == models.Novel.id)
+            .correlate(models.Novel)
+            .scalar_subquery()
+        ).label(C.COL_TAGS)
+
+        # First attempt: shuffle >= random start
+        rows = self.session.execute(
+            select(models.Novel, tags_subq)
             .where(
                 models.Novel.like >= min_likes,
                 models.Novel.text >= min_texts,
+                models.Novel.shuffle >= start,
             )
-            .order_by(func.random())
+            .order_by(models.Novel.shuffle.asc(), models.Novel.id.asc())
             .limit(limit)
         ).all()
+        for novel, tags_str in rows:
+            nd = model_to_dict(novel)
+            nd[C.COL_TAGS] = tags_str.split("|") if tags_str else []
+            novels.append(nd)
 
-        ids = [row[0] for row in id_rows]
-        if not ids:
-            return []
+        # Wrap around if the tail didn't have enough rows.
+        if len(novels) < limit and start > 0:
+            remaining = limit - len(novels)
+            seen_ids = {n["id"] for n in novels}
+            rows = self.session.execute(
+                select(models.Novel, tags_subq)
+                .where(
+                    models.Novel.like >= min_likes,
+                    models.Novel.text >= min_texts,
+                    models.Novel.shuffle >= 0,
+                )
+                .order_by(models.Novel.shuffle.asc(), models.Novel.id.asc())
+                .limit(remaining + len(seen_ids))
+            ).all()
+            for novel, tags_str in rows:
+                nd = model_to_dict(novel)
+                if nd["id"] not in seen_ids:
+                    nd[C.COL_TAGS] = tags_str.split("|") if tags_str else []
+                    novels.append(nd)
+                    if len(novels) >= limit:
+                        break
 
-        # Phase 2 — fetch full rows by primary key.
-        novels = self.session.execute(
-            select(models.Novel).where(models.Novel.id.in_(ids))
-        ).scalars().all()
-
-        novel_dicts = [self._row_to_dict(n) for n in novels]
-
-        # Batch-load tags as clean lists (no delimiter round-trip).
-        tag_map = self._load_tags(ids)
-        for nd in novel_dicts:
-            nd[C.COL_TAGS] = tag_map.get(nd[C.COL_ID], [])
-
-        return novel_dicts
+        return novels
 
     # ---- helpers -------------------------------------------------------------
 
     def _validate_query_field(self, field: str) -> None:
         if field not in self.VALID_NOVEL_QUERY_FIELDS:
             raise ValueError(f"Invalid query field: {field}")
-
-    def _row_to_dict(self, obj: Any) -> dict:
-        return {c.name: getattr(obj, c.name) for c in obj.__table__.columns}
-
-    def _load_tags(self, novel_ids: list[int]) -> dict[int, list[str]]:
-        """Batch-load tags for a set of novel IDs.
-
-        Returns a mapping of ``{novel_id: [tag_name, ...]}`` with tag names
-        sorted alphabetically. Novels without tags are absent from the dict.
-        """
-        if not novel_ids:
-            return {}
-
-        rows = self.session.execute(
-            select(
-                models.NovelTag.novel_id,
-                models.Tag.name,
-            )
-            .join(models.Tag, models.NovelTag.tag_id == models.Tag.id)
-            .where(models.NovelTag.novel_id.in_(novel_ids))
-            .order_by(models.NovelTag.novel_id, models.Tag.name)
-        ).all()
-
-        tag_map: dict[int, list[str]] = {}
-        for novel_id, tag_name in rows:
-            tag_map.setdefault(novel_id, []).append(tag_name)
-        return tag_map

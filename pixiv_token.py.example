@@ -1,0 +1,23 @@
+"""Pixiv account tokens — loaded by Container._load_accounts() as fallback.
+
+Copy this file to pixiv_token.py and fill in your account tokens.
+Each entry maps to a TokenInfo dataclass.
+"""
+TOKENS = [
+    {
+        "token": "your_oauth_token_here",
+        "username": "account1@example.com",
+        "premium": True,
+        "valid": True,
+        "id": 111111111,
+        "password": "your_password_here",
+    },
+    {
+        "token": "another_oauth_token_here",
+        "username": "account2@example.com",
+        "premium": False,
+        "valid": True,
+        "id": 222222222,
+        "password": "another_password",
+    },
+]
