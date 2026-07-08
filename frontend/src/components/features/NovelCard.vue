@@ -79,7 +79,7 @@ const getTagClass = (tag: string) => {
     :class="likeBorderClass"
     @click="toggleActions"
   >
-    <div class="p-5 flex-grow flex flex-col">
+    <div class="p-5 grow flex flex-col">
       <div class="mb-1">
         <a
           :href="`https://www.pixiv.net/novel/show.php?id=${novel.id}`"
@@ -95,7 +95,7 @@ const getTagClass = (tag: string) => {
       <div v-if="novel.series_name" class="text-sm text-gray-500 mb-1 flex items-start">
         <span class="shrink-0 whitespace-nowrap">系列：</span>
         <span
-          :class="[{ 'cursor-pointer hover:text-blue-600': novel.series_id }, 'break-words']"
+          :class="[{ 'cursor-pointer hover:text-blue-600': novel.series_id }, 'wrap-break-word']"
           @click="handleSeriesClick"
         >
           {{ novel.series_name }}<template v-if="novel.series_index"> #{{ novel.series_index }}</template>
@@ -104,7 +104,7 @@ const getTagClass = (tag: string) => {
       <div class="text-sm text-gray-500 mb-3 flex items-start">
         <span class="shrink-0 whitespace-nowrap">作者：</span>
         <span
-          :class="[{ 'cursor-pointer hover:text-blue-600': novel.author_id }, 'break-words']"
+          :class="[{ 'cursor-pointer hover:text-blue-600': novel.author_id }, 'wrap-break-word']"
           @click="handleAuthorClick"
         >
           {{ novel.author_name || '未知' }}
@@ -135,7 +135,7 @@ const getTagClass = (tag: string) => {
 
       <div
         class="absolute inset-0 bg-white/95 backdrop-blur-sm border-t border-gray-100 flex items-center px-3 py-2 gap-2 transition-transform duration-300"
-        :class="['translate-y-full', 'group-hover:translate-y-0', showMobileActions ? '!translate-y-0' : '']"
+        :class="['translate-y-full', 'group-hover:translate-y-0', showMobileActions ? 'translate-y-0' : '']"
         @click="stopPropagation"
       >
         <div class="flex-1 flex gap-2 h-full">

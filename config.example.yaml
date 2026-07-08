@@ -17,3 +17,5 @@ proxy:
   https: "127.0.0.1:20172"
 pixiv_accounts:
   follow: "YOUR_PIXIV_EMAIL"
+batch_download:
+  naming: "{author_name}/{series_name}/#{series_index}_{title}_{id}"

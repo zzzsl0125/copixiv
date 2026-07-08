@@ -56,3 +56,9 @@ Thumbs.db
 
 # === OS ===
 .directory
+
+# === 3rd Party ===
+3rdparty
+
+# === docs === 
+docs

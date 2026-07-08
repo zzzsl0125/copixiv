@@ -66,7 +66,7 @@ const navIconClass = 'mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500'
   <div
     :class="[
       isOpen ? 'translate-x-0' : '-translate-x-full',
-      'fixed inset-y-0 left-0 z-30 w-72 bg-white shadow-xl transform transition-transform duration-300 ease-in-out md:translate-x-0 md:sticky md:top-0 md:h-screen md:flex-shrink-0 flex flex-col',
+      'fixed inset-y-0 left-0 z-30 w-72 bg-white shadow-xl transform transition-transform duration-300 ease-in-out md:translate-x-0 md:sticky md:top-0 md:h-screen md:shrink-0 flex flex-col',
     ]"
   >
     <div class="flex-1 overflow-y-auto px-8 py-6">
