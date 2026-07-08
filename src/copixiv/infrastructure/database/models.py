@@ -160,12 +160,6 @@ class SpecialFollow(Base):
     )
 
 
-class ProcessedPeriod(Base):
-    __tablename__ = C.TABLE_PROCESSED_PERIOD
-    period_type = Column(String(10), primary_key=True)
-    period_value = Column(String(10), primary_key=True)
-
-
 class FailedNovel(Base):
     __tablename__ = C.TABLE_FAILED_NOVEL
     novel_id = Column(Integer, primary_key=True)
@@ -246,17 +240,6 @@ class TagAlias(Base):
 
     def __repr__(self) -> str:
         return f"<TagAlias(source_id={self.source}, target_id={self.target})>"
-
-
-class NovelEpubConversion(Base):
-    __tablename__ = C.TABLE_NOVEL_EPUB_CONVERSION
-    novel_id = Column(
-        Integer,
-        ForeignKey(f"{C.TABLE_NOVEL}.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    status = Column(String, nullable=False, default="pending")
-    last_processed = Column(String)
 
 
 class Token(Base):

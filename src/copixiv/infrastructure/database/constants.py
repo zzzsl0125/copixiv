@@ -17,8 +17,6 @@ TABLE_TASK_HISTORY = "task_history"
 TABLE_SCHEDULED_TASK = "scheduled_tasks"
 TABLE_TAG_PREFERENCE = "tag_preferences"
 TABLE_TAG_ALIAS = "tag_aliases"
-TABLE_PROCESSED_PERIOD = "processed_periods"
-TABLE_NOVEL_EPUB_CONVERSION = "novel_epub_conversions"
 TABLE_TOKEN = "tokens"
 
 # Column Names

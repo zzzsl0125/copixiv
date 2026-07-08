@@ -27,6 +27,8 @@ from .pipeline import (
 )
 from . import maintenance  # noqa: F401 — ensure @register decorators fire
 
+from copixiv.infrastructure.repositories.failed_novel import FailedNovelRepository
+
 from copixiv.app.logger import logger
 
 
@@ -283,11 +285,13 @@ async def author_special_follow(
             all_novels.extend(novels)
 
     async with uow.begin():
+        failed_repo = FailedNovelRepository(uow.session)
         titles = await _batch_handle(
             all_novels, uow,
             client=client,
             file_storage=file_storage,
             image_downloader=image_downloader,
+            failed_repo=failed_repo,
         )
 
     return TaskResult(

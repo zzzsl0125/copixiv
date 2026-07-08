@@ -19,6 +19,8 @@ from copixiv.domain.services.novel_factory import (
 )
 from copixiv.domain.services.parsing import safe_get
 
+from copixiv.infrastructure.repositories.failed_novel import FailedNovelRepository
+
 from copixiv.app.logger import logger
 
 
@@ -117,6 +119,7 @@ async def _download_novels(
     file_storage,
     image_downloader,
     redownload: bool = False,
+    failed_repo: FailedNovelRepository | None = None,
 ) -> list[dict]:
     """Download novels via webview concurrently.
 
@@ -152,6 +155,8 @@ async def _download_novels(
             logger.error(
                 f"下载: #{nid} 失败: {type(result).__name__}: {result}"
             )
+            if failed_repo is not None:
+                failed_repo.record(nid, "download", str(result))
         elif result is not None:
             valid.append(result)
 
@@ -173,6 +178,7 @@ async def _batch_handle(
     file_storage=None,
     image_downloader=None,
     redownload: bool = False,
+    failed_repo: FailedNovelRepository | None = None,
 ) -> list[str]:
     """Process a batch of novels: metadata upsert for existing, download for new.
 
@@ -188,11 +194,19 @@ async def _batch_handle(
 
     ids = {n.id for n in novels}
     existing = await uow.novels.get_existing_ids(ids)
-    need_download = ids if redownload else ids - existing
+
+    # Exclude novels that have already failed too many times
+    skip_ids: set[int] = set()
+    if failed_repo is not None:
+        need_check = ids if redownload else ids - existing
+        skip_ids = failed_repo.get_skip_ids(need_check)
+
+    need_download = ids if redownload else ids - existing - skip_ids
 
     logger.info(
         f"_batch_handle: {len(novels)} novels — "
-        f"{len(existing)} already in DB, {len(need_download)} need download",
+        f"{len(existing)} in DB, {len(skip_ids)} failed-too-many-times, "
+        f"{len(need_download)} need download",
     )
 
     titles: list[str] = []
@@ -213,9 +227,13 @@ async def _batch_handle(
             downloaded = await _download_novels(
                 download_ids, client, file_storage, image_downloader,
                 redownload=redownload,
+                failed_repo=failed_repo,
             )
             if downloaded:
+                success_ids = {d["id"] for d in downloaded}
                 await _batch_upsert(downloaded, uow)
+                if failed_repo is not None:
+                    failed_repo.forget_many(success_ids)
                 titles = [d["title"] for d in downloaded if "title" in d]
                 logger.info(
                     f"_batch_handle: {len(downloaded)} novels downloaded and upserted",
@@ -257,12 +275,14 @@ def _make_page_handler(
         async with client.account_rule():
             page_uow = _UoW(session_factory)
             async with page_uow.begin():
+                failed_repo = FailedNovelRepository(page_uow.session)
                 return await _batch_handle(
                     cn, page_uow,
                     client=client,
                     file_storage=file_storage,
                     image_downloader=image_downloader,
                     redownload=redownload,
+                    failed_repo=failed_repo,
                 )
 
     return handler

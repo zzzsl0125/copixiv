@@ -134,6 +134,61 @@ class PixivClient:
 
     # ---- Internal call machinery -------------------------------------------
 
+    # Retry configuration
+    _MAX_RETRIES: int = 3
+    _BACKOFF_BASE: float = 1.0     # seconds — doubled each attempt
+    _BACKOFF_CAP: float = 10.0     # seconds
+
+    @staticmethod
+    def _backoff(attempt: int) -> float:
+        """Exponential backoff: 1s, 2s, 4s, capped at 10s."""
+        return min(PixivClient._BACKOFF_BASE * (2 ** attempt),
+                   PixivClient._BACKOFF_CAP)
+
+    async def _execute_with_retry(self, method: str, *args, **kwargs):
+        """Call ``account.execute()`` with exponential backoff and
+        automatic account switching on rate-limit or invalid-account errors.
+
+        ``start_cooldown()`` / account invalidation is handled inside
+        ``account.execute()`` — this method only manages the retry loop.
+        """
+        last_error: Exception | None = None
+
+        for attempt in range(self._MAX_RETRIES + 1):
+            account = self.pool.select()
+            try:
+                return await account.execute(method, *args, **kwargs)
+            except AccountInvalidError:
+                # Account already marked INVALID by authenticate();
+                # select() will skip it on the next iteration.
+                logger.warning(
+                    f"Account {account} is invalid, switching "
+                    f"(attempt {attempt + 1}/{self._MAX_RETRIES + 1})"
+                )
+                last_error = AccountInvalidError(str(account))
+            except RateLimitError:
+                # Cooldown already started in account.execute().
+                # TODO: parse Retry-After from the HTTP response if
+                # pixivpy3 ever exposes it, rather than using the
+                # fixed cooling_duration.
+                logger.warning(
+                    f"Rate limited on {account}, "
+                    f"retry {attempt + 1}/{self._MAX_RETRIES + 1}"
+                )
+                last_error = RateLimitError(str(account))
+                if attempt < self._MAX_RETRIES:
+                    await asyncio.sleep(self._backoff(attempt))
+            except Exception as e:
+                logger.warning(
+                    f"API error on {account}: {e}, "
+                    f"retry {attempt + 1}/{self._MAX_RETRIES + 1}"
+                )
+                last_error = e
+                if attempt < self._MAX_RETRIES:
+                    await asyncio.sleep(self._backoff(attempt))
+
+        raise last_error  # type: ignore[misc]
+
     async def _call(self, method: str, *args, **kwargs):
         """Execute an API call with optional pagination and handler dispatch."""
         fetch_all = kwargs.pop("fetch_all", None)
@@ -142,19 +197,7 @@ class PixivClient:
         handler = kwargs.pop("handler", None)
 
         async with self._semaphore:
-            account = self.pool.select()
-            try:
-                result = await account.execute(method, *args, **kwargs)
-            except RateLimitError:
-                account.start_cooldown()
-                account = self.pool.select()
-                result = await account.execute(method, *args, **kwargs)
-            except AccountInvalidError:
-                # Token is invalid — account already marked INVALID by
-                # authenticate().  Just pick another account.
-                logger.warning(f"Account {account} is invalid, switching.")
-                account = self.pool.select()
-                result = await account.execute(method, *args, **kwargs)
+            result = await self._execute_with_retry(method, *args, **kwargs)
 
         if result is None:
             return None
@@ -196,16 +239,9 @@ class PixivClient:
             next_qs = account.api.parse_qs(result.next_url)
 
             async with self._semaphore:
-                try:
-                    next_result = await account.execute(method, **next_qs)
-                except RateLimitError:
-                    account.start_cooldown()
-                    account = self.pool.select()
-                    next_result = await account.execute(method, **next_qs)
-                except AccountInvalidError:
-                    logger.warning(f"Account {account} is invalid, switching.")
-                    account = self.pool.select()
-                    next_result = await account.execute(method, **next_qs)
+                next_result = await self._execute_with_retry(
+                    method, **next_qs
+                )
 
             result.next_url = safe_get(next_result, "next_url")
 
