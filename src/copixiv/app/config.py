@@ -60,6 +60,18 @@ class PixivAccountsConfig(BaseModel):
     follow: str = ""
 
 
+class BatchDownloadConfig(BaseModel):
+    """Naming template for batch-download ZIP internal paths.
+
+    Available tokens:
+        ``{id}`` (required), ``{title}``, ``{author_name}``, ``{author_id}``,
+        ``{like}``, ``{view}``, ``{text}``, ``{date}``, ``{series_name}``,
+        ``{series_index}``.
+    """
+
+    naming: str = "{author_name}/{series_name}/#{series_index}_{title}_{id}"
+
+
 class AppConfig(BaseModel):
     """Root configuration object."""
 
@@ -70,6 +82,9 @@ class AppConfig(BaseModel):
     frontend: FrontendConfig = Field(default_factory=FrontendConfig)
     pixiv_accounts: PixivAccountsConfig = Field(
         default_factory=PixivAccountsConfig
+    )
+    batch_download: BatchDownloadConfig = Field(
+        default_factory=BatchDownloadConfig
     )
 
 

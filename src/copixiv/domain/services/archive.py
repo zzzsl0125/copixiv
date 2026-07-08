@@ -5,12 +5,13 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-from .filename import safe_filename
+from .filename import NovelNamingTemplate
 
 
 def build_batch_zip(
     novels: list[dict[str, Any]],
     format_mode: str = "txt",
+    naming_template: str | None = None,
 ) -> tuple[io.BytesIO, list[str], list[str]]:
     """Build an in-memory ZIP of novel files matching the given criteria.
 
@@ -19,6 +20,8 @@ def build_batch_zip(
                 ``title``, ``author_name``, ``series_id``, ``series_name``,
                 ``series_index``, and ``has_epub``.
         format_mode: ``'txt'`` or ``'prefer_epub'`` (prefers EPUB when available).
+        naming_template: Token-based naming template for ZIP arcnames.
+                Defaults to ``{user}/{series_title}/#{series_order}_{title}_{novel_id}``.
 
     Returns:
         ``(zip_buffer, added_titles, missing_ids)`` — the ZIP as a ``BytesIO``,
@@ -28,15 +31,15 @@ def build_batch_zip(
     added_titles: list[str] = []
     missing_ids: list[str] = []
 
+    template = NovelNamingTemplate(
+        naming_template or "{author_name}/{series_name}/#{series_index}_{title}_{id}"
+    )
+
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for novel in novels:
             novel_id = novel.get("id")
             novel_path_str = novel.get("path")
             title = novel.get("title", str(novel_id))
-            author_name = novel.get("author_name") or "未知作者"
-            series_id = novel.get("series_id")
-            series_name = novel.get("series_name")
-            series_index = novel.get("series_index")
 
             actual_fmt = (
                 "epub"
@@ -53,23 +56,7 @@ def build_batch_zip(
                 missing_ids.append(str(novel_id))
                 continue
 
-            safe_name = safe_filename(title)
-            safe_author = safe_filename(author_name)
-
-            if series_id and series_name:
-                safe_series = safe_filename(series_name)
-                prefix = (
-                    f"{int(series_index):02d}_"
-                    if series_index is not None
-                    else ""
-                )
-                arcname = (
-                    f"{safe_author}/{safe_series}/"
-                    f"{prefix}{safe_name}_{novel_id}.{actual_fmt}"
-                )
-            else:
-                arcname = f"{safe_author}/{safe_name}_{novel_id}.{actual_fmt}"
-
+            arcname = template.resolve(novel) + "." + actual_fmt
             zf.write(str(file_path), arcname)
             added_titles.append(title)
 

@@ -43,6 +43,8 @@ export const novelApi = {
     min_text?: number
     limit?: number
     format_mode?: string
+    zip_name?: string
+    naming_template?: string
   }) {
     const response = await apiClient.post('/novels/batch-download', params, {
       responseType: 'blob',

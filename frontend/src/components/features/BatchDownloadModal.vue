@@ -3,6 +3,7 @@ import { ref, watch, computed } from 'vue'
 import BaseModal from '../ui/BaseModal.vue'
 import { novelApi } from '../../api'
 import { buildQueries } from '../../lib'
+import { useSystem } from '../../composables'
 
 const props = defineProps<{
   isOpen: boolean
@@ -24,6 +25,10 @@ const countLoading = ref(false)
 const totalCount = ref(0)
 const downloadLimit = ref(50)
 const formatMode = ref<'txt' | 'prefer_epub'>('txt')
+const { systemConfig } = useSystem()
+
+const zipName = ref('')
+const namingTemplate = ref('')
 
 const keywordDisplay = computed(() => {
   if (!props.keyword.trim()) return '（无）'
@@ -39,6 +44,25 @@ const keywordDisplay = computed(() => {
   return keywords.length > 0 ? keywords.join(', ') : props.keyword
 })
 
+const searchValues = computed(() => {
+  if (!props.keyword.trim()) return [] as string[]
+  const parts = props.keyword.split(/[;；]/).filter(Boolean)
+  return parts
+    .map(p => {
+      const idx = p.indexOf(':')
+      if (idx > 0) return p.substring(idx + 1).trim()
+      return p.trim()
+    })
+    .filter(Boolean)
+})
+
+function defaultZipName(): string {
+  if (searchValues.value.length > 0) {
+    return searchValues.value.slice(0, 3).join('_')
+  }
+  return `批量下载`
+}
+
 const orderByDisplay = computed(() => {
   const map: Record<string, string> = {
     id: '默认排序', like: '按赞数', view: '按浏览数', text: '按字数', random: '随机', create_time: '按创建时间',
@@ -53,6 +77,8 @@ watch(() => props.isOpen, async (open) => {
   totalCount.value = 0
   downloadLimit.value = 50
   formatMode.value = 'txt'
+  zipName.value = defaultZipName()
+  namingTemplate.value = systemConfig.value?.batch_download_naming || ''
   countLoading.value = true
   try {
     const queries = buildQueries(props.keyword)
@@ -65,6 +91,7 @@ watch(() => props.isOpen, async (open) => {
     console.log('[BatchDownloadModal] count result:', result)
     totalCount.value = result.total
     if (downloadLimit.value > result.total) downloadLimit.value = result.total || 1
+    zipName.value = defaultZipName()
   } catch (err) {
     console.error('[BatchDownloadModal] count failed:', err)
     totalCount.value = 0
@@ -87,6 +114,8 @@ async function handleConfirm() {
       min_text: props.min_text,
       limit: downloadLimit.value,
       format_mode: formatMode.value,
+      zip_name: zipName.value || undefined,
+      naming_template: namingTemplate.value || undefined,
     })
 
     const blob = response.data as Blob
@@ -153,6 +182,20 @@ async function handleConfirm() {
           <label class="inline-flex items-center"><input v-model="formatMode" type="radio" value="prefer_epub" class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300" /><span class="ml-2 text-sm text-gray-700">优先 epub</span></label>
         </div>
         <p v-if="formatMode === 'prefer_epub'" class="mt-1 text-xs text-gray-500">有 epub 的小说使用 .epub，否则回退为 .txt</p>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">压缩包名</label>
+        <div class="flex items-center gap-1">
+          <input v-model="zipName" type="text" class="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm" />
+          <span class="text-sm text-gray-400 shrink-0">.zip</span>
+        </div>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">命名规则</label>
+        <input v-model="namingTemplate" type="text" class="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm font-mono text-xs" />
+        <p class="mt-1 text-xs text-gray-400">
+          可用：&#123;id&#125; &#123;title&#125; &#123;author_name&#125; &#123;author_id&#125; &#123;like&#125; &#123;view&#125; &#123;text&#125; &#123;date&#125; &#123;series_name&#125; &#123;series_index&#125;
+        </p>
       </div>
     </div>
   </BaseModal>

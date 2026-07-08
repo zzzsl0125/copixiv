@@ -10,4 +10,5 @@ class GetConfigUseCase:
         return {
             "default_min_like": config.frontend.default_min_like,
             "default_min_text": config.frontend.default_min_text,
+            "batch_download_naming": config.batch_download.naming,
         }

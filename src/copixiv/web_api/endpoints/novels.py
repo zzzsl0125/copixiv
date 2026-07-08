@@ -104,9 +104,11 @@ def download_novel(
 async def batch_download_novels(
     body: BatchDownloadRequest = Body(...),
     db: Session = Depends(get_db),
+    request: Request = None,
 ):
     queries = parse_queries_json(body.queries)
-    use_case = BatchDownloadUseCase(NovelRepository(db))
+    naming = request.app.state.config.batch_download.naming if request else None
+    use_case = BatchDownloadUseCase(NovelRepository(db), naming)
     result = await use_case.execute(body, queries)
 
     headers = {

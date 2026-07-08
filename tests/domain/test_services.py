@@ -6,7 +6,7 @@ import pytest
 
 from copixiv.domain.services.tags import parse_tags, normalize_tag
 from copixiv.domain.services.language import has_image_placeholders
-from copixiv.domain.services.filename import safe_filename, build_path
+from copixiv.domain.services.filename import safe_filename, build_path, NovelNamingTemplate
 from copixiv.domain.services.parsing import (
     safe_get,
     safe_set,
@@ -192,3 +192,222 @@ class TestBuildBatchZip:
         novels = [{"id": 99999, "path": "/nonexistent/file.txt", "title": "T", "author_name": "A"}]
         buf, titles, missing = build_batch_zip(novels)
         assert "99999" in missing
+
+
+# ---- naming template ----
+
+def _novel_dict(**overrides: object) -> dict:
+    """Minimal novel dict for template resolution tests."""
+    return {
+        "id": 12345678,
+        "title": "テスト小説",
+        "author_name": "作者名",
+        "author_id": 99999,
+        "like": 100,
+        "view": 5000,
+        "text": 3000,
+        "series_name": "シリーズ",
+        "series_index": 3,
+        "create_time": "2024-01-15T00:00:00",
+        "path": "/some/path",
+        "has_epub": 0,
+    } | overrides
+
+
+class TestNovelNamingTemplate:
+    """Unit tests for the token-based template engine."""
+
+    # -- construction --------------------------------------------------
+
+    def test_id_required(self):
+        with pytest.raises(ValueError, match="id"):
+            NovelNamingTemplate("{title}")
+
+    # -- token resolution ----------------------------------------------
+
+    def test_all_basic_tokens_resolved(self):
+        tpl = NovelNamingTemplate("{id}_{title}_{author_name}_{author_id}")
+        result = tpl.resolve(_novel_dict())
+        assert result == "12345678_テスト小説_作者名_99999"
+
+    def test_stats_tokens_resolved(self):
+        tpl = NovelNamingTemplate("{id}_{like}_{view}_{text}")
+        result = tpl.resolve(_novel_dict())
+        assert result == "12345678_100_5000_3000"
+
+    def test_date_token_formatted(self):
+        tpl = NovelNamingTemplate("{id}_{date}")
+        # create_time as string "2024-01-15T00:00:00" → "2024-01-15"
+        result = tpl.resolve(_novel_dict())
+        assert result == "12345678_2024-01-15"
+
+    def test_date_token_none(self):
+        tpl = NovelNamingTemplate("{id}_{date}")
+        result = tpl.resolve(_novel_dict(create_time=None))
+        # empty {date} removes adjacent separator '_'
+        assert result == "12345678"
+
+    def test_date_token_datetime_object(self):
+        from datetime import datetime
+        tpl = NovelNamingTemplate("{id}_{date}")
+        result = tpl.resolve(_novel_dict(create_time=datetime(2024, 6, 15)))
+        assert result == "12345678_2024-06-15"
+
+    def test_series_tokens_with_series(self):
+        tpl = NovelNamingTemplate(
+            "{author_name}/{series_name}/#{series_index}_{title}_{id}"
+        )
+        result = tpl.resolve(_novel_dict())
+        assert result == "作者名/シリーズ/#3_テスト小説_12345678"
+
+    def test_series_tokens_without_series(self):
+        tpl = NovelNamingTemplate(
+            "{author_name}/{series_name}/#{series_index}_{title}_{id}"
+        )
+        result = tpl.resolve(_novel_dict(series_name=None, series_index=None))
+        # /シリーズディレクトリ/#_  should both collapse
+        assert result == "作者名/テスト小説_12345678"
+
+    def test_author_name_defaults_to_unknown(self):
+        tpl = NovelNamingTemplate("{id}_{author_name}")
+        result = tpl.resolve(_novel_dict(author_name=None))
+        assert result == "12345678_未知作者"
+
+    # -- sanitization --------------------------------------------------
+
+    def test_illegal_chars_replaced_with_fullwidth(self):
+        tpl = NovelNamingTemplate("{id}_{title}")
+        result = tpl.resolve(_novel_dict(title='test:file?<name>'))
+        assert ":" not in result
+        assert "?" not in result
+        assert "<" not in result
+        assert ">" not in result
+        assert "：" in result
+        assert "？" in result
+
+    def test_path_separator_in_title_mapped(self):
+        """Title containing '/' should have '/' mapped to full-width '／'."""
+        tpl = NovelNamingTemplate("{id}_{title}")
+        result = tpl.resolve(_novel_dict(title="a/b"))
+        assert result == "12345678_a／b"
+
+    def test_backslash_in_title_mapped(self):
+        tpl = NovelNamingTemplate("{id}_{title}")
+        result = tpl.resolve(_novel_dict(title="a\\b"))
+        assert "\\" not in result
+        assert "＼" in result
+
+    def test_windows_reserved_plain_name(self):
+        """When the entire path segment is a reserved name, append suffix."""
+        tpl = NovelNamingTemplate("{id}/{title}")
+        result = tpl.resolve(_novel_dict(title="CON"))
+        assert result == "12345678/CON[WinReserved]"
+
+    def test_windows_reserved_with_extension(self):
+        """When reserved name has a dot extension, replace all dots."""
+        tpl = NovelNamingTemplate("{id}/{title}")
+        result = tpl.resolve(_novel_dict(title="CON.txt"))
+        assert "CON．txt" in result
+        assert "." not in result.split("/")[-1]
+
+    def test_leading_dot_stripped(self):
+        tpl = NovelNamingTemplate("{id}_{title}")
+        result = tpl.resolve(_novel_dict(title=".hidden"))
+        assert not result.endswith("/.hidden")
+
+    def test_control_chars_removed(self):
+        tpl = NovelNamingTemplate("{id}_{title}")
+        result = tpl.resolve(_novel_dict(title="test\x00null"))
+        assert "\x00" not in result
+        assert "testnull" in result
+
+    # -- separator removal ---------------------------------------------
+
+    def test_empty_series_order_removes_wrapping_separators(self):
+        tpl = NovelNamingTemplate("{id}#{series_index}_{title}")
+        result = tpl.resolve(_novel_dict(series_index=None))
+        # #{series_index}_ — all three chars adjacent to empty token → removed
+        assert "#" not in result
+        assert result == "12345678テスト小説"
+
+    def test_consecutive_slashes_collapsed(self):
+        tpl = NovelNamingTemplate("{author_name}/{series_name}/{id}")
+        result = tpl.resolve(_novel_dict(series_name=None))
+        assert "//" not in result
+        assert result == "作者名/12345678"
+
+    def test_multiple_separators_stripped(self):
+        tpl = NovelNamingTemplate("{id}_#-_{title}")
+        result = tpl.resolve(_novel_dict())
+        assert result == "12345678_#-_テスト小説"
+
+    # -- integration ---------------------------------------------------
+
+    def test_default_template_with_real_dict(self):
+        tpl = NovelNamingTemplate(
+            "{author_name}/{series_name}/#{series_index}_{title}_{id}"
+        )
+        novel = _novel_dict(
+            id=85633671,
+            title="とある魔術の禁書目録",
+            author_name="鎌池和馬",
+            author_id=12345,
+            series_name="とあるシリーズ",
+            series_index=1,
+        )
+        result = tpl.resolve(novel)
+        assert result == "鎌池和馬/とあるシリーズ/#1_とある魔術の禁書目録_85633671"
+
+    def test_default_template_without_series_no_residue(self):
+        tpl = NovelNamingTemplate(
+            "{author_name}/{series_name}/#{series_index}_{title}_{id}"
+        )
+        novel = _novel_dict(
+            id=42,
+            title="短編",
+            author_name="名無し",
+            series_name=None,
+            series_index=None,
+        )
+        result = tpl.resolve(novel)
+        assert result == "名無し/短編_42"
+        assert "#" not in result
+
+
+class TestBuildBatchZipWithTemplate:
+    """Integration: build_batch_zip uses the template for arcnames."""
+
+    def test_custom_template_is_used(self, tmp_path):
+        import zipfile
+
+        # Create a dummy file on disk
+        novel_dir = tmp_path / "download" / "0000"
+        novel_dir.mkdir(parents=True)
+        file_path = novel_dir / "test_title_42.txt"
+        file_path.write_text("content", encoding="utf-8")
+
+        novels = [{
+            "id": 42,
+            "title": "Test Title",
+            "author_name": "Author",
+            "author_id": 1,
+            "like": 10,
+            "view": 100,
+            "text": 500,
+            "series_name": "My Series",
+            "series_index": 2,
+            "create_time": "2024-01-15T00:00:00",
+            "path": str(file_path.with_suffix("")),  # without extension
+            "has_epub": 0,
+        }]
+
+        custom = "{id}_{title}"
+        buf, titles, missing = build_batch_zip(novels, "txt", custom)
+
+        assert len(titles) == 1
+        assert len(missing) == 0
+
+        buf.seek(0)
+        with zipfile.ZipFile(buf) as zf:
+            names = zf.namelist()
+            assert names == ["42_Test Title.txt"]

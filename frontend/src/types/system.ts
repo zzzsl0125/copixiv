@@ -3,6 +3,7 @@
 export interface SystemConfig {
   default_min_like: number
   default_min_text: number
+  batch_download_naming: string
 }
 
 export interface SearchHistory {

@@ -229,6 +229,7 @@ class TaskMethod(BaseModel):
 class SystemConfigResponse(BaseModel):
     default_min_like: int
     default_min_text: int
+    batch_download_naming: str
 
 
 class RestartRequest(BaseModel):
@@ -247,6 +248,8 @@ class BatchDownloadRequest(BaseModel):
     min_text: int | None = None
     limit: int = Field(default=50, ge=1, le=200)
     format_mode: Literal["txt", "prefer_epub"] = "txt"
+    zip_name: str | None = None
+    naming_template: str | None = None
 
 
 # ---------------------------------------------------------------------------

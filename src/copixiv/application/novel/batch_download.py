@@ -19,6 +19,8 @@ class BatchDownloadRequest:
     min_text: int | None = None
     limit: int = 50
     format_mode: str = "txt"
+    zip_name: str | None = None
+    naming_template: str | None = None
 
 
 @dataclass
@@ -46,8 +48,9 @@ class BatchDownloadUseCase:
             could be added to the ZIP.
     """
 
-    def __init__(self, novel_repo: NovelRepository):
+    def __init__(self, novel_repo: NovelRepository, naming_template: str | None = None):
         self._repo = novel_repo
+        self._naming_template = naming_template
 
     async def execute(
         self, req: BatchDownloadRequest, queries: dict[str, str] | None = None
@@ -64,12 +67,13 @@ class BatchDownloadUseCase:
         if not novels:
             raise NotFoundError("未找到匹配条件的小说")
 
-        zip_buf, titles, missing = build_batch_zip(novels, req.format_mode)
+        naming = req.naming_template or self._naming_template
+        zip_buf, titles, missing = build_batch_zip(novels, req.format_mode, naming)
         if not titles:
             raise NotFoundError("未找到可下载的有效文件")
 
         zip_buf.seek(0)
-        search_desc = _build_search_desc(titles, queries or {})
+        search_desc = req.zip_name or _build_search_desc(queries or {})
         return BatchDownloadResult(
             zip_buffer=zip_buf,
             titles=titles,
@@ -78,11 +82,11 @@ class BatchDownloadUseCase:
         )
 
 
-def _build_search_desc(titles: list[str], queries: dict[str, str]) -> str:
+def _build_search_desc(queries: dict[str, str]) -> str:
     """Build a human-readable description for the download filename."""
-    search_desc = f"批量下载_{len(titles)}篇"
+    search_desc = f"批量下载"
     if queries:
         keywords = [k for k, v in queries.items() if v == "keyword"]
         if keywords:
-            search_desc = f"{'_'.join(keywords[:3])}_{len(titles)}篇"
+            search_desc = f"{'_'.join(keywords[:3])}"
     return search_desc
