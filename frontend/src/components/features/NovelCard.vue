@@ -135,7 +135,7 @@ const getTagClass = (tag: string) => {
 
       <div
         class="absolute inset-0 bg-white/95 backdrop-blur-sm border-t border-gray-100 flex items-center px-3 py-2 gap-2 transition-transform duration-300"
-        :class="['translate-y-full', 'group-hover:translate-y-0', showMobileActions ? 'translate-y-0' : '']"
+        :class="['translate-y-full', 'group-hover:translate-y-0', showMobileActions ? 'translate-y-0!' : '']"
         @click="stopPropagation"
       >
         <div class="flex-1 flex gap-2 h-full">

@@ -45,6 +45,16 @@ def create_database_engine(
         cursor.execute("PRAGMA synchronous=NORMAL")
         cursor.execute("PRAGMA busy_timeout=10000")
         cursor.execute("PRAGMA foreign_keys=ON")
+        # mmap the main DB file into the process address space so page
+        # access is a pointer dereference instead of a pread() syscall.
+        # 512 MB covers the current ~508 MB DB; growth beyond this
+        # silently falls back to read(). WAL is not mmap'd either way.
+        cursor.execute("PRAGMA mmap_size=536870912")
+        # Per-connection pager cache (~50 MB). Unlike the OS page cache,
+        # this lives on the process heap and is never reclaimed by Linux,
+        # so the pool_size persistent connections stay warm across idle
+        # periods. 50 MB is enough to hold the hot index B-tree nodes.
+        cursor.execute("PRAGMA cache_size=-50000")
         cursor.close()
 
     return engine

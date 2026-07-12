@@ -38,9 +38,16 @@ class FTSManager:
 
     @staticmethod
     def warm_up() -> None:
-        """Pre-import jieba so the first search isn't slow."""
+        """Pre-load jieba's dict so the first keyword search isn't slow.
+
+        jieba loads its 4.95 MB default dict and builds the prefix trie on
+        the first ``cut()`` call, not on import (import alone is ~37 ms;
+        the real ~700 ms cost lands on the first ``cut()``). Triggering it
+        here shifts that cost to startup instead of the first user search.
+        """
         try:
-            import jieba  # noqa: F401
+            import jieba
+            list(jieba.cut("预热", HMM=True))
         except ImportError:
             pass
 

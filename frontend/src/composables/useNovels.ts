@@ -57,7 +57,11 @@ export function useNovels() {
       const colonIndex = condition.indexOf(':')
       if (colonIndex > 0) {
         const type = condition.substring(0, colonIndex).trim()
-        if (type === 'author_id' || type === 'author') {
+        if (type === 'id') {
+          filters.order_by = 'id'
+          filters.order_direction = 'DESC'
+          isSpecialCase = true
+        } else if (type === 'author_id' || type === 'author') {
           filters.order_by = 'id'
           filters.order_direction = 'DESC'
           isSpecialCase = true
@@ -70,6 +74,11 @@ export function useNovels() {
           filters.order_direction = 'DESC'
           isSpecialCase = true
         }
+      } else if (/^\d{7,}$/.test(condition.trim())) {
+        // Bare 7+ digit number — auto-detected as novel ID by buildQueries.
+        filters.order_by = 'id'
+        filters.order_direction = 'DESC'
+        isSpecialCase = true
       }
     }
 
