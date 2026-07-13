@@ -36,6 +36,21 @@ class AuthorRepository(BaseRepository):
             return None
         return model_to_dict(author)
 
+    async def get_names_by_ids(self, author_ids: set[int]) -> dict[int, str]:
+        """Batch lookup: return ``{author_id: author_name}`` for ids whose
+        name is already known (non-NULL).  Authors with ``author_name IS NULL``
+        are silently omitted."""
+        if not author_ids:
+            return {}
+        rows = self.session.execute(
+            _select(models.Author.author_id, models.Author.author_name)
+            .where(
+                models.Author.author_id.in_(author_ids),
+                models.Author.author_name.isnot(None),
+            )
+        ).fetchall()
+        return {row.author_id: row.author_name for row in rows}
+
     async def need_update(self, author_id: int) -> bool:
         author = self.session.get(models.Author, author_id)
         if author and author.last_update:

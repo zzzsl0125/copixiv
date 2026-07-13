@@ -14,13 +14,13 @@ from datetime import datetime, timedelta
 from copixiv.domain.models.task_result import TaskResult
 from copixiv.domain.services.novel_factory import build_from_webview
 from copixiv.domain.services.parsing import safe_get
+from copixiv.domain.services.author_name_resolver import resolve_author_names
 
 from .registry import register
 from .pipeline import (
     _account,
     _batch_upsert,
     _batch_handle,
-    _db_write_lock,
     _filter_chinese_novels,
     _make_page_handler,
     _month_ranges,
@@ -115,20 +115,11 @@ async def novel_fetch(
     async with uow.begin():
         count = await _batch_upsert([data], uow)
 
-    # API call + write outside the batch transaction to avoid holding
-    # the SQLite lock during network I/O.
+    # Resolve author name — webview API doesn't return it.
     if count:
-        try:
-            detail = await client.user_detail(data["author_id"])
-            name = safe_get(detail, "user.name", "")
-            if name:
-                async with _db_write_lock:
-                    async with uow.begin():
-                        await uow.authors.update_author_name(data["author_id"], name)
-        except Exception:
-            logger.warning(
-                f"Failed to fetch name for author #{data['author_id']}"
-            )
+        await resolve_author_names(
+            {data["author_id"]}, client=client, uow=uow,
+        )
 
     title = data.get("title", "")
     if count:
@@ -157,9 +148,10 @@ async def novel_follow(
     because the Pixiv novel_follow endpoint returns results scoped to the
     authenticated account's own following list.
     """
+    new_author_ids: set[int] = set()
     _handle = _make_page_handler(
         uow._session_factory, client, file_storage, image_downloader,
-        redownload=force,
+        redownload=force, author_ids_out=new_author_ids,
     )
     fetch_til = datetime.now().astimezone() - timedelta(days=days)
     async with client.account_rule(
@@ -168,6 +160,10 @@ async def novel_follow(
         resp = await client.novel_follow(fetch_til=fetch_til, handler=_handle)
 
     titles: list[str] = safe_get(resp, "handler_results", [])
+
+    if new_author_ids:
+        await resolve_author_names(new_author_ids, client=client, uow=uow)
+
     return TaskResult(
         summary=f"关注更新: 新增 {len(titles)} 本小说",
         new_novel_titles=titles,
@@ -205,25 +201,17 @@ async def author_fetch(
     )
     resp = await client.user_novels(author_id, fetch_all=True, handler=_download)
 
-    # Fetch author name (webview API doesn't return it) and persist
-    # to both the author row and all novels by this author.
-    # API call is done OUTSIDE the DB transaction to avoid holding
-    # the SQLite write lock during slow network I/O.
-    name: str = ""
-    try:
-        detail = await client.user_detail(author_id)
-        name = safe_get(detail, "user.name", "")
-    except Exception:
-        logger.warning(f"Failed to fetch name for author #{author_id}")
-
-    async with _db_write_lock:
-        async with uow.begin():
-            if name:
-                await uow.authors.update_author_name(author_id, name)
-                logger.info(f"Author #{author_id} name set to {name!r}")
-            await uow.authors.update_last_update(author_id)
-
     titles: list[str] = safe_get(resp, "handler_results", [])
+
+    # Resolve author name — webview API doesn't return it.
+    resolved = await resolve_author_names(
+        {author_id}, client=client, uow=uow,
+    )
+    name = resolved.get(author_id, "")
+
+    async with uow.begin():
+        await uow.authors.update_last_update(author_id)
+
     label = name or f"#{author_id}"
     return TaskResult(
         summary=f"作者 {label}: 新增 {len(titles)} 本小说",
@@ -286,13 +274,16 @@ async def author_special_follow(
 
     async with uow.begin():
         failed_repo = FailedNovelRepository(uow.session)
-        titles = await _batch_handle(
+        titles, new_author_ids = await _batch_handle(
             all_novels, uow,
             client=client,
             file_storage=file_storage,
             image_downloader=image_downloader,
             failed_repo=failed_repo,
         )
+
+    if new_author_ids:
+        await resolve_author_names(new_author_ids, client=client, uow=uow)
 
     return TaskResult(
         summary=f"特别关注: 新增 {len(titles)} 本小说",

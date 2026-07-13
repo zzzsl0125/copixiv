@@ -179,7 +179,7 @@ async def _batch_handle(
     image_downloader=None,
     redownload: bool = False,
     failed_repo: FailedNovelRepository | None = None,
-) -> list[str]:
+) -> tuple[list[str], set[int]]:
     """Process a batch of novels: metadata upsert for existing, download for new.
 
     When *client* / *file_storage* / *image_downloader* are provided,
@@ -187,10 +187,13 @@ async def _batch_handle(
     and upserted to the DB.  Without them (legacy callers), only metadata
     upsert is performed.
 
-    Returns the titles of newly downloaded novels.
+    Returns ``(titles, new_author_ids)`` — the titles and author IDs of
+    newly downloaded novels (which may have missing author names because
+    the webview API doesn't return them).  Callers should pass
+    ``new_author_ids`` to :func:`resolve_author_names` to fill in the gaps.
     """
     if not novels:
-        return []
+        return [], set()
 
     ids = {n.id for n in novels}
     existing = await uow.novels.get_existing_ids(ids)
@@ -210,6 +213,7 @@ async def _batch_handle(
     )
 
     titles: list[str] = []
+    new_author_ids: set[int] = set()
 
     # Metadata-only upsert for existing
     if not redownload:
@@ -235,6 +239,7 @@ async def _batch_handle(
                 if failed_repo is not None:
                     failed_repo.forget_many(success_ids)
                 titles = [d["title"] for d in downloaded if "title" in d]
+                new_author_ids = {d["author_id"] for d in downloaded if d.get("author_id")}
                 logger.info(
                     f"_batch_handle: {len(downloaded)} novels downloaded and upserted",
                 )
@@ -244,7 +249,7 @@ async def _batch_handle(
                 f"but no client/storage provided — skipping download",
             )
 
-    return titles
+    return titles, new_author_ids
 
 
 # ---------------------------------------------------------------------------
@@ -258,12 +263,17 @@ def _make_page_handler(
     file_storage,
     image_downloader,
     redownload: bool = False,
+    *,
+    author_ids_out: set[int] | None = None,
 ):
     """Build a per-page handler with its own UoW session.
 
     Each page from a paginated API call runs concurrently — sharing a single
     session across concurrent handlers causes SQLite write contention.  This
     factory creates handlers that each get their own session.
+
+    If *author_ids_out* is provided, the handler will collect the author IDs
+    of newly-downloaded novels into it (for later name resolution).
     """
     from copixiv.infrastructure.database.uow import SqlUnitOfWork as _UoW
 
@@ -276,7 +286,7 @@ def _make_page_handler(
             page_uow = _UoW(session_factory)
             async with page_uow.begin():
                 failed_repo = FailedNovelRepository(page_uow.session)
-                return await _batch_handle(
+                titles, new_author_ids = await _batch_handle(
                     cn, page_uow,
                     client=client,
                     file_storage=file_storage,
@@ -284,5 +294,8 @@ def _make_page_handler(
                     redownload=redownload,
                     failed_repo=failed_repo,
                 )
+                if author_ids_out is not None:
+                    author_ids_out.update(new_author_ids)
+                return titles
 
     return handler

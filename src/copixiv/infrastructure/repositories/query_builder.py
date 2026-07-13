@@ -500,8 +500,12 @@ class NovelQueryBuilder(BaseQueryBuilder):
         is_special_follow CASE expressions).  A second JOIN on the same
         table would produce an ambiguous column reference.
 
-        Instead we use independent ``WHERE id IN (SELECT ...)`` subqueries
-        which are cheap since these tables are tiny (67 / 58 rows).
+        *is_favourite* filters by novel PK, which is always efficient.
+
+        *is_special_follow* uses EXISTS (same pattern as tag/FTS filters)
+        so SQLite can walk the PK index for ORDER BY + LIMIT instead of
+        building a TEMP B-TREE over all matching rows (benchmarked:
+        1.7 ms vs 4.5 ms for the WHERE-IN approach).
         """
         for qtype, _value in field_filters.items():
             if qtype == C.FIELD_IS_FAVOURITE:
@@ -512,8 +516,13 @@ class NovelQueryBuilder(BaseQueryBuilder):
                 )
             elif qtype == C.FIELD_IS_SPECIAL_FOLLOW:
                 stmt = stmt.where(
-                    self.main_model.author_id.in_(
-                        select(models.SpecialFollow.author_id)
+                    _exists(
+                        select(literal_column("1"))
+                        .select_from(models.SpecialFollow)
+                        .where(
+                            models.SpecialFollow.author_id
+                            == self.main_model.author_id,
+                        )
                     )
                 )
         return stmt

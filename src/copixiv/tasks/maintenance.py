@@ -9,11 +9,10 @@ Since these are maintenance tasks (not novel discovery), the
 plain summary instead of incorrectly labelling results as "new novels".
 """
 
-import asyncio
 from pathlib import Path
 
 from copixiv.domain.models.task_result import TaskResult
-from copixiv.domain.services.parsing import safe_get
+from copixiv.domain.services.author_name_resolver import resolve_author_names
 from copixiv.app.logger import logger
 
 from .registry import register
@@ -95,62 +94,25 @@ async def sync_empty_name(
 ):
     """Fix novels whose ``author_name`` is NULL.
 
-    First tries to resolve names from the local ``author`` table, then
-    falls back to the Pixiv API for any remaining authors.
+    Delegates to :func:`resolve_author_names` which checks the local
+    ``author`` table first, then falls back to the Pixiv API.
     """
     from sqlalchemy import select as _select
     from copixiv.infrastructure.database import models
 
     async with uow.begin():
-        stmt = _select(models.Novel.id, models.Novel.author_id).where(
-            models.Novel.author_name.is_(None)
-        )
+        stmt = _select(
+            models.Novel.id, models.Novel.author_id
+        ).where(models.Novel.author_name.is_(None))
         rows = uow.session.execute(stmt).fetchall()
 
     if not rows:
         return TaskResult(summary="作者名同步: 无需修复")
 
-    # Group novel IDs by author
-    author_novels: dict[int, set[int]] = {}
-    for novel_id, author_id in rows:
-        author_novels.setdefault(author_id, set()).add(novel_id)
+    author_ids = {row.author_id for row in rows}
+    resolved = await resolve_author_names(author_ids, client=client, uow=uow)
 
-    # Resolve names from local author table first
-    resolved: dict[int, str] = {}
-    async with uow.begin():
-        for author_id in author_novels:
-            author = await uow.authors.get_by_id(author_id)
-            name = (author or {}).get("author_name", "")
-            if name:
-                resolved[author_id] = name
-
-    # Fall back to Pixiv API for authors still missing names
-    missing = [a for a in author_novels if a not in resolved]
-    if missing:
-        results = await asyncio.gather(
-            *[client.user_detail(a) for a in missing],
-            return_exceptions=True,
-        )
-        for author_id, result in zip(missing, results):
-            if isinstance(result, Exception):
-                continue
-            name = safe_get(result, "user.name", "")
-            if name:
-                resolved[author_id] = name
-
-    # Persist resolved names
-    async with uow.begin():
-        for author_id, name in resolved.items():
-            if not name:
-                continue
-            await uow.authors.update_author_name(author_id, name)
-
-        await uow.authors.update_summary(set(author_novels.keys()))
-        await uow.series.update_summary(
-            await uow.series.get_empty_series_ids()
-        )
-
-    total_fixed = sum(len(novel_ids) for novel_ids in author_novels.values())
+    total_fixed = len(rows)
     author_count = len(resolved)
     return TaskResult(
         summary=f"作者名同步: 修复了 {total_fixed} 本小说 ({author_count} 位作者)"
