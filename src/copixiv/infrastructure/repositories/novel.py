@@ -213,7 +213,7 @@ class NovelRepository(BaseRepository):
         """
         update_fields_set = set([
             "like", "view", "title", "text", "caption",
-            "series_id", "series_name", "series_index", "create_time",
+            "series_name", "create_time",
         ] + force_update)
 
         new_ids: list[int] = []

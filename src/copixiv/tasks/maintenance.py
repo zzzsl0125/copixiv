@@ -129,3 +129,59 @@ async def rebuild_fts(
         await uow.novels.rebuild_fts()
 
     return TaskResult(summary="FTS 索引重建完成")
+
+
+@register("fix_series_index")
+async def fix_series_index(
+    *,
+    client,
+    uow,
+):
+    """Fix novels whose ``series_index`` is NULL by assigning chapter
+    numbers from series order (sorted by novel ID ≈ creation time).
+
+    Listing APIs (user_novels, novel_follow, novel_series) do **not**
+    include the ``series.index`` field, but ``novel_series`` returns
+    all novels in a series in chronological order.  We assign indices
+    locally (1, 2, 3, …) and upsert them.
+
+    Each series is fetched and committed immediately so partial
+    progress is preserved even if the task times out.
+    """
+    from copixiv.domain.services.novel_factory import build_from_novel_info
+    from copixiv.domain.services.parsing import safe_get, safe_set
+    from .pipeline import _batch_upsert
+
+    async with uow.begin():
+        series_ids = await uow.series.series_with_empty_index()
+
+    if not series_ids:
+        return TaskResult(summary="系列章节号检查: 无需修复")
+
+    total = len(series_ids)
+    logger.info(
+        f"fix_series_index: {total} series have novels with NULL series_index"
+    )
+
+    done = 0
+    fixed = 0
+    for sid in series_ids:
+        resp = await client.novel_series(sid, fetch_all=True)
+        novels = safe_get(resp, "novels", [])
+        if not novels:
+            continue
+        # Sort by novel ID (lower ID ≈ earlier chapter), assign indices
+        novels.sort(key=lambda n: safe_get(n, "id", 0))
+        for i, n in enumerate(novels):
+            safe_set(n, "series.index", i + 1)
+        novel_dicts = [build_from_novel_info(n) for n in novels]
+        async with uow.begin():
+            fixed += await _batch_upsert(novel_dicts, uow)
+        done += 1
+
+    if done == 0:
+        return TaskResult(summary="系列章节号检查: API 请求全部失败")
+
+    return TaskResult(
+        summary=f"系列章节号修复: {done}/{total} 个系列, 更新 {fixed} 本小说"
+    )
