@@ -24,9 +24,13 @@ class InterceptHandler(logging.Handler):
         except ValueError:
             level = record.levelno
 
-        # Find caller from where the logged message originated (skip logging
-        # module frames so the reported location is the real call site).
+        # Find caller from where the logged message originated.
+        # ``logging.currentframe()`` returns *this* frame (emit), which is
+        # NOT in ``logging.__file__``, so we advance past it first, then
+        # skip every stdlib-logging frame so the reported location is the
+        # real call site (e.g. uvicorn, alembic, sqlalchemy).
         frame, depth = logging.currentframe(), 2
+        frame = frame.f_back  # step past emit into the stdlib logging frames
         while frame and frame.f_code.co_filename == logging.__file__:
             frame = frame.f_back
             depth += 1
@@ -59,7 +63,9 @@ def setup_logging(log_dir: str = "log") -> None:
     # Console (stdout, colourised)
     logger.add(sys.stdout, format=log_format, level="INFO", colorize=True)
 
-    # Backend log file — all application messages except frontend / access noise
+    # Backend log file — all application / library messages.
+    # Exclude only HTTP access-log entries produced by the access-log
+    # middleware (tagged with ``extra.name == "http_access"``).
     logger.add(
         log_dir / "backend.log",
         format=log_format,
@@ -67,23 +73,11 @@ def setup_logging(log_dir: str = "log") -> None:
         rotation="10 MB",
         retention="3 days",
         encoding="utf-8",
-        filter=lambda record: record["extra"].get("name") != "frontend"
-        and record["name"] != "uvicorn.access"
-        and record["name"] != "logging",
+        filter=lambda record: record["extra"].get("name") != "http_access",
     )
 
-    # Frontend log file — only messages tagged with name=frontend
-    logger.add(
-        log_dir / "frontend.log",
-        format=log_format,
-        level="INFO",
-        rotation="10 MB",
-        retention="3 days",
-        encoding="utf-8",
-        filter=lambda record: record["extra"].get("name") == "frontend",
-    )
-
-    # Access log file — HTTP access logs (uvicorn.access + stdlib)
+    # Access log file — HTTP request/response entries from the access-log
+    # middleware (tagged with ``extra.name == "http_access"``).
     logger.add(
         log_dir / "access.log",
         format=log_format,
@@ -91,8 +85,7 @@ def setup_logging(log_dir: str = "log") -> None:
         rotation="10 MB",
         retention="3 days",
         encoding="utf-8",
-        filter=lambda record: record["name"] == "uvicorn.access"
-        or record["name"] == "logging",
+        filter=lambda record: record["extra"].get("name") == "http_access",
     )
 
     # --- Bridge standard library logging into loguru ---

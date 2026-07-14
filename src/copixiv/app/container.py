@@ -131,14 +131,48 @@ class Container:
 
     def create_app(self):
         """Return a fully configured FastAPI application."""
+        import time as _time
         from fastapi import FastAPI
         from fastapi.middleware.cors import CORSMiddleware
         from contextlib import asynccontextmanager
+        from starlette.types import Scope, Receive, Send
 
         from copixiv.web_api.endpoints import (
             novels, tasks, system, tag_preferences, search_history,
             tokens, tag_aliases,
         )
+        from copixiv.infrastructure.pixiv.account import AccountStatus
+
+        # -- pure-ASGI access-log middleware --------------------------------
+        class _AccessLogMiddleware:
+            """Log every HTTP request to ``access.log`` via loguru."""
+
+            def __init__(self, app):
+                self.app = app
+
+            async def __call__(self, scope: Scope, receive: Receive, send: Send):
+                if scope["type"] != "http":
+                    await self.app(scope, receive, send)
+                    return
+
+                start = _time.monotonic()
+                status_code = 0
+
+                async def _send_wrapper(message):
+                    nonlocal status_code
+                    if message["type"] == "http.response.start":
+                        status_code = message.get("status", 0)
+                    await send(message)
+
+                try:
+                    await self.app(scope, receive, _send_wrapper)
+                finally:
+                    elapsed_ms = (_time.monotonic() - start) * 1000
+                    with logger.contextualize(name="http_access"):
+                        logger.info(
+                            f"{scope['method']} {scope['path']} → "
+                            f"{status_code} {elapsed_ms:.1f}ms",
+                        )
 
         @asynccontextmanager
         async def lifespan(app: FastAPI):
@@ -156,12 +190,20 @@ class Container:
 
             # Pre-authenticate all accounts in parallel so the first API
             # call on each doesn't pay the ~2s auth cost individually.
-            logger.info(
-                "Authenticating %d accounts in parallel...",
-                len(self._account_pool.accounts),
-            )
+            total = len(self._account_pool.accounts)
+            logger.info(f"Authenticating {total} accounts in parallel...")
             await self._account_pool.authenticate_all()
-            logger.info("All accounts authenticated.")
+            active = sum(
+                1 for a in self._account_pool.accounts
+                if a.status == AccountStatus.ACTIVE
+            )
+            if active == total:
+                logger.info("All {} accounts authenticated.", total)
+            else:
+                logger.warning(
+                    "Account authentication finished: {}/{} active",
+                    active, total,
+                )
 
             self._task_manager.start()
             yield
@@ -181,6 +223,10 @@ class Container:
             return JSONResponse(
                 status_code=exc.status_code, content={"detail": exc.detail},
             )
+
+        # Access-log middleware — innermost (added first) so it sees the
+        # real status code from the handler, not CORS preflight noise.
+        app.add_middleware(_AccessLogMiddleware)
 
         app.add_middleware(
             CORSMiddleware,
