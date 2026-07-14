@@ -88,7 +88,7 @@ class Novel(Base):
     series_index = Column(Integer, nullable=True)
     create_time = Column(String, index=True)
     has_epub = Column(Integer, default=0, index=True)
-    shuffle = Column(Integer, default=0, index=True)
+    shuffle = Column(Integer, default=0)
 
     author_rel = relationship("Author", back_populates="novels")
     series_rel = relationship("Series", back_populates="novels")
@@ -101,6 +101,7 @@ class Novel(Base):
         Index("idx_novel_series_likes", "series_id", "like"),
         Index("idx_novel_like_text_id", "like", "text", "id"),
         Index("idx_novel_author_id", "author_id", "id"),
+        Index("ix_novel_shuffle_like_text", "shuffle", "like", "text"),
     )
 
     def __repr__(self) -> str:

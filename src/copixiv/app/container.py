@@ -85,6 +85,9 @@ class Container:
         # FTS warm-up
         FTSManager.warm_up()
 
+        # Database cache warm-up — preload hot index pages into OS cache
+        self._warmup_database_cache()
+
         # Storage
         self._file_storage = FileStorage(self.config.path.download or "download")
 
@@ -286,6 +289,38 @@ class Container:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _warmup_database_cache(self) -> None:
+        """Run representative queries to preload hot index pages into OS cache.
+
+        After a server restart the SQLite page cache and OS buffer cache are
+        cold — the first few requests pay the full cost of random disk I/O
+        (~20-30 ms per page on HDD).  Touching the key indexes AND the main
+        table pages they reference shifts that cost to startup instead of
+        the first user request.
+        """
+        logger.info("Warming database cache...")
+        try:
+            from sqlalchemy import text as _text
+            with self._session_factory() as session:
+                # Touch the shuffle composite index by scanning through a
+                # range of shuffle values.  This also pulls the main-table
+                # pages for the rows the index points to (SELECT * forces
+                # main-table access for columns not in the index).
+                session.execute(_text(
+                    "SELECT * FROM novel "
+                    "WHERE shuffle > 0 AND like >= 500 AND text >= 3000 "
+                    "ORDER BY shuffle ASC LIMIT 100"
+                ))
+                # Touch novel_tag covering index so the first batch tag
+                # lookup doesn't stall.
+                session.execute(_text(
+                    "SELECT COUNT(*) FROM novel_tag "
+                    "WHERE novel_id IN (SELECT id FROM novel LIMIT 100)"
+                ))
+            logger.info("Database cache warmup complete.")
+        except Exception:
+            logger.warning("Database cache warmup failed — continuing.")
 
     def _load_accounts(self) -> None:
         """Load Pixiv accounts from the tokens table or config."""

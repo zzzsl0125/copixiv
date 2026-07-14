@@ -156,6 +156,8 @@ class TestIndexesExist:
         "idx_novel_author_likes",
         "idx_novel_series_likes",
         "idx_novel_like_text_id",
+        "idx_novel_author_id",
+        "ix_novel_shuffle_like_text",
         "idx_novel_tag_tag_id",
         "idx_novel_tag_novel_id",
         "ix_search_history_timestamp",

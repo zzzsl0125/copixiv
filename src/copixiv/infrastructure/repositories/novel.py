@@ -107,10 +107,12 @@ class NovelRepository(BaseRepository):
             else:
                 cursor_out = {"id": n["id"], order_by: n.get(order_by)}
 
-        # Tags come inline from the scalar subquery — split pipe-delimited string
-        for novel in novels:
-            tags_str: str = novel.get(C.COL_TAGS) or ""
-            novel[C.COL_TAGS] = tags_str.split("|") if tags_str else []
+        # Batch-load tags for all returned novels (replaces per-row subquery)
+        if novels:
+            novel_ids = [n["id"] for n in novels]
+            tag_map = self._batch_load_tags(novel_ids)
+            for novel in novels:
+                novel[C.COL_TAGS] = tag_map.get(novel["id"], [])
 
         return {"novels": novels, "cursor": cursor_out}
 
@@ -379,9 +381,12 @@ class NovelRepository(BaseRepository):
         each visit shows a different slice; if the tail doesn't have enough
         rows the query wraps around from ``shuffle >= 0``.
 
-        The index ``ix_novel_shuffle`` is walked in ascending order and
-        each row is probed for the like/text thresholds — with permissive
-        filters (the common case) the first *limit* rows pass immediately.
+        The composite index ``ix_novel_shuffle_like_text`` (shuffle, like, text)
+        allows SQLite to evaluate the like/text filters directly from the index
+        without main-table lookups for candidate rows that don't pass.
+
+        Tags, favourite, and special_follow flags are loaded in batch after
+        the main query — no per-row correlated subqueries.
         """
         import random as _random
 
@@ -393,19 +398,10 @@ class NovelRepository(BaseRepository):
         novels: list[dict] = []
         start = _random.randint(0, max_shuffle) if max_shuffle > 0 else 0
 
-        # Tags scalar subquery — same inline pattern as QueryBuilder._base_select
-        tags_subq = (
-            select(func.coalesce(func.group_concat(models.Tag.name, '|'), ''))
-            .select_from(models.NovelTag)
-            .join(models.Tag, models.NovelTag.tag_id == models.Tag.id)
-            .where(models.NovelTag.novel_id == models.Novel.id)
-            .correlate(models.Novel)
-            .scalar_subquery()
-        ).label(C.COL_TAGS)
-
-        # First attempt: shuffle >= random start
+        # First attempt: shuffle >= random start — fetch novel entities only,
+        # no correlated tags / favourite / sf subqueries.
         rows = self.session.execute(
-            select(models.Novel, tags_subq)
+            select(models.Novel)
             .where(
                 models.Novel.like >= min_likes,
                 models.Novel.text >= min_texts,
@@ -413,18 +409,16 @@ class NovelRepository(BaseRepository):
             )
             .order_by(models.Novel.shuffle.asc(), models.Novel.id.asc())
             .limit(limit)
-        ).all()
-        for novel, tags_str in rows:
-            nd = model_to_dict(novel)
-            nd[C.COL_TAGS] = tags_str.split("|") if tags_str else []
-            novels.append(nd)
+        ).scalars().all()
+        for novel in rows:
+            novels.append(model_to_dict(novel))
 
         # Wrap around if the tail didn't have enough rows.
         if len(novels) < limit and start > 0:
             remaining = limit - len(novels)
             seen_ids = {n["id"] for n in novels}
             rows = self.session.execute(
-                select(models.Novel, tags_subq)
+                select(models.Novel)
                 .where(
                     models.Novel.like >= min_likes,
                     models.Novel.text >= min_texts,
@@ -432,16 +426,57 @@ class NovelRepository(BaseRepository):
                 )
                 .order_by(models.Novel.shuffle.asc(), models.Novel.id.asc())
                 .limit(remaining + len(seen_ids))
-            ).all()
-            for novel, tags_str in rows:
+            ).scalars().all()
+            for novel in rows:
                 nd = model_to_dict(novel)
                 if nd["id"] not in seen_ids:
-                    nd[C.COL_TAGS] = tags_str.split("|") if tags_str else []
                     novels.append(nd)
                     if len(novels) >= limit:
                         break
 
+        # ---- batch-load tags, favourite, and special_follow flags ---------
+        novel_ids = [n["id"] for n in novels]
+        if novel_ids:
+            tag_map = self._batch_load_tags(novel_ids)
+            fav_ids = set(self.session.execute(
+                select(models.Favourite.novel_id).where(
+                    models.Favourite.novel_id.in_(novel_ids)
+                )
+            ).scalars().all())
+            sf_author_ids = set(self.session.execute(
+                select(models.SpecialFollow.author_id)
+            ).scalars().all())
+            for novel in novels:
+                novel[C.COL_TAGS] = tag_map.get(novel["id"], [])
+                novel[C.FIELD_IS_FAVOURITE] = novel["id"] in fav_ids
+                novel[C.FIELD_IS_SPECIAL_FOLLOW] = (
+                    novel.get(C.COL_AUTHOR_ID) in sf_author_ids
+                )
+
         return novels
+
+    # ---- batch helpers -------------------------------------------------------
+
+    def _batch_load_tags(self, novel_ids: list[int]) -> dict[int, list[str]]:
+        """Return a mapping of novel_id → tag name list for the given IDs.
+
+        Replaces the per-row correlated scalar subquery with a single batch
+        query — one round-trip instead of N.
+        """
+        if not novel_ids:
+            return {}
+        rows = self.session.execute(
+            select(
+                models.NovelTag.novel_id,
+                func.group_concat(models.Tag.name, '|'),
+            )
+            .join(models.Tag, models.NovelTag.tag_id == models.Tag.id)
+            .where(models.NovelTag.novel_id.in_(novel_ids))
+            .group_by(models.NovelTag.novel_id)
+        ).all()
+        return {
+            row[0]: (row[1] or "").split("|") for row in rows
+        }
 
     # ---- helpers -------------------------------------------------------------
 

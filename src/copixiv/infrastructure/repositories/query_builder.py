@@ -297,14 +297,14 @@ class NovelQueryBuilder(BaseQueryBuilder):
         skip_favourite_join: bool = False,
         skip_special_follow_join: bool = False,
     ) -> Select:
-        """Build the SELECT clause with all novel columns + display flags + tags.
+        """Build the SELECT clause with all novel columns + display flags.
 
         When the query already filters by *is_favourite* or
         *is_special_follow*, the corresponding OUTER JOIN can be skipped
         because the flag value is statically known (1).
 
-        Tags are fetched inline via a correlated scalar subquery —
-        no second database round-trip needed (``_load_tags`` is gone).
+        Tags are now loaded in batch by the repository after the main query
+        via ``_batch_load_tags`` — no per-row correlated subquery.
         """
         cols: list = list(self.main_model.__table__.c)
 
@@ -325,18 +325,6 @@ class NovelQueryBuilder(BaseQueryBuilder):
                     (models.SpecialFollow.author_id != None, 1), else_=0,
                 ).label(C.FIELD_IS_SPECIAL_FOLLOW),
             )
-
-        # Tags: correlated scalar subquery — walks covering index on
-        # novel_tag(novel_id, tag_id), no GROUP BY on the outer query.
-        tags_subq = (
-            select(func.coalesce(func.group_concat(models.Tag.name, '|'), ''))
-            .select_from(models.NovelTag)
-            .join(models.Tag, models.NovelTag.tag_id == models.Tag.id)
-            .where(models.NovelTag.novel_id == self.main_model.id)
-            .correlate(self.main_model)
-            .scalar_subquery()
-        ).label(C.COL_TAGS)
-        cols.append(tags_subq)
 
         stmt = select(*cols).select_from(self.main_model)
 
