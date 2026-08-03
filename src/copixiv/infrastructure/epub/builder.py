@@ -180,6 +180,12 @@ class EpubBuilder:
     ) -> str:
         processed: set[str] = set()
 
+        # Escape the raw novel text before embedding it in XHTML — it may
+        # contain <, >, & from the source content.  Image placeholders
+        # ([uploadedimage:12345]) contain no HTML-special characters, so
+        # they survive escape unchanged and still match below.
+        content = html.escape(content)
+
         def _replace(match):
             img_id = match.group(2)
             if img_path := image_map.get(img_id):

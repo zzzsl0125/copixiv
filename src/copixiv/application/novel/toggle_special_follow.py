@@ -1,6 +1,6 @@
 """Use case: toggle special-follow status for an author."""
 
-from copixiv.infrastructure.repositories.novel import NovelRepository
+from copixiv.domain.ports.repositories import NovelRepository
 
 
 class ToggleSpecialFollowUseCase:

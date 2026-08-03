@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-from copixiv.infrastructure.repositories.novel import NovelRepository
+from copixiv.domain.ports.repositories import NovelRepository
 
 
 @dataclass

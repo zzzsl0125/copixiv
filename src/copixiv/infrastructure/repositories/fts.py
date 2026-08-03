@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import text as _text, select, delete as _delete
+from sqlalchemy import text as _text, select, delete as _delete, func
 from sqlalchemy.orm import Session
 
 from copixiv.infrastructure.database import models
@@ -207,11 +207,9 @@ class FTSManager:
             result["fts_entry_count"] = fts_count or 0
 
             novel_count = self.session.execute(
-                select(models.Novel).with_only_columns(
-                    models.Novel.id
-                )
-            ).scalars().all()
-            result["novel_count"] = len(novel_count)
+                select(func.count()).select_from(models.Novel)
+            ).scalar()
+            result["novel_count"] = novel_count or 0
         except Exception as e:
             result["error"] = f"Count query failed: {e}"
             return result
@@ -283,9 +281,14 @@ class FTSManager:
 
         Tokenizes each row individually (jieba can't run inside SQLite) but
         issues a single multi-row INSERT for efficiency.
+
+        Uses raw SQL instead of ``Base.metadata.tables``: the ``novel_fts``
+        virtual table is created via raw DDL and is deliberately NOT part
+        of the ORM metadata, so ``metadata.tables.get()`` would always
+        return None and the insert would be silently skipped (the FTS
+        index would stay empty and keyword search would match nothing).
         """
-        fts_t = models.Base.metadata.tables.get(C.TABLE_NOVEL_FTS)
-        if fts_t is None or not rows:
+        if not rows:
             return
         values = [
             {
@@ -296,7 +299,12 @@ class FTSManager:
             }
             for nid, title, author, series in rows
         ]
-        self.session.execute(fts_t.insert(), values)
+        stmt = (
+            f"INSERT INTO {C.TABLE_NOVEL_FTS}"
+            f"(rowid, {C.COL_TITLE}, {C.COL_AUTHOR_NAME}, {C.COL_SERIES_NAME}) "
+            f"VALUES (:id, :title, :author_name, :series_name)"
+        )
+        self.session.execute(_text(stmt), values)
 
     def _insert_fts_entry(
         self, novel_id: int, title: str, author: str, series: str

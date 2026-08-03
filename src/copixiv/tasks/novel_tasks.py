@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from copixiv.domain.models.task_result import TaskResult
 from copixiv.domain.services.novel_factory import build_from_webview
 from copixiv.domain.services.parsing import safe_get
-from copixiv.domain.services.author_name_resolver import resolve_author_names
+from copixiv.application.author.resolve_names import resolve_author_names
 
 from .registry import register
 from .pipeline import (
@@ -150,7 +150,7 @@ async def novel_follow(
     """
     new_author_ids: set[int] = set()
     _handle = _make_page_handler(
-        uow._session_factory, client, file_storage, image_downloader,
+        uow.session_factory, client, file_storage, image_downloader,
         redownload=force, author_ids_out=new_author_ids,
     )
     fetch_til = datetime.now().astimezone() - timedelta(days=days)
@@ -196,7 +196,7 @@ async def author_fetch(
                 await client.user_follow_add(author_id)
 
     _download = _make_page_handler(
-        uow._session_factory, client, file_storage, image_downloader,
+        uow.session_factory, client, file_storage, image_downloader,
         redownload=redownload,
     )
     resp = await client.user_novels(author_id, fetch_all=True, handler=_download)

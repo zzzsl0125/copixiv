@@ -2,28 +2,19 @@
 
 from __future__ import annotations
 
-import enum
 import json
-from enum import IntEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # ---------------------------------------------------------------------------
-# Domain enums (will move to domain/models/ in Priority 3)
+# Domain enums — re-exported from domain.models to keep a single source
+# of truth (values are part of the v1-compatible API contract).
 # ---------------------------------------------------------------------------
 
-class EpubStatus(IntEnum):
-    """EPUB conversion status for a novel."""
-    NO = 0
-    PENDING = 1
-    DONE = 2
-
-
-class TagPreferenceType(str, enum.Enum):
-    favourite = "favourite"
-    blocked = "blocked"
+from copixiv.domain.models.novel import EpubStatus
+from copixiv.domain.models.tag import TagPreferenceType
 
 
 # ---------------------------------------------------------------------------
@@ -230,10 +221,6 @@ class SystemConfigResponse(BaseModel):
     default_min_like: int
     default_min_text: int
     batch_download_naming: str
-
-
-class RestartRequest(BaseModel):
-    sudo_password: SecretStr
 
 
 # ---------------------------------------------------------------------------

@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Search, Settings, Power, Download } from '@lucide/vue'
-import RestartModal from './features/RestartModal.vue'
+import { Search, Settings, Download } from '@lucide/vue'
 import BatchDownloadModal from './features/BatchDownloadModal.vue'
 import type { NovelFilters } from '../types'
 
@@ -25,19 +24,6 @@ const emit = defineEmits<{
 }>()
 
 const isBatchModalOpen = ref(false)
-const isRestarting = ref(false)
-const showRestartModal = ref(false)
-
-const handleRestartClick = () => { showRestartModal.value = true }
-const handleRestarting = () => { isRestarting.value = true }
-const handleRestarted = () => {
-  isRestarting.value = false
-  alert('应用正在重启，请稍后手动刷新页面。')
-}
-const handleRestartError = (message: string) => {
-  isRestarting.value = false
-  alert(`重启失败: ${message}`)
-}
 
 const updateFilter = (key: keyof typeof props.filters, value: unknown) => {
   const newFilters = { ...props.filters, [key]: value }
@@ -90,9 +76,6 @@ const navIconClass = 'mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500'
         <router-link to="/tokens" :class="[navItemClass(false), route.path === '/tokens' ? 'bg-gray-100' : '']">
           <Settings :class="navIconClass" /> 账号管理
         </router-link>
-        <button @click="handleRestartClick" :disabled="isRestarting" :class="navItemClass(false) + ' w-full'">
-          <Power :class="navIconClass" /> {{ isRestarting ? '重启中...' : '重启应用' }}
-        </button>
       </nav>
 
       <!-- Batch Download -->
@@ -152,12 +135,5 @@ const navIconClass = 'mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500'
     :min_like="props.filters.min_like"
     :min_text="props.filters.min_text"
     @close="isBatchModalOpen = false"
-  />
-
-  <RestartModal
-    v-model:isOpen="showRestartModal"
-    @restarting="handleRestarting"
-    @restarted="handleRestarted"
-    @error="handleRestartError"
   />
 </template>

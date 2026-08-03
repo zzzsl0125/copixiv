@@ -2,10 +2,8 @@
 
 from pathlib import Path
 
-from sqlalchemy.orm import Session
-
 from copixiv.domain.exceptions import NotFoundError
-from copixiv.infrastructure.database import models
+from copixiv.domain.ports.repositories import NovelRepository
 
 
 class GetNovelFileUseCase:
@@ -15,23 +13,24 @@ class GetNovelFileUseCase:
     serve a ``FileResponse``.
     """
 
-    def __init__(self, db: Session):
-        self._db = db
+    def __init__(self, novel_repo: NovelRepository):
+        self._repo = novel_repo
 
-    def execute(self, novel_id: int, format: str = "txt") -> tuple[Path, str]:
+    async def execute(self, novel_id: int, format: str = "txt") -> tuple[Path, str]:
         """Return ``(file_path, media_type)`` for the given novel.
 
         Raises:
             NotFoundError: If the novel doesn't exist, has no path, or the
                 requested file doesn't exist on disk.
         """
-        novel = self._db.get(models.Novel, novel_id)
+        novel = await self._repo.get_by_id(novel_id)
         if not novel:
             raise NotFoundError(f"Novel {novel_id} not found")
-        if not novel.path:
+        path = novel.get("path")
+        if not path:
             raise NotFoundError(f"Novel {novel_id} has no file path")
 
-        file_path = Path(novel.path).with_suffix("." + format)
+        file_path = Path(path).with_suffix("." + format)
         if not file_path.is_file():
             raise NotFoundError(f"File not found for novel {novel_id}")
 

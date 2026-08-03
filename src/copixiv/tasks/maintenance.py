@@ -12,7 +12,7 @@ plain summary instead of incorrectly labelling results as "new novels".
 from pathlib import Path
 
 from copixiv.domain.models.task_result import TaskResult
-from copixiv.domain.services.author_name_resolver import resolve_author_names
+from copixiv.application.author.resolve_names import resolve_author_names
 from copixiv.app.logger import logger
 
 from .registry import register

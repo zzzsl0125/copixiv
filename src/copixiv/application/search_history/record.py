@@ -1,7 +1,9 @@
 """Service for recording search history in background tasks.
 
 Extracted from ``web_api/endpoints/novels.py`` to keep business logic out of
-the HTTP layer.
+the HTTP layer.  Lives in the application layer: it constructs concrete
+repositories (the composition root can't reach into FastAPI
+``BackgroundTasks`` callbacks), which is an accepted compromise.
 """
 
 from __future__ import annotations
@@ -41,18 +43,23 @@ def record_search_history(
         author_repo = AuthorRepository(session)
         series_repo = SeriesRepository(session)
 
-        for value, qtype in queries_dict.items():
-            display_value = None
-            if qtype == "author_id":
-                author = a.run(author_repo.get_by_id(int(value)))
-                if author:
-                    display_value = author.get("author_name")
-            elif qtype == "series_id":
-                series = a.run(series_repo.get_by_id(int(value)))
-                if series:
-                    display_value = series.get("series_name")
-            a.run(history_repo.add_or_update(qtype, value, display_value))
+        async def _run() -> None:
+            # BackgroundTasks runs in a worker thread with no running event
+            # loop, so a single asyncio.run() around the whole batch is the
+            # correct way to drive the async repository methods here.
+            for value, qtype in queries_dict.items():
+                display_value = None
+                if qtype == "author_id":
+                    author = await author_repo.get_by_id(int(value))
+                    if author:
+                        display_value = author.get("author_name")
+                elif qtype == "series_id":
+                    series = await series_repo.get_by_id(int(value))
+                    if series:
+                        display_value = series.get("series_name")
+                await history_repo.add_or_update(qtype, value, display_value)
 
+        a.run(_run())
         session.commit()
     except Exception:
         logger.exception("Failed to record search history")

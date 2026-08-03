@@ -3,11 +3,11 @@
 import asyncio
 
 from copixiv.domain.services.novel_factory import build_from_webview
-from copixiv.infrastructure.repositories.novel import NovelRepository
-from copixiv.infrastructure.repositories.author import AuthorRepository
-from copixiv.infrastructure.repositories.series import SeriesRepository
-from copixiv.infrastructure.storage.file_storage import FileStorage
-from copixiv.infrastructure.storage.image_downloader import ImageDownloader
+from copixiv.domain.ports.repositories import NovelRepository
+from copixiv.domain.ports.repositories import AuthorRepository
+from copixiv.domain.ports.repositories import SeriesRepository
+from copixiv.domain.ports.storage import FileStoragePort
+from copixiv.domain.ports.storage import ImageDownloaderPort
 
 from copixiv.app.logger import logger
 
@@ -21,8 +21,8 @@ class DownloadNovelUseCase:
         novel_repo: NovelRepository,
         author_repo: AuthorRepository,
         series_repo: SeriesRepository,
-        file_storage: FileStorage,
-        image_downloader: ImageDownloader,
+        file_storage: FileStoragePort,
+        image_downloader: ImageDownloaderPort,
     ):
         self._client = client
         self._novel_repo = novel_repo

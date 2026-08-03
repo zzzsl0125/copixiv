@@ -1,6 +1,6 @@
 """Use case: list search history entries."""
 
-from copixiv.infrastructure.repositories.search_history import SearchHistoryRepository
+from copixiv.domain.ports.repositories import SearchHistoryRepository
 
 
 class ListHistoryUseCase:

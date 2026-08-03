@@ -41,6 +41,13 @@ _fts_table = table(
     column("rowid", Integer),
 )
 
+# FTS5 query-language reserved words — kept out of MATCH queries because
+# a bare reserved word is parsed as an operator (e.g. ``AND OR`` is a
+# syntax error), turning user input into a 500 response.
+_FTS5_RESERVED: frozenset[str] = frozenset({
+    "and", "or", "not", "near",
+})
+
 
 def reset_fts_cache() -> None:
     """Reset the FTS availability cache (call after FTS index rebuild)."""
@@ -110,10 +117,24 @@ class BaseQueryBuilder:
         if not tokens:
             return ""
 
-        # Escape single-quotes by doubling them — the FTS query is embedded
-        # in a SQL string literal so unescaped quotes break the query.
+        # The MATCH query is passed as a bound parameter (see
+        # ``_where_fts_filter``), so no SQL-string escaping is needed here.
+        # This step only keeps the query valid as an FTS5 expression:
+        # tokens containing spaces are wrapped in double-quotes to form a
+        # phrase; a bare single-quote inside a token would otherwise start
+        # an unterminated FTS5 string literal (syntax error), so such
+        # quotes are stripped; and tokens that are FTS5 reserved words
+        # (AND/OR/NOT/NEAR) are dropped — left bare they'd be parsed as
+        # operators and could turn the whole query into a syntax error.
+        tokens = [
+            t for t in tokens
+            if t.strip().lower() not in _FTS5_RESERVED
+        ]
+        if not tokens:
+            return ""
+
         return " AND ".join(
-            f'"{t}"' if " " in t else t.replace("'", "''") for t in tokens
+            f'"{t}"' if " " in t else t.replace("'", "") for t in tokens
         )
 
     def _apply_cursor(
@@ -458,7 +479,8 @@ class NovelQueryBuilder(BaseQueryBuilder):
                 select(literal_column("1"))
                 .select_from(_fts_table)
                 .where(
-                    _text(f"{C.TABLE_NOVEL_FTS} MATCH '{fts_query}'"),
+                    _text(f"{C.TABLE_NOVEL_FTS} MATCH :fts_query")
+                    .bindparams(fts_query=fts_query),
                     _fts_table.c.rowid == self.main_model.id,
                 )
             )
@@ -468,7 +490,8 @@ class NovelQueryBuilder(BaseQueryBuilder):
                 select(literal_column("rowid"))
                 .select_from(_text(C.TABLE_NOVEL_FTS))
                 .where(
-                    _text(f"{C.TABLE_NOVEL_FTS} MATCH '{fts_query}'")
+                    _text(f"{C.TABLE_NOVEL_FTS} MATCH :fts_query")
+                    .bindparams(fts_query=fts_query)
                 )
             )
             stmt = stmt.where(self.main_model.id.in_(inner))

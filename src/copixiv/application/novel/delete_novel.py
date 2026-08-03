@@ -1,9 +1,8 @@
 """Use case: delete a novel and its associated files."""
 
 from copixiv.domain.exceptions import NotFoundError
-from copixiv.infrastructure.database import models
-from copixiv.infrastructure.repositories.novel import NovelRepository
-from copixiv.infrastructure.storage.file_storage import FileStorage
+from copixiv.domain.ports.repositories import NovelRepository
+from copixiv.domain.ports.storage import FileStoragePort
 
 
 class DeleteNovelUseCase:
@@ -12,7 +11,7 @@ class DeleteNovelUseCase:
     Looks up the novel internally — the endpoint only needs to pass the ID.
     """
 
-    def __init__(self, novel_repo: NovelRepository, file_storage: FileStorage):
+    def __init__(self, novel_repo: NovelRepository, file_storage: FileStoragePort):
         self._repo = novel_repo
         self._file_storage = file_storage
 
@@ -22,11 +21,11 @@ class DeleteNovelUseCase:
         Raises:
             NotFoundError: If the novel doesn't exist.
         """
-        novel = self._repo.session.get(models.Novel, novel_id)
+        novel = await self._repo.get_by_id(novel_id)
         if not novel:
             raise NotFoundError(f"Novel {novel_id} not found")
 
-        if novel.path:
-            self._file_storage.delete_novel_files(novel.path)
+        if novel_path := novel.get("path"):
+            self._file_storage.delete_novel_files(novel_path)
 
         await self._repo.delete(novel_id)

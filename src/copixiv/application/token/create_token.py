@@ -1,6 +1,6 @@
 """Use case: create a Pixiv token."""
 
-from copixiv.infrastructure.repositories.token import TokenRepository
+from copixiv.domain.ports.repositories import TokenRepository
 
 
 class CreateTokenUseCase:

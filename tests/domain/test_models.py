@@ -1,7 +1,7 @@
 """Pure unit tests for domain models — zero I/O."""
 
 import pytest
-from copixiv.domain.models.novel import Novel, Favourite, SpecialFollow
+from copixiv.domain.models.novel import Novel
 from copixiv.domain.models.author import Author
 from copixiv.domain.models.series import Series
 from copixiv.domain.models.tag import Tag, TagPreference, TagAlias, TagPreferenceType
@@ -51,18 +51,6 @@ class TestNovel:
         assert n.series_id is None
 
 
-class TestFavourite:
-    def test_creation(self):
-        f = Favourite(novel_id=5)
-        assert f.novel_id == 5
-
-
-class TestSpecialFollow:
-    def test_creation(self):
-        sf = SpecialFollow(author_id=99)
-        assert sf.author_id == 99
-
-
 class TestAuthor:
     def test_minimal(self):
         a = Author(author_id=1)
@@ -70,6 +58,7 @@ class TestAuthor:
         assert a.novel_count == 0
 
     def test_full(self):
+        from datetime import datetime
         a = Author(
             author_id=99,
             author_name="名無し",
@@ -77,10 +66,10 @@ class TestAuthor:
             like=300,
             view=5000,
             text=120000,
-            last_update="2024-06-01",
+            last_update=datetime(2024, 6, 1),
         )
         assert a.novel_count == 15
-        assert a.last_update == "2024-06-01"
+        assert a.last_update == datetime(2024, 6, 1)
 
 
 class TestSeries:

@@ -62,6 +62,9 @@ class TestModels:
         f1 = Favourite(novel_id=1)
         session.add(f1)
         session.commit()
+        # Detach f1 so the second insert is a fresh row (no identity-map
+        # conflict warning) and the PK uniqueness is enforced by SQLite.
+        session.expunge(f1)
 
         f2 = Favourite(novel_id=1)
         session.add(f2)

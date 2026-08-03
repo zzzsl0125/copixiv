@@ -1,6 +1,6 @@
 """Use case: list tag aliases."""
 
-from copixiv.infrastructure.repositories.tag import TagRepository
+from copixiv.domain.ports.repositories import TagRepository
 
 
 class ListAliasesUseCase:

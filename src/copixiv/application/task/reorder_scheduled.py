@@ -1,7 +1,7 @@
 """Use case: reorder scheduled tasks."""
 
 from copixiv.domain.exceptions import NotFoundError
-from copixiv.infrastructure.repositories.task import TaskRepository
+from copixiv.domain.ports.repositories import TaskRepository
 
 
 class ReorderScheduledUseCase:

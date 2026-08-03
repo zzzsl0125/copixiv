@@ -1,5 +1,6 @@
 """Novel repository — full implementation."""
 
+import asyncio
 from collections.abc import Sequence
 from typing import Any
 
@@ -44,6 +45,27 @@ class NovelRepository(BaseRepository):
         return set(self.session.execute(stmt).scalars().all())
 
     async def get_novels(
+        self,
+        queries: dict[str, str] | None = None,
+        order_by: str = C.COL_LIKES,
+        order_direction: str = "DESC",
+        cursor: dict | None = None,
+        per_page: int = 50,
+        min_like: int | None = None,
+        min_text: int | None = None,
+    ) -> dict:
+        """Retrieve a paginated, filtered list of novels.
+
+        Heavy query — executes in a worker thread so the event loop is
+        never blocked by SQLite work (tag/FTS subqueries, sorting).
+        """
+        return await asyncio.to_thread(
+            self._get_novels_sync,
+            queries, order_by, order_direction, cursor, per_page,
+            min_like, min_text,
+        )
+
+    def _get_novels_sync(
         self,
         queries: dict[str, str] | None = None,
         order_by: str = C.COL_LIKES,
@@ -122,6 +144,17 @@ class NovelRepository(BaseRepository):
         min_like: int | None = None,
         min_text: int | None = None,
     ) -> int:
+        """Count novels matching filters (runs in a worker thread)."""
+        return await asyncio.to_thread(
+            self._count_novels_sync, queries, min_like, min_text,
+        )
+
+    def _count_novels_sync(
+        self,
+        queries: dict[str, str] | None = None,
+        min_like: int | None = None,
+        min_text: int | None = None,
+    ) -> int:
         if queries:
             for q_type in queries.values():
                 self._validate_query_field(q_type)
@@ -145,6 +178,19 @@ class NovelRepository(BaseRepository):
     # ---- write ---------------------------------------------------------------
 
     async def upsert_novels(
+        self, novels: list[dict], force_update: list[str] | None = None
+    ) -> int:
+        """Insert or update novels, then sync tags and FTS index.
+
+        Heavy write path (alias resolution, batch upsert, tag sync, FTS
+        index update) — runs in a worker thread so the event loop is not
+        blocked by SQLite write work or busy-timeout waits.
+        """
+        return await asyncio.to_thread(
+            self._upsert_novels_sync, novels, force_update,
+        )
+
+    def _upsert_novels_sync(
         self, novels: list[dict], force_update: list[str] | None = None
     ) -> int:
         """Insert or update novels, then sync tags and FTS index."""
@@ -308,6 +354,10 @@ class NovelRepository(BaseRepository):
             .where(models.Novel.id.in_(novel_ids))
             .values(has_epub=status)
         )
+
+    async def rebuild_fts(self) -> None:
+        """Rebuild the FTS5 index from scratch (runs in a worker thread)."""
+        await asyncio.to_thread(FTSManager(self.session).rebuild_novel_fts)
 
     # ---- tags ----------------------------------------------------------------
 

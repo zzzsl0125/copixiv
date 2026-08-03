@@ -1,6 +1,6 @@
 """Use case: create a scheduled task."""
 
-from copixiv.infrastructure.repositories.task import TaskRepository
+from copixiv.domain.ports.repositories import TaskRepository
 
 
 class CreateScheduledUseCase:

@@ -1,6 +1,6 @@
 """Use case: suggest tag alias mappings."""
 
-from copixiv.infrastructure.repositories.tag import TagRepository
+from copixiv.domain.ports.repositories import TagRepository
 
 
 class SuggestAliasesUseCase:

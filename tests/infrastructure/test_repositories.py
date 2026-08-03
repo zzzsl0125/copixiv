@@ -17,7 +17,16 @@ from copixiv.infrastructure.repositories.tag import TagRepository
 
 @pytest.fixture
 def engine():
-    eng = create_engine("sqlite:///:memory:", echo=False)
+    # StaticPool: share one connection across all sessions/threads — a
+    # plain ":memory:" SQLite gives each connection its own empty
+    # database, which breaks once repos run in worker threads.
+    from sqlalchemy.pool import StaticPool
+    eng = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},  # repos run in worker threads
+        poolclass=StaticPool,
+        echo=False,
+    )
 
     @event.listens_for(eng, "connect")
     def _set_pragmas(dbapi_connection, _connection_record):
@@ -455,31 +464,28 @@ class TestTaskManagerHelpers:
         assert TMS._parse_json({"a": 1}) == {"a": 1}
         assert TMS._parse_json(None) == {}
 
-    def test_parse_result_list(self):
+    def test_normalize_result_taskresult_passthrough(self):
+        from copixiv.domain.models.task_result import TaskResult
         from copixiv.tasks.manager import TaskManagerSystem as TMS
-        titles, count = TMS._parse_result(["t1", "t2", "t3"], {})
-        assert count == 3
-        assert titles == []  # notify_on_new_novel not set
+        tr = TaskResult(summary="done", new_novel_titles=["a"])
+        assert TMS._normalize_result(tr) is tr
 
-    def test_parse_result_list_with_notify(self):
+    def test_normalize_result_list(self):
         from copixiv.tasks.manager import TaskManagerSystem as TMS
-        titles, count = TMS._parse_result(
-            ["t1", "t2"], {"notify_on_new_novel": True}
-        )
-        assert count == 2
-        assert titles == ["t1", "t2"]
+        r = TMS._normalize_result(["t1", "t2", "t3"])
+        assert r.new_novel_count == 3
+        assert r.new_novel_titles == ["t1", "t2", "t3"]
 
-    def test_parse_result_int(self):
+    def test_normalize_result_int(self):
         from copixiv.tasks.manager import TaskManagerSystem as TMS
-        titles, count = TMS._parse_result(42, {})
-        assert count == 42
-        assert titles == []
+        r = TMS._normalize_result(42)
+        assert r.new_novel_count == 42
+        assert r.new_novel_titles == []
 
-    def test_parse_result_none(self):
+    def test_normalize_result_none(self):
         from copixiv.tasks.manager import TaskManagerSystem as TMS
-        titles, count = TMS._parse_result(None, {})
-        assert count == 0
-        assert titles == []
+        r = TMS._normalize_result(None)
+        assert r.summary == "完成"
 
     def test_construction_strips_none_deps(self):
         from copixiv.tasks.manager import TaskManagerSystem

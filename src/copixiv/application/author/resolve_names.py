@@ -2,10 +2,15 @@
 
 Resolves Pixiv author names by checking the local database first,
 then falling back to the Pixiv API for unknown authors.
+
+Lives in the application layer (not domain) because it orchestrates
+I/O through the Pixiv client and the unit of work.
 """
 
 import asyncio
 
+from copixiv.domain.ports.pixiv import PixivNovelPort
+from copixiv.domain.ports.unit_of_work import UnitOfWork
 from copixiv.domain.services.parsing import safe_get
 from copixiv.app.logger import logger
 
@@ -13,8 +18,8 @@ from copixiv.app.logger import logger
 async def resolve_author_names(
     author_ids: set[int],
     *,
-    client,
-    uow,
+    client: PixivNovelPort,
+    uow: UnitOfWork,
 ) -> dict[int, str]:
     """Resolve author names for the given IDs.
 

@@ -1,6 +1,6 @@
 """Use case: reorder Pixiv tokens."""
 
-from copixiv.infrastructure.repositories.token import TokenRepository
+from copixiv.domain.ports.repositories import TokenRepository
 
 
 class ReorderTokensUseCase:

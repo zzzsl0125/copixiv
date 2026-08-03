@@ -8,6 +8,8 @@ from typing import Protocol, runtime_checkable
 class FileStoragePort(Protocol):
     """Port for reading and writing downloaded novel files."""
 
+    download_dir: str
+
     def novel_text_path(self, novel_id: int, title: str) -> Path: ...
     def novel_epub_path(self, novel_id: int, title: str) -> Path: ...
     def save_novel_text(

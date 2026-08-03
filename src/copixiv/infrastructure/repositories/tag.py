@@ -87,9 +87,6 @@ class TagRepository(BaseRepository):
 
     async def get_aliases(self) -> Sequence[dict]:
         """Return all tag aliases with source/target as tag names."""
-        src_tag = models.__dict__.get("_TagAliasSource")
-        tgt_tag = models.__dict__.get("_TagAliasTarget")
-
         rows = self.session.execute(
             select(
                 models.TagAlias.id,

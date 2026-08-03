@@ -1,7 +1,7 @@
 """Use case: update a tag preference."""
 
 from copixiv.domain.exceptions import NotFoundError
-from copixiv.infrastructure.repositories.tag import TagRepository
+from copixiv.domain.ports.repositories import TagRepository
 
 
 class UpdatePreferenceUseCase:

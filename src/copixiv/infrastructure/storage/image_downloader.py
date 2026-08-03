@@ -190,6 +190,12 @@ class ImageDownloader:
                         pass
         except Exception:
             logger.exception(f"Error processing assets for novel {novel_id}")
+            # EPUB creation failed — don't leave half-downloaded temp files behind.
+            for f in downloaded_files:
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
         finally:
             session.close()
 

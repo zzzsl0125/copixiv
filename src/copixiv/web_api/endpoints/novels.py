@@ -11,8 +11,7 @@ from copixiv.web_api.deps import get_db, parse_queries_json, parse_json_cursor
 from copixiv.web_api.schemas import BatchDownloadRequest
 from copixiv.infrastructure.repositories.novel import NovelRepository
 from copixiv.infrastructure.database import constants as C
-from copixiv.infrastructure.storage.file_storage import FileStorage
-from copixiv.domain.services.search_history_service import record_search_history
+from copixiv.application.search_history.record import record_search_history
 from copixiv.application.novel import (
     BatchDownloadUseCase,
     CountNovelsUseCase,
@@ -87,13 +86,13 @@ async def toggle_special_follow(author_id: int, db_session: Session = Depends(ge
 
 
 @router.get("/{novel_id}/download")
-def download_novel(
+async def download_novel(
     novel_id: int,
     db_session: Session = Depends(get_db),
     format: Literal["txt", "epub"] = "txt",
 ):
-    use_case = GetNovelFileUseCase(db_session)
-    file_path, media_type = use_case.execute(novel_id, format)
+    use_case = GetNovelFileUseCase(NovelRepository(db_session))
+    file_path, media_type = await use_case.execute(novel_id, format)
     headers = {
         "Content-Disposition": f"attachment; filename*=UTF-8''{quote(file_path.name)}"
     }
@@ -127,7 +126,13 @@ async def batch_download_novels(
 
 
 @router.delete("/{novel_id}", status_code=204)
-async def delete_novel(novel_id: int, db_session: Session = Depends(get_db)):
-    use_case = DeleteNovelUseCase(NovelRepository(db_session), FileStorage())
+async def delete_novel(
+    novel_id: int,
+    db_session: Session = Depends(get_db),
+    request: Request = None,
+):
+    use_case = DeleteNovelUseCase(
+        NovelRepository(db_session), request.app.state.file_storage
+    )
     await use_case.execute(novel_id)
     db_session.commit()

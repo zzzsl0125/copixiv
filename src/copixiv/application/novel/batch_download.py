@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from copixiv.domain.exceptions import NotFoundError
 from copixiv.domain.services.archive import build_batch_zip
-from copixiv.infrastructure.repositories.novel import NovelRepository
+from copixiv.domain.ports.repositories import NovelRepository
 
 
 @dataclass

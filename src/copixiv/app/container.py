@@ -43,8 +43,8 @@ class Container:
 
     def __init__(self, config_path: str | None = None):
         if config_path:
-            from copixiv.app.config import _load_config
-            self.config = _load_config(config_path)
+            from copixiv.app.config import load_config
+            self.config = load_config(config_path)
         else:
             self.config = config
 
@@ -214,6 +214,7 @@ class Container:
             logger.info("Shutting down copixiv v2...")
             self._task_manager.stop()
             self._image_downloader.shutdown()
+            await self._notifier.close()
 
         app = FastAPI(title="Novel Database API", lifespan=lifespan)
 

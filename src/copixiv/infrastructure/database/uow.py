@@ -105,6 +105,12 @@ class SqlUnitOfWork:
         return self._search_history
 
     @property
+    def session_factory(self):
+        """The session factory this UoW was created from (None when a
+        ready-made Session was injected)."""
+        return self._session_factory
+
+    @property
     def session(self) -> Session:
         if self._session is None:
             self._session = self._session_factory()
@@ -114,7 +120,11 @@ class SqlUnitOfWork:
 
     @asynccontextmanager
     async def begin(self) -> AsyncIterator[None]:
-        """Enter a transactional scope.  Commits on clean exit, rolls back on exception."""
+        """Enter a transactional scope.  Commits on clean exit, rolls back on exception.
+
+        Note: the exit path already commits — callers should NOT call
+        ``commit()`` explicitly inside the ``async with`` block.
+        """
         try:
             yield
             await self.commit()

@@ -21,7 +21,7 @@ def build_batch_zip(
                 ``series_index``, and ``has_epub``.
         format_mode: ``'txt'`` or ``'prefer_epub'`` (prefers EPUB when available).
         naming_template: Token-based naming template for ZIP arcnames.
-                Defaults to ``{user}/{series_title}/#{series_order}_{title}_{novel_id}``.
+                Defaults to ``{author_name}/{series_name}/#{series_index}_{title}_{id}``.
 
     Returns:
         ``(zip_buffer, added_titles, missing_ids)`` — the ZIP as a ``BytesIO``,

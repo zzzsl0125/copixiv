@@ -1,7 +1,7 @@
 """Use case: delete a search history entry."""
 
 from copixiv.domain.exceptions import NotFoundError
-from copixiv.infrastructure.repositories.search_history import SearchHistoryRepository
+from copixiv.domain.ports.repositories import SearchHistoryRepository
 
 
 class DeleteHistoryUseCase:

@@ -1,7 +1,7 @@
 """Use case: create a tag alias with retroactive application."""
 
 from copixiv.domain.exceptions import ValidationError
-from copixiv.infrastructure.repositories.tag import TagRepository
+from copixiv.domain.ports.repositories import TagRepository
 
 
 class CreateAliasUseCase:

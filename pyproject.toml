@@ -48,3 +48,6 @@ packages = ["src/copixiv"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 pythonpath = ["src"]
+markers = [
+    "slow: long-running tests (concurrency/IO heavy)",
+]

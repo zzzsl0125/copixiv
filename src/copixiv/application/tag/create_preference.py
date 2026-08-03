@@ -1,6 +1,6 @@
 """Use case: create a tag preference."""
 
-from copixiv.infrastructure.repositories.tag import TagRepository
+from copixiv.domain.ports.repositories import TagRepository
 
 
 class CreatePreferenceUseCase:

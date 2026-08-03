@@ -1,5 +1,6 @@
 """Series repository."""
 
+import asyncio
 from sqlalchemy import select as _select, func
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -34,6 +35,10 @@ class SeriesRepository(BaseRepository):
         return model_to_dict(series)
 
     async def update_summary(self, series_ids: set[int] | None = None) -> None:
+        """Recalculate series aggregates (runs in a worker thread)."""
+        await asyncio.to_thread(self._update_summary_sync, series_ids)
+
+    def _update_summary_sync(self, series_ids: set[int] | None = None) -> None:
         update_summary(
             self.session, models.Series, C.COL_SERIES_ID, series_ids,
             extra_columns=[

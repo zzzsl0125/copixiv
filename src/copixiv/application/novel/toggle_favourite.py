@@ -1,6 +1,6 @@
 """Use case: toggle novel favourite status."""
 
-from copixiv.infrastructure.repositories.novel import NovelRepository
+from copixiv.domain.ports.repositories import NovelRepository
 
 
 class ToggleFavouriteUseCase:

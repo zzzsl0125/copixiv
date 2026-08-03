@@ -1,6 +1,6 @@
 """Use case: get task execution history."""
 
-from copixiv.infrastructure.repositories.task import TaskRepository
+from copixiv.domain.ports.repositories import TaskRepository
 
 
 class GetHistoryUseCase:

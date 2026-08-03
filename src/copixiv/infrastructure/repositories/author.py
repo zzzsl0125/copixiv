@@ -1,5 +1,6 @@
 """Author repository."""
 
+import asyncio
 from datetime import datetime, date
 
 from sqlalchemy import update as _update, delete as _delete, select as _select, func
@@ -59,6 +60,10 @@ class AuthorRepository(BaseRepository):
         return True
 
     async def update_summary(self, author_ids: set[int] | None = None) -> None:
+        """Recalculate author aggregates (runs in a worker thread)."""
+        await asyncio.to_thread(self._update_summary_sync, author_ids)
+
+    def _update_summary_sync(self, author_ids: set[int] | None = None) -> None:
         update_summary(
             self.session, models.Author, C.COL_AUTHOR_ID, author_ids,
             extra_columns=[

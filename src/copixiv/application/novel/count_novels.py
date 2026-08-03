@@ -1,6 +1,6 @@
 """Use case: count novels matching filters."""
 
-from copixiv.infrastructure.repositories.novel import NovelRepository
+from copixiv.domain.ports.repositories import NovelRepository
 
 
 class CountNovelsUseCase:

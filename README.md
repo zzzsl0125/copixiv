@@ -122,7 +122,11 @@ src/copixiv/
 │   ├── ports/              # Protocol 抽象接口
 │   └── services/           # 纯函数：标签解析、中文检测、路径生成…
 ├── application/            # 用例：编排 domain 端口完成任务
-│   └── novel/              # ListNovels, DownloadNovel, ToggleFavourite…
+│   ├── novel/              # ListNovels, DownloadNovel, ToggleFavourite…
+│   ├── author/             # resolve_author_names（作者名解析）
+│   ├── tag/ task/ token/   # 标签、定时任务、Token 用例
+│   ├── search_history/     # 列表/删除 + record（后台记录）
+│   └── system/             # GetConfigUseCase
 ├── infrastructure/         # 实现层
 │   ├── database/           # SQLAlchemy engine / session / ORM / UnitOfWork
 │   ├── repositories/       # Novel, Author, Series, Tag, Token, Task…
@@ -135,11 +139,11 @@ src/copixiv/
 │   ├── deps.py             # FastAPI Depends
 │   └── endpoints/          # 7 个路由模块
 tests/                       # 按层组织
-├── domain/                  # 纯单元测试（48 个）
-└── infrastructure/          # 集成测试（9 个，内存 SQLite）
+├── domain/                  # 纯单元测试（零 I/O，models + services）
+└── infrastructure/          # 集成测试（内存 SQLite，database + repositories）
 ```
 
-依赖方向：`web_api` → `application` → `domain` ← `infrastructure`
+依赖方向：`web_api` → `application` → `domain` ← `infrastructure`（application 通过 `domain/ports` 的 Protocol 依赖抽象，不直接依赖具体实现）
 
 ---
 

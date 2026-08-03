@@ -1,7 +1,7 @@
 """Use case: delete a Pixiv token."""
 
 from copixiv.domain.exceptions import NotFoundError
-from copixiv.infrastructure.repositories.token import TokenRepository
+from copixiv.domain.ports.repositories import TokenRepository
 
 
 class DeleteTokenUseCase:
