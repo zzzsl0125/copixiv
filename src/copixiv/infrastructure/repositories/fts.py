@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import text as _text, select, delete as _delete, func
+from sqlalchemy import text as _text, select, delete as _delete, func, bindparam
 from sqlalchemy.orm import Session
 
 from copixiv.infrastructure.database import models
@@ -55,30 +55,32 @@ class FTSManager:
     # Rebuild (idempotent)
     # ------------------------------------------------------------------
 
+    # The FTS table is a *standalone* FTS5 table (no external-content
+    # clause).  The index stores jieba-tokenised text that deliberately
+    # differs from the raw ``novel`` rows, so a content-synchronised
+    # table would make FTS5's 'delete' command unable to match rows.
+    # Column set matches the table as it exists in production
+    # (``title, author_name, series_name, tags``) so
+    # ``CREATE ... IF NOT EXISTS`` never tries to recreate it with a
+    # different shape.
+    _CREATE_SQL = (
+        f"CREATE VIRTUAL TABLE IF NOT EXISTS {C.TABLE_NOVEL_FTS} USING fts5("
+        f"  {C.COL_TITLE}, {C.COL_AUTHOR_NAME}, {C.COL_SERIES_NAME}, tags,"
+        f"  tokenize='porter unicode61'"
+        f")"
+    )
+
     def rebuild_novel_fts(self) -> None:
         """Create FTS5 virtual table if missing, then rebuild from novels.
 
-        Idempotent: uses ``CREATE VIRTUAL TABLE IF NOT EXISTS`` so it
-        doesn't fail when the FTS table already exists.
-
-        Uses ``INSERT INTO ..._fts(..._fts) VALUES('delete-all')`` to
-        clear the index safely — avoids the "database disk image is
-        malformed" error that can occur when DELETE is used on a
-        content-synchronized FTS5 table.
+        Idempotent: drops the virtual table first, then recreates it via
+        ``CREATE VIRTUAL TABLE``, so it works regardless of whether the
+        table already exists and what shape a legacy table has.
         """
-        self.session.execute(_text(
-            f"CREATE VIRTUAL TABLE IF NOT EXISTS {C.TABLE_NOVEL_FTS} USING fts5("
-            f"  {C.COL_TITLE}, {C.COL_AUTHOR_NAME}, {C.COL_SERIES_NAME},"
-            f"  content='{C.TABLE_NOVEL}', content_rowid='{C.COL_ID}'"
-            f")"
-        ))
-        # Clear all existing FTS index entries safely
         self.session.execute(
-            _text(
-                f"INSERT INTO {C.TABLE_NOVEL_FTS}({C.TABLE_NOVEL_FTS}) "
-                f"VALUES('delete-all')"
-            )
+            _text(f"DROP TABLE IF EXISTS {C.TABLE_NOVEL_FTS}")
         )
+        self.session.execute(_text(self._CREATE_SQL))
         self._batch_insert_all_novels()
         self.session.commit()
         logger.info("FTS5 index rebuilt from scratch.")
@@ -90,9 +92,10 @@ class FTSManager:
     def update_novel_fts_index(self, novel_ids: list[int]) -> None:
         """Update FTS entries for the given novel IDs.
 
-        No-op if FTS table missing or *novel_ids* is empty.  Uses
-        FTS5 delete command (safe for content-synced tables) then
-        batch re-inserts all affected rows.
+        No-op if FTS table missing or *novel_ids* is empty.  Deletes
+        the affected rowids (plain DELETE — the standalone novel_fts
+        table has no external-content clause) then batch re-inserts
+        all affected rows.
         """
         if not novel_ids:
             return
@@ -100,19 +103,17 @@ class FTSManager:
         if not self._fts_table_exists():
             return
 
-        # Use FTS5 'delete' command — avoids corruption on content-synced tables
-        for nid in novel_ids:
-            try:
-                self.session.execute(
-                    _text(
-                        f"INSERT INTO {C.TABLE_NOVEL_FTS}"
-                        f"({C.TABLE_NOVEL_FTS}) VALUES('delete', :id)"
-                    ),
-                    {"id": nid},
-                )
-            except Exception:
-                # Row may not exist in FTS index yet — that's fine
-                pass
+        # Remove the existing entries first.  novel_fts is a standalone
+        # FTS5 table, so a plain rowid DELETE is safe and exact (the
+        # FTS5 'delete' command would require the exact tokenised
+        # values stored in the index).  Without this, re-inserting the
+        # same rowid below would fail with an IntegrityError.
+        self.session.execute(
+            _text(
+                f"DELETE FROM {C.TABLE_NOVEL_FTS} WHERE rowid IN :nids"
+            ).bindparams(bindparam("nids", expanding=True)),
+            {"nids": novel_ids},
+        )
 
         novels = self.session.execute(
             select(
@@ -132,18 +133,13 @@ class FTSManager:
     def delete_novel_fts(self, novel_id: int) -> None:
         """Remove an FTS entry for a deleted novel.
 
-        Uses FTS5 'delete' command — safe for content-synced tables.
+        Plain rowid DELETE — safe on the standalone novel_fts table
+        and a no-op when the row doesn't exist.
         """
-        try:
-            self.session.execute(
-                _text(
-                    f"INSERT INTO {C.TABLE_NOVEL_FTS}"
-                    f"({C.TABLE_NOVEL_FTS}) VALUES('delete', :id)"
-                ),
-                {"id": novel_id},
-            )
-        except Exception:
-            pass
+        self.session.execute(
+            _text(f"DELETE FROM {C.TABLE_NOVEL_FTS} WHERE rowid = :id"),
+            {"id": novel_id},
+        )
 
     # ------------------------------------------------------------------
     # Batch operations (Phase 2)
@@ -152,24 +148,18 @@ class FTSManager:
     def batch_rebuild_fts(self, batch_size: int = 500) -> int:
         """Rebuild the entire FTS index in batches, avoiding per-row upserts.
 
-        Uses ``INSERT INTO ..._fts SELECT ... FROM novel`` for bulk transfer.
+        Drops and recreates the table (shape always matches
+        ``_CREATE_SQL``), then bulk-inserts every novel.
         Returns the number of novels indexed.
         """
-        if not self._fts_table_exists():
-            self.session.execute(_text(
-                f"CREATE VIRTUAL TABLE IF NOT EXISTS {C.TABLE_NOVEL_FTS} USING fts5("
-                f"  {C.COL_TITLE}, {C.COL_AUTHOR_NAME}, {C.COL_SERIES_NAME},"
-                f"  content='{C.TABLE_NOVEL}', content_rowid='{C.COL_ID}'"
-                f")"
-            ))
-
-        # Clear existing entries safely (DELETE on content-synced FTS can corrupt)
+        # Recreate the table so its shape always matches _CREATE_SQL
+        # (a legacy table may have a different definition), then bulk
+        # re-insert.  'delete-all' is not used: it only works on
+        # contentless / external-content FTS5 tables.
         self.session.execute(
-            _text(
-                f"INSERT INTO {C.TABLE_NOVEL_FTS}({C.TABLE_NOVEL_FTS}) "
-                f"VALUES('delete-all')"
-            )
+            _text(f"DROP TABLE IF EXISTS {C.TABLE_NOVEL_FTS}")
         )
+        self.session.execute(_text(self._CREATE_SQL))
         count = self._batch_insert_all_novels()
         self.session.commit()
         logger.info(f"FTS5 batch rebuild complete — {count} novels indexed.")

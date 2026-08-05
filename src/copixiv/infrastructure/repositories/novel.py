@@ -280,9 +280,11 @@ class NovelRepository(BaseRepository):
                     filtered[int_field] = int(filtered[int_field])
 
             if existing:
-                for key, value in filtered.items():
-                    if (getattr(existing, key, None) is None and value) or key in update_fields_set:
-                        setattr(existing, key, value)
+                # Detect FTS-relevant changes BEFORE applying them —
+                # title/series_name are in *update_fields_set* and get
+                # setattr'ed below, so a comparison after that would
+                # always see equal values and the FTS index would never
+                # be marked dirty on title changes.
                 fts_fields = (C.COL_TITLE, C.COL_AUTHOR_NAME, C.COL_SERIES_NAME)
                 if nid and any(
                     key in filtered
@@ -290,6 +292,9 @@ class NovelRepository(BaseRepository):
                     for key in fts_fields
                 ):
                     fts_dirty_ids.append(nid)
+                for key, value in filtered.items():
+                    if (getattr(existing, key, None) is None and value) or key in update_fields_set:
+                        setattr(existing, key, value)
             else:
                 new_novel = models.Novel(**filtered)
                 if "shuffle" not in filtered or not filtered["shuffle"]:
