@@ -22,12 +22,12 @@ from .pipeline import (
     _batch_upsert,
     _batch_handle,
     _filter_chinese_novels,
-    _make_page_handler,
     _month_ranges,
 )
 from . import maintenance  # noqa: F401 — ensure @register decorators fire
 
-from copixiv.infrastructure.repositories.failed_novel import FailedNovelRepository
+from copixiv.infrastructure.database.write_lock import db_write
+from copixiv.infrastructure.database.uow import SqlUnitOfWork
 
 from copixiv.app.logger import logger
 
@@ -52,6 +52,11 @@ async def _fan_out_author_fetch(
 
     Used by :func:`novel_ranking` and :func:`novel_search`.
 
+    Each concurrent ``author_fetch`` gets its own :class:`SqlUnitOfWork`
+    — sessions are never shared across coroutines.  All database writes
+    are serialized by the global ``db_write()`` lock inside the pipeline,
+    so concurrency here only ever covers network I/O.
+
     Returns the combined list of newly-downloaded novel titles.
     """
     cn = _filter_chinese_novels(novels)
@@ -69,7 +74,7 @@ async def _fan_out_author_fetch(
         results = await asyncio.gather(*[
             author_fetch(
                 a, force=force,
-                client=client, uow=uow,
+                client=client, uow=SqlUnitOfWork(uow.session_factory),
                 file_storage=file_storage,
                 image_downloader=image_downloader,
                 config=config,
@@ -112,8 +117,9 @@ async def novel_fetch(
 
     await image_downloader.process_novel_assets(data, force=redownload)
 
-    async with uow.begin():
-        count = await _batch_upsert([data], uow)
+    async with db_write():
+        async with uow.begin():
+            count = await _batch_upsert([data], uow)
 
     # Resolve author name — webview API doesn't return it.
     if count:
@@ -147,19 +153,22 @@ async def novel_follow(
     Forces the designated "follow" account (config.pixiv_accounts.follow)
     because the Pixiv novel_follow endpoint returns results scoped to the
     authenticated account's own following list.
+
+    Collect-then-persist: the feed is fetched without touching the
+    database, then processed by :func:`_batch_handle`.
     """
-    new_author_ids: set[int] = set()
-    _handle = _make_page_handler(
-        uow.session_factory, client, file_storage, image_downloader,
-        redownload=force, author_ids_out=new_author_ids,
-    )
     fetch_til = datetime.now().astimezone() - timedelta(days=days)
     async with client.account_rule(
         force_account=_account("follow", config),
     ):
-        resp = await client.novel_follow(fetch_til=fetch_til, handler=_handle)
+        resp = await client.novel_follow(fetch_til=fetch_til)
 
-    titles: list[str] = safe_get(resp, "handler_results", [])
+    novels = _filter_chinese_novels(safe_get(resp, "novels", []))
+    titles, new_author_ids = await _batch_handle(
+        novels, uow.session_factory,
+        client=client, file_storage=file_storage,
+        image_downloader=image_downloader, redownload=force,
+    )
 
     if new_author_ids:
         await resolve_author_names(new_author_ids, client=client, uow=uow)
@@ -182,35 +191,52 @@ async def author_fetch(
     image_downloader,
     config,
 ):
-    """Fetch all novels by an author."""
+    """Fetch all novels by an author.
+
+    Collect-then-persist flow: the whole catalogue is fetched without
+    touching the database (client accumulates pages into ``resp.novels``),
+    then :func:`_batch_handle` downloads new novels concurrently and
+    persists everything in a single write transaction inside
+    ``db_write()``.  No transaction is ever held across network I/O, and
+    no write happens outside the global write lock.
+    """
+    session_factory = uow.session_factory
+
+    # Plan — read-only, short transaction, no lock.
     async with uow.begin():
         if not force and not await uow.authors.need_update(author_id):
             logger.info(f"Skip Author {author_id}, already updated today.")
             return TaskResult(summary=f"作者 #{author_id} 今日已更新，跳过")
 
         author = await uow.authors.get_by_id(author_id)
-        if not author:
-            async with client.account_rule(
-                force_account=_account("follow", config),
-            ):
-                await client.user_follow_add(author_id)
 
-    _download = _make_page_handler(
-        uow.session_factory, client, file_storage, image_downloader,
-        redownload=redownload,
+    if not author:
+        async with client.account_rule(
+            force_account=_account("follow", config),
+        ):
+            await client.user_follow_add(author_id)
+
+    # Collect — pure network, pages accumulate into resp.novels.
+    resp = await client.user_novels(author_id, fetch_all=True)
+    novels = _filter_chinese_novels(safe_get(resp, "novels", []))
+
+    # Persist — plan → download → write, writes serialized by db_write().
+    titles, _new_author_ids = await _batch_handle(
+        novels, session_factory,
+        client=client, file_storage=file_storage,
+        image_downloader=image_downloader, redownload=redownload,
     )
-    resp = await client.user_novels(author_id, fetch_all=True, handler=_download)
 
-    titles: list[str] = safe_get(resp, "handler_results", [])
+    # Mark the author as updated today (same write discipline).
+    async with db_write():
+        async with uow.begin():
+            await uow.authors.update_last_update(author_id)
 
     # Resolve author name — webview API doesn't return it.
     resolved = await resolve_author_names(
         {author_id}, client=client, uow=uow,
     )
     name = resolved.get(author_id, "")
-
-    async with uow.begin():
-        await uow.authors.update_last_update(author_id)
 
     label = name or f"#{author_id}"
     return TaskResult(
@@ -228,8 +254,9 @@ async def author_delete(
     config,
 ):
     """Delete an author and all their novels."""
-    async with uow.begin():
-        await uow.authors.delete_author_and_data(author_id)
+    async with db_write():
+        async with uow.begin():
+            await uow.authors.delete_author_and_data(author_id)
 
     async with client.account_rule(
         force_account=_account("follow", config)
@@ -272,15 +299,11 @@ async def author_special_follow(
         if novels:
             all_novels.extend(novels)
 
-    async with uow.begin():
-        failed_repo = FailedNovelRepository(uow.session)
-        titles, new_author_ids = await _batch_handle(
-            all_novels, uow,
-            client=client,
-            file_storage=file_storage,
-            image_downloader=image_downloader,
-            failed_repo=failed_repo,
-        )
+    titles, new_author_ids = await _batch_handle(
+        all_novels, uow.session_factory,
+        client=client, file_storage=file_storage,
+        image_downloader=image_downloader,
+    )
 
     if new_author_ids:
         await resolve_author_names(new_author_ids, client=client, uow=uow)

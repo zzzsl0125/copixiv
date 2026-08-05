@@ -1,7 +1,7 @@
 """Download + persistence pipeline shared by task functions.
 
 These are the building blocks that registered tasks compose together:
-batch upserter, concurrent downloader, per-page handler factory, and
+batch upserter, concurrent downloader, plan/persist phases, and
 small pure helpers for filtering / date-range generation.
 """
 
@@ -10,7 +10,7 @@ import calendar
 from datetime import datetime, timedelta
 from pathlib import Path
 
-_db_write_lock = asyncio.Lock()
+from copixiv.infrastructure.database.write_lock import db_write
 
 from copixiv.domain.services.language import is_chinese
 from copixiv.domain.services.novel_factory import (
@@ -74,6 +74,10 @@ async def _batch_upsert(
 
     Ensures author + series placeholder rows exist before the novel
     insert so FK constraints are satisfied for first-seen authors/series.
+
+    Pure write helper: the caller is responsible for wrapping it in
+    ``db_write()`` + ``uow.begin()`` so the whole batch (including the
+    commit) happens while holding the global write lock.
     """
     novels = [n for n in novels if n]
     if not novels:
@@ -82,28 +86,18 @@ async def _batch_upsert(
     author_ids = {n["author_id"] for n in novels}
     series_ids = {sid for n in novels if (sid := n.get("series_id"))}
 
-    # Serialize all DB writes across concurrent page handlers.
-    # SQLite (even in WAL mode) allows only one writer at a time.
-    # The lock must cover both the writes AND the commit so that the
-    # next handler doesn't try to write before this one's transaction
-    # finishes and releases SQLite's internal write lock.
-    async with _db_write_lock:
-        uow.authors.ensure_exists(author_ids)
-        uow.series.ensure_exists(series_ids)
+    uow.authors.ensure_exists(author_ids)
+    uow.series.ensure_exists(series_ids)
 
-        count = await uow.novels.upsert_novels(novels, force_update or [])
-        logger.info(
-            f"_batch_upsert: upsert_novels returned {count} for "
-            f"{len(novels)} input novels (sample id: {novels[0].get('id')!r})"
-        )
-        await uow.authors.update_summary({n["author_id"] for n in novels})
-        await uow.series.update_summary(
-            {sid for n in novels if (sid := n.get("series_id"))}
-        )
-
-        # Commit inside the lock so SQLite's write lock is released
-        # before the next concurrent handler tries to write.
-        await uow.commit()
+    count = await uow.novels.upsert_novels(novels, force_update or [])
+    logger.info(
+        f"_batch_upsert: upsert_novels returned {count} for "
+        f"{len(novels)} input novels (sample id: {novels[0].get('id')!r})"
+    )
+    await uow.authors.update_summary({n["author_id"] for n in novels})
+    await uow.series.update_summary(
+        {sid for n in novels if (sid := n.get("series_id"))}
+    )
 
     return count
 
@@ -119,17 +113,20 @@ async def _download_novels(
     file_storage,
     image_downloader,
     redownload: bool = False,
-    failed_repo: FailedNovelRepository | None = None,
-) -> list[dict]:
+) -> tuple[list[dict], list[tuple[int, str]]]:
     """Download novels via webview concurrently.
 
     Fires all webview_novel calls in parallel — the client semaphore + LRU
     account selection distribute the load across accounts automatically.
     Each novel's text, images, and EPUB are processed as it completes.
-    Returns a list of processed novel dicts ready for DB upsert.
+
+    Pure download phase: no database access at all (the write lock is
+    never held across network I/O).  Failed downloads are returned as
+    ``(novel_id, reason)`` records for the caller to persist inside the
+    write transaction.
     """
     if not novel_ids:
-        return []
+        return [], []
 
     async def _fetch_one(nid: int) -> dict | None:
         resp = await client.webview_novel(nid)
@@ -150,20 +147,20 @@ async def _download_novels(
     )
 
     valid: list[dict] = []
+    failed_records: list[tuple[int, str]] = []
     for nid, result in zip(novel_ids, results):
         if isinstance(result, Exception):
             logger.error(
                 f"下载: #{nid} 失败: {type(result).__name__}: {result}"
             )
-            if failed_repo is not None:
-                failed_repo.record(nid, "download", str(result))
+            failed_records.append((nid, str(result)))
         elif result is not None:
             valid.append(result)
 
     logger.info(
         f"_download_novels: {len(valid)}/{len(novel_ids)} downloaded successfully",
     )
-    return valid
+    return valid, failed_records
 
 
 # ---------------------------------------------------------------------------
@@ -171,29 +168,21 @@ async def _download_novels(
 # ---------------------------------------------------------------------------
 
 
-async def _batch_handle(
+async def _plan_batch(
     novels: list,
     uow,
-    client=None,
-    file_storage=None,
-    image_downloader=None,
     redownload: bool = False,
     failed_repo: FailedNovelRepository | None = None,
-) -> tuple[list[str], set[int]]:
-    """Process a batch of novels: metadata upsert for existing, download for new.
+) -> tuple[list[dict], list[int]]:
+    """Plan phase (read-only): decide what to download and what to upsert.
 
-    When *client* / *file_storage* / *image_downloader* are provided,
-    new novels are downloaded concurrently via :func:`_download_novels`
-    and upserted to the DB.  Without them (legacy callers), only metadata
-    upsert is performed.
-
-    Returns ``(titles, new_author_ids)`` — the titles and author IDs of
-    newly downloaded novels (which may have missing author names because
-    the webview API doesn't return them).  Callers should pass
-    ``new_author_ids`` to :func:`resolve_author_names` to fill in the gaps.
+    Must run outside the write lock — it only reads.  Returns
+    ``(existing_meta, download_ids)`` where ``existing_meta`` holds the
+    metadata dicts of already-known novels (empty when ``redownload``),
+    and ``download_ids`` are the novel IDs that still need downloading.
     """
     if not novels:
-        return [], set()
+        return [], []
 
     ids = {n.id for n in novels}
     existing = await uow.novels.get_existing_ids(ids)
@@ -207,95 +196,120 @@ async def _batch_handle(
     need_download = ids if redownload else ids - existing - skip_ids
 
     logger.info(
-        f"_batch_handle: {len(novels)} novels — "
+        f"_plan_batch: {len(novels)} novels — "
         f"{len(existing)} in DB, {len(skip_ids)} failed-too-many-times, "
         f"{len(need_download)} need download",
     )
 
+    existing_meta: list[dict] = []
+    if not redownload:
+        existing_meta = [
+            build_from_novel_info(n) for n in novels if n.id in existing
+        ]
+
+    download_ids = [n.id for n in novels if n.id in need_download]
+    return existing_meta, download_ids
+
+
+async def _persist_batch(
+    existing_meta: list[dict],
+    downloaded: list[dict],
+    uow,
+    failed_records: list[tuple[int, str]] | None = None,
+    failed_repo: FailedNovelRepository | None = None,
+) -> tuple[list[str], set[int]]:
+    """Persist phase (write-only): run inside ``db_write()`` + ``uow.begin()``.
+
+    Records download failures, upserts existing metadata + downloaded
+    novels, and forgets success markers — all in the caller's write
+    transaction.  Returns ``(titles, new_author_ids)``.
+    """
     titles: list[str] = []
     new_author_ids: set[int] = set()
 
-    # Metadata-only upsert for existing
-    if not redownload:
-        n_existing = [build_from_novel_info(n) for n in novels if n.id in existing]
-        if n_existing:
-            upserted = await _batch_upsert(n_existing, uow)
-            logger.info(
-                f"_batch_handle: metadata upsert done for {upserted} existing novels",
-            )
+    # Failed downloads — recorded in the same write transaction.
+    if failed_records and failed_repo is not None:
+        for nid, reason in failed_records:
+            failed_repo.record(nid, "download", reason)
 
-    # Download new ones concurrently
-    download_ids = [n.id for n in novels if n.id in need_download]
+    # Metadata-only upsert for existing
+    if existing_meta:
+        upserted = await _batch_upsert(existing_meta, uow)
+        logger.info(
+            f"_persist_batch: metadata upsert done for {upserted} existing novels",
+        )
+
+    if downloaded:
+        success_ids = {d["id"] for d in downloaded}
+        await _batch_upsert(downloaded, uow)
+        if failed_repo is not None:
+            failed_repo.forget_many(success_ids)
+        titles = [d["title"] for d in downloaded if "title" in d]
+        new_author_ids = {d["author_id"] for d in downloaded if d.get("author_id")}
+        logger.info(
+            f"_persist_batch: {len(downloaded)} novels downloaded and upserted",
+        )
+
+    return titles, new_author_ids
+
+
+async def _batch_handle(
+    novels: list,
+    session_factory,
+    client=None,
+    file_storage=None,
+    image_downloader=None,
+    redownload: bool = False,
+) -> tuple[list[str], set[int]]:
+    """Process a batch of novels end-to-end: plan → download → persist.
+
+    The pipeline keeps every database write inside ``db_write()`` and
+    never holds a transaction (or the write lock) across network
+    downloads.  Concurrent calls are safe: the plan phase reads without
+    the lock, the download phase touches no database, and the persist
+    phase serializes through ``db_write()``.
+
+    Returns ``(titles, new_author_ids)`` — the titles and author IDs of
+    newly downloaded novels (which may have missing author names because
+    the webview API doesn't return them).  Callers should pass
+    ``new_author_ids`` to :func:`resolve_author_names` to fill in the gaps.
+    """
+    if not novels:
+        return [], set()
+
+    from copixiv.infrastructure.database.uow import SqlUnitOfWork
+
+    # 1. Plan — read-only, short transaction, no lock.
+    uow = SqlUnitOfWork(session_factory)
+    async with uow.begin():
+        failed_repo = FailedNovelRepository(uow.session)
+        existing_meta, download_ids = await _plan_batch(
+            novels, uow, redownload=redownload, failed_repo=failed_repo,
+        )
+
+    # 2. Download — concurrent network/file I/O, no database.
+    downloaded: list[dict] = []
+    failed_records: list[tuple[int, str]] = []
     if download_ids:
         if client and file_storage and image_downloader:
-            downloaded = await _download_novels(
+            downloaded, failed_records = await _download_novels(
                 download_ids, client, file_storage, image_downloader,
                 redownload=redownload,
-                failed_repo=failed_repo,
             )
-            if downloaded:
-                success_ids = {d["id"] for d in downloaded}
-                await _batch_upsert(downloaded, uow)
-                if failed_repo is not None:
-                    failed_repo.forget_many(success_ids)
-                titles = [d["title"] for d in downloaded if "title" in d]
-                new_author_ids = {d["author_id"] for d in downloaded if d.get("author_id")}
-                logger.info(
-                    f"_batch_handle: {len(downloaded)} novels downloaded and upserted",
-                )
         else:
             logger.warning(
                 f"_batch_handle: {len(download_ids)} novels need download "
                 f"but no client/storage provided — skipping download",
             )
 
+    # 3. Persist — one write transaction inside the global write lock.
+    async with db_write():
+        async with uow.begin():
+            failed_repo = FailedNovelRepository(uow.session)
+            titles, new_author_ids = await _persist_batch(
+                existing_meta, downloaded, uow,
+                failed_records=failed_records, failed_repo=failed_repo,
+            )
+
     return titles, new_author_ids
 
-
-# ---------------------------------------------------------------------------
-# Per-page handler factory
-# ---------------------------------------------------------------------------
-
-
-def _make_page_handler(
-    session_factory,
-    client,
-    file_storage,
-    image_downloader,
-    redownload: bool = False,
-    *,
-    author_ids_out: set[int] | None = None,
-):
-    """Build a per-page handler with its own UoW session.
-
-    Each page from a paginated API call runs concurrently — sharing a single
-    session across concurrent handlers causes SQLite write contention.  This
-    factory creates handlers that each get their own session.
-
-    If *author_ids_out* is provided, the handler will collect the author IDs
-    of newly-downloaded novels into it (for later name resolution).
-    """
-    from copixiv.infrastructure.database.uow import SqlUnitOfWork as _UoW
-
-    async def handler(resp):
-        novels = safe_get(resp, "novels", [])
-        if not novels:
-            return []
-        cn = _filter_chinese_novels(novels)
-        async with client.account_rule():
-            page_uow = _UoW(session_factory)
-            async with page_uow.begin():
-                failed_repo = FailedNovelRepository(page_uow.session)
-                titles, new_author_ids = await _batch_handle(
-                    cn, page_uow,
-                    client=client,
-                    file_storage=file_storage,
-                    image_downloader=image_downloader,
-                    redownload=redownload,
-                    failed_repo=failed_repo,
-                )
-                if author_ids_out is not None:
-                    author_ids_out.update(new_author_ids)
-                return titles
-
-    return handler

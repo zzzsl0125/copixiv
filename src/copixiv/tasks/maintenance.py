@@ -13,6 +13,7 @@ from pathlib import Path
 
 from copixiv.domain.models.task_result import TaskResult
 from copixiv.application.author.resolve_names import resolve_author_names
+from copixiv.infrastructure.database.write_lock import db_write
 from copixiv.app.logger import logger
 
 from .registry import register
@@ -63,12 +64,14 @@ async def check_epub(
                 pending_ids.append(novel_id)
 
     if completed_ids:
-        async with uow.begin():
-            await uow.novels.update_has_epub_status(completed_ids, 2)
+        async with db_write():
+            async with uow.begin():
+                await uow.novels.update_has_epub_status(completed_ids, 2)
 
     if revert_ids:
-        async with uow.begin():
-            await uow.novels.update_has_epub_status(revert_ids, 1)
+        async with db_write():
+            async with uow.begin():
+                await uow.novels.update_has_epub_status(revert_ids, 1)
 
     logger.info(
         f"check_epub: completed={len(completed_ids)}, "
@@ -125,8 +128,9 @@ async def rebuild_fts(
     uow,
 ):
     """Rebuild the FTS5 index."""
-    async with uow.begin():
-        await uow.novels.rebuild_fts()
+    async with db_write():
+        async with uow.begin():
+            await uow.novels.rebuild_fts()
 
     return TaskResult(summary="FTS 索引重建完成")
 
@@ -175,8 +179,9 @@ async def fix_series_index(
         for i, n in enumerate(novels):
             safe_set(n, "series.index", i + 1)
         novel_dicts = [build_from_novel_info(n) for n in novels]
-        async with uow.begin():
-            fixed += await _batch_upsert(novel_dicts, uow)
+        async with db_write():
+            async with uow.begin():
+                fixed += await _batch_upsert(novel_dicts, uow)
         done += 1
 
     if done == 0:

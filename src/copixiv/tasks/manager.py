@@ -184,6 +184,8 @@ class TaskManagerSystem:
         with self._session_factory() as session:
             from copixiv.infrastructure.repositories.task import TaskRepository
             repo = TaskRepository(session)
+            # Short INSERT outside db_write() — task enqueue happens in
+            # sync API paths; 60s busy_timeout covers the rare collision.
             task_id = repo.add_task_sync(name, params)
             session.commit()
             logger.info("Task '{}' (id={}) enqueued.", name, task_id)
@@ -236,7 +238,7 @@ class TaskManagerSystem:
         result_val: Any = None
 
         # --- Update status to "running" ---
-        self._update_history(task_id, "running")
+        await self._update_history(task_id, "running")
 
         # Capture all loguru output during task execution
         with capture_logs(task_id=task_id) as get_logs:
@@ -281,7 +283,7 @@ class TaskManagerSystem:
             ensure_ascii=False,
         )
 
-        self._update_history(task_id, status, result=result_data, duration=duration)
+        await self._update_history(task_id, status, result=result_data, duration=duration)
 
         # --- Telegram notification ---
         if self._notifier is not None:
@@ -340,20 +342,29 @@ class TaskManagerSystem:
             )
         return TaskResult(summary=str(result_val))
 
-    def _update_history(
+    async def _update_history(
         self,
         task_id: int,
         status: str,
         result: str | None = None,
         duration: float | None = None,
     ) -> None:
-        """Sync helper that updates a TaskHistory row."""
-        from copixiv.infrastructure.repositories.task import TaskRepository
+        """Update a TaskHistory row inside the global write lock.
 
-        with self._session_factory() as session:
-            repo = TaskRepository(session)
-            repo.update_task_sync(task_id, status, result=result, duration=duration)
-            session.commit()
+        task_history is written from paths that may overlap with other
+        tasks' writes — serialize it through ``db_write()`` like every
+        other database write.
+        """
+        from copixiv.infrastructure.repositories.task import TaskRepository
+        from copixiv.infrastructure.database.write_lock import db_write
+
+        async with db_write():
+            with self._session_factory() as session:
+                repo = TaskRepository(session)
+                repo.update_task_sync(
+                    task_id, status, result=result, duration=duration,
+                )
+                session.commit()
 
     @staticmethod
     def _parse_json(value: Any) -> dict:

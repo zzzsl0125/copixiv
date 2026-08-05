@@ -12,6 +12,7 @@ import asyncio
 from copixiv.domain.ports.pixiv import PixivNovelPort
 from copixiv.domain.ports.unit_of_work import UnitOfWork
 from copixiv.domain.services.parsing import safe_get
+from copixiv.infrastructure.database.write_lock import db_write
 from copixiv.app.logger import logger
 
 
@@ -33,6 +34,10 @@ async def resolve_author_names(
     author.  IDs that could not be resolved (API failure, empty name) are
     silently omitted — they'll be picked up by the ``sync_empty_name``
     maintenance task later.
+
+    Note: this function acquires ``db_write()`` itself for the persist
+    step — callers must NOT invoke it while already holding the write
+    lock (``asyncio.Lock`` is not re-entrant).
     """
     if not author_ids:
         return {}
@@ -62,10 +67,13 @@ async def resolve_author_names(
             api_names[aid] = name
 
     # -- persist --------------------------------------------------------
+    # Persist happens inside the global write lock (db_write) so that
+    # name updates never collide with concurrent task writes.
     if api_names:
-        async with uow.begin():
-            for aid, name in api_names.items():
-                await uow.authors.update_author_name(aid, name)
+        async with db_write():
+            async with uow.begin():
+                for aid, name in api_names.items():
+                    await uow.authors.update_author_name(aid, name)
         resolved.update(api_names)
 
     return resolved

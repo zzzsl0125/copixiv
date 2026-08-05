@@ -22,9 +22,11 @@ def create_database_engine(
         database_path: Path to the SQLite database file.
         echo: If True, log all SQL statements.
 
-    Pool config: QueuePool(pool_size=3, max_overflow=5) — three persistent
+    Pool config: QueuePool(pool_size=6, max_overflow=12) — six persistent
     connections for concurrent reads (WAL mode supports multiple readers)
-    plus up to 5 overflow connections for bursts.
+    plus up to 12 overflow connections for bursts.  Concurrency is kept
+    in check by the page-handler semaphore in ``tasks/pipeline.py``, so
+    the pool only needs to cover that cap plus API traffic.
     """
     db_path = Path(database_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -34,8 +36,8 @@ def create_database_engine(
         connect_args={"check_same_thread": False},
         echo=echo,
         poolclass=QueuePool,
-        pool_size=3,
-        max_overflow=5,
+        pool_size=6,
+        max_overflow=12,
     )
 
     @event.listens_for(engine, "connect")
@@ -43,7 +45,10 @@ def create_database_engine(
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA synchronous=NORMAL")
-        cursor.execute("PRAGMA busy_timeout=10000")
+        # Writes are serialized in-process via db_write() (see
+        # infrastructure/database/write_lock.py), so this timeout is only
+        # a fallback for short external writers (e.g. FastAPI sessions).
+        cursor.execute("PRAGMA busy_timeout=60000")
         cursor.execute("PRAGMA foreign_keys=ON")
         # mmap the main DB file into the process address space so page
         # access is a pointer dereference instead of a pread() syscall.
