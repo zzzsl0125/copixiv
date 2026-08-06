@@ -1,10 +1,12 @@
-"""FastAPI dependencies — session lifecycle and query parsing."""
+"""FastAPI dependencies — session lifecycle, unit of work, query parsing."""
 
 import json
-from collections.abc import Generator
+from collections.abc import AsyncIterator, Generator
 
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException, Request
 from sqlalchemy.orm import Session
+
+from copixiv.infrastructure.database.uow import SqlUnitOfWork
 
 
 def get_db(request: Request) -> Generator[Session, None, None]:
@@ -18,6 +20,18 @@ def get_db(request: Request) -> Generator[Session, None, None]:
         yield session
     finally:
         session.close()
+
+
+async def get_uow(db: Session = Depends(get_db)) -> AsyncIterator[SqlUnitOfWork]:
+    """Yield a request-scoped unit of work.
+
+    The transaction commits on clean exit and rolls back on exception
+    (including handler errors / cancellation), so endpoints never touch
+    commit/rollback or the session lifecycle themselves.
+    """
+    uow = SqlUnitOfWork(db)
+    async with uow.begin():
+        yield uow
 
 
 def parse_queries_json(queries_str: str | None) -> dict | None:

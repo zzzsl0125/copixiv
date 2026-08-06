@@ -11,7 +11,7 @@ from copixiv.infrastructure.database import models
 from .base import BaseRepository
 
 
-class SearchHistoryRepository(BaseRepository):
+class SQLAlchemySearchHistoryRepository(BaseRepository):
     """Repository for search history entries."""
 
     def __init__(self, session: Session):

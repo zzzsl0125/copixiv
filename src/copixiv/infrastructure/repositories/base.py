@@ -31,7 +31,8 @@ def update_summary(
 
     Queries the Novel table grouped by *id_column_name* and upserts the
     computed aggregates into *model_class*.  This is a standalone helper
-    used by :class:`AuthorRepository` and :class:`SeriesRepository` — it
+    used by :class:`SQLAlchemyAuthorRepository` and
+    :class:`SQLAlchemySeriesRepository` — it
     does not belong in ``BaseRepository`` because it hardcodes ``Novel``
     as the source table.
     """

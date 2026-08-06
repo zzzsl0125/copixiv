@@ -11,6 +11,9 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session, sessionmaker
+
 from copixiv.app.config import config
 from copixiv.infrastructure.database.engine import (
     create_database_engine,
@@ -28,6 +31,8 @@ from copixiv.infrastructure.epub.builder import EpubBuilder
 from copixiv.infrastructure.repositories.fts import FTSManager
 
 from copixiv.app.logger import logger
+from copixiv.infrastructure.notifier.telegram import TelegramNotifier
+from copixiv.tasks.manager import TaskManagerSystem
 
 
 class Container:
@@ -47,6 +52,19 @@ class Container:
             self.config = load_config(config_path)
         else:
             self.config = config
+
+        # All singletons created by ``build()`` — declared here explicitly
+        # so the attribute set is visible to IDEs / type checkers instead
+        # of being created dynamically.
+        self._engine: Engine | None = None
+        self._session_factory: sessionmaker[Session] | None = None
+        self._file_storage: FileStorage | None = None
+        self._epub_builder: EpubBuilder | None = None
+        self._image_downloader: ImageDownloader | None = None
+        self._account_pool: AccountPool | None = None
+        self._client: PixivClient | None = None
+        self._notifier: TelegramNotifier | None = None
+        self._task_manager: TaskManagerSystem | None = None
 
     # ------------------------------------------------------------------
     # Build — wire everything together
@@ -111,11 +129,9 @@ class Container:
         )
 
         # Telegram notifier
-        from copixiv.infrastructure.notifier.telegram import TelegramNotifier
         self._notifier = TelegramNotifier(self.config)
 
         # Task manager (background scheduler)
-        from copixiv.tasks.manager import TaskManagerSystem
         self._task_manager = TaskManagerSystem(
             session_factory=self._session_factory,
             client=self._client,
@@ -134,6 +150,18 @@ class Container:
 
     def create_app(self):
         """Return a fully configured FastAPI application."""
+        # build() must have run first (see main.py / README).  Explicit
+        # check (not assert) so it also works under ``python -O``; it also
+        # narrows the optional types for IDEs / type checkers.
+        if (
+            self._engine is None or self._session_factory is None
+            or self._file_storage is None or self._epub_builder is None
+            or self._image_downloader is None or self._account_pool is None
+            or self._client is None or self._notifier is None
+            or self._task_manager is None
+        ):
+            raise RuntimeError("Container.build() must be called before create_app()")
+
         import time as _time
         from fastapi import FastAPI
         from fastapi.middleware.cors import CORSMiddleware
@@ -262,8 +290,9 @@ class Container:
 
     def shutdown(self) -> None:
         """Release all resources."""
-        self._image_downloader.shutdown()
-        if hasattr(self, "_engine"):
+        if self._image_downloader is not None:
+            self._image_downloader.shutdown()
+        if self._engine is not None:
             self._engine.dispose()
 
     # ------------------------------------------------------------------
@@ -301,6 +330,8 @@ class Container:
         the first user request.
         """
         logger.info("Warming database cache...")
+        if self._session_factory is None:
+            raise RuntimeError("Container.build() not called")
         try:
             from sqlalchemy import text as _text
             with self._session_factory() as session:
@@ -326,6 +357,9 @@ class Container:
     def _load_accounts(self) -> None:
         """Load Pixiv accounts from the tokens table or config."""
         from sqlalchemy import select
+
+        if self._session_factory is None:
+            raise RuntimeError("Container.build() not called")
 
         # Try loading from the database first
         try:

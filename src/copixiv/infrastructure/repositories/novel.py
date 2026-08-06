@@ -14,11 +14,11 @@ from copixiv.infrastructure.database import models
 from copixiv.infrastructure.database import constants as C
 from .base import BaseRepository, model_to_dict
 from .fts import FTSManager
-from .tag import TagRepository
+from .tag import SQLAlchemyTagRepository
 from .query_builder import NovelQueryBuilder
 
 
-class NovelRepository(BaseRepository):
+class SQLAlchemyNovelRepository(BaseRepository):
     """Repository for novel CRUD and queries."""
 
     def __init__(self, session: Session):
@@ -226,7 +226,7 @@ class NovelRepository(BaseRepository):
         self, novels: list[dict],
     ) -> dict[int, set[str]]:
         """Pop tags from each novel dict and apply alias mapping."""
-        tag_repo = TagRepository(self.session)
+        tag_repo = SQLAlchemyTagRepository(self.session)
         alias_map = tag_repo.get_alias_map_sync()
         novel_tags_map: dict[int, set[str]] = {}
         for n in novels:

@@ -13,7 +13,7 @@ from .base import BaseRepository, model_to_dict, update_summary
 from .fts import FTSManager
 
 
-class AuthorRepository(BaseRepository):
+class SQLAlchemyAuthorRepository(BaseRepository):
     """Repository for author CRUD and statistics."""
 
     def __init__(self, session: Session):

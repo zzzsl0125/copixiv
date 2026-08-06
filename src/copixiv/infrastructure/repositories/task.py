@@ -11,7 +11,7 @@ from copixiv.infrastructure.database import models
 from .base import BaseRepository
 
 
-class TaskRepository(BaseRepository):
+class SQLAlchemyTaskRepository(BaseRepository):
     """Repository for task history and scheduled tasks."""
 
     def __init__(self, session: Session):

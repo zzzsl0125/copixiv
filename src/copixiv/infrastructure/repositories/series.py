@@ -10,7 +10,7 @@ from copixiv.infrastructure.database import constants as C
 from .base import BaseRepository, model_to_dict, update_summary
 
 
-class SeriesRepository(BaseRepository):
+class SQLAlchemySeriesRepository(BaseRepository):
     """Repository for series CRUD and statistics."""
 
     def __init__(self, session: Session):

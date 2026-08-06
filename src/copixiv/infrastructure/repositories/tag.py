@@ -17,7 +17,7 @@ from copixiv.infrastructure.database import constants as C
 from .base import BaseRepository
 
 
-class TagRepository(BaseRepository):
+class SQLAlchemyTagRepository(BaseRepository):
     """Repository for tag CRUD, preferences, and aliases."""
 
     def __init__(self, session: Session):

@@ -12,9 +12,9 @@ from collections.abc import Callable
 
 from sqlalchemy.orm import Session
 
-from copixiv.infrastructure.repositories.search_history import SearchHistoryRepository
-from copixiv.infrastructure.repositories.author import AuthorRepository
-from copixiv.infrastructure.repositories.series import SeriesRepository
+from copixiv.infrastructure.repositories.search_history import SQLAlchemySearchHistoryRepository
+from copixiv.infrastructure.repositories.author import SQLAlchemyAuthorRepository
+from copixiv.infrastructure.repositories.series import SQLAlchemySeriesRepository
 
 
 def record_search_history(
@@ -39,9 +39,9 @@ def record_search_history(
 
     session = session_factory()
     try:
-        history_repo = SearchHistoryRepository(session)
-        author_repo = AuthorRepository(session)
-        series_repo = SeriesRepository(session)
+        history_repo = SQLAlchemySearchHistoryRepository(session)
+        author_repo = SQLAlchemyAuthorRepository(session)
+        series_repo = SQLAlchemySeriesRepository(session)
 
         async def _run() -> None:
             # BackgroundTasks runs in a worker thread with no running event

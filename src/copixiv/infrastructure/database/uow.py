@@ -5,14 +5,14 @@ from collections.abc import AsyncIterator
 
 from sqlalchemy.orm import Session
 
-from copixiv.infrastructure.repositories.novel import NovelRepository
-from copixiv.infrastructure.repositories.author import AuthorRepository
-from copixiv.infrastructure.repositories.series import SeriesRepository
-from copixiv.infrastructure.repositories.tag import TagRepository
-from copixiv.infrastructure.repositories.token import TokenRepository
-from copixiv.infrastructure.repositories.task import TaskRepository
+from copixiv.infrastructure.repositories.novel import SQLAlchemyNovelRepository
+from copixiv.infrastructure.repositories.author import SQLAlchemyAuthorRepository
+from copixiv.infrastructure.repositories.series import SQLAlchemySeriesRepository
+from copixiv.infrastructure.repositories.tag import SQLAlchemyTagRepository
+from copixiv.infrastructure.repositories.token import SQLAlchemyTokenRepository
+from copixiv.infrastructure.repositories.task import SQLAlchemyTaskRepository
 from copixiv.infrastructure.repositories.search_history import (
-    SearchHistoryRepository,
+    SQLAlchemySearchHistoryRepository,
 )
 
 
@@ -24,13 +24,15 @@ class SqlUnitOfWork:
         uow = SqlUnitOfWork(session_factory)
         async with uow.begin():
             await uow.novels.upsert_novels([...])
-            await uow.commit()
+        # begin() commits on clean exit / rolls back on exception
 
-    Usage in FastAPI endpoints (unit-of-work is implicit via Depends(get_db))::
+    Usage in FastAPI endpoints (session lifecycle via Depends(get_db))::
 
-        uow = SqlUnitOfWork(SessionLocal)
-        results = await uow.novels.get_novels(...)
-        # Commit/rollback handled by the FastAPI dependency
+        uow = SqlUnitOfWork(db_session)
+        async with uow.begin():
+            results = await uow.novels.get_novels(...)
+        # commit/rollback handled by begin(); the session itself stays
+        # owned by the FastAPI dependency (closed by get_db after the request)
     """
 
     def __init__(self, session_factory_or_session):
@@ -52,56 +54,56 @@ class SqlUnitOfWork:
             self._owns_session = False
 
         # Repositories are populated lazily via properties
-        self._novels: NovelRepository | None = None
-        self._authors: AuthorRepository | None = None
-        self._series: SeriesRepository | None = None
-        self._tags: TagRepository | None = None
-        self._tokens: TokenRepository | None = None
-        self._tasks: TaskRepository | None = None
-        self._search_history: SearchHistoryRepository | None = None
+        self._novels: SQLAlchemyNovelRepository | None = None
+        self._authors: SQLAlchemyAuthorRepository | None = None
+        self._series: SQLAlchemySeriesRepository | None = None
+        self._tags: SQLAlchemyTagRepository | None = None
+        self._tokens: SQLAlchemyTokenRepository | None = None
+        self._tasks: SQLAlchemyTaskRepository | None = None
+        self._search_history: SQLAlchemySearchHistoryRepository | None = None
 
     # -- repositories as properties (lazy) -----------------------------------
 
     @property
-    def novels(self) -> NovelRepository:
+    def novels(self) -> SQLAlchemyNovelRepository:
         if self._novels is None:
-            self._novels = NovelRepository(self.session)
+            self._novels = SQLAlchemyNovelRepository(self.session)
         return self._novels
 
     @property
-    def authors(self) -> AuthorRepository:
+    def authors(self) -> SQLAlchemyAuthorRepository:
         if self._authors is None:
-            self._authors = AuthorRepository(self.session)
+            self._authors = SQLAlchemyAuthorRepository(self.session)
         return self._authors
 
     @property
-    def series(self) -> SeriesRepository:
+    def series(self) -> SQLAlchemySeriesRepository:
         if self._series is None:
-            self._series = SeriesRepository(self.session)
+            self._series = SQLAlchemySeriesRepository(self.session)
         return self._series
 
     @property
-    def tags(self) -> TagRepository:
+    def tags(self) -> SQLAlchemyTagRepository:
         if self._tags is None:
-            self._tags = TagRepository(self.session)
+            self._tags = SQLAlchemyTagRepository(self.session)
         return self._tags
 
     @property
-    def tokens(self) -> TokenRepository:
+    def tokens(self) -> SQLAlchemyTokenRepository:
         if self._tokens is None:
-            self._tokens = TokenRepository(self.session)
+            self._tokens = SQLAlchemyTokenRepository(self.session)
         return self._tokens
 
     @property
-    def tasks(self) -> TaskRepository:
+    def tasks(self) -> SQLAlchemyTaskRepository:
         if self._tasks is None:
-            self._tasks = TaskRepository(self.session)
+            self._tasks = SQLAlchemyTaskRepository(self.session)
         return self._tasks
 
     @property
-    def search_history(self) -> SearchHistoryRepository:
+    def search_history(self) -> SQLAlchemySearchHistoryRepository:
         if self._search_history is None:
-            self._search_history = SearchHistoryRepository(self.session)
+            self._search_history = SQLAlchemySearchHistoryRepository(self.session)
         return self._search_history
 
     @property
@@ -124,12 +126,22 @@ class SqlUnitOfWork:
 
         Note: the exit path already commits — callers should NOT call
         ``commit()`` explicitly inside the ``async with`` block.
+
+        ``BaseException`` (not just ``Exception``) is caught so that
+        cancellation (``CancelledError``) and generator shutdown
+        (``GeneratorExit``, e.g. when a FastAPI dependency is closed
+        after a handler error) still roll back explicitly.
         """
         try:
             yield
             await self.commit()
-        except Exception:
-            await self.rollback()
+        except BaseException:
+            try:
+                await self.rollback()
+            except BaseException:
+                # Never let a rollback failure mask the original error.
+                from copixiv.app.logger import logger
+                logger.exception("Rollback failed")
             raise
         finally:
             if self._owns_session and self._session is not None:

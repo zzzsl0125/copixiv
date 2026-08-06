@@ -109,11 +109,11 @@ class TaskManagerSystem:
 
     def _load_cron_jobs(self) -> None:
         """Read ``scheduled_tasks`` table and register cron jobs."""
-        from copixiv.infrastructure.repositories.task import TaskRepository
+        from copixiv.infrastructure.repositories.task import SQLAlchemyTaskRepository
 
         with self._session_factory() as session:
             try:
-                tasks = TaskRepository(session).get_scheduled_tasks_sync()
+                tasks = SQLAlchemyTaskRepository(session).get_scheduled_tasks_sync()
             except Exception:
                 logger.exception("Failed to load scheduled tasks from database.")
                 return
@@ -182,8 +182,8 @@ class TaskManagerSystem:
         params = params or {}
 
         with self._session_factory() as session:
-            from copixiv.infrastructure.repositories.task import TaskRepository
-            repo = TaskRepository(session)
+            from copixiv.infrastructure.repositories.task import SQLAlchemyTaskRepository
+            repo = SQLAlchemyTaskRepository(session)
             # Short INSERT outside db_write() — task enqueue happens in
             # sync API paths; 60s busy_timeout covers the rare collision.
             task_id = repo.add_task_sync(name, params)
@@ -202,10 +202,10 @@ class TaskManagerSystem:
 
         Used by the ``POST /api/tasks/scheduled/{id}/run`` endpoint.
         """
-        from copixiv.infrastructure.repositories.task import TaskRepository
+        from copixiv.infrastructure.repositories.task import SQLAlchemyTaskRepository
 
         with self._session_factory() as session:
-            repo = TaskRepository(session)
+            repo = SQLAlchemyTaskRepository(session)
             tasks = repo.get_scheduled_tasks_sync()
             task = next((t for t in tasks if t.id == task_id), None)
             if task is None:
@@ -355,12 +355,12 @@ class TaskManagerSystem:
         tasks' writes — serialize it through ``db_write()`` like every
         other database write.
         """
-        from copixiv.infrastructure.repositories.task import TaskRepository
+        from copixiv.infrastructure.repositories.task import SQLAlchemyTaskRepository
         from copixiv.infrastructure.database.write_lock import db_write
 
         async with db_write():
             with self._session_factory() as session:
-                repo = TaskRepository(session)
+                repo = SQLAlchemyTaskRepository(session)
                 repo.update_task_sync(
                     task_id, status, result=result, duration=duration,
                 )

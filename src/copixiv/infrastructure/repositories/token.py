@@ -9,7 +9,7 @@ from copixiv.infrastructure.database import models
 from .base import BaseRepository
 
 
-class TokenRepository(BaseRepository):
+class SQLAlchemyTokenRepository(BaseRepository):
     """Repository for Pixiv refresh tokens."""
 
     def __init__(self, session: Session):

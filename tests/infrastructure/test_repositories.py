@@ -10,9 +10,9 @@ from copixiv.infrastructure.database.models import (
     TaskHistory, ScheduledTask,
 )
 from copixiv.infrastructure.database.engine import create_session_factory
-from copixiv.infrastructure.repositories.novel import NovelRepository
-from copixiv.infrastructure.repositories.author import AuthorRepository
-from copixiv.infrastructure.repositories.tag import TagRepository
+from copixiv.infrastructure.repositories.novel import SQLAlchemyNovelRepository
+from copixiv.infrastructure.repositories.author import SQLAlchemyAuthorRepository
+from copixiv.infrastructure.repositories.tag import SQLAlchemyTagRepository
 
 
 @pytest.fixture
@@ -46,12 +46,12 @@ def session(engine):
     s.close()
 
 
-class TestNovelRepository:
+class TestSQLAlchemyNovelRepository:
     def test_upsert_new_novel(self, session):
         session.add(Author(author_id=10, author_name="Test Author"))
         session.commit()
 
-        repo = NovelRepository(session)
+        repo = SQLAlchemyNovelRepository(session)
         count = asyncio.run(repo.upsert_novels([{
             "id": 1, "title": "Test Novel", "author_id": 10,
             "path": "/tmp/n1.txt", "text": 5000,
@@ -70,7 +70,7 @@ class TestNovelRepository:
         session.add(Novel(id=2, title="B", author_id=1, path="/tmp/b.txt"))
         session.commit()
 
-        repo = NovelRepository(session)
+        repo = SQLAlchemyNovelRepository(session)
         existing = asyncio.run(repo.get_existing_ids({1, 2, 3}))
         assert existing == {1, 2}
 
@@ -79,7 +79,7 @@ class TestNovelRepository:
         session.add(Novel(id=1, title="F", author_id=1, path="/tmp/f.txt"))
         session.commit()
 
-        repo = NovelRepository(session)
+        repo = SQLAlchemyNovelRepository(session)
 
         asyncio.run(repo.toggle_favourite(1))
         session.commit()
@@ -92,18 +92,18 @@ class TestNovelRepository:
         assert session.get(Favourite, 1) is None
 
 
-class TestAuthorRepository:
+class TestSQLAlchemyAuthorRepository:
     def test_get_by_id(self, session):
         session.add(Author(author_id=99, author_name="Test Author"))
         session.commit()
 
-        repo = AuthorRepository(session)
+        repo = SQLAlchemyAuthorRepository(session)
         author = asyncio.run(repo.get_by_id(99))
         assert author is not None
         assert author["author_name"] == "Test Author"
 
     def test_need_update_new_author(self, session):
-        repo = AuthorRepository(session)
+        repo = SQLAlchemyAuthorRepository(session)
         assert asyncio.run(repo.need_update(999)) is True
 
     def test_need_update_with_date(self, session):
@@ -114,16 +114,16 @@ class TestAuthorRepository:
         ))
         session.commit()
 
-        repo = AuthorRepository(session)
+        repo = SQLAlchemyAuthorRepository(session)
         assert asyncio.run(repo.need_update(5)) is False
 
 
-class TestTagRepository:
+class TestSQLAlchemyTagRepository:
     """Phase 3: Tests for tag aliases with integer FK normalization."""
 
     def _ensure_tags(self, session, *names: str) -> dict[str, int]:
         """Ensure tags exist and return {name: id} mapping."""
-        repo = TagRepository(session)
+        repo = SQLAlchemyTagRepository(session)
         result = {}
         for name in names:
             tid = repo._get_or_create_tag_id(name)
@@ -139,7 +139,7 @@ class TestTagRepository:
         session.add(TagAlias(source=ids["NTR"], target=ids["ntr"]))
         session.commit()
 
-        repo = TagRepository(session)
+        repo = SQLAlchemyTagRepository(session)
         alias_map = repo.get_alias_map_sync()
         assert alias_map.get("R-18") == "R18"
         assert alias_map.get("NTR") == "ntr"
@@ -148,7 +148,7 @@ class TestTagRepository:
         """create_alias should accept tag names and store as integer FKs."""
         ids = self._ensure_tags(session, "source_tag", "target_tag")
 
-        repo = TagRepository(session)
+        repo = SQLAlchemyTagRepository(session)
         result = asyncio.run(repo.create_alias({
             "source": "source_tag",
             "target": "target_tag",
@@ -188,7 +188,7 @@ class TestTagRepository:
 
     def test_suggest_aliases_finds_similar_tags(self, session):
         """suggest_aliases should find pairs of tags with similar names."""
-        repo = TagRepository(session)
+        repo = SQLAlchemyTagRepository(session)
 
         # Create tags with varying reference counts and similarity
         from copixiv.infrastructure.database.models import Tag as TagModel
@@ -220,7 +220,7 @@ class TestTagRepository:
 
     def test_suggest_aliases_excludes_aliased_tags(self, session):
         """Tags already in an alias mapping should be excluded from suggestions."""
-        repo = TagRepository(session)
+        repo = SQLAlchemyTagRepository(session)
 
         from copixiv.infrastructure.database.models import Tag as TagModel
         tag_data = [
@@ -254,7 +254,7 @@ class TestTagRepository:
 
     def test_suggest_aliases_with_target_tag_filter(self, session):
         """When target_tag is specified, only suggestions for that tag return."""
-        repo = TagRepository(session)
+        repo = SQLAlchemyTagRepository(session)
 
         from copixiv.infrastructure.database.models import Tag as TagModel
         tag_data = [
@@ -321,7 +321,7 @@ class TestConcurrentAccess:
         def read_page(offset: int):
             try:
                 with Session() as s:
-                    repo = NovelRepository(s)
+                    repo = SQLAlchemyNovelRepository(s)
                     result = asyncio.run(repo.get_novels(
                         order_by="id",
                         per_page=10,
@@ -340,11 +340,11 @@ class TestConcurrentAccess:
             f"Expected 10 novels per page, got {results}"
 
 
-class TestTaskRepository:
+class TestSQLAlchemyTaskRepository:
     def test_add_and_update_task_sync(self, session):
-        from copixiv.infrastructure.repositories.task import TaskRepository
+        from copixiv.infrastructure.repositories.task import SQLAlchemyTaskRepository
 
-        repo = TaskRepository(session)
+        repo = SQLAlchemyTaskRepository(session)
 
         # Add
         task_id = repo.add_task_sync("test-task", {"key": "value"})
@@ -362,10 +362,10 @@ class TestTaskRepository:
         assert task.status == "running"
 
     def test_update_task_with_result_and_duration(self, session):
-        from copixiv.infrastructure.repositories.task import TaskRepository
+        from copixiv.infrastructure.repositories.task import SQLAlchemyTaskRepository
         import json
 
-        repo = TaskRepository(session)
+        repo = SQLAlchemyTaskRepository(session)
         task_id = repo.add_task_sync("dur-test", {"a": 1})
         session.commit()
 
@@ -379,9 +379,9 @@ class TestTaskRepository:
         assert "new_novels_count" in task.result
 
     def test_get_scheduled_tasks_sync(self, session):
-        from copixiv.infrastructure.repositories.task import TaskRepository
+        from copixiv.infrastructure.repositories.task import SQLAlchemyTaskRepository
 
-        repo = TaskRepository(session)
+        repo = SQLAlchemyTaskRepository(session)
         # Insert a couple of scheduled tasks
         models = __import__(
             "copixiv.infrastructure.database.models", fromlist=["ScheduledTask"]
@@ -402,9 +402,9 @@ class TestTaskRepository:
         assert tasks[1].name == "weekly"
 
     def test_crud_scheduled_task(self, session):
-        from copixiv.infrastructure.repositories.task import TaskRepository
+        from copixiv.infrastructure.repositories.task import SQLAlchemyTaskRepository
 
-        repo = TaskRepository(session)
+        repo = SQLAlchemyTaskRepository(session)
 
         # Create
         t = session.begin_nested()
@@ -432,9 +432,9 @@ class TestTaskRepository:
         assert asyncio.run(repo.delete_scheduled(9999)) is False
 
     def test_reorder_scheduled(self, session):
-        from copixiv.infrastructure.repositories.task import TaskRepository
+        from copixiv.infrastructure.repositories.task import SQLAlchemyTaskRepository
 
-        repo = TaskRepository(session)
+        repo = SQLAlchemyTaskRepository(session)
         t1 = ScheduledTask(name="a", task="x", cron="* * * * *", sort_index=0)
         t2 = ScheduledTask(name="b", task="y", cron="* * * * *", sort_index=1)
         session.add_all([t1, t2])
