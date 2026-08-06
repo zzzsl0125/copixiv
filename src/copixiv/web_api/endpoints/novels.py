@@ -125,6 +125,19 @@ async def batch_download_novels(
     )
 
 
+@router.post("/batch-download/preview")
+async def batch_download_preview(
+    body: BatchDownloadRequest = Body(...),
+    db: Session = Depends(get_db),
+    request: Request = None,
+):
+    queries = parse_queries_json(body.queries)
+    naming = request.app.state.config.batch_download.naming if request else None
+    use_case = BatchDownloadUseCase(NovelRepository(db), naming)
+    path = await use_case.preview(body, queries)
+    return {"path": path}
+
+
 @router.delete("/{novel_id}", status_code=204)
 async def delete_novel(
     novel_id: int,

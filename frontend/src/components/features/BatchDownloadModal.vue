@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, computed } from 'vue'
+import { ref, watch, computed, onUnmounted } from 'vue'
 import BaseModal from '../ui/BaseModal.vue'
 import { novelApi } from '../../api'
 import { buildQueries } from '../../lib'
@@ -29,6 +29,63 @@ const { systemConfig } = useSystem()
 
 const zipName = ref('')
 const namingTemplate = ref('')
+
+const previewPath = ref<string | null>(null)
+const previewLoading = ref(false)
+const previewError = ref('')
+let previewTimer: ReturnType<typeof setTimeout> | undefined
+let previewSeq = 0
+
+async function fetchPreview() {
+  const seq = ++previewSeq
+  const queries = buildQueries(props.keyword)
+  previewLoading.value = true
+  previewError.value = ''
+  try {
+    const result = await novelApi.batchDownloadPreview({
+      queries: Object.keys(queries).length > 0 ? JSON.stringify(queries) : undefined,
+      order_by: props.order_by,
+      order_direction: props.order_direction,
+      min_like: props.min_like,
+      min_text: props.min_text,
+      format_mode: formatMode.value,
+      naming_template: namingTemplate.value || undefined,
+    })
+    if (seq !== previewSeq) return
+    previewPath.value = result.path
+  } catch (err: unknown) {
+    if (seq !== previewSeq) return
+    const msg = err && typeof err === 'object' && 'response' in err
+      ? (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
+      : err instanceof Error ? err.message : '预览失败'
+    previewPath.value = null
+    previewError.value = msg || '预览失败'
+  } finally {
+    if (seq === previewSeq) previewLoading.value = false
+  }
+}
+
+function schedulePreview() {
+  if (previewTimer) clearTimeout(previewTimer)
+  previewTimer = setTimeout(fetchPreview, 300)
+}
+
+watch(
+  [
+    namingTemplate,
+    formatMode,
+    () => props.keyword,
+    () => props.order_by,
+    () => props.order_direction,
+    () => props.min_like,
+    () => props.min_text,
+  ],
+  schedulePreview,
+)
+
+onUnmounted(() => {
+  if (previewTimer) clearTimeout(previewTimer)
+})
 
 const keywordDisplay = computed(() => {
   if (!props.keyword.trim()) return '（无）'
@@ -92,6 +149,7 @@ watch(() => props.isOpen, async (open) => {
     totalCount.value = result.total
     if (downloadLimit.value > result.total) downloadLimit.value = result.total || 1
     zipName.value = defaultZipName()
+    schedulePreview()
   } catch (err) {
     console.error('[BatchDownloadModal] count failed:', err)
     totalCount.value = 0
@@ -193,9 +251,31 @@ async function handleConfirm() {
       <div>
         <label class="block text-sm font-medium text-gray-700 mb-1">命名规则</label>
         <input v-model="namingTemplate" type="text" class="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm font-mono text-xs" />
+        <div class="mt-1 text-xs">
+          <span v-if="previewLoading" class="text-gray-400">正在生成预览…</span>
+          <span v-else-if="previewError" class="text-red-500">{{ previewError }}</span>
+          <span v-else-if="previewPath" class="text-gray-500">
+            首篇预览：<code class="bg-gray-100 px-1 rounded font-mono">{{ previewPath }}</code>
+          </span>
+          <span v-else class="text-gray-400">无匹配作品，无法预览</span>
+        </div>
         <p class="mt-1 text-xs text-gray-400">
-          可用：&#123;id&#125; &#123;title&#125; &#123;author_name&#125; &#123;author_id&#125; &#123;like&#125; &#123;view&#125; &#123;text&#125; &#123;date&#125; &#123;series_name&#125; &#123;series_index&#125;
+          用 <code class="bg-gray-100 px-1 rounded">/</code> 分隔建立子文件夹，用 <code class="bg-gray-100 px-1 rounded">{}</code> 框起关键词变量。例如
+          <code class="bg-gray-100 px-1 rounded">pixiv/{id}-{title}-by-{author_name}</code>。为防止文件名重复，命名规则中必须含有 <code class="bg-gray-100 px-1 rounded">{id}</code>
         </p>
+        <p class="mt-1 text-xs text-gray-400">可用关键词：</p>
+        <ul class="mt-1 grid grid-cols-2 gap-x-4 gap-y-0.5 text-xs text-gray-400">
+          <li><code class="bg-gray-100 px-1 rounded">{id}</code> 作品 ID</li>
+          <li><code class="bg-gray-100 px-1 rounded">{title}</code> 标题</li>
+          <li><code class="bg-gray-100 px-1 rounded">{author_name}</code> 作者名</li>
+          <li><code class="bg-gray-100 px-1 rounded">{author_id}</code> 作者 ID</li>
+          <li><code class="bg-gray-100 px-1 rounded">{like}</code> 赞数</li>
+          <li><code class="bg-gray-100 px-1 rounded">{view}</code> 浏览数</li>
+          <li><code class="bg-gray-100 px-1 rounded">{text}</code> 字数</li>
+          <li><code class="bg-gray-100 px-1 rounded">{date}</code> 创建日期</li>
+          <li><code class="bg-gray-100 px-1 rounded">{series_name}</code> 系列名</li>
+          <li><code class="bg-gray-100 px-1 rounded">{series_index}</code> 系列序号</li>
+        </ul>
       </div>
     </div>
   </BaseModal>

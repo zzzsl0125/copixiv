@@ -5,8 +5,9 @@ from __future__ import annotations
 import io
 from dataclasses import dataclass
 
-from copixiv.domain.exceptions import NotFoundError
+from copixiv.domain.exceptions import NotFoundError, ValidationError
 from copixiv.domain.services.archive import build_batch_zip
+from copixiv.domain.services.filename import NovelNamingTemplate
 from copixiv.domain.ports.repositories import NovelRepository
 
 
@@ -68,7 +69,10 @@ class BatchDownloadUseCase:
             raise NotFoundError("未找到匹配条件的小说")
 
         naming = req.naming_template or self._naming_template
-        zip_buf, titles, missing = build_batch_zip(novels, req.format_mode, naming)
+        try:
+            zip_buf, titles, missing = build_batch_zip(novels, req.format_mode, naming)
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
         if not titles:
             raise NotFoundError("未找到可下载的有效文件")
 
@@ -80,6 +84,48 @@ class BatchDownloadUseCase:
             missing_ids=missing,
             search_desc=search_desc,
         )
+
+    async def preview(
+        self, req: BatchDownloadRequest, queries: dict[str, str] | None = None
+    ) -> str | None:
+        """Resolve the naming template for the first matching novel.
+
+        Returns the arcname (extension included) the first novel would get
+        inside the ZIP — a live preview of the naming rule — or ``None``
+        when no novels match.
+
+        Raises:
+            ValidationError: If the template does not contain ``{id}``.
+        """
+        results = await self._repo.get_novels(
+            queries=queries,
+            order_by=req.order_by,
+            order_direction=req.order_direction,
+            per_page=1,
+            min_like=req.min_like,
+            min_text=req.min_text,
+        )
+        novels = results.get("novels", [])
+        if not novels:
+            return None
+
+        naming = (
+            req.naming_template
+            or self._naming_template
+            or "{author_name}/{series_name}/#{series_index}_{title}_{id}"
+        )
+        try:
+            template = NovelNamingTemplate(naming)
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+
+        novel = novels[0]
+        actual_fmt = (
+            "epub"
+            if (req.format_mode == "prefer_epub" and novel.get("has_epub") == 2)
+            else "txt"
+        )
+        return template.resolve(novel) + "." + actual_fmt
 
 
 def _build_search_desc(queries: dict[str, str]) -> str:

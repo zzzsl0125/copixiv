@@ -51,4 +51,17 @@ export const novelApi = {
     })
     return response
   },
+
+  async batchDownloadPreview(params: {
+    queries?: string
+    order_by?: string
+    order_direction?: string
+    min_like?: number
+    min_text?: number
+    format_mode?: string
+    naming_template?: string
+  }) {
+    const response = await apiClient.post('/novels/batch-download/preview', params)
+    return response.data as { path: string | null }
+  },
 }
