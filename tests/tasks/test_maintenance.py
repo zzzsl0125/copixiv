@@ -85,3 +85,38 @@ class TestCheckEpubDowngrade:
 
         assert "已完成" in result.summary
         assert _get_status(session_factory, 3) == 2
+
+
+class TestCheckEpubStalePlaceholders:
+    """PENDING + placeholders + no image files ever + stale txt → downgrade."""
+
+    async def test_downgrades_stale_placeholder_novel(
+        self, session_factory, tmp_path,
+    ):
+        import os
+        import time as _time
+
+        await _seed_pending(
+            session_factory, 4, "正文 [uploadedimage:1]", False, tmp_path,
+        )
+        txt = tmp_path / "4" / "novel4.txt"
+        old = _time.time() - 30 * 86400          # 30 天前 = 早已放弃重试
+        os.utime(txt, (old, old))
+
+        result = await check_epub(uow=SqlUnitOfWork(session_factory))
+
+        assert "降级" in result.summary
+        assert _get_status(session_factory, 4) == 0
+
+    async def test_keeps_fresh_placeholder_novel(
+        self, session_factory, tmp_path,
+    ):
+        """Placeholders + no images but txt is fresh → stays pending."""
+        await _seed_pending(
+            session_factory, 5, "正文 [uploadedimage:2]", False, tmp_path,
+        )
+
+        result = await check_epub(uow=SqlUnitOfWork(session_factory))
+
+        assert "仍待处理" in result.summary
+        assert _get_status(session_factory, 5) == 1

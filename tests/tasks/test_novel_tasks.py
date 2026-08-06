@@ -177,3 +177,35 @@ class TestBatchHandleEndToEnd:
         with session_factory() as session:
             assert session.get(models.Novel, 100) is not None
             assert session.get(models.Author, 1) is not None
+
+
+class _NullWebviewClient:
+    """webview_novel always returns None — simulates a deleted novel."""
+
+    async def webview_novel(self, novel_id):
+        return None
+
+
+class TestNovelFetchFailureRecorded:
+    """Regression: novel_fetch must record fetch failures into failed_novel
+    (aligned with the batch path), so deleted novels leave a trace."""
+
+    async def test_fetch_failure_recorded(self, tmp_path):
+        engine = _make_engine(tmp_path / "novel_fetch_fail.db")
+        session_factory = create_session_factory(engine)
+        uow = SqlUnitOfWork(session_factory)
+
+        result = await novel_tasks.novel_fetch(
+            id=999,
+            client=_NullWebviewClient(),
+            uow=uow,
+            file_storage=None,
+            image_downloader=None,
+        )
+
+        assert "获取失败" in result.summary
+        with session_factory() as s:
+            row = s.get(models.FailedNovel, 999)
+            assert row is not None
+            assert row.failure_type == "download"
+            assert "webview_novel 返回空" in row.error_message

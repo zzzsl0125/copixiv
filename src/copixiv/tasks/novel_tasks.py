@@ -109,6 +109,14 @@ async def novel_fetch(
     """Download and persist a single novel by ID."""
     resp = await client.webview_novel(id)
     if resp is None:
+        # Align with the batch path (_download_novels → failed_records):
+        # a failed fetch must leave a trace in failed_novel, otherwise
+        # permanently-gone novels silently linger forever.
+        async with db_write():
+            async with uow.begin():
+                FailedNovelRepository(uow.session).record(
+                    id, "download", "webview_novel 返回空"
+                )
         return TaskResult(summary=f"小说 #{id} 获取失败")
 
     data = build_from_webview(resp, file_storage.download_dir)

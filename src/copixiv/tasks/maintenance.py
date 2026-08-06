@@ -10,6 +10,7 @@ plain summary instead of incorrectly labelling results as "new novels".
 """
 
 from pathlib import Path
+import time
 
 from copixiv.domain.models.novel import EpubStatus
 from copixiv.domain.models.task_result import TaskResult
@@ -32,6 +33,9 @@ async def check_epub(
     * 2 (completed) + file gone        → 1 (pending)
     * 1 (pending) + file missing      → 0 (downgraded) when the body text
       no longer contains image placeholders (author removed the images)
+    * 1 (pending) + file missing      → 0 (downgraded) when the body still
+      has placeholders but no image file was ever downloaded and the last
+      attempt is stale (> 7 days) — the images are gone for good
     * 1 (pending) + file missing      → stays pending otherwise
     """
     from sqlalchemy import select as _select
@@ -63,6 +67,8 @@ async def check_epub(
                     revert_ids.append(novel_id)
                 elif has_epub_status == EpubStatus.PENDING:
                     if _txt_has_no_images(txt_path):
+                        downgrade_ids.append(novel_id)
+                    elif _no_images_ever_and_stale(txt_path, novel_id):
                         downgrade_ids.append(novel_id)
                     else:
                         pending_ids.append(novel_id)
@@ -116,6 +122,32 @@ def _txt_has_no_images(txt_path: Path) -> bool:
     except OSError:
         return False
     return not has_image_placeholders(text)
+
+
+_STALE_DAYS = 7
+
+
+def _no_images_ever_and_stale(txt_path: Path, novel_id: int) -> bool:
+    """True when no image file was ever downloaded and the last attempt is stale.
+
+    The body still has image placeholders, but there is no ``{id}_u_*`` /
+    ``{id}_p_*`` file on disk (the download never succeeded) and the txt
+    file — whose mtime tracks the last download attempt — is older than
+    ``_STALE_DAYS``.  That means the images are gone for good (deleted by
+    the author, or the URLs are dead); keeping such novels PENDING forever
+    just accumulates zombie rows.
+
+    Freshly-downloaded novels are never downgraded: their mtime is recent,
+    so they stay pending and can retry.
+    """
+    parent = txt_path.parent
+    if any(parent.glob(f"{novel_id}_u_*")) or any(parent.glob(f"{novel_id}_p_*")):
+        return False
+    try:
+        age_days = (time.time() - txt_path.stat().st_mtime) / 86400
+    except OSError:
+        return False
+    return age_days > _STALE_DAYS
 
 
 @register("sync_empty_name")
