@@ -13,9 +13,10 @@ from pathlib import Path
 from copixiv.infrastructure.database.write_lock import db_write
 
 from copixiv.domain.services.language import is_chinese
+from copixiv.application.novel.download_novel import fetch_novel_and_assets
+
 from copixiv.domain.services.novel_factory import (
-    build_from_webview,
-    build_from_novel_info,
+    NovelInfoLike, build_from_novel_info,
 )
 from copixiv.domain.services.parsing import safe_get
 
@@ -129,16 +130,11 @@ async def _download_novels(
         return [], []
 
     async def _fetch_one(nid: int) -> dict | None:
-        resp = await client.webview_novel(nid)
-        if resp is None:
+        data = await fetch_novel_and_assets(
+            nid, client, file_storage, image_downloader, redownload,
+        )
+        if data is None:
             logger.warning(f"下载: #{nid} webview 返回空")
-            return None
-        data = build_from_webview(resp, file_storage.download_dir)
-        if content := data.pop("content", None):
-            file_storage.save_novel_text(
-                data["id"], data["title"], content, force=redownload,
-            )
-        await image_downloader.process_novel_assets(data, force=redownload)
         return data
 
     results = await asyncio.gather(
@@ -169,7 +165,7 @@ async def _download_novels(
 
 
 async def _plan_batch(
-    novels: list,
+    novels: list[NovelInfoLike],
     uow,
     redownload: bool = False,
     failed_repo: FailedNovelRepository | None = None,
@@ -254,7 +250,7 @@ async def _persist_batch(
 
 
 async def _batch_handle(
-    novels: list,
+    novels: list[NovelInfoLike],
     session_factory,
     client=None,
     file_storage=None,
@@ -302,13 +298,27 @@ async def _batch_handle(
                 f"but no client/storage provided — skipping download",
             )
 
+    # 2.5 Gate — wait for in-flight image/EPUB tasks before persisting, so
+    # the write transaction only sees novels whose files are actually on
+    # disk (no "downloaded but EPUB not ready yet" race).  Failures are
+    # collected and persisted in the same transaction as the downloads.
+    asset_failures: list[tuple[int, str]] = []
+    if image_downloader is not None:
+        asset_failures = await image_downloader.await_all()
+        if asset_failures:
+            logger.warning(
+                f"_batch_handle: {len(asset_failures)} novels failed "
+                f"image/EPUB processing",
+            )
+
     # 3. Persist — one write transaction inside the global write lock.
     async with db_write():
         async with uow.begin():
             failed_repo = FailedNovelRepository(uow.session)
             titles, new_author_ids = await _persist_batch(
                 existing_meta, downloaded, uow,
-                failed_records=failed_records, failed_repo=failed_repo,
+                failed_records=failed_records + asset_failures,
+                failed_repo=failed_repo,
             )
 
     return titles, new_author_ids

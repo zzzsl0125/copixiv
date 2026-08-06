@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .filename import NovelNamingTemplate
+from copixiv.domain.models.novel import EpubStatus
 
 
 def build_batch_zip(
@@ -43,7 +44,8 @@ def build_batch_zip(
 
             actual_fmt = (
                 "epub"
-                if (format_mode == "prefer_epub" and novel.get("has_epub") == 2)
+                if (format_mode == "prefer_epub"
+                    and novel.get("has_epub") == EpubStatus.DONE)
                 else "txt"
             )
 

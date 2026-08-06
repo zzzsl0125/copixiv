@@ -12,6 +12,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from copixiv.infrastructure.database import models
 from copixiv.infrastructure.database import constants as C
+from copixiv.domain.models.novel import EpubStatus
 from .base import BaseRepository, model_to_dict
 from .fts import FTSManager
 from .tag import SQLAlchemyTagRepository
@@ -262,6 +263,12 @@ class SQLAlchemyNovelRepository(BaseRepository):
         update_fields_set = set([
             "like", "view", "title", "text", "caption",
             "series_name", "create_time",
+            # Downloaded novels carry a freshly-computed has_epub and must
+            # refresh the stored state when the body text changed (e.g.
+            # author removed images).  Metadata-only dicts (from
+            # build_from_novel_info) do NOT carry this key, so they never
+            # touch it — see build_from_novel_info.
+            "has_epub",
         ] + force_update)
 
         new_ids: list[int] = []
@@ -350,7 +357,7 @@ class SQLAlchemyNovelRepository(BaseRepository):
             self.session.add(models.SpecialFollow(author_id=author_id))
 
     async def update_has_epub_status(
-        self, novel_ids: list[int], status: int
+        self, novel_ids: list[int], status: EpubStatus
     ) -> None:
         if not novel_ids:
             return

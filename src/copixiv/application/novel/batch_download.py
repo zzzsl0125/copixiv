@@ -6,6 +6,7 @@ import io
 from dataclasses import dataclass
 
 from copixiv.domain.exceptions import NotFoundError, ValidationError
+from copixiv.domain.models.novel import EpubStatus
 from copixiv.domain.services.archive import build_batch_zip
 from copixiv.domain.services.filename import NovelNamingTemplate
 from copixiv.domain.ports.repositories import NovelRepository
@@ -122,7 +123,8 @@ class BatchDownloadUseCase:
         novel = novels[0]
         actual_fmt = (
             "epub"
-            if (req.format_mode == "prefer_epub" and novel.get("has_epub") == 2)
+            if (req.format_mode == "prefer_epub"
+                and novel.get("has_epub") == EpubStatus.DONE)
             else "txt"
         )
         return template.resolve(novel) + "." + actual_fmt

@@ -66,7 +66,17 @@ def create_database_engine(
 
 
 def create_session_factory(engine: Engine) -> sessionmaker[Session]:
-    """Create a sessionmaker bound to *engine*."""
+    """Create a sessionmaker bound to *engine*.
+
+    ``autoflush=False`` is deliberate: writes are executed only when the
+    repository code says so, never implicitly on the next SELECT.  This
+    keeps write timing predictable inside worker threads.
+
+    Caveat: inside one transaction, a SELECT on a table you just wrote
+    to does NOT see your own pending rows unless the write was flushed.
+    When a code path needs "write then read the same table", call
+    ``await uow.flush()`` explicitly (see :class:`SqlUnitOfWork`).
+    """
     return sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 

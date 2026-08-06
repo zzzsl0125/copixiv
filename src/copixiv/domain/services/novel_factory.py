@@ -1,11 +1,52 @@
 """Novel dict factory — builds the canonical novel dict from raw API data."""
 
-from typing import Any
+from typing import Any, Protocol
 
+from copixiv.domain.models.novel import EpubStatus
 from .filename import build_path
 from .tags import parse_tags
 from .parsing import safe_get, guess_series_order
 from .language import has_image_placeholders
+
+
+# ---------------------------------------------------------------------------
+# Input contract for novelInfo-style data
+# ---------------------------------------------------------------------------
+
+
+class UserInfoLike(Protocol):
+    """The fields ``build_from_novel_info`` reads from a pixivpy3 user object."""
+
+    id: int
+    name: str
+
+
+class SeriesInfoLike(Protocol):
+    """The fields read from a pixivpy3 series object (may be ``None``)."""
+
+    id: Any
+    title: Any
+    index: Any
+
+
+class NovelInfoLike(Protocol):
+    """Input contract for novelInfo-style data (a pixivpy3 Novel object).
+
+    The batch pipeline (``tasks/pipeline.py``) feeds the same kind of
+    objects into its plan phase, so this Protocol documents the shared
+    input contract for both consumers.
+    """
+
+    id: int
+    title: str
+    caption: str
+    tags: list
+    user: UserInfoLike
+    series: SeriesInfoLike | None
+    total_bookmarks: int
+    total_view: int
+    text_length: int
+    create_date: str
 
 
 def build_novel_dict(
@@ -22,7 +63,7 @@ def build_novel_dict(
     series_name: str | None = None,
     series_index: int | None = None,
     create_time: str | None = None,
-    has_epub: int = 0,
+    has_epub: EpubStatus = EpubStatus.NO,
     tags: list[str | dict] | None = None,
     # Transient fields (popped before DB upsert)
     content: str | None = None,
@@ -81,7 +122,7 @@ def build_from_webview(data: Any, download_dir: str = "download") -> dict[str, A
         series_name=data.series_title,
         series_index=guess_series_order(data.series_navigation),
         create_time=data.cdate,
-        has_epub=1 if has_image_placeholders(data.text) else 0,
+        has_epub=EpubStatus.PENDING if has_image_placeholders(data.text) else EpubStatus.NO,
         tags=data.tags,
         content=data.text,
         images=data.images,
@@ -91,11 +132,13 @@ def build_from_webview(data: Any, download_dir: str = "download") -> dict[str, A
     )
 
 
-def build_from_novel_info(data: Any, download_dir: str = "download") -> dict[str, Any]:
+def build_from_novel_info(
+    data: NovelInfoLike, download_dir: str = "download"
+) -> dict[str, Any]:
     """Build a novel dict from a ``novelInfo`` API response (metadata only)."""
     user = data.user
     series = data.series
-    return build_novel_dict(
+    novel = build_novel_dict(
         id=data.id,
         title=data.title,
         author_id=safe_get(user, "id"),
@@ -108,7 +151,14 @@ def build_from_novel_info(data: Any, download_dir: str = "download") -> dict[str
         series_name=safe_get(series, "title"),
         series_index=safe_get(series, "index"),
         create_time=data.create_date[:10],
-        has_epub=0,
+        has_epub=EpubStatus.NO,
         tags=[safe_get(tag, "name", str(tag)) for tag in data.tags],
         download_dir=download_dir,
     )
+    # Metadata-only: the body text is not available, so the image
+    # placeholder state (and thus has_epub) cannot be computed here.
+    # Dropping the key lets the upsert update path leave an existing
+    # novel's has_epub untouched — otherwise every metadata refresh
+    # would overwrite it with NO and destroy PENDING/DONE states.
+    novel.pop("has_epub")
+    return novel

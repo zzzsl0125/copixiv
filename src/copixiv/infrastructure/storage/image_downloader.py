@@ -1,8 +1,9 @@
 """Image downloader — fetches cover/illustration images in a thread pool."""
 
+import asyncio
 import atexit
 import os
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,7 @@ class ImageDownloader:
     ):
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
         self._epub_builder = epub_builder
+        self._futures: list[tuple[int, Future]] = []
         atexit.register(self.shutdown)
 
     def __del__(self) -> None:
@@ -109,10 +111,44 @@ class ImageDownloader:
         if not images and not illusts:
             return
 
-        self._executor.submit(self._download_assets, data.copy())
+        future = self._executor.submit(self._download_assets, data.copy())
+        self._futures.append((data["id"], future))
 
-    def _download_assets(self, data: dict) -> None:
-        """Synchronous asset download + EPUB creation (runs in thread pool)."""
+    async def await_all(self) -> list[tuple[int, str]]:
+        """Wait for all in-flight asset tasks (image download + EPUB) to finish.
+
+        Downloads stay fire-and-forget, but callers that need "files are
+        ready before I persist" — the batch pipeline before its persist
+        phase, single-novel tasks before their upsert — must ``await``
+        this.  Uses ``asyncio.wrap_future`` so waiting never blocks the
+        event loop.
+
+        Returns ``[(novel_id, reason), ...]`` for every task that failed,
+        so callers can persist the failures into ``failed_novel`` inside
+        their write transaction (previously these errors were swallowed
+        by the worker thread).
+
+        The in-flight list is swapped out first: tasks submitted while we
+        are waiting land in a fresh list and are NOT waited on (they
+        belong to the next round, which will gate on them).
+        """
+        futures, self._futures = self._futures, []
+        failures: list[tuple[int, str]] = []
+        for novel_id, future in futures:
+            try:
+                reason = await asyncio.wrap_future(future)
+                if reason:
+                    failures.append((novel_id, str(reason)))
+            except Exception as exc:  # defensive: unexpected future error
+                failures.append((novel_id, str(exc)))
+        return failures
+
+    def _download_assets(self, data: dict) -> str | None:
+        """Synchronous asset download + EPUB creation (runs in thread pool).
+
+        Returns ``None`` on success, or a failure reason string so the
+        caller (``await_all``) can persist it into ``failed_novel``.
+        """
         from copixiv.app.logger import logger
 
         base_path = Path(data["path"]).parent
@@ -177,8 +213,10 @@ class ImageDownloader:
                             if self.download_image(url, path, session):
                                 downloaded_files.append(path)
 
-            # EPUB
-            if self._epub_builder and self._epub_builder.create_epub(data):
+            # EPUB —— 只有成功才清理临时图片
+            if self._epub_builder is not None:
+                if not self._epub_builder.create_epub(data):
+                    return f"EPUB 生成失败: novel {novel_id}"
                 logger.info(
                     f"下载: #{novel_id} EPUB 完成 "
                     f"(已清理 {len(downloaded_files)} 张临时图片)",
@@ -188,14 +226,14 @@ class ImageDownloader:
                         os.remove(f)
                     except OSError:
                         pass
+            return None
         except Exception:
             logger.exception(f"Error processing assets for novel {novel_id}")
-            # EPUB creation failed — don't leave half-downloaded temp files behind.
-            for f in downloaded_files:
-                try:
-                    os.remove(f)
-                except OSError:
-                    pass
+            # EPUB 失败(create_epub 返回 False 或抛异常)时统一保留已下载的
+            # 图片:download_image 下载失败时会自删坏文件,所以留下的都是
+            # 完整文件;下次重试时 download_image 看到文件已存在会直接跳过,
+            # 复用它们重建 EPUB,避免重复下载。
+            return f"资产处理异常: novel {novel_id}"
         finally:
             session.close()
 

@@ -11,7 +11,9 @@ plain summary instead of incorrectly labelling results as "new novels".
 
 from pathlib import Path
 
+from copixiv.domain.models.novel import EpubStatus
 from copixiv.domain.models.task_result import TaskResult
+from copixiv.domain.services.language import has_image_placeholders
 from copixiv.application.author.resolve_names import resolve_author_names
 from copixiv.infrastructure.database.write_lock import db_write
 from copixiv.app.logger import logger
@@ -26,9 +28,11 @@ async def check_epub(
 ):
     """Synchronise ``has_epub`` status with actual files on disk.
 
-    * 1 (pending) + file exists  → 2 (completed)
-    * 2 (completed) + file gone  → 1 (pending)
-    * 1 (pending) + file missing → stays pending (needs download)
+    * 1 (pending) + file exists        → 2 (completed)
+    * 2 (completed) + file gone        → 1 (pending)
+    * 1 (pending) + file missing      → 0 (downgraded) when the body text
+      no longer contains image placeholders (author removed the images)
+    * 1 (pending) + file missing      → stays pending otherwise
     """
     from sqlalchemy import select as _select
     from copixiv.infrastructure.database import models
@@ -44,38 +48,48 @@ async def check_epub(
 
     completed_ids: list[int] = []
     revert_ids: list[int] = []
+    downgrade_ids: list[int] = []
     pending_ids: list[int] = []
 
     for novel_id, path_str, has_epub_status in rows:
         if path_str:
-            epub_path = Path(path_str).with_suffix(".epub")
+            txt_path = Path(path_str)
+            epub_path = txt_path.with_suffix(".epub")
             if epub_path.exists():
-                if has_epub_status == 1:
+                if has_epub_status == EpubStatus.PENDING:
                     completed_ids.append(novel_id)
             else:
-                if has_epub_status == 2:
+                if has_epub_status == EpubStatus.DONE:
                     revert_ids.append(novel_id)
-                elif has_epub_status == 1:
-                    pending_ids.append(novel_id)
+                elif has_epub_status == EpubStatus.PENDING:
+                    if _txt_has_no_images(txt_path):
+                        downgrade_ids.append(novel_id)
+                    else:
+                        pending_ids.append(novel_id)
         else:
-            if has_epub_status == 2:
+            if has_epub_status == EpubStatus.DONE:
                 revert_ids.append(novel_id)
-            elif has_epub_status == 1:
+            elif has_epub_status == EpubStatus.PENDING:
                 pending_ids.append(novel_id)
 
     if completed_ids:
         async with db_write():
             async with uow.begin():
-                await uow.novels.update_has_epub_status(completed_ids, 2)
+                await uow.novels.update_has_epub_status(completed_ids, EpubStatus.DONE)
 
     if revert_ids:
         async with db_write():
             async with uow.begin():
-                await uow.novels.update_has_epub_status(revert_ids, 1)
+                await uow.novels.update_has_epub_status(revert_ids, EpubStatus.PENDING)
+
+    if downgrade_ids:
+        async with db_write():
+            async with uow.begin():
+                await uow.novels.update_has_epub_status(downgrade_ids, EpubStatus.NO)
 
     logger.info(
-        f"check_epub: completed={len(completed_ids)}, "
-        f"reverted={len(revert_ids)}, pending={len(pending_ids)}",
+        f"check_epub: completed={len(completed_ids)}, reverted={len(revert_ids)}, "
+        f"downgraded={len(downgrade_ids)}, pending={len(pending_ids)}",
     )
 
     parts: list[str] = []
@@ -83,10 +97,25 @@ async def check_epub(
         parts.append(f"{len(completed_ids)} 本标记为已完成")
     if revert_ids:
         parts.append(f"{len(revert_ids)} 本回退为待处理")
+    if downgrade_ids:
+        parts.append(f"{len(downgrade_ids)} 本降级为无图")
     if pending_ids:
         parts.append(f"{len(pending_ids)} 本仍待处理")
 
-    return TaskResult(summary="EPUB 状态检查: " + ("; ".join(parts) or "无变化"))
+    return TaskResult(summary="EPUB 状态检查: " + (" ".join(parts) or "无变化"))
+
+
+def _txt_has_no_images(txt_path: Path) -> bool:
+    """True when the novel text file exists and has no image placeholders.
+
+    A missing/unreadable text file returns False — we cannot judge, so
+    the novel stays pending rather than being wrongly downgraded.
+    """
+    try:
+        text = txt_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return not has_image_placeholders(text)
 
 
 @register("sync_empty_name")

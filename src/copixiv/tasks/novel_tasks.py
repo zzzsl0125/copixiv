@@ -28,6 +28,7 @@ from . import maintenance  # noqa: F401 — ensure @register decorators fire
 
 from copixiv.infrastructure.database.write_lock import db_write
 from copixiv.infrastructure.database.uow import SqlUnitOfWork
+from copixiv.infrastructure.repositories.failed_novel import FailedNovelRepository
 
 from copixiv.app.logger import logger
 
@@ -117,8 +118,16 @@ async def novel_fetch(
 
     await image_downloader.process_novel_assets(data, force=redownload)
 
+    # Gate: wait for image/EPUB work so the upsert below only happens
+    # after the novel's files are actually on disk.  Asset failures are
+    # persisted into failed_novel in the same transaction as the upsert.
+    asset_failures = await image_downloader.await_all()
+
     async with db_write():
         async with uow.begin():
+            failed_repo = FailedNovelRepository(uow.session)
+            for nid, reason in asset_failures:
+                failed_repo.record(nid, "download", reason)
             count = await _batch_upsert([data], uow)
 
     # Resolve author name — webview API doesn't return it.

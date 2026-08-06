@@ -154,6 +154,9 @@ class TestBatchHandleEndToEnd:
             async def process_novel_assets(self, data, force=False):
                 pass
 
+            async def await_all(self):
+                return []
+
         novels = [SimpleNamespace(
             id=100, title="新小说", caption="中文",
             user=SimpleNamespace(id=1, name="作者"), series=None,

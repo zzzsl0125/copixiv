@@ -162,6 +162,18 @@ class SqlUnitOfWork:
         if self._session is not None:
             self._session.commit()
 
+    async def flush(self) -> None:
+        """Force pending changes into the database, inside the current transaction.
+
+        Needed when the same transaction reads a table it just wrote to:
+        the session factory uses ``autoflush=False`` (see
+        ``engine.create_session_factory``), so a SELECT does NOT flush
+        pending INSERTs automatically — without an explicit flush you
+        would read stale rows and get no error.
+        """
+        if self._session is not None:
+            self._session.flush()
+
     async def rollback(self) -> None:
         if self._session is not None:
             self._session.rollback()
