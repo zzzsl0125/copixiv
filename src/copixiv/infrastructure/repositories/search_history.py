@@ -56,3 +56,8 @@ class SQLAlchemySearchHistoryRepository(BaseRepository):
             return False
         self.session.delete(entry)
         return True
+
+    async def clear_all(self) -> int:
+        """Delete every search-history row. Returns the number deleted."""
+        result = self.session.execute(_delete(models.SearchHistory))
+        return result.rowcount or 0

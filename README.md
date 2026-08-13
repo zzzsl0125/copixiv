@@ -37,6 +37,8 @@ cp ../copixiv/config.yaml .
 path:
   database: database/database.db
   download: download
+backup:
+  keep_count: 4   # 可选：保留最近 N 份每周备份（默认 4，防止误删无保护）
 ```
 
 环境变量可覆盖任意配置项（前缀 `COPIXIV_`，双下划线分隔层级）：
@@ -67,6 +69,52 @@ uvicorn main:app --host 0.0.0.0 --port 9000
 > pip install -e ".[dev]"   # 只补装 v2 新增的包
 > ```
 
+### 5. 生产部署前端（不要再跑 `npm run dev`）
+
+前端 systemd 服务原本跑的是 Vite 开发服务器（HMR/内存缓存/长驻进程都不适合
+生产）。生产模式改为「构建 + 静态预览」：
+
+```bash
+cd frontend
+npm run build            # 产出 frontend/dist/（vue-tsc 类型检查 + vite build）
+npm run preview          # vite preview：静态服务 + /api 反代到 127.0.0.1:9000
+```
+
+仓库提供了现成的单元文件 `deploy/copixiv-frontend.service`（构建 → preview，
+每次启动自动重新构建）：
+
+```bash
+sudo cp deploy/copixiv-frontend.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl stop copixiv-frontend    # 先停掉旧的 dev-server 单元
+sudo systemctl start copixiv-frontend
+sudo systemctl status copixiv-frontend  # 确认 active (running)
+```
+
+`vite preview` 对单用户工具足够；若以后要多用户/HTTPS/压缩，把 ExecStart 换成
+nginx（`frontend/dist` 静态 + `location /api { proxy_pass http://127.0.0.1:9000; }`）。
+
+### 6. FTS 索引维护（升级旧库后必做）
+
+v1 库的 `novel_fts` 表没有 `tags` 列，关键词搜索命中不了「只出现在标签里」的
+文本。服务恢复后跑一次重建任务（或直接建一个每周定时任务自动维护）：
+
+```bash
+# 立即重建（通过 API 建一次性任务并触发）
+curl -X POST http://127.0.0.1:9000/api/tasks/scheduled \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"FTS重建","task":"rebuild_fts","cron":"0 4 * * 1","is_enabled":false}'
+# 用返回的 id 触发立即执行（或在网页任务页点“立即运行”）
+curl -X POST http://127.0.0.1:9000/api/tasks/scheduled/<id>/run
+
+# 健康检查任务（孤儿/缺失条目/损坏检测）
+curl -X POST http://127.0.0.1:9000/api/tasks/scheduled \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"FTS检查","task":"check_fts","cron":"20 4 * * 1","is_enabled":false}'
+```
+
+把两个任务的 `is_enabled` 设为 `true` 即可每周自动执行。
+
 ### API 端点（与 v1 完全兼容）
 
 | 前缀 | 说明 |
@@ -96,9 +144,13 @@ pytest tests/ -v
 pytest tests/domain/ -v
 
 # 基础设施测试（内存 SQLite，无外部依赖）
+# 含：数据库/仓库、FTS 标签索引、pixiv 层（AccountPool/重试/patch，零网络）、
+#     Alembic 迁移链路（v1 形状旧库 → head）
 pytest tests/infrastructure/ -v
 
 # 用例 / 任务 / Web 层测试
+# 含：DownloadNovelUseCase + persist_novels 单测、端点冒烟（TestClient，
+#     流式 batch-download、DomainError→HTTP）、FTS 维护任务
 pytest tests/application/ tests/tasks/ tests/web_api/ -v
 ```
 

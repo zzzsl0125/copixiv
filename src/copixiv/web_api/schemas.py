@@ -31,17 +31,6 @@ def _parse_json_str(v: Any) -> Any:
     return v
 
 
-def _int_to_bool(v: Any) -> bool | None:
-    """Coerce int (0/1) to bool for backwards-compat with DB int columns."""
-    if v is None:
-        return None
-    if isinstance(v, bool):
-        return v
-    if isinstance(v, int):
-        return bool(v)
-    return v
-
-
 # ---------------------------------------------------------------------------
 # Tag Preferences
 # ---------------------------------------------------------------------------
@@ -128,8 +117,8 @@ class NovelBase(BaseModel):
     create_time: str | None = None
     has_epub: EpubStatus = EpubStatus.NO
     tags: list[str] = []
-    is_favourite: bool = False
-    is_special_follow: bool = False
+    is_favourite: int = 0
+    is_special_follow: int = 0
     series_id: int | None = None
     series_name: str | None = None
     series_index: int | None = None
@@ -139,8 +128,6 @@ class NovelBase(BaseModel):
     _coerce_has_epub = field_validator("has_epub", mode="before")(
         lambda v: EpubStatus(v) if v is not None else EpubStatus.NO
     )
-    _coerce_is_favourite = field_validator("is_favourite", mode="before")(_int_to_bool)
-    _coerce_is_special_follow = field_validator("is_special_follow", mode="before")(_int_to_bool)
 
 
 class NovelListResponse(BaseModel):

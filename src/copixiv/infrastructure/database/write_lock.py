@@ -32,7 +32,13 @@ async def db_write() -> AsyncIterator[None]:
     """Serialize SQLite write transactions across all tasks.
 
     The lock is process-wide (module-level ``asyncio.Lock``), matching
-    the single-process uvicorn deployment.
+    the single-process uvicorn deployment (systemd runs one worker, and
+    ``COPIXIV_RELOAD=1`` is dev-only).  If the service ever moves to
+    multiple uvicorn workers, this lock silently stops covering the other
+    processes — SQLite's own write serialization (busy_timeout) would
+    still prevent corruption, but "database is locked" errors become
+    possible.  A file lock (``fcntl.flock`` on a lockfile) or an
+    externalized lock would be required then.
     """
     async with _db_write_lock:
         yield

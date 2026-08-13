@@ -42,6 +42,12 @@ class TestParseTags:
         result = parse_tags(["  hello  "])
         assert result == ["hello"]
 
+    def test_preserves_input_order(self):
+        """Regression: output order follows first-seen input order, not set
+        iteration order (the dedup map preserves insertion sequence)."""
+        result = parse_tags(["zebra", "alpha", "zebra", "猫", "alpha"])
+        assert result == ["zebra", "alpha", "猫"]
+
 
 class TestNormalizeTag:
     def test_lowercase(self):

@@ -72,6 +72,17 @@ class BatchDownloadConfig(BaseModel):
     naming: str = "{author_name}/{series_name}/#{series_index}_{title}_{id}"
 
 
+class BackupConfig(BaseModel):
+    """Weekly database backup retention.
+
+    ``keep_count`` weekly backups are retained (default 4).  Keeping a
+    single copy gives no protection against accidental corruption being
+    vacuumed into the only backup; N copies preserve a recovery window.
+    """
+
+    keep_count: int = 4
+
+
 class AppConfig(BaseModel):
     """Root configuration object."""
 
@@ -86,6 +97,7 @@ class AppConfig(BaseModel):
     batch_download: BatchDownloadConfig = Field(
         default_factory=BatchDownloadConfig
     )
+    backup: BackupConfig = Field(default_factory=BackupConfig)
 
 
 # ---------------------------------------------------------------------------

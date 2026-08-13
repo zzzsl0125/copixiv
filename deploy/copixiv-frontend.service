@@ -1,0 +1,40 @@
+# Production unit for the copixiv frontend — build + static preview, NOT `npm run dev`.
+#
+# Install:
+#   sudo cp deploy/copixiv-frontend.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl stop copixiv-frontend   # stop the old dev-server unit first
+#   sudo systemctl start copixiv-frontend
+#
+# `vite preview` serves frontend/dist/ and proxies /api -> 127.0.0.1:9000
+# (preview.proxy in vite.config.ts), so the browser talks to the backend
+# same-origin exactly like the dev server did.
+#
+# Optional hardening: swap the ExecStart for nginx serving frontend/dist/
+# with a location /api proxy to the backend.  vite preview is a static
+# file server built for previewing builds — fine for a single-user tool,
+# but nginx (or caddy) is the better long-term option for TLS/compression.
+
+[Unit]
+Description=Frontend of Copixiv (production: build + vite preview)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=invocation
+Group=invocation
+WorkingDirectory=/home/invocation/copixiv-v2/frontend/
+# Rebuild the bundle on every start so dist/ always matches the tree.
+# Remove this line if you build manually.
+ExecStartPre=/usr/bin/npm run build
+ExecStart=/usr/bin/npm run preview
+
+Restart=on-failure
+RestartSec=5s
+
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Install]
+WantedBy=multi-user.target

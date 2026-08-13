@@ -21,6 +21,7 @@ export interface ScheduledTask {
   params?: Record<string, unknown>
   config?: Record<string, unknown>
   is_enabled: boolean
+  sort_index?: number
 }
 
 export interface ScheduledTaskCreate {

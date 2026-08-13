@@ -1,6 +1,8 @@
 """Database backup using SQLite VACUUM INTO (SQLite 3.27+).
 
-Provides weekly backup creation — keeps only the single most recent backup.
+Provides weekly backup creation — retains the ``keep_count`` most recent
+backups (see ``cleanup_old_backups``; the container passes
+``config.backup.keep_count``, default 4).
 """
 
 from datetime import date

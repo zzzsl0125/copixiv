@@ -367,9 +367,14 @@ class SQLAlchemyNovelRepository(BaseRepository):
             .values(has_epub=status)
         )
 
-    async def rebuild_fts(self) -> None:
-        """Rebuild the FTS5 index from scratch (runs in a worker thread)."""
-        await asyncio.to_thread(FTSManager(self.session).rebuild_novel_fts)
+    async def rebuild_fts(self) -> int:
+        """Rebuild the FTS5 index from scratch (runs in a worker thread).
+
+        Returns the number of novels indexed.  Uses the batched rebuild
+        path (``FTSManager.batch_rebuild_fts``) — the canonical full
+        rebuild for production (maintenance task ``rebuild_fts``).
+        """
+        return await asyncio.to_thread(FTSManager(self.session).batch_rebuild_fts)
 
     # ---- tags ----------------------------------------------------------------
 

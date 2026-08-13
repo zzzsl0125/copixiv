@@ -313,10 +313,12 @@ class Container:
 
     @staticmethod
     def _maybe_backup(db_path: Path) -> None:
-        """Create a weekly backup and remove older ones (keep only the latest)."""
+        """Create a weekly backup and remove older ones (keep N most recent)."""
         try:
             backup_database(str(db_path))
-            cleanup_old_backups(str(db_path))
+            cleanup_old_backups(
+                str(db_path), keep_count=config.backup.keep_count,
+            )
         except Exception:
             logger.exception("Backup failed — continuing without backup.")
 

@@ -19,6 +19,7 @@ Usage::
     python scripts/test_ingest.py novel_ranking mode=daily_r18 days=2
     python scripts/test_ingest.py author_delete author_id=12345
     python scripts/test_ingest.py rebuild_fts
+    python scripts/test_ingest.py check_fts
     python scripts/test_ingest.py check_epub
     python scripts/test_ingest.py sync_empty_name
 

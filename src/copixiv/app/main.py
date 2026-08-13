@@ -9,11 +9,29 @@ import os
 import subprocess
 import sys
 
-from copixiv.app.logger import logger, setup_logging
+from copixiv.app.logger import logger, setup_logging, InterceptHandler
 from copixiv.app.container import Container
 
 # Configure logging before anything else so all log output is captured.
 setup_logging()
+
+# uvicorn re-applies its own logging config on startup (dictConfig), which
+# would wipe the InterceptHandler that setup_logging() installed on the
+# "uvicorn" loggers — that's why "Uvicorn running on ..." never reached
+# backend.log before.  Pass an explicit config that routes uvicorn's
+# loggers back through loguru instead of stderr.
+UVICORN_LOG_CONFIG = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {
+        "loguru": {"()": InterceptHandler},
+    },
+    "loggers": {
+        "uvicorn": {"handlers": ["loguru"], "level": "INFO", "propagate": False},
+        "uvicorn.error": {"handlers": ["loguru"], "level": "INFO", "propagate": False},
+        "uvicorn.access": {"handlers": ["loguru"], "level": "INFO", "propagate": False},
+    },
+}
 
 # Module-level app for uvicorn/gunicorn import.  Building the container at
 # import time (instead of inside a lifespan) keeps ``uvicorn
@@ -75,7 +93,7 @@ def main() -> None:
             host="0.0.0.0",
             port=port,
             reload=os.environ.get("COPIXIV_RELOAD") == "1",
-            log_config=None,
+            log_config=UVICORN_LOG_CONFIG,
             access_log=False,
         )
     except SystemExit:

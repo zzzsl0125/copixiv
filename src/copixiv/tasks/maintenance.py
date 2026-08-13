@@ -188,12 +188,49 @@ async def rebuild_fts(
     *,
     uow,
 ):
-    """Rebuild the FTS5 index."""
+    """Rebuild the FTS5 index from scratch.
+
+    Use this after upgrading an existing v1 database whose ``novel_fts``
+    rows predate the tags column — a rebuild is required before keyword
+    search can hit tag-only text.
+    """
     async with db_write():
         async with uow.begin():
-            await uow.novels.rebuild_fts()
+            count = await uow.novels.rebuild_fts()
 
-    return TaskResult(summary="FTS 索引重建完成")
+    return TaskResult(summary=f"FTS 索引重建完成（{count} 本小说）")
+
+
+@register("check_fts")
+async def check_fts(
+    *,
+    uow,
+):
+    """FTS5 index health check — corruption, orphans, and missing entries.
+
+    Read-only (no write lock).  Reports the index-entry/novel counts and
+    any orphan (index row without a novel) / missing (novel without an
+    index row) entries, so ops can decide whether a ``rebuild_fts`` run
+    is needed.
+    """
+    from copixiv.infrastructure.repositories.fts import FTSManager
+
+    async with uow.begin():
+        result = FTSManager(uow.session).check_fts_health()
+
+    if not result["fts_table_exists"]:
+        return TaskResult(summary="FTS 检查: 索引表不存在，需运行 rebuild_fts")
+
+    parts = [f"条目 {result['fts_entry_count']}/{result['novel_count']}"]
+    if result.get("orphan_entries"):
+        parts.append(f"孤儿 {result['orphan_entries']}")
+    if result.get("missing_entries"):
+        parts.append(f"缺失 {result['missing_entries']}")
+    if result.get("error"):
+        parts.append(f"错误 {result['error']}")
+
+    status = "健康" if result["is_healthy"] else "异常"
+    return TaskResult(summary=f"FTS 检查({status}): " + ", ".join(parts))
 
 
 @register("fix_series_index")

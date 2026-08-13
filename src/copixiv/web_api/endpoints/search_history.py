@@ -4,7 +4,9 @@ from fastapi import APIRouter, Depends, Query
 
 from copixiv.web_api.deps import get_uow
 from copixiv.infrastructure.database.uow import SqlUnitOfWork
-from copixiv.application.search_history import ListHistoryUseCase, DeleteHistoryUseCase
+from copixiv.application.search_history import (
+    ClearHistoryUseCase, DeleteHistoryUseCase, ListHistoryUseCase,
+)
 
 router = APIRouter()
 
@@ -17,6 +19,13 @@ async def get_search_history(
 ):
     use_case = ListHistoryUseCase(uow.search_history)
     return await use_case.execute(limit=limit, offset=offset)
+
+
+@router.delete("/")
+async def clear_search_history(uow: SqlUnitOfWork = Depends(get_uow)):
+    """Delete all search-history entries (frontend "全部清除" button)."""
+    deleted = await ClearHistoryUseCase(uow.search_history).execute()
+    return {"deleted": deleted}
 
 
 @router.delete("/{history_id}")

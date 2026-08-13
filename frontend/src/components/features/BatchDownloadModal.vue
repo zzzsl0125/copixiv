@@ -194,10 +194,25 @@ async function handleConfirm() {
     emit('download-success', filename)
     emit('close')
   } catch (err: unknown) {
-    const msg = err && typeof err === 'object' && 'response' in err
-      ? (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
-      : err instanceof Error ? err.message : '下载失败'
-    emit('download-error', msg || '下载失败')
+    // responseType is 'blob', so error bodies arrive as Blobs — read the
+    // JSON out of them instead of showing a generic message.
+    let msg = '下载失败'
+    if (err && typeof err === 'object' && 'response' in err) {
+      const resp = (err as { response?: { data?: unknown; status?: number } }).response
+      const data = resp?.data
+      if (data instanceof Blob) {
+        try {
+          const text = await data.text()
+          const parsed = JSON.parse(text) as { detail?: string }
+          if (parsed.detail) msg = parsed.detail
+        } catch { /* non-JSON error body — keep generic message */ }
+      } else if (data && typeof data === 'object' && 'detail' in data) {
+        msg = (data as { detail?: string }).detail || msg
+      }
+    } else if (err instanceof Error) {
+      msg = err.message
+    }
+    emit('download-error', msg)
   } finally {
     loading.value = false
   }

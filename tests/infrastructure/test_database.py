@@ -244,6 +244,106 @@ class TestFTS:
         assert result["fts_entry_count"] == 2
 
 
+class TestFtsTagsIndexing:
+    """T5: keyword search must hit text that exists ONLY in tags.
+
+    Regression guard for the D1 backfill: a v1-era ``novel_fts`` table has
+    no tags column, so tag-only keywords silently match nothing until the
+    index is rebuilt.  These tests pin that after a rebuild, the real
+    repository search path (query builder + MATCH) finds tag-only text.
+    """
+
+    @pytest.fixture
+    def repo_session(self):
+        """Session on a StaticPool in-memory DB — repository queries run in
+        worker threads, so the plain :memory: engine (single-threaded,
+        per-connection DBs) cannot be reused here."""
+        from sqlalchemy.pool import StaticPool
+        eng = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(bind=eng)
+        sf = create_session_factory(eng)
+        s = sf()
+        yield s
+        s.close()
+
+    @staticmethod
+    def _seed_tagged_novel(session, novel_id: int, title: str, tag_names: list[str]):
+        """Insert a novel whose ONLY text containing the keyword is in tags."""
+        session.add(Author(author_id=novel_id, author_name="作者"))
+        session.flush()
+        session.add(Novel(
+            id=novel_id, title=title, author_id=novel_id,
+            author_name="作者", path=f"/tmp/{novel_id}.txt",
+        ))
+        session.flush()
+        for name in tag_names:
+            tag = Tag(name=name, reference_count=1)
+            session.add(tag)
+            session.flush()
+            session.add(NovelTag(novel_id=novel_id, tag_id=tag.id))
+        session.commit()
+
+    @staticmethod
+    def _keyword_ids(session, keyword: str) -> list[int]:
+        import asyncio
+        from copixiv.infrastructure.repositories.novel import SQLAlchemyNovelRepository
+        from copixiv.infrastructure.repositories.query_builder import reset_fts_cache
+        # The FTS availability cache is process-wide — a previous test may
+        # have cached False for a DB without the virtual table.
+        reset_fts_cache()
+        repo = SQLAlchemyNovelRepository(session)
+        result = asyncio.run(repo.get_novels(
+            queries={keyword: "keyword"}, order_by="id", per_page=50,
+        ))
+        return [n["id"] for n in result["novels"]]
+
+    def test_keyword_matches_tag_only_text(self, repo_session):
+        """D1 regression: tags are searchable after an FTS rebuild."""
+        # The keyword appears in NO other indexed column (title/author/series).
+        self._seed_tagged_novel(repo_session, 1, "无标题的测试小说", ["neko", "cyberpunk2077"])
+        self._seed_tagged_novel(repo_session, 2, "另一篇测试小说", ["日常"])
+
+        fts = FTSManager(repo_session)
+        fts.rebuild_novel_fts()
+        repo_session.commit()  # production contract: caller commits the rebuild
+
+        assert self._keyword_ids(repo_session, "neko") == [1]
+        assert self._keyword_ids(repo_session, "cyberpunk2077") == [1]
+        assert self._keyword_ids(repo_session, "日常") == [2]
+        assert self._keyword_ids(repo_session, "完全不存在") == []
+
+    def test_keyword_matches_title_and_tags_independently(self, repo_session):
+        """Sanity: title-only hits still work alongside tag-only hits."""
+        self._seed_tagged_novel(repo_session, 1, "neko 标题", ["日常"])
+        self._seed_tagged_novel(repo_session, 2, "其他标题", ["neko"])
+
+        fts = FTSManager(repo_session)
+        fts.rebuild_novel_fts()
+        repo_session.commit()
+
+        assert sorted(self._keyword_ids(repo_session, "neko")) == [1, 2]
+
+    def test_orphan_fts_row_detected_by_health_check(self, repo_session):
+        """check_fts_health reports orphan entries (FTS row without a novel)."""
+        self._seed_tagged_novel(repo_session, 1, "标题", ["neko"])
+        fts = FTSManager(repo_session)
+        fts.rebuild_novel_fts()
+        repo_session.commit()
+
+        # Remove the novel row directly, leaving its FTS entry orphaned.
+        novel = repo_session.get(Novel, 1)
+        repo_session.delete(novel)
+        repo_session.commit()
+
+        result = fts.check_fts_health()
+        assert result["is_healthy"] is False
+        assert result["orphan_entries"] >= 1
+
+
 class TestConnectionPoolConfig:
     """Phase 4: Verify connection pool configuration."""
 
