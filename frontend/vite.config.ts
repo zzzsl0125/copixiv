@@ -1,10 +1,12 @@
-import { defineConfig } from 'vite'
+import { defineConfig, type ProxyOptions } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import tailwindcss from '@tailwindcss/vite'
 
 // Shared /api proxy: dev server and preview server both forward API
 // calls to the backend, so the built bundle can be served as-is.
-const apiProxy = {
+// Explicit ProxyOptions typing keeps the configure callbacks
+// contextually typed (no implicit-any under TS 6 defaults).
+const apiProxy: Record<string, string | ProxyOptions> = {
   '/api': {
     target: 'http://127.0.0.1:9000',
     changeOrigin: true,

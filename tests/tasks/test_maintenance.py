@@ -127,9 +127,9 @@ class TestFtsMaintenanceTasks:
 
     @staticmethod
     def _seed(sf):
+        # Author(1) already exists — the module-level session_factory
+        # fixture pre-seeds it for the check_epub tests' FK requirements.
         with sf() as s:
-            s.add(Author(author_id=1, author_name="作者"))
-            s.flush()
             s.add(Novel(id=1, title="标题", author_id=1, path="/tmp/1.txt"))
             s.commit()
 

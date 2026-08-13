@@ -192,12 +192,15 @@ class TestClientRetry:
         assert sleep_recorder == [1.0, 2.0]
 
     async def test_exhaustion_raises_last_error(self, sleep_recorder):
-        acc = _account_raising(ConnectionError("boom"))
+        # One error per attempt (MAX_RETRIES + 1 = 4) so the retry loop
+        # truly exhausts instead of succeeding on the second attempt.
+        acc = _account_raising(*[ConnectionError("boom")] * 4)
         client = PixivClient(_ScriptedPool([acc]))
 
         with pytest.raises(ConnectionError, match="boom"):
             await client._execute_with_retry("user_novels", 1)
         assert acc.state["calls"] == 4
+        assert sleep_recorder == [1.0, 2.0, 4.0]
 
 
 class TestPixivPatches:

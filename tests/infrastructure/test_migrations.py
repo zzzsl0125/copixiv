@@ -326,9 +326,9 @@ class TestFreshDatabase:
                 "SELECT version_num FROM alembic_version"
             ).fetchone()[0]
         assert version == HEAD_REVISION
-        # baseline created every table
-        assert "novel" in _table_info(db, "novel")
-        assert "tag_aliases" in _table_info(db, "tag_aliases")
+        # baseline created every table (PRAGMA table_info returns its columns)
+        assert "id" in _table_info(db, "novel")
+        assert "id" in _table_info(db, "tag_aliases")
         assert "ix_novel_shuffle_like_text" in _index_names(db)
 
     def test_orm_models_load_after_migration(self, tmp_path):
