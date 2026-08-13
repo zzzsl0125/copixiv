@@ -91,6 +91,16 @@ sudo systemctl start copixiv-frontend
 sudo systemctl status copixiv-frontend  # 确认 active (running)
 ```
 
+**启动失败排查**（`systemctl start` 报 "control process exited with error code" 时）：
+
+```bash
+journalctl -xeu copixiv-frontend.service -n 80 --no-pager   # systemd 侧真实错误
+cd /home/invocation/copixiv-v2/frontend && npm run build    # 手动跑构建看报错
+ss -tlnp | grep 5173                                        # 旧 dev 进程占端口？
+# 若 5173 被非 systemd 的残留 vite 进程占用：
+pkill -f "vite" && sudo systemctl start copixiv-frontend
+```
+
 `vite preview` 对单用户工具足够；若以后要多用户/HTTPS/压缩，把 ExecStart 换成
 nginx（`frontend/dist` 静态 + `location /api { proxy_pass http://127.0.0.1:9000; }`）。
 

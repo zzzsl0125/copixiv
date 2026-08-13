@@ -30,6 +30,17 @@ WorkingDirectory=/home/invocation/copixiv-v2/frontend/
 ExecStartPre=/usr/bin/npm run build
 ExecStart=/usr/bin/npm run preview
 
+# vue-tsc + vite build can take a while on cold cache — don't let the
+# default 90s timeout kill a legitimate build.
+TimeoutStartSec=180
+
+# Debugging a failed start:
+#   journalctl -xeu copixiv-frontend.service -n 80 --no-pager
+#   cd /home/invocation/copixiv-frontend && npm run build   # manual build error
+#   ss -tlnp | grep 5173                                    # stale dev server?
+#   # If 5173 is held by an old `vite` dev process not owned by systemd:
+#   #   pkill -f "vite"   (then systemctl start copixiv-frontend)
+
 Restart=on-failure
 RestartSec=5s
 
