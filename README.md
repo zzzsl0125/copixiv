@@ -51,10 +51,15 @@ export COPIXIV_PROXY__HTTPS="http://127.0.0.1:20172"
 ```bash
 python main.py
 # 或
-uvicorn main:app --host 0.0.0.0 --port 9000 --reload
+uvicorn main:app --host 0.0.0.0 --port 9000
 ```
 
 `http://localhost:9000` 即可访问。
+
+> **生产部署（systemd）不要带 `--reload`**：`main.py` 默认已关闭 reload，
+> 仅当设置 `COPIXIV_RELOAD=1`（开发调试）时才启用。systemd 下由
+> `Restart=` 负责拉起，uvicorn 的 reloader 会把任何对 `*.py` 的触碰
+> （包括 `.venv` 内的文件）变成重启风暴。
 
 > **提示**：如果旧项目 `../copixiv/.venv` 已装好依赖，也可以直接复用：
 > ```bash
@@ -92,6 +97,9 @@ pytest tests/domain/ -v
 
 # 基础设施测试（内存 SQLite，无外部依赖）
 pytest tests/infrastructure/ -v
+
+# 用例 / 任务 / Web 层测试
+pytest tests/application/ tests/tasks/ tests/web_api/ -v
 ```
 
 ### 运行单个文件
@@ -140,7 +148,10 @@ src/copixiv/
 │   └── endpoints/          # 7 个路由模块
 tests/                       # 按层组织
 ├── domain/                  # 纯单元测试（零 I/O，models + services）
-└── infrastructure/          # 集成测试（内存 SQLite，database + repositories）
+├── application/             # 用例层测试（假仓库）
+├── infrastructure/          # 集成测试（内存 SQLite，database + repositories）
+├── tasks/                   # 后台任务流水线回归测试
+└── web_api/                 # FastAPI 依赖契约测试
 ```
 
 依赖方向：`web_api` → `application` → `domain` ← `infrastructure`（application 通过 `domain/ports` 的 Protocol 依赖抽象，不直接依赖具体实现）

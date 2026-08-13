@@ -43,8 +43,8 @@ async def get_scheduled_tasks(uow: SqlUnitOfWork = Depends(get_uow)):
 
 @router.post("/scheduled", response_model=ScheduledTaskResponse)
 async def create_scheduled_task(
+    request: Request,
     task_in: ScheduledTaskCreate, uow: SqlUnitOfWork = Depends(get_uow),
-    request: Request = None,
 ):
     use_case = CreateScheduledUseCase(
         uow.tasks, task_manager=request.app.state.task_manager,
@@ -55,8 +55,9 @@ async def create_scheduled_task(
 
 @router.put("/scheduled/{task_id}", response_model=ScheduledTaskResponse)
 async def update_scheduled_task(
+    request: Request,
     task_id: int, task_in: ScheduledTaskUpdate,
-    uow: SqlUnitOfWork = Depends(get_uow), request: Request = None,
+    uow: SqlUnitOfWork = Depends(get_uow),
 ):
     use_case = UpdateScheduledUseCase(
         uow.tasks, task_manager=request.app.state.task_manager,
@@ -67,7 +68,8 @@ async def update_scheduled_task(
 
 @router.delete("/scheduled/{task_id}")
 async def delete_scheduled_task(
-    task_id: int, uow: SqlUnitOfWork = Depends(get_uow), request: Request = None,
+    request: Request,
+    task_id: int, uow: SqlUnitOfWork = Depends(get_uow),
 ):
     use_case = DeleteScheduledUseCase(
         uow.tasks, task_manager=request.app.state.task_manager,
@@ -78,7 +80,8 @@ async def delete_scheduled_task(
 
 @router.post("/scheduled/reorder")
 async def reorder_scheduled_tasks(
-    task_ids: list[int], uow: SqlUnitOfWork = Depends(get_uow), request: Request = None,
+    request: Request,
+    task_ids: list[int], uow: SqlUnitOfWork = Depends(get_uow),
 ):
     use_case = ReorderScheduledUseCase(
         uow.tasks, task_manager=request.app.state.task_manager,

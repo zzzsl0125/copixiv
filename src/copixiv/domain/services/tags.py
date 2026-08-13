@@ -19,7 +19,9 @@ def parse_tags(tags: list[str | dict]) -> list[str]:
     Handles both raw strings and Pixiv dict tags (``{"name": "..."}``).
     Splits combined tags on ``/|#、\\`` and removes parenthesised clutter.
     """
-    result: set[str] = set()
+    # dict keys deduplicate like a set but preserve first-seen order,
+    # so the output is deterministic (set iteration order is not).
+    result: dict[str, None] = {}
     for tag in tags:
         tag_text: str = (
             tag.get("name", "") if isinstance(tag, dict) else str(tag)
@@ -28,5 +30,5 @@ def parse_tags(tags: list[str | dict]) -> list[str]:
         for part in _SPLIT_PATTERN.split(cleaned):
             part = normalize_tag(part)
             if part:
-                result.add(part)
+                result.setdefault(part)
     return list(result)

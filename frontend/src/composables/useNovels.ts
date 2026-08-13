@@ -73,6 +73,10 @@ export function useNovels() {
           filters.order_by = 'id'
           filters.order_direction = 'DESC'
           isSpecialCase = true
+        } else if (type === 'is_favourite') {
+          filters.order_by = 'id'
+          filters.order_direction = 'DESC'
+          isSpecialCase = true
         }
       } else if (/^\d{7,}$/.test(condition.trim())) {
         // Bare 7+ digit number — auto-detected as novel ID by buildQueries.

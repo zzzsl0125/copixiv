@@ -77,12 +77,15 @@ class FTSManager:
         ``CREATE VIRTUAL TABLE``, so it works regardless of whether the
         table already exists and what shape a legacy table has.
         """
+        # DROP/CREATE are DDL and auto-commit in SQLite regardless; the
+        # INSERTs below stay inside the caller's transaction.  Callers run
+        # inside db_write() + uow.begin() (see the rebuild_fts task), which
+        # commits on exit — FTSManager never commits itself.
         self.session.execute(
             _text(f"DROP TABLE IF EXISTS {C.TABLE_NOVEL_FTS}")
         )
         self.session.execute(_text(self._CREATE_SQL))
         self._batch_insert_all_novels()
-        self.session.commit()
         logger.info("FTS5 index rebuilt from scratch.")
 
     # ------------------------------------------------------------------
@@ -121,13 +124,18 @@ class FTSManager:
                 models.Novel.title,
                 models.Novel.author_name,
                 models.Novel.series_name,
-            ).where(models.Novel.id.in_(novel_ids))
+                func.group_concat(models.Tag.name, " ").label("tags"),
+            )
+            .outerjoin(models.NovelTag, models.Novel.id == models.NovelTag.novel_id)
+            .outerjoin(models.Tag, models.NovelTag.tag_id == models.Tag.id)
+            .where(models.Novel.id.in_(novel_ids))
+            .group_by(models.Novel.id)
         ).all()
 
         if novels:
             self._batch_insert_fts_entries([
-                (nid, title or "", author or "", series_name or "")
-                for nid, title, author, series_name in novels
+                (nid, title or "", author or "", series_name or "", tags or "")
+                for nid, title, author, series_name, tags in novels
             ])
 
     def delete_novel_fts(self, novel_id: int) -> None:
@@ -156,12 +164,13 @@ class FTSManager:
         # (a legacy table may have a different definition), then bulk
         # re-insert.  'delete-all' is not used: it only works on
         # contentless / external-content FTS5 tables.
+        # DDL auto-commits in SQLite; the INSERTs below are committed by
+        # the caller's transaction (FTSManager never commits itself).
         self.session.execute(
             _text(f"DROP TABLE IF EXISTS {C.TABLE_NOVEL_FTS}")
         )
         self.session.execute(_text(self._CREATE_SQL))
         count = self._batch_insert_all_novels()
-        self.session.commit()
         logger.info(f"FTS5 batch rebuild complete — {count} novels indexed.")
         return count
 
@@ -286,23 +295,16 @@ class FTSManager:
                 "title": self._tokenize(title),
                 "author_name": self._tokenize(author),
                 "series_name": self._tokenize(series),
+                "tags": self._tokenize(tags),
             }
-            for nid, title, author, series in rows
+            for nid, title, author, series, tags in rows
         ]
         stmt = (
             f"INSERT INTO {C.TABLE_NOVEL_FTS}"
-            f"(rowid, {C.COL_TITLE}, {C.COL_AUTHOR_NAME}, {C.COL_SERIES_NAME}) "
-            f"VALUES (:id, :title, :author_name, :series_name)"
+            f"(rowid, {C.COL_TITLE}, {C.COL_AUTHOR_NAME}, {C.COL_SERIES_NAME}, tags) "
+            f"VALUES (:id, :title, :author_name, :series_name, :tags)"
         )
         self.session.execute(_text(stmt), values)
-
-    def _insert_fts_entry(
-        self, novel_id: int, title: str, author: str, series: str
-    ) -> None:
-        """Insert a single FTS entry (convenience wrapper)."""
-        self._batch_insert_fts_entries([
-            (novel_id, title, author, series),
-        ])
 
     def _batch_insert_all_novels(self) -> int:
         """Insert all novels from the novel table into FTS in one bulk operation.
@@ -316,15 +318,19 @@ class FTSManager:
                 models.Novel.title,
                 models.Novel.author_name,
                 models.Novel.series_name,
+                func.group_concat(models.Tag.name, " ").label("tags"),
             )
+            .outerjoin(models.NovelTag, models.Novel.id == models.NovelTag.novel_id)
+            .outerjoin(models.Tag, models.NovelTag.tag_id == models.Tag.id)
+            .group_by(models.Novel.id)
         ).all()
 
         if not novels:
             return 0
 
         self._batch_insert_fts_entries([
-            (nid, title or "", author or "", series_name or "")
-            for nid, title, author, series_name in novels
+            (nid, title or "", author or "", series_name or "", tags or "")
+            for nid, title, author, series_name, tags in novels
         ])
 
         return len(novels)

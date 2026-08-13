@@ -12,14 +12,13 @@ import asyncio
 from datetime import datetime, timedelta
 
 from copixiv.domain.models.task_result import TaskResult
-from copixiv.domain.services.novel_factory import build_from_webview
 from copixiv.domain.services.parsing import safe_get
 from copixiv.application.author.resolve_names import resolve_author_names
+from copixiv.application.novel.download_novel import DownloadNovelUseCase
 
 from .registry import register
 from .pipeline import (
     _account,
-    _batch_upsert,
     _batch_handle,
     _filter_chinese_novels,
     _month_ranges,
@@ -28,7 +27,6 @@ from . import maintenance  # noqa: F401 — ensure @register decorators fire
 
 from copixiv.infrastructure.database.write_lock import db_write
 from copixiv.infrastructure.database.uow import SqlUnitOfWork
-from copixiv.infrastructure.repositories.failed_novel import FailedNovelRepository
 
 from copixiv.app.logger import logger
 
@@ -107,51 +105,11 @@ async def novel_fetch(
     image_downloader,
 ):
     """Download and persist a single novel by ID."""
-    resp = await client.webview_novel(id)
-    if resp is None:
-        # Align with the batch path (_download_novels → failed_records):
-        # a failed fetch must leave a trace in failed_novel, otherwise
-        # permanently-gone novels silently linger forever.
-        async with db_write():
-            async with uow.begin():
-                FailedNovelRepository(uow.session).record(
-                    id, "download", "webview_novel 返回空"
-                )
-        return TaskResult(summary=f"小说 #{id} 获取失败")
-
-    data = build_from_webview(resp, file_storage.download_dir)
-
-    if content := data.pop("content", None):
-        file_storage.save_novel_text(data["id"], data["title"], content, force=redownload)
-
-    await image_downloader.process_novel_assets(data, force=redownload)
-
-    # Gate: wait for image/EPUB work so the upsert below only happens
-    # after the novel's files are actually on disk.  Asset failures are
-    # persisted into failed_novel in the same transaction as the upsert.
-    asset_failures = await image_downloader.await_all()
-
-    async with db_write():
-        async with uow.begin():
-            failed_repo = FailedNovelRepository(uow.session)
-            for nid, reason in asset_failures:
-                failed_repo.record(nid, "download", reason)
-            count = await _batch_upsert([data], uow)
-
-    # Resolve author name — webview API doesn't return it.
-    if count:
-        await resolve_author_names(
-            {data["author_id"]}, client=client, uow=uow,
-        )
-
-    title = data.get("title", "")
-    if count:
-        return TaskResult(
-            summary=f"下载完成: {title}",
-            new_novel_titles=[title],
-            new_novel_count=count,
-        )
-    return TaskResult(summary=f"已存在，跳过: {title}")
+    use_case = DownloadNovelUseCase(
+        client=client, uow=uow,
+        file_storage=file_storage, image_downloader=image_downloader,
+    )
+    return await use_case.execute(id, redownload=redownload)
 
 
 @register("novel_follow")

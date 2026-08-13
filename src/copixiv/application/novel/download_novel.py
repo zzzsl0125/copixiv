@@ -1,12 +1,27 @@
-"""Use case: download a single novel from Pixiv."""
+"""Use case: download a single novel from Pixiv and persist it.
 
+The canonical single-novel download flow — consumed by the ``novel_fetch``
+background task.  The batch pipeline (``tasks/pipeline.py``) reuses
+:func:`fetch_novel_and_assets` for the fetch half and
+:func:`copixiv.application.novel.persist.persist_novels` for the write half,
+so the two paths never drift apart.
+"""
+
+from copixiv.domain.models.task_result import TaskResult
 from copixiv.domain.services.novel_factory import build_from_webview
-from copixiv.domain.ports.repositories import NovelRepository
-from copixiv.domain.ports.repositories import AuthorRepository
-from copixiv.domain.ports.repositories import SeriesRepository
+from copixiv.domain.ports.unit_of_work import UnitOfWork
 from copixiv.domain.ports.storage import FileStoragePort
 from copixiv.domain.ports.storage import ImageDownloaderPort
 from copixiv.domain.ports.pixiv import PixivNovelPort
+
+from copixiv.application.author.resolve_names import resolve_author_names
+from copixiv.application.novel.persist import persist_novels
+
+# Documented infrastructure compromise (same precedent as resolve_names.py /
+# record.py): the failure ledger has no port yet, and use cases may not
+# reach the composition root.
+from copixiv.infrastructure.database.write_lock import db_write
+from copixiv.infrastructure.repositories.failed_novel import FailedNovelRepository
 
 
 async def fetch_novel_and_assets(
@@ -45,28 +60,34 @@ async def fetch_novel_and_assets(
 
 
 class DownloadNovelUseCase:
-    """Download a single novel from Pixiv and persist it."""
+    """Download a single novel from Pixiv and persist it.
+
+    Follows the same write discipline as the batch pipeline: asset work is
+    gated via ``await_all()`` before persisting, every database write
+    happens inside ``db_write()`` + ``uow.begin()``, and failures are
+    recorded into ``failed_novel`` in the same transaction as the upsert.
+    """
 
     def __init__(
         self,
-        client,
-        novel_repo: NovelRepository,
-        author_repo: AuthorRepository,
-        series_repo: SeriesRepository,
+        client: PixivNovelPort,
+        uow: UnitOfWork,
         file_storage: FileStoragePort,
         image_downloader: ImageDownloaderPort,
     ):
         self._client = client
-        self._novel_repo = novel_repo
-        self._author_repo = author_repo
-        self._series_repo = series_repo
+        self._uow = uow
         self._file_storage = file_storage
         self._image_downloader = image_downloader
 
     async def execute(
         self, novel_id: int, redownload: bool = False
-    ) -> int:
-        """Fetch + persist one novel. Returns count of new novels (0 or 1)."""
+    ) -> TaskResult:
+        """Fetch + persist one novel.
+
+        Returns a :class:`TaskResult` describing what happened (newly
+        downloaded title / already-known skip / fetch failure).
+        """
         data = await fetch_novel_and_assets(
             novel_id,
             self._client,
@@ -75,21 +96,38 @@ class DownloadNovelUseCase:
             redownload,
         )
         if data is None:
-            return 0
+            # A failed fetch must leave a trace in failed_novel, otherwise
+            # permanently-gone novels silently linger forever.
+            async with db_write():
+                async with self._uow.begin():
+                    FailedNovelRepository(self._uow.session).record(
+                        novel_id, "download", "webview_novel 返回空"
+                    )
+            return TaskResult(summary=f"小说 #{novel_id} 获取失败")
 
         # Gate: wait for in-flight image/EPUB work so the novel row is
-        # persisted only after its files exist on disk.  Asset failures
-        # are NOT persisted here — this use case has no failure-record
-        # repository; pipeline._batch_handle and tasks.novel_fetch (which
-        # own a FailedNovelRepository) collect them via await_all().
-        await self._image_downloader.await_all()
+        # persisted only after its files exist on disk.  Asset failures are
+        # recorded in the same write transaction as the upsert.
+        asset_failures = await self._image_downloader.await_all()
 
-        # Upsert, then refresh author/series summaries unconditionally —
-        # like/view may have changed even for already-known novels, and
-        # this matches the batch pipeline's behaviour (pipeline._batch_upsert).
-        count = await self._novel_repo.upsert_novels([data])
-        await self._author_repo.update_summary({data["author_id"]})
-        if sid := data.get("series_id"):
-            await self._series_repo.update_summary({sid})
+        async with db_write():
+            async with self._uow.begin():
+                failed_repo = FailedNovelRepository(self._uow.session)
+                for nid, reason in asset_failures:
+                    failed_repo.record(nid, "download", reason)
+                count = await persist_novels(self._uow, [data])
 
-        return count
+        # Resolve author name — webview API doesn't return it.
+        if count:
+            await resolve_author_names(
+                {data["author_id"]}, client=self._client, uow=self._uow,
+            )
+
+        title = data.get("title", "")
+        if count:
+            return TaskResult(
+                summary=f"下载完成: {title}",
+                new_novel_titles=[title],
+                new_novel_count=count,
+            )
+        return TaskResult(summary=f"已存在，跳过: {title}")

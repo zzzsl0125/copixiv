@@ -1,10 +1,11 @@
 """Novel API endpoints — identical contract to v1."""
 
+from collections.abc import Iterator
 from typing import Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Body, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, StreamingResponse
 
 from copixiv.web_api.deps import get_uow, parse_queries_json, parse_json_cursor
 from copixiv.web_api.schemas import BatchDownloadRequest
@@ -25,11 +26,20 @@ from copixiv.application.novel import (
 router = APIRouter()
 
 
+def _iter_zip(buffer) -> Iterator[bytes]:
+    """Stream a ZIP buffer in chunks, closing it when done."""
+    try:
+        while chunk := buffer.read(1 << 16):
+            yield chunk
+    finally:
+        buffer.close()
+
+
 @router.get("/", response_model=dict)
 async def get_novels(
     request: Request,
+    background_tasks: BackgroundTasks,
     uow: SqlUnitOfWork = Depends(get_uow),
-    background_tasks: BackgroundTasks = None,
     queries: str | None = Query(None),
     order_by: str = C.ORDER_BY_RANDOM,
     order_direction: str = "DESC",
@@ -96,12 +106,12 @@ async def download_novel(
 
 @router.post("/batch-download")
 async def batch_download_novels(
+    request: Request,
     body: BatchDownloadRequest = Body(...),
     uow: SqlUnitOfWork = Depends(get_uow),
-    request: Request = None,
 ):
     queries = parse_queries_json(body.queries)
-    naming = request.app.state.config.batch_download.naming if request else None
+    naming = request.app.state.config.batch_download.naming
     use_case = BatchDownloadUseCase(uow.novels, naming)
     result = await use_case.execute(body, queries)
 
@@ -113,8 +123,8 @@ async def batch_download_novels(
     if result.missing_ids:
         headers["X-Batch-Missing-Ids"] = ",".join(result.missing_ids)
 
-    return Response(
-        content=result.zip_buffer.getvalue(),
+    return StreamingResponse(
+        _iter_zip(result.zip_buffer),
         media_type="application/zip",
         headers=headers,
     )
@@ -122,12 +132,12 @@ async def batch_download_novels(
 
 @router.post("/batch-download/preview")
 async def batch_download_preview(
+    request: Request,
     body: BatchDownloadRequest = Body(...),
     uow: SqlUnitOfWork = Depends(get_uow),
-    request: Request = None,
 ):
     queries = parse_queries_json(body.queries)
-    naming = request.app.state.config.batch_download.naming if request else None
+    naming = request.app.state.config.batch_download.naming
     use_case = BatchDownloadUseCase(uow.novels, naming)
     path = await use_case.preview(body, queries)
     return {"path": path}
@@ -135,9 +145,9 @@ async def batch_download_preview(
 
 @router.delete("/{novel_id}", status_code=204)
 async def delete_novel(
+    request: Request,
     novel_id: int,
     uow: SqlUnitOfWork = Depends(get_uow),
-    request: Request = None,
 ):
     use_case = DeleteNovelUseCase(
         uow.novels, request.app.state.file_storage

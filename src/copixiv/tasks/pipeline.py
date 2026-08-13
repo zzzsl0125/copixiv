@@ -14,6 +14,7 @@ from copixiv.infrastructure.database.write_lock import db_write
 
 from copixiv.domain.services.language import is_chinese
 from copixiv.application.novel.download_novel import fetch_novel_and_assets
+from copixiv.application.novel.persist import persist_novels
 
 from copixiv.domain.services.novel_factory import (
     NovelInfoLike, build_from_novel_info,
@@ -73,33 +74,20 @@ async def _batch_upsert(
 ) -> int:
     """Upsert novels and update author/series summaries.
 
-    Ensures author + series placeholder rows exist before the novel
-    insert so FK constraints are satisfied for first-seen authors/series.
+    Thin wrapper over :func:`copixiv.application.novel.persist.persist_novels`
+    that adds batch-level logging.
 
     Pure write helper: the caller is responsible for wrapping it in
     ``db_write()`` + ``uow.begin()`` so the whole batch (including the
     commit) happens while holding the global write lock.
     """
+    count = await persist_novels(uow, novels, force_update)
     novels = [n for n in novels if n]
-    if not novels:
-        return 0
-
-    author_ids = {n["author_id"] for n in novels}
-    series_ids = {sid for n in novels if (sid := n.get("series_id"))}
-
-    uow.authors.ensure_exists(author_ids)
-    uow.series.ensure_exists(series_ids)
-
-    count = await uow.novels.upsert_novels(novels, force_update or [])
-    logger.info(
-        f"_batch_upsert: upsert_novels returned {count} for "
-        f"{len(novels)} input novels (sample id: {novels[0].get('id')!r})"
-    )
-    await uow.authors.update_summary({n["author_id"] for n in novels})
-    await uow.series.update_summary(
-        {sid for n in novels if (sid := n.get("series_id"))}
-    )
-
+    if novels:
+        logger.info(
+            f"_batch_upsert: upsert_novels returned {count} for "
+            f"{len(novels)} input novels (sample id: {novels[0].get('id')!r})"
+        )
     return count
 
 

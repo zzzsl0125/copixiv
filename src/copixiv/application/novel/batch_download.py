@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import io
 from dataclasses import dataclass
+from typing import BinaryIO
 
 from copixiv.domain.exceptions import NotFoundError, ValidationError
 from copixiv.domain.models.novel import EpubStatus
@@ -30,13 +30,14 @@ class BatchDownloadResult:
     """Result of a batch-download operation.
 
     Attributes:
-        zip_buffer: In-memory ZIP file as a ``BytesIO``.
+        zip_buffer: The ZIP as a seekable binary file object (spooled:
+            memory up to 8 MB, then disk).
         titles: List of titles that were successfully added to the ZIP.
         missing_ids: List of novel IDs whose files were missing.
         search_desc: A human-readable description for the download filename.
     """
 
-    zip_buffer: io.BytesIO
+    zip_buffer: BinaryIO
     titles: list[str]
     missing_ids: list[str]
     search_desc: str

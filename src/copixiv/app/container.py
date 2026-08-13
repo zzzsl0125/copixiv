@@ -42,7 +42,7 @@ class Container:
 
         container = Container()
         container.build()              # create all singletons
-        container.build(backup=True)   # also create a daily backup
+        container.build(backup=True)   # also create a weekly backup
         app = container.create_app()   # get the FastAPI instance
     """
 
@@ -74,9 +74,9 @@ class Container:
         """Create and wire all singletons.
 
         Args:
-            backup: If True, create a daily backup of the database before
-                running migrations.  Also performs automatic daily backup
-                on first startup of each day.
+            backup: If True, create a weekly backup of the database before
+                running migrations.  Also performs an automatic weekly
+                backup on the first startup of each ISO week.
         """
         apply_pixiv_patches()
         logger.info("Pixiv patches applied.")
@@ -87,11 +87,11 @@ class Container:
             db_path = Path.cwd() / db_path
         db_path_str = str(db_path)
 
-        # Auto-backup: every first startup of the day
+        # Auto-backup: first startup of each ISO week
         if backup:
             self._maybe_backup(db_path)
         elif self._should_auto_backup(db_path):
-            logger.info("First startup today — creating automatic backup.")
+            logger.info("First startup this week — creating automatic backup.")
             self._maybe_backup(db_path)
 
         # Database engine + migrations
@@ -260,10 +260,14 @@ class Container:
         # real status code from the handler, not CORS preflight noise.
         app.add_middleware(_AccessLogMiddleware)
 
+        # allow_origins=["*"] combined with allow_credentials=True is
+        # rejected by browsers (wildcard origins cannot carry credentials),
+        # and the frontend never sends cookies cross-origin — so drop
+        # credentials and let the wildcard be honored.
         app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],
-            allow_credentials=True,
+            allow_credentials=False,
             allow_methods=["*"],
             allow_headers=["*"],
         )
@@ -333,23 +337,34 @@ class Container:
         if self._session_factory is None:
             raise RuntimeError("Container.build() not called")
         try:
-            from sqlalchemy import text as _text
+            from sqlalchemy import func as _func, select as _select
+            from copixiv.infrastructure.database import models as _models
             with self._session_factory() as session:
                 # Touch the shuffle composite index by scanning through a
                 # range of shuffle values.  This also pulls the main-table
-                # pages for the rows the index points to (SELECT * forces
-                # main-table access for columns not in the index).
-                session.execute(_text(
-                    "SELECT * FROM novel "
-                    "WHERE shuffle > 0 AND like >= 500 AND text >= 3000 "
-                    "ORDER BY shuffle ASC LIMIT 100"
-                ))
+                # pages for the rows the index points to (full entity
+                # SELECT forces main-table access for columns not in the
+                # index).  Built from the ORM so schema renames propagate.
+                session.execute(
+                    _select(_models.Novel)
+                    .where(
+                        _models.Novel.shuffle > 0,
+                        _models.Novel.like >= 500,
+                        _models.Novel.text >= 3000,
+                    )
+                    .order_by(_models.Novel.shuffle.asc())
+                    .limit(100)
+                )
                 # Touch novel_tag covering index so the first batch tag
                 # lookup doesn't stall.
-                session.execute(_text(
-                    "SELECT COUNT(*) FROM novel_tag "
-                    "WHERE novel_id IN (SELECT id FROM novel LIMIT 100)"
-                ))
+                session.execute(
+                    _select(_func.count()).select_from(_models.NovelTag)
+                    .where(
+                        _models.NovelTag.novel_id.in_(
+                            _select(_models.Novel.id).limit(100)
+                        )
+                    )
+                )
             logger.info("Database cache warmup complete.")
         except Exception:
             logger.warning("Database cache warmup failed — continuing.")

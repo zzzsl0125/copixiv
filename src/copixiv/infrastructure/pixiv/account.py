@@ -93,6 +93,11 @@ class PixivAccount:
     # to avoid using an expired token.
     _AUTH_TTL: float = 50 * 60  # 50 minutes
 
+    # An ACTIVE account that hasn't been selected for this long is
+    # treated as idle again (status → INACTIVE) so it re-enters the
+    # auth + LRU path instead of being considered perpetually fresh.
+    _IDLE_TIMEOUT: float = 3500  # seconds (~58 min)
+
     def __str__(self) -> str:
         return f"[{self.username[:6]}]"
 
@@ -116,7 +121,7 @@ class PixivAccount:
             return False
         if (
             self.status == AccountStatus.ACTIVE
-            and time.monotonic() - self.last_req_time > 3500
+            and time.monotonic() - self.last_req_time > self._IDLE_TIMEOUT
         ):
             self.status = AccountStatus.INACTIVE
         return self.status == AccountStatus.ACTIVE
