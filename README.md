@@ -191,12 +191,10 @@ src/copixiv/
 │   ├── models/             # Pydantic 实体
 │   ├── ports/              # Protocol 抽象接口
 │   └── services/           # 纯函数：标签解析、中文检测、路径生成…
-├── application/            # 用例：编排 domain 端口完成任务
-│   ├── novel/              # ListNovels, DownloadNovel, ToggleFavourite…
+├── application/            # 业务逻辑：仅保留有真实编排的模块（薄用例层已移除）
+│   ├── novel/              # DownloadNovel, BatchDownload, DeleteNovel, GetNovelFile, persist
 │   ├── author/             # resolve_author_names（作者名解析）
-│   ├── tag/ task/ token/   # 标签、定时任务、Token 用例
-│   ├── search_history/     # 列表/删除 + record（后台记录）
-│   └── system/             # GetConfigUseCase
+│   └── search_history/     # record（后台记录回调）
 ├── infrastructure/         # 实现层
 │   ├── database/           # SQLAlchemy engine / session / ORM / UnitOfWork
 │   ├── repositories/       # Novel, Author, Series, Tag, Token, Task…
@@ -204,7 +202,7 @@ src/copixiv/
 │   ├── storage/            # FileStorage, ImageDownloader
 │   └── epub/               # EpubBuilder
 ├── tasks/                  # 后台任务（每文件一个任务）
-├── web_api/                # 薄 FastAPI 层
+├── web_api/                # 薄 FastAPI 层（endpoint 直连 repository）
 │   ├── schemas.py          # 请求/响应 Pydantic（与 v1 契约一致）
 │   ├── deps.py             # FastAPI Depends
 │   └── endpoints/          # 7 个路由模块

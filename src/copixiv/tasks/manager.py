@@ -11,6 +11,7 @@ guessing based on ``isinstance(result, list)``.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import inspect
 import json
 import time
@@ -310,7 +311,6 @@ class TaskManagerSystem:
             )
         else:
             loop = asyncio.get_running_loop()
-            import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 return await asyncio.wait_for(
                     loop.run_in_executor(pool, lambda: func(**params, **deps)),
@@ -321,25 +321,13 @@ class TaskManagerSystem:
     def _normalize_result(result_val: Any) -> TaskResult:
         """Convert a task's return value into a :class:`TaskResult`.
 
-        Supports both the new ``TaskResult`` return type and legacy tasks
-        that still return ``list`` or ``int``.
+        Registered tasks all return ``TaskResult``; ``None`` and any other
+        value are mapped to a generic summary as a safety net.
         """
         if isinstance(result_val, TaskResult):
             return result_val
         if result_val is None:
             return TaskResult(summary="完成")
-        # Backward compat: legacy tasks returning list or int
-        if isinstance(result_val, list):
-            titles = [str(t) for t in result_val]
-            return TaskResult(
-                summary=f"完成，处理 {len(titles)} 项",
-                new_novel_titles=titles,
-            )
-        if isinstance(result_val, int):
-            return TaskResult(
-                summary=f"完成，处理 {result_val} 项",
-                new_novel_count=result_val,
-            )
         return TaskResult(summary=str(result_val))
 
     async def _update_history(

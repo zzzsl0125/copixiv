@@ -13,19 +13,6 @@ from copixiv.domain.ports.repositories import NovelRepository
 
 
 @dataclass
-class BatchDownloadRequest:
-    queries: str | None = None
-    order_by: str = "id"
-    order_direction: str = "DESC"
-    min_like: int | None = None
-    min_text: int | None = None
-    limit: int = 50
-    format_mode: str = "txt"
-    zip_name: str | None = None
-    naming_template: str | None = None
-
-
-@dataclass
 class BatchDownloadResult:
     """Result of a batch-download operation.
 
@@ -56,30 +43,40 @@ class BatchDownloadUseCase:
         self._naming_template = naming_template
 
     async def execute(
-        self, req: BatchDownloadRequest, queries: dict[str, str] | None = None
+        self,
+        queries: dict[str, str] | None = None,
+        *,
+        order_by: str = "id",
+        order_direction: str = "DESC",
+        limit: int = 50,
+        min_like: int | None = None,
+        min_text: int | None = None,
+        format_mode: str = "txt",
+        zip_name: str | None = None,
+        naming_template: str | None = None,
     ) -> BatchDownloadResult:
         results = await self._repo.get_novels(
             queries=queries,
-            order_by=req.order_by,
-            order_direction=req.order_direction,
-            per_page=req.limit,
-            min_like=req.min_like,
-            min_text=req.min_text,
+            order_by=order_by,
+            order_direction=order_direction,
+            per_page=limit,
+            min_like=min_like,
+            min_text=min_text,
         )
         novels = results.get("novels", [])
         if not novels:
             raise NotFoundError("未找到匹配条件的小说")
 
-        naming = req.naming_template or self._naming_template
+        naming = naming_template or self._naming_template
         try:
-            zip_buf, titles, missing = build_batch_zip(novels, req.format_mode, naming)
+            zip_buf, titles, missing = build_batch_zip(novels, format_mode, naming)
         except ValueError as exc:
             raise ValidationError(str(exc)) from exc
         if not titles:
             raise NotFoundError("未找到可下载的有效文件")
 
         zip_buf.seek(0)
-        search_desc = req.zip_name or _build_search_desc(queries or {})
+        search_desc = zip_name or _build_search_desc(queries or {})
         return BatchDownloadResult(
             zip_buffer=zip_buf,
             titles=titles,
@@ -88,7 +85,15 @@ class BatchDownloadUseCase:
         )
 
     async def preview(
-        self, req: BatchDownloadRequest, queries: dict[str, str] | None = None
+        self,
+        queries: dict[str, str] | None = None,
+        *,
+        order_by: str = "id",
+        order_direction: str = "DESC",
+        min_like: int | None = None,
+        min_text: int | None = None,
+        format_mode: str = "txt",
+        naming_template: str | None = None,
     ) -> str | None:
         """Resolve the naming template for the first matching novel.
 
@@ -101,18 +106,18 @@ class BatchDownloadUseCase:
         """
         results = await self._repo.get_novels(
             queries=queries,
-            order_by=req.order_by,
-            order_direction=req.order_direction,
+            order_by=order_by,
+            order_direction=order_direction,
             per_page=1,
-            min_like=req.min_like,
-            min_text=req.min_text,
+            min_like=min_like,
+            min_text=min_text,
         )
         novels = results.get("novels", [])
         if not novels:
             return None
 
         naming = (
-            req.naming_template
+            naming_template
             or self._naming_template
             or "{author_name}/{series_name}/#{series_index}_{title}_{id}"
         )
@@ -124,7 +129,7 @@ class BatchDownloadUseCase:
         novel = novels[0]
         actual_fmt = (
             "epub"
-            if (req.format_mode == "prefer_epub"
+            if (format_mode == "prefer_epub"
                 and novel.get("has_epub") == EpubStatus.DONE)
             else "txt"
         )

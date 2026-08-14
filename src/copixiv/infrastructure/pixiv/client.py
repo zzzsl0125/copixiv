@@ -1,8 +1,8 @@
 """PixivClient — explicit API methods, no __getattr__ magic.
 
 Each API method is a regular async method with explicit parameters.
-Pagination, handler dispatch, and rate limiting are composed through the
-AccountPool and RequestManager.
+Pagination and rate limiting are composed through the AccountPool and
+RequestManager.
 """
 
 import asyncio
@@ -63,12 +63,10 @@ class PixivClient:
         """Fetch a single novel with full text content."""
         return await self._call("webview_novel", novel_id)
 
-    async def user_novels(
-        self, author_id: int, fetch_all: bool = False, handler=None,
-    ) -> dict:
+    async def user_novels(self, author_id: int, fetch_all: bool = False) -> dict:
         """Fetch all novels by an author."""
         return await self._call(
-            "user_novels", author_id, fetch_all=fetch_all, handler=handler,
+            "user_novels", author_id, fetch_all=fetch_all,
         )
 
     async def user_detail(self, user_id: int) -> dict:
@@ -83,10 +81,10 @@ class PixivClient:
         """Unfollow a user."""
         return await self._call("user_follow_delete", user_id)
 
-    async def novel_follow(self, fetch_til=None, handler=None) -> dict:
+    async def novel_follow(self, fetch_til=None) -> dict:
         """Fetch novels from followed users."""
         return await self._call(
-            "novel_follow", fetch_til=fetch_til, handler=handler,
+            "novel_follow", fetch_til=fetch_til,
         )
 
     async def novel_ranking(
@@ -94,12 +92,10 @@ class PixivClient:
         mode: str = "day_r18",
         date=None,
         fetch_all: bool = False,
-        handler=None,
     ) -> dict:
         """Fetch novel rankings."""
         return await self._call(
             "novel_ranking", mode=mode, date=date, fetch_all=fetch_all,
-            handler=handler,
         )
 
     async def search_novel(
@@ -110,7 +106,6 @@ class PixivClient:
         start_date=None,
         end_date=None,
         fetch_minlike: int | None = None,
-        handler=None,
     ) -> dict:
         """Search novels by keyword."""
         return await self._call(
@@ -121,7 +116,6 @@ class PixivClient:
             start_date=start_date,
             end_date=end_date,
             fetch_minlike=fetch_minlike,
-            handler=handler,
         )
 
     async def novel_series(
@@ -190,11 +184,10 @@ class PixivClient:
         raise last_error  # type: ignore[misc]
 
     async def _call(self, method: str, *args, **kwargs):
-        """Execute an API call with optional pagination and handler dispatch."""
+        """Execute an API call with optional pagination."""
         fetch_all = kwargs.pop("fetch_all", None)
         fetch_til = kwargs.pop("fetch_til", None)
         fetch_minlike = kwargs.pop("fetch_minlike", None)
-        handler = kwargs.pop("handler", None)
 
         async with self._semaphore:
             result = await self._execute_with_retry(method, *args, **kwargs)
@@ -203,32 +196,15 @@ class PixivClient:
             return None
 
         if not (fetch_all or fetch_til or fetch_minlike):
-            return await self._run_handlers(result, handler)
+            return result
 
-        return await self._paginate(
-            method, result, handler, fetch_til, fetch_minlike
-        )
-
-    async def _run_handlers(self, result, handler):
-        """Run a handler coroutine on the result, attaching output."""
-        result.handler_results = []
-        if handler is not None:
-            tasks = [asyncio.create_task(handler(result))]
-            flat = await asyncio.gather(*tasks)
-            result.handler_results = [
-                item for sublist in flat for item in (sublist or [])
-            ]
-        return result
+        return await self._paginate(method, result, fetch_til, fetch_minlike)
 
     async def _paginate(
-        self, method, result, handler, fetch_til, fetch_minlike
+        self, method, result, fetch_til, fetch_minlike
     ):
         """Follow ``next_url`` across pages, collecting results."""
-        handler_tasks: list[asyncio.Task] = []
         page = 1
-
-        if handler:
-            handler_tasks.append(asyncio.create_task(handler(result)))
 
         novels_count = len(safe_get(result, "novels", []))
         logger.info(f"Paginate {method}: page {page} — {novels_count} items")
@@ -244,11 +220,7 @@ class PixivClient:
                 )
 
             result.next_url = safe_get(next_result, "next_url")
-
-            if handler:
-                handler_tasks.append(asyncio.create_task(handler(next_result)))
-            else:
-                result.novels += safe_get(next_result, "novels", [])
+            result.novels += safe_get(next_result, "novels", [])
 
             next_novels = safe_get(next_result, "novels", [])
             novels_count += len(next_novels)
@@ -268,14 +240,6 @@ class PixivClient:
         logger.info(
             f"Paginate {method}: done — {page} pages, {novels_count} items total",
         )
-
-        if handler_tasks:
-            flat = await asyncio.gather(*handler_tasks)
-            result.handler_results = [
-                item for sublist in flat for item in (sublist or [])
-            ]
-        else:
-            result.handler_results = []
 
         return result
 

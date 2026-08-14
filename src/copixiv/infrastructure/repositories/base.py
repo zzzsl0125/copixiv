@@ -117,3 +117,39 @@ class BaseRepository:
         stmt = select(model_class).where(pk_col == item_id)
         result = self.session.execute(stmt).scalar_one_or_none()
         return model_to_dict(result) if result else None
+
+    # -- shared CRUD helpers (used by token/task/tag/search_history) ----------
+
+    def _update_attrs(
+        self, model_class: type[ModelType], item_id: Any, data: dict
+    ) -> Any | None:
+        """Set the given attributes on an existing row.
+
+        Returns the updated instance, or ``None`` when the row doesn't exist.
+        ``None`` values are skipped (callers pass ``exclude_none`` data).
+        """
+        obj = self.session.get(model_class, item_id)
+        if obj is None:
+            return None
+        for k, v in data.items():
+            if v is not None and hasattr(obj, k):
+                setattr(obj, k, v)
+        return obj
+
+    def _delete_by_id(self, model_class: type[ModelType], item_id: Any) -> bool:
+        """Delete a row by id; returns False when it doesn't exist."""
+        obj = self.session.get(model_class, item_id)
+        if obj is None:
+            return False
+        self.session.delete(obj)
+        return True
+
+    def _reorder(
+        self, model_class: type[ModelType], sort_field: str, ids: list[int]
+    ) -> bool:
+        """Assign sort indices 0..n-1 to the rows in *ids* order."""
+        for idx, obj_id in enumerate(ids):
+            obj = self.session.get(model_class, obj_id)
+            if obj is not None:
+                setattr(obj, sort_field, idx)
+        return True

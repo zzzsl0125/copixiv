@@ -2,13 +2,16 @@
 
 from fastapi import APIRouter
 
+from copixiv.app.config import config
 from copixiv.web_api.schemas import SystemConfigResponse
-from copixiv.application.system import GetConfigUseCase
 
 router = APIRouter()
 
 
 @router.get("/config", response_model=SystemConfigResponse)
 def get_system_config():
-    use_case = GetConfigUseCase()
-    return use_case.execute()
+    return {
+        "default_min_like": config.frontend.default_min_like,
+        "default_min_text": config.frontend.default_min_text,
+        "batch_download_naming": config.batch_download.naming,
+    }

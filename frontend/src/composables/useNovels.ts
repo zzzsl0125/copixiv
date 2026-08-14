@@ -1,6 +1,6 @@
 import { reactive, onMounted, onUnmounted } from 'vue'
 import { novelApi } from '../api'
-import { buildQueries } from '../lib'
+import { buildQueries } from '../lib/utils'
 import type { Novel, NovelFilters } from '../types'
 import { useCursorPagination } from './useCursorPagination'
 

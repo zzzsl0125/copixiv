@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, type PropType } from 'vue'
 import { novelApi } from '../../api'
-import { formatNumber } from '../../lib'
+import { formatNumber } from '../../lib/utils'
 import type { Novel, TagPreference } from '../../types'
 
 const props = defineProps({

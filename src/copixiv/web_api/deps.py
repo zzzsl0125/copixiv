@@ -34,25 +34,21 @@ async def get_uow(db: Session = Depends(get_db)) -> AsyncIterator[SqlUnitOfWork]
         yield uow
 
 
-def parse_queries_json(queries_str: str | None) -> dict | None:
-    """Parse a JSON queries string into a dict."""
-    if not queries_str:
+def parse_json_param(value: str | None, name: str) -> dict | None:
+    """Parse a JSON string request parameter into a dict.
+
+    Args:
+        value: The raw query/cursor string (``None`` → ``None``).
+        name: Parameter name, used in the 400 error message.
+
+    Raises:
+        HTTPException: 400 when the string is not valid JSON.
+    """
+    if not value:
         return None
     try:
-        return json.loads(queries_str)
+        return json.loads(value)
     except json.JSONDecodeError:
         raise HTTPException(
-            status_code=400, detail="Invalid queries JSON format"
-        )
-
-
-def parse_json_cursor(cursor_str: str | None) -> dict | None:
-    """Parse a JSON cursor string into a dict."""
-    if not cursor_str:
-        return None
-    try:
-        return json.loads(cursor_str)
-    except json.JSONDecodeError:
-        raise HTTPException(
-            status_code=400, detail="Invalid cursor JSON format"
+            status_code=400, detail=f"Invalid {name} JSON format"
         )

@@ -2,17 +2,14 @@
 
 from fastapi import APIRouter, Depends, Query, Request
 
+from copixiv.domain.exceptions import NotFoundError
 from copixiv.web_api.deps import get_uow
 from copixiv.infrastructure.database.uow import SqlUnitOfWork
 from copixiv.web_api.schemas import (
     ScheduledTaskCreate, ScheduledTaskUpdate, ScheduledTaskResponse,
     TaskHistoryListResponse, TaskMethod, TaskArgument,
 )
-from copixiv.application.task import (
-    GetMethodsUseCase, ListScheduledUseCase, CreateScheduledUseCase,
-    UpdateScheduledUseCase, DeleteScheduledUseCase, ReorderScheduledUseCase,
-    RunScheduledUseCase, GetHistoryUseCase,
-)
+from copixiv.tasks.registry import describe_tasks
 import copixiv.tasks.novel_tasks  # noqa: F401 — ensure @register decorators fire
 
 router = APIRouter()
@@ -20,8 +17,7 @@ router = APIRouter()
 
 @router.get("/methods", response_model=list[TaskMethod])
 def get_task_methods():
-    use_case = GetMethodsUseCase()
-    raw_methods = use_case.execute()
+    raw_methods = describe_tasks()
     methods = []
     for m in raw_methods:
         arguments = [
@@ -37,8 +33,7 @@ def get_task_methods():
 
 @router.get("/scheduled", response_model=list[ScheduledTaskResponse])
 async def get_scheduled_tasks(uow: SqlUnitOfWork = Depends(get_uow)):
-    use_case = ListScheduledUseCase(uow.tasks)
-    return await use_case.execute()
+    return await uow.tasks.get_scheduled_tasks()
 
 
 @router.post("/scheduled", response_model=ScheduledTaskResponse)
@@ -46,10 +41,8 @@ async def create_scheduled_task(
     request: Request,
     task_in: ScheduledTaskCreate, uow: SqlUnitOfWork = Depends(get_uow),
 ):
-    use_case = CreateScheduledUseCase(
-        uow.tasks, task_manager=request.app.state.task_manager,
-    )
-    task = await use_case.execute(task_in.model_dump())
+    task = await uow.tasks.create_scheduled(task_in.model_dump())
+    request.app.state.task_manager.reload_cron_jobs()
     return task
 
 
@@ -59,10 +52,10 @@ async def update_scheduled_task(
     task_id: int, task_in: ScheduledTaskUpdate,
     uow: SqlUnitOfWork = Depends(get_uow),
 ):
-    use_case = UpdateScheduledUseCase(
-        uow.tasks, task_manager=request.app.state.task_manager,
-    )
-    task = await use_case.execute(task_id, task_in.model_dump(exclude_none=True))
+    task = await uow.tasks.update_scheduled(task_id, task_in.model_dump(exclude_none=True))
+    if task is None:
+        raise NotFoundError(f"Task {task_id} not found")
+    request.app.state.task_manager.reload_cron_jobs()
     return task
 
 
@@ -71,10 +64,9 @@ async def delete_scheduled_task(
     request: Request,
     task_id: int, uow: SqlUnitOfWork = Depends(get_uow),
 ):
-    use_case = DeleteScheduledUseCase(
-        uow.tasks, task_manager=request.app.state.task_manager,
-    )
-    await use_case.execute(task_id)
+    if not await uow.tasks.delete_scheduled(task_id):
+        raise NotFoundError(f"Task {task_id} not found")
+    request.app.state.task_manager.reload_cron_jobs()
     return {"ok": True}
 
 
@@ -83,17 +75,18 @@ async def reorder_scheduled_tasks(
     request: Request,
     task_ids: list[int], uow: SqlUnitOfWork = Depends(get_uow),
 ):
-    use_case = ReorderScheduledUseCase(
-        uow.tasks, task_manager=request.app.state.task_manager,
-    )
-    await use_case.execute(task_ids)
+    if not await uow.tasks.reorder_scheduled(task_ids):
+        raise NotFoundError("Failed to reorder tasks")
+    request.app.state.task_manager.reload_cron_jobs()
     return {"ok": True}
 
 
 @router.post("/scheduled/{task_id}/run")
 async def run_scheduled_task(task_id: int, request: Request):
-    use_case = RunScheduledUseCase(request.app.state.task_manager)
-    use_case.execute(task_id)
+    try:
+        request.app.state.task_manager.run_task_now(task_id)
+    except ValueError as exc:
+        raise NotFoundError(str(exc))
     return {"ok": True}
 
 
@@ -103,5 +96,6 @@ async def get_task_history(
     offset: int = Query(0, ge=0),
     uow: SqlUnitOfWork = Depends(get_uow),
 ):
-    use_case = GetHistoryUseCase(uow.tasks)
-    return await use_case.execute(limit=limit, offset=offset)
+    history = await uow.tasks.get_history(limit=limit, offset=offset)
+    total = await uow.tasks.count_history()
+    return {"items": history, "total": total}

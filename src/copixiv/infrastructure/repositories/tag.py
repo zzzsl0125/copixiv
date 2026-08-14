@@ -59,27 +59,13 @@ class SQLAlchemyTagRepository(BaseRepository):
         return pref
 
     async def update_preference(self, pref_id: int, pref_data: dict) -> Any | None:
-        pref = self.session.get(models.TagPreference, pref_id)
-        if pref is None:
-            return None
-        for k, v in pref_data.items():
-            if hasattr(pref, k):
-                setattr(pref, k, v)
-        return pref
+        return self._update_attrs(models.TagPreference, pref_id, pref_data)
 
     async def delete_preference(self, pref_id: int) -> bool:
-        pref = self.session.get(models.TagPreference, pref_id)
-        if pref is None:
-            return False
-        self.session.delete(pref)
-        return True
+        return self._delete_by_id(models.TagPreference, pref_id)
 
     async def reorder_preferences(self, ids: list[int]) -> bool:
-        for idx, pref_id in enumerate(ids):
-            pref = self.session.get(models.TagPreference, pref_id)
-            if pref is not None:
-                pref.sort_index = idx
-        return True
+        return self._reorder(models.TagPreference, "sort_index", ids)
 
     # -- aliases ------------------------------------------------------------
     # source/target are stored as integer FKs → tag.id but exposed as tag
@@ -95,21 +81,9 @@ class SQLAlchemyTagRepository(BaseRepository):
             ).order_by(models.TagAlias.id)
         ).all()
 
-        # Resolve IDs → names
-        tag_ids: set[int] = set()
-        for row in rows:
-            tag_ids.add(row[1])
-            tag_ids.add(row[2])
-
-        id_to_name: dict[int, str] = {}
-        if tag_ids:
-            tag_rows = self.session.execute(
-                select(models.Tag.id, models.Tag.name).where(
-                    models.Tag.id.in_(tag_ids)
-                )
-            ).all()
-            id_to_name = {t[0]: t[1] for t in tag_rows}
-
+        id_to_name = self._load_tag_names(
+            {row[1] for row in rows} | {row[2] for row in rows}
+        )
         return [
             {
                 "id": row[0],
@@ -118,6 +92,17 @@ class SQLAlchemyTagRepository(BaseRepository):
             }
             for row in rows
         ]
+
+    def _load_tag_names(self, tag_ids: set[int]) -> dict[int, str]:
+        """Return ``{tag.id: tag.name}`` for the given ids (missing → absent)."""
+        if not tag_ids:
+            return {}
+        rows = self.session.execute(
+            select(models.Tag.id, models.Tag.name).where(
+                models.Tag.id.in_(tag_ids)
+            )
+        ).all()
+        return {t[0]: t[1] for t in rows}
 
     def get_alias_map_sync(self) -> dict[str, str]:
         """Return {source_tag_name: target_tag_name} for all aliases (sync)."""
@@ -128,20 +113,9 @@ class SQLAlchemyTagRepository(BaseRepository):
             )
         ).all()
 
-        tag_ids: set[int] = set()
-        for src, tgt in rows:
-            tag_ids.add(src)
-            tag_ids.add(tgt)
-
-        id_to_name: dict[int, str] = {}
-        if tag_ids:
-            tag_rows = self.session.execute(
-                select(models.Tag.id, models.Tag.name).where(
-                    models.Tag.id.in_(tag_ids)
-                )
-            ).all()
-            id_to_name = {t[0]: t[1] for t in tag_rows}
-
+        id_to_name = self._load_tag_names(
+            {src for src, tgt in rows} | {tgt for src, tgt in rows}
+        )
         return {
             id_to_name.get(src, str(src)): id_to_name.get(tgt, str(tgt))
             for src, tgt in rows
@@ -294,17 +268,7 @@ class SQLAlchemyTagRepository(BaseRepository):
         if not src_tag:
             return 0
 
-        tgt_tag = self.session.execute(
-            select(models.Tag).where(models.Tag.name == target)
-        ).scalar_one_or_none()
-        if not tgt_tag:
-            self.session.execute(
-                sqlite_insert(models.Tag).values(name=target)
-            )
-            self.session.flush()
-            tgt_tag = self.session.execute(
-                select(models.Tag).where(models.Tag.name == target)
-            ).scalar_one()
+        tgt_tag_id = self._get_or_create_tag_id(target)
 
         # Find novels with source tag
         stmt = select(models.NovelTag.novel_id).where(
@@ -317,7 +281,7 @@ class SQLAlchemyTagRepository(BaseRepository):
         # Batch insert target links (skip existing)
         self.session.execute(
             sqlite_insert(models.NovelTag).values([
-                {"novel_id": nid, "tag_id": tgt_tag.id} for nid in novel_ids
+                {"novel_id": nid, "tag_id": tgt_tag_id} for nid in novel_ids
             ]).on_conflict_do_nothing(index_elements=["novel_id", "tag_id"])
         )
 
@@ -340,14 +304,14 @@ class SQLAlchemyTagRepository(BaseRepository):
         already_had = self.session.execute(
             select(func.count()).select_from(models.NovelTag).where(
                 models.NovelTag.novel_id.in_(novel_ids),
-                models.NovelTag.tag_id == tgt_tag.id,
+                models.NovelTag.tag_id == tgt_tag_id,
             )
         ).scalar() or 0
         newly_added = affected - already_had
         if newly_added > 0:
             self.session.execute(
                 _update(models.Tag)
-                .where(models.Tag.id == tgt_tag.id)
+                .where(models.Tag.id == tgt_tag_id)
                 .values(reference_count=models.Tag.reference_count + newly_added)
             )
 

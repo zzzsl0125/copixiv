@@ -166,44 +166,13 @@ class Container:
         from fastapi import FastAPI
         from fastapi.middleware.cors import CORSMiddleware
         from contextlib import asynccontextmanager
-        from starlette.types import Scope, Receive, Send
 
         from copixiv.web_api.endpoints import (
             novels, tasks, system, tag_preferences, search_history,
             tokens, tag_aliases,
         )
+        from copixiv.web_api.middleware import AccessLogMiddleware
         from copixiv.infrastructure.pixiv.account import AccountStatus
-
-        # -- pure-ASGI access-log middleware --------------------------------
-        class _AccessLogMiddleware:
-            """Log every HTTP request to ``access.log`` via loguru."""
-
-            def __init__(self, app):
-                self.app = app
-
-            async def __call__(self, scope: Scope, receive: Receive, send: Send):
-                if scope["type"] != "http":
-                    await self.app(scope, receive, send)
-                    return
-
-                start = _time.monotonic()
-                status_code = 0
-
-                async def _send_wrapper(message):
-                    nonlocal status_code
-                    if message["type"] == "http.response.start":
-                        status_code = message.get("status", 0)
-                    await send(message)
-
-                try:
-                    await self.app(scope, receive, _send_wrapper)
-                finally:
-                    elapsed_ms = (_time.monotonic() - start) * 1000
-                    with logger.contextualize(name="http_access"):
-                        logger.info(
-                            f"{scope['method']} {scope['path']} → "
-                            f"{status_code} {elapsed_ms:.1f}ms",
-                        )
 
         @asynccontextmanager
         async def lifespan(app: FastAPI):
@@ -258,7 +227,7 @@ class Container:
 
         # Access-log middleware — innermost (added first) so it sees the
         # real status code from the handler, not CORS preflight noise.
-        app.add_middleware(_AccessLogMiddleware)
+        app.add_middleware(AccessLogMiddleware)
 
         # allow_origins=["*"] combined with allow_credentials=True is
         # rejected by browsers (wildcard origins cannot carry credentials),
@@ -311,13 +280,12 @@ class Container:
         week_backup = backup_dir / f"{this_week}.db"
         return not week_backup.exists()
 
-    @staticmethod
-    def _maybe_backup(db_path: Path) -> None:
+    def _maybe_backup(self, db_path: Path) -> None:
         """Create a weekly backup and remove older ones (keep N most recent)."""
         try:
             backup_database(str(db_path))
             cleanup_old_backups(
-                str(db_path), keep_count=config.backup.keep_count,
+                str(db_path), keep_count=self.config.backup.keep_count,
             )
         except Exception:
             logger.exception("Backup failed — continuing without backup.")
@@ -372,7 +340,7 @@ class Container:
             logger.warning("Database cache warmup failed — continuing.")
 
     def _load_accounts(self) -> None:
-        """Load Pixiv accounts from the tokens table or config."""
+        """Load Pixiv accounts from the tokens table, falling back to the token file."""
         from sqlalchemy import select
 
         if self._session_factory is None:
@@ -388,20 +356,7 @@ class Container:
 
                 if tokens:
                     for t in tokens:
-                        self._account_pool.add_account(
-                            PixivAccount(
-                                token_info=TokenInfo(
-                                    token=t.token,
-                                    username=t.name,
-                                    premium=t.premium,
-                                    valid=t.valid,
-                                ),
-                                proxy_http=self.config.proxy.http,
-                                proxy_https=self.config.proxy.https,
-                                min_interval=self.config.pixiv_client.min_interval,
-                                cooling_duration=self.config.pixiv_client.cooling_duration,
-                            )
-                        )
+                        self._add_account(t.token, t.name, t.premium, t.valid)
                     logger.info(f"Loaded {len(tokens)} Pixiv accounts from database.")
                     return
         except Exception:
@@ -409,9 +364,8 @@ class Container:
 
         # Fallback: load from the token file
         try:
-            from pathlib import Path
             token_path = Path(self.config.path.token or "pixiv_token.py")
-            if token_path and token_path.exists():
+            if token_path.exists():
                 import importlib.util
                 spec = importlib.util.spec_from_file_location(
                     "token_module", token_path
@@ -421,14 +375,11 @@ class Container:
                     spec.loader.exec_module(mod)
                     if hasattr(mod, "TOKENS"):
                         for t_data in mod.TOKENS:
-                            self._account_pool.add_account(
-                                PixivAccount(
-                                    token_info=TokenInfo(**t_data),
-                                    proxy_http=self.config.proxy.http,
-                                    proxy_https=self.config.proxy.https,
-                                    min_interval=self.config.pixiv_client.min_interval,
-                                    cooling_duration=self.config.pixiv_client.cooling_duration,
-                                )
+                            self._add_account(
+                                t_data.get("token", ""),
+                                t_data.get("username", ""),
+                                t_data.get("premium", False),
+                                t_data.get("valid", True),
                             )
                         logger.info(
                             f"Loaded {len(mod.TOKENS)} accounts from token file."
@@ -438,3 +389,22 @@ class Container:
             logger.exception("Failed to load accounts from token file.")
 
         logger.warning("No Pixiv accounts loaded — API calls will fail.")
+
+    def _add_account(
+        self, token: str, username: str, premium: bool, valid: bool
+    ) -> None:
+        """Add a single account to the pool with the shared client settings."""
+        self._account_pool.add_account(
+            PixivAccount(
+                token_info=TokenInfo(
+                    token=token,
+                    username=username,
+                    premium=premium,
+                    valid=valid,
+                ),
+                proxy_http=self.config.proxy.http,
+                proxy_https=self.config.proxy.https,
+                min_interval=self.config.pixiv_client.min_interval,
+                cooling_duration=self.config.pixiv_client.cooling_duration,
+            )
+        )

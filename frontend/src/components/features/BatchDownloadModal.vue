@@ -2,7 +2,7 @@
 import { ref, watch, computed, onUnmounted } from 'vue'
 import BaseModal from '../ui/BaseModal.vue'
 import { novelApi } from '../../api'
-import { buildQueries } from '../../lib'
+import { buildQueries } from '../../lib/utils'
 import { useSystem } from '../../composables'
 
 const props = defineProps<{

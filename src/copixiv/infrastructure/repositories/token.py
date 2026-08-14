@@ -30,24 +30,10 @@ class SQLAlchemyTokenRepository(BaseRepository):
         return token
 
     async def update(self, token_id: int, token_data: dict) -> models.Token | None:
-        token = self.session.get(models.Token, token_id)
-        if token is None:
-            return None
-        for k, v in token_data.items():
-            if hasattr(token, k):
-                setattr(token, k, v)
-        return token
+        return self._update_attrs(models.Token, token_id, token_data)
 
     async def delete(self, token_id: int) -> bool:
-        token = self.session.get(models.Token, token_id)
-        if token is None:
-            return False
-        self.session.delete(token)
-        return True
+        return self._delete_by_id(models.Token, token_id)
 
     async def reorder(self, ids: list[int]) -> bool:
-        for idx, token_id in enumerate(ids):
-            token = self.session.get(models.Token, token_id)
-            if token is not None:
-                token.sort_index = idx
-        return True
+        return self._reorder(models.Token, "sort_index", ids)

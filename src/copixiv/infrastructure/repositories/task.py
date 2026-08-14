@@ -89,24 +89,10 @@ class SQLAlchemyTaskRepository(BaseRepository):
     ) -> models.ScheduledTask | None:
         if "config" in task_data and isinstance(task_data["config"], dict):
             task_data["config"] = json.dumps(task_data["config"], ensure_ascii=False)
-        task = self.session.get(models.ScheduledTask, task_id)
-        if task is None:
-            return None
-        for k, v in task_data.items():
-            if v is not None and hasattr(task, k):
-                setattr(task, k, v)
-        return task
+        return self._update_attrs(models.ScheduledTask, task_id, task_data)
 
     async def delete_scheduled(self, task_id: int) -> bool:
-        task = self.session.get(models.ScheduledTask, task_id)
-        if task is None:
-            return False
-        self.session.delete(task)
-        return True
+        return self._delete_by_id(models.ScheduledTask, task_id)
 
     async def reorder_scheduled(self, ids: list[int]) -> bool:
-        for idx, task_id in enumerate(ids):
-            task = self.session.get(models.ScheduledTask, task_id)
-            if task is not None:
-                task.sort_index = idx
-        return True
+        return self._reorder(models.ScheduledTask, "sort_index", ids)

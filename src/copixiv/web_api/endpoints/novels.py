@@ -7,20 +7,15 @@ from urllib.parse import quote
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Body, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
-from copixiv.web_api.deps import get_uow, parse_queries_json, parse_json_cursor
+from copixiv.web_api.deps import get_uow, parse_json_param
 from copixiv.web_api.schemas import BatchDownloadRequest
 from copixiv.infrastructure.database.uow import SqlUnitOfWork
 from copixiv.infrastructure.database import constants as C
 from copixiv.application.search_history.record import record_search_history
 from copixiv.application.novel import (
     BatchDownloadUseCase,
-    CountNovelsUseCase,
     DeleteNovelUseCase,
     GetNovelFileUseCase,
-    ListNovelsUseCase,
-    ListNovelsRequest,
-    ToggleFavouriteUseCase,
-    ToggleSpecialFollowUseCase,
 )
 
 router = APIRouter()
@@ -48,14 +43,18 @@ async def get_novels(
     min_like: int | None = None,
     min_text: int | None = None,
 ):
-    queries_dict = parse_queries_json(queries)
-    cursor_dict = parse_json_cursor(cursor)
+    queries_dict = parse_json_param(queries, "queries")
+    cursor_dict = parse_json_param(cursor, "cursor")
 
-    use_case = ListNovelsUseCase(uow.novels)
-    results = await use_case.execute(ListNovelsRequest(
-        queries=queries_dict, order_by=order_by, order_direction=order_direction,
-        cursor=cursor_dict, per_page=per_page, min_like=min_like, min_text=min_text,
-    ))
+    results = await uow.novels.get_novels(
+        queries=queries_dict,
+        order_by=order_by,
+        order_direction=order_direction,
+        cursor=cursor_dict,
+        per_page=per_page,
+        min_like=min_like,
+        min_text=min_text,
+    )
 
     if queries_dict and background_tasks:
         background_tasks.add_task(
@@ -72,9 +71,8 @@ async def count_novels(
     min_like: int | None = Query(None),
     min_text: int | None = Query(None),
 ):
-    use_case = CountNovelsUseCase(uow.novels)
-    total = await use_case.execute(
-        queries=parse_queries_json(queries),
+    total = await uow.novels.count_novels(
+        queries=parse_json_param(queries, "queries"),
         min_like=min_like, min_text=min_text,
     )
     return {"total": total}
@@ -82,12 +80,12 @@ async def count_novels(
 
 @router.post("/{novel_id}/favourite", status_code=204)
 async def toggle_favourite(novel_id: int, uow: SqlUnitOfWork = Depends(get_uow)):
-    await ToggleFavouriteUseCase(uow.novels).execute(novel_id)
+    await uow.novels.toggle_favourite(novel_id)
 
 
 @router.post("/author/{author_id}/follow", status_code=204)
 async def toggle_special_follow(author_id: int, uow: SqlUnitOfWork = Depends(get_uow)):
-    await ToggleSpecialFollowUseCase(uow.novels).execute(author_id)
+    await uow.novels.toggle_special_follow(author_id)
 
 
 @router.get("/{novel_id}/download")
@@ -110,10 +108,20 @@ async def batch_download_novels(
     body: BatchDownloadRequest = Body(...),
     uow: SqlUnitOfWork = Depends(get_uow),
 ):
-    queries = parse_queries_json(body.queries)
+    queries = parse_json_param(body.queries, "queries")
     naming = request.app.state.config.batch_download.naming
     use_case = BatchDownloadUseCase(uow.novels, naming)
-    result = await use_case.execute(body, queries)
+    result = await use_case.execute(
+        queries,
+        order_by=body.order_by,
+        order_direction=body.order_direction,
+        limit=body.limit,
+        min_like=body.min_like,
+        min_text=body.min_text,
+        format_mode=body.format_mode,
+        zip_name=body.zip_name,
+        naming_template=body.naming_template,
+    )
 
     headers = {
         "Content-Disposition": (
@@ -136,10 +144,18 @@ async def batch_download_preview(
     body: BatchDownloadRequest = Body(...),
     uow: SqlUnitOfWork = Depends(get_uow),
 ):
-    queries = parse_queries_json(body.queries)
+    queries = parse_json_param(body.queries, "queries")
     naming = request.app.state.config.batch_download.naming
     use_case = BatchDownloadUseCase(uow.novels, naming)
-    path = await use_case.preview(body, queries)
+    path = await use_case.preview(
+        queries,
+        order_by=body.order_by,
+        order_direction=body.order_direction,
+        min_like=body.min_like,
+        min_text=body.min_text,
+        format_mode=body.format_mode,
+        naming_template=body.naming_template,
+    )
     return {"path": path}
 
 

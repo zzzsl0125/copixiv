@@ -51,11 +51,7 @@ class SQLAlchemySearchHistoryRepository(BaseRepository):
         self.session.execute(stmt)
 
     async def delete(self, history_id: int) -> bool:
-        entry = self.session.get(models.SearchHistory, history_id)
-        if entry is None:
-            return False
-        self.session.delete(entry)
-        return True
+        return self._delete_by_id(models.SearchHistory, history_id)
 
     async def clear_all(self) -> int:
         """Delete every search-history row. Returns the number deleted."""

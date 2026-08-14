@@ -2,14 +2,11 @@
 
 from fastapi import APIRouter, Depends
 
+from copixiv.domain.exceptions import NotFoundError
 from copixiv.web_api.deps import get_uow
 from copixiv.infrastructure.database.uow import SqlUnitOfWork
 from copixiv.web_api.schemas import (
     TagPreferenceCreate, TagPreferenceUpdate, TagPreferenceResponse,
-)
-from copixiv.application.tag import (
-    ListPreferencesUseCase, CreatePreferenceUseCase, UpdatePreferenceUseCase,
-    DeletePreferenceUseCase, ReorderPreferencesUseCase,
 )
 
 router = APIRouter()
@@ -17,35 +14,32 @@ router = APIRouter()
 
 @router.get("/", response_model=list[TagPreferenceResponse])
 async def get_tag_preferences(uow: SqlUnitOfWork = Depends(get_uow)):
-    use_case = ListPreferencesUseCase(uow.tags)
-    return await use_case.execute()
+    return await uow.tags.get_preferences()
 
 
 @router.post("/", response_model=TagPreferenceResponse)
 async def create_tag_preference(data: TagPreferenceCreate, uow: SqlUnitOfWork = Depends(get_uow)):
-    use_case = CreatePreferenceUseCase(uow.tags)
-    result = await use_case.execute(data.model_dump())
-    return result
+    return await uow.tags.create_preference(data.model_dump())
 
 
 @router.put("/{pref_id}", response_model=TagPreferenceResponse)
 async def update_tag_preference(
     pref_id: int, data: TagPreferenceUpdate, uow: SqlUnitOfWork = Depends(get_uow)
 ):
-    use_case = UpdatePreferenceUseCase(uow.tags)
-    result = await use_case.execute(pref_id, data.model_dump(exclude_none=True))
+    result = await uow.tags.update_preference(pref_id, data.model_dump(exclude_none=True))
+    if result is None:
+        raise NotFoundError(f"Tag preference {pref_id} not found")
     return result
 
 
 @router.delete("/{pref_id}")
 async def delete_tag_preference(pref_id: int, uow: SqlUnitOfWork = Depends(get_uow)):
-    use_case = DeletePreferenceUseCase(uow.tags)
-    await use_case.execute(pref_id)
+    if not await uow.tags.delete_preference(pref_id):
+        raise NotFoundError(f"Tag preference {pref_id} not found")
     return {"ok": True}
 
 
 @router.post("/reorder")
 async def reorder_tag_preferences(ids: list[int], uow: SqlUnitOfWork = Depends(get_uow)):
-    use_case = ReorderPreferencesUseCase(uow.tags)
-    await use_case.execute(ids)
+    await uow.tags.reorder_preferences(ids)
     return {"ok": True}

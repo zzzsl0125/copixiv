@@ -18,8 +18,6 @@ class TokenInfo:
     username: str
     premium: bool = False
     valid: bool = True
-    id: int = 0
-    password: str = ""
 
 
 @dataclass

@@ -64,10 +64,6 @@ class TagAliasBase(BaseModel):
     target: str
 
 
-class TagAliasCreate(TagAliasBase):
-    pass
-
-
 class TagAliasResponse(TagAliasBase):
     id: int
     model_config = ConfigDict(from_attributes=True)
@@ -235,10 +231,6 @@ class TokenBase(BaseModel):
     token: str
     premium: bool = False
     valid: bool = True
-
-
-class TokenCreate(TokenBase):
-    pass
 
 
 class TokenUpdate(BaseModel):

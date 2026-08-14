@@ -470,18 +470,6 @@ class TestTaskManagerHelpers:
         tr = TaskResult(summary="done", new_novel_titles=["a"])
         assert TMS._normalize_result(tr) is tr
 
-    def test_normalize_result_list(self):
-        from copixiv.tasks.manager import TaskManagerSystem as TMS
-        r = TMS._normalize_result(["t1", "t2", "t3"])
-        assert r.new_novel_count == 3
-        assert r.new_novel_titles == ["t1", "t2", "t3"]
-
-    def test_normalize_result_int(self):
-        from copixiv.tasks.manager import TaskManagerSystem as TMS
-        r = TMS._normalize_result(42)
-        assert r.new_novel_count == 42
-        assert r.new_novel_titles == []
-
     def test_normalize_result_none(self):
         from copixiv.tasks.manager import TaskManagerSystem as TMS
         r = TMS._normalize_result(None)
