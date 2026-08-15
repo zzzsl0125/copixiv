@@ -2,8 +2,11 @@
 import { ref, watch, computed, onUnmounted } from 'vue'
 import BaseModal from '../ui/BaseModal.vue'
 import { novelApi } from '../../api'
-import { buildQueries } from '../../lib/utils'
+import { getApiErrorMessage } from '../../api/errors'
+import { buildQueries, downloadBlob, filenameFromContentDisposition } from '../../lib/utils'
 import { useSystem } from '../../composables'
+
+const DOWNLOAD_LIMIT_CAP = 500
 
 const props = defineProps<{
   isOpen: boolean
@@ -55,11 +58,8 @@ async function fetchPreview() {
     previewPath.value = result.path
   } catch (err: unknown) {
     if (seq !== previewSeq) return
-    const msg = err && typeof err === 'object' && 'response' in err
-      ? (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
-      : err instanceof Error ? err.message : '预览失败'
     previewPath.value = null
-    previewError.value = msg || '预览失败'
+    previewError.value = getApiErrorMessage(err, '预览失败')
   } finally {
     if (seq === previewSeq) previewLoading.value = false
   }
@@ -80,7 +80,9 @@ watch(
     () => props.min_like,
     () => props.min_text,
   ],
-  schedulePreview,
+  () => {
+    if (props.isOpen) schedulePreview()
+  },
 )
 
 onUnmounted(() => {
@@ -129,7 +131,6 @@ const orderByDisplay = computed(() => {
 })
 
 watch(() => props.isOpen, async (open) => {
-  console.log('[BatchDownloadModal] isOpen changed:', open, 'keyword:', props.keyword)
   if (!open) return
   totalCount.value = 0
   downloadLimit.value = 50
@@ -139,27 +140,26 @@ watch(() => props.isOpen, async (open) => {
   countLoading.value = true
   try {
     const queries = buildQueries(props.keyword)
-    console.log('[BatchDownloadModal] built queries:', queries)
     const result = await novelApi.countNovels({
       queries: Object.keys(queries).length > 0 ? queries : undefined,
       min_like: props.min_like,
       min_text: props.min_text,
     })
-    console.log('[BatchDownloadModal] count result:', result)
     totalCount.value = result.total
-    if (downloadLimit.value > result.total) downloadLimit.value = result.total || 1
+    downloadLimit.value = Math.min(50, result.total || 1)
     zipName.value = defaultZipName()
     schedulePreview()
-  } catch (err) {
-    console.error('[BatchDownloadModal] count failed:', err)
+  } catch (err: unknown) {
     totalCount.value = 0
+    emit('download-error', getApiErrorMessage(err, '统计匹配数量失败'))
   } finally {
     countLoading.value = false
   }
 })
 
 async function handleConfirm() {
-  if (totalCount.value === 0) return
+  if (loading.value || totalCount.value === 0) return
+  const limit = Math.min(Math.max(Math.floor(downloadLimit.value) || 1, 1), DOWNLOAD_LIMIT_CAP)
   loading.value = true
   try {
     const queries = buildQueries(props.keyword)
@@ -170,26 +170,18 @@ async function handleConfirm() {
       order_direction: props.order_direction,
       min_like: props.min_like,
       min_text: props.min_text,
-      limit: downloadLimit.value,
+      limit,
       format_mode: formatMode.value,
       zip_name: zipName.value || undefined,
       naming_template: namingTemplate.value || undefined,
     })
 
     const blob = response.data as Blob
-    const disposition = response.headers['content-disposition'] || ''
-    const match = disposition.match(/filename\*=UTF-8''(.+)/)
-    let filename = 'batch_download.zip'
-    if (match) filename = decodeURIComponent(match[1])
-
-    const url = window.URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = filename
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    window.URL.revokeObjectURL(url)
+    const filename = filenameFromContentDisposition(
+      response.headers['content-disposition'] as string | undefined,
+      'batch_download.zip',
+    )
+    downloadBlob(blob, filename)
 
     emit('download-success', filename)
     emit('close')
@@ -243,10 +235,11 @@ async function handleConfirm() {
       <div>
         <label class="block text-sm font-medium text-gray-700 mb-1">下载数量</label>
         <div class="flex items-center gap-2">
-          <input v-model.number="downloadLimit" type="number" min="1" :max="totalCount" class="block w-24 px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm" />
+          <input v-model.number="downloadLimit" type="number" min="1" :max="Math.min(totalCount, DOWNLOAD_LIMIT_CAP)" class="block w-24 px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm" />
           <span class="text-sm text-gray-500">/ 共 {{ totalCount }} 篇</span>
-          <button v-if="totalCount > 50" type="button" class="text-sm text-blue-600 hover:text-blue-800" @click="downloadLimit = totalCount">下载全部</button>
+          <button v-if="totalCount > DOWNLOAD_LIMIT_CAP" type="button" class="text-sm text-blue-600 hover:text-blue-800" @click="downloadLimit = DOWNLOAD_LIMIT_CAP">下载全部（最多 500）</button>
         </div>
+        <p v-if="totalCount > DOWNLOAD_LIMIT_CAP" class="mt-1 text-xs text-gray-400">单次最多下载 {{ DOWNLOAD_LIMIT_CAP }} 篇，可分批下载。</p>
       </div>
       <div>
         <label class="block text-sm font-medium text-gray-700 mb-1">文件格式</label>

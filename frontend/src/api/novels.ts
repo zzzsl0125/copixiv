@@ -1,4 +1,4 @@
-import { apiClient, downloadBaseUrl } from './client'
+import { apiClient } from './client'
 import type { Novel, GetNovelsParams } from '../types'
 
 export const novelApi = {
@@ -22,8 +22,12 @@ export const novelApi = {
     await apiClient.post(`/novels/author/${authorId}/follow`)
   },
 
-  downloadUrl(novelId: number, format: 'txt' | 'epub' = 'txt') {
-    return `${downloadBaseUrl}/novels/${novelId}/download?format=${format}`
+  /** Blob download through the shared client so X-API-Key can be attached. */
+  async downloadNovel(novelId: number, format: 'txt' | 'epub' = 'txt') {
+    return apiClient.get(`/novels/${novelId}/download`, {
+      params: { format },
+      responseType: 'blob',
+    })
   },
 
   async countNovels(params: GetNovelsParams) {

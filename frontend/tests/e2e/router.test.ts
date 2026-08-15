@@ -1,7 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { createRouter, createWebHistory } from 'vue-router'
-import { mount } from '@vue/test-utils'
-import { createApp, h, type Component } from 'vue'
 
 /**
  * E2E-style tests: mount full views and verify rendering.
@@ -30,14 +28,6 @@ const router = createRouter({
     { path: '/tokens', name: 'tokens', component: { template: '<div>TokensPage</div>' } },
   ],
 })
-
-function mountWithRouter(component: Component) {
-  return mount(component, {
-    global: {
-      plugins: [router],
-    },
-  })
-}
 
 describe('Router configuration', () => {
   beforeEach(async () => {

@@ -1,8 +1,16 @@
 <script setup lang="ts">
-import { computed, type PropType } from 'vue'
+import { computed, ref, type PropType } from 'vue'
 import { novelApi } from '../../api'
-import { formatNumber } from '../../lib/utils'
+import { getApiErrorMessage } from '../../api/errors'
+import { downloadBlob, filenameFromContentDisposition, formatNumber } from '../../lib/utils'
+import { useToast } from '../../composables'
 import type { Novel, TagPreference } from '../../types'
+
+export interface NovelStateChange {
+  id: number
+  field: 'is_favourite' | 'is_special_follow'
+  value: number
+}
 
 const props = defineProps({
   novel: { type: Object as PropType<Novel>, required: true },
@@ -13,9 +21,13 @@ const props = defineProps({
 const emit = defineEmits<{
   (e: 'search', type: 'author' | 'series' | 'tag', value: string | number): void
   (e: 'toggle-active', id: number | string): void
+  (e: 'state-changed', payload: NovelStateChange): void
 }>()
 
+const toast = useToast()
+const downloading = ref(false)
 const showMobileActions = computed(() => props.isActive)
+const hasEpubReady = computed(() => props.novel.has_epub === 2)
 
 const toggleActions = (e: Event) => {
   e.stopPropagation()
@@ -40,9 +52,13 @@ const handleToggleFavourite = async (e: Event) => {
   e.stopPropagation()
   try {
     await novelApi.toggleFavourite(props.novel.id)
-    props.novel.is_favourite = props.novel.is_favourite ? 0 : 1
-  } catch (err) {
-    console.error('Failed to toggle favourite', err)
+    emit('state-changed', {
+      id: props.novel.id,
+      field: 'is_favourite',
+      value: props.novel.is_favourite ? 0 : 1,
+    })
+  } catch (err: unknown) {
+    toast.error(getApiErrorMessage(err, '收藏操作失败'))
   }
 }
 
@@ -51,9 +67,35 @@ const handleToggleFollow = async (e: Event) => {
   if (!props.novel.author_id) return
   try {
     await novelApi.toggleSpecialFollow(props.novel.author_id)
-    props.novel.is_special_follow = props.novel.is_special_follow ? 0 : 1
-  } catch (err) {
-    console.error('Failed to toggle follow', err)
+    emit('state-changed', {
+      id: props.novel.id,
+      field: 'is_special_follow',
+      value: props.novel.is_special_follow ? 0 : 1,
+    })
+  } catch (err: unknown) {
+    toast.error(getApiErrorMessage(err, '追更操作失败'))
+  }
+}
+
+const handleDownload = async (e: Event) => {
+  e.stopPropagation()
+  if (downloading.value) return
+  downloading.value = true
+  try {
+    const response = await novelApi.downloadNovel(
+      props.novel.id,
+      hasEpubReady.value ? 'epub' : 'txt',
+    )
+    const blob = response.data as Blob
+    const filename = filenameFromContentDisposition(
+      response.headers['content-disposition'] as string | undefined,
+      `${props.novel.id}.txt`,
+    )
+    downloadBlob(blob, filename)
+  } catch (err: unknown) {
+    toast.error(getApiErrorMessage(err, '下载失败'))
+  } finally {
+    downloading.value = false
   }
 }
 
@@ -79,6 +121,14 @@ const getTagClass = (tag: string) => {
     :class="likeBorderClass"
     @click="toggleActions"
   >
+    <button
+      type="button"
+      class="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-10 focus:px-3 focus:py-1.5 focus:rounded-md focus:bg-white focus:border focus:border-gray-300 focus:text-sm"
+      :aria-expanded="isActive"
+      @click="toggleActions"
+    >
+      {{ isActive ? '收起操作' : '展开操作' }}
+    </button>
     <div class="p-5 grow flex flex-col">
       <div class="mb-1">
         <a
@@ -130,7 +180,7 @@ const getTagClass = (tag: string) => {
           <span class="flex items-center gap-1" title="字数">📝 {{ formatNumber(novel.text) }}</span>
           <span class="flex items-center gap-1" title="日期">📝 {{ (novel.create_time || '2016-01-01').substring(0, 10) }}</span>
         </div>
-        <span v-if="novel.has_epub" class="px-1.5 py-0.5 rounded bg-green-100 text-green-800 text-[10px] font-bold">EPUB</span>
+        <span v-if="hasEpubReady" class="px-1.5 py-0.5 rounded bg-green-100 text-green-800 text-[10px] font-bold">EPUB</span>
       </div>
 
       <div
@@ -139,14 +189,13 @@ const getTagClass = (tag: string) => {
         @click="stopPropagation"
       >
         <div class="flex-1 flex gap-2 h-full">
-          <a
-            :href="novelApi.downloadUrl(novel.id, novel.has_epub ? 'epub' : 'txt')"
-            target="_blank"
-            class="flex-1 flex items-center justify-center text-xs font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors cursor-pointer"
-            @click="stopPropagation"
+          <button
+            class="flex-1 flex items-center justify-center text-xs font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-wait"
+            :disabled="downloading"
+            @click="handleDownload"
           >
-            下载
-          </a>
+            {{ downloading ? '下载中…' : '下载' }}
+          </button>
           <button
             class="flex-1 flex items-center justify-center text-xs font-medium rounded-lg transition-colors cursor-pointer"
             :class="novel.is_favourite ? 'text-white bg-red-500 hover:bg-red-600' : 'text-gray-700 bg-gray-100 hover:bg-gray-200'"
@@ -160,12 +209,6 @@ const getTagClass = (tag: string) => {
             @click="handleToggleFollow"
           >
             {{ novel.is_special_follow ? '已追更' : '追更' }}
-          </button>
-          <button
-            class="flex-1 flex items-center justify-center text-xs font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors cursor-pointer"
-            @click="stopPropagation"
-          >
-            编辑
           </button>
         </div>
       </div>

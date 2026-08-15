@@ -32,6 +32,14 @@ const onDragEnd = () => {
   emit('reorder', localItems.value)
 }
 
+const moveItem = (index: number, delta: number) => {
+  const nextIndex = index + delta
+  if (nextIndex < 0 || nextIndex >= localItems.value.length) return
+  const [item] = localItems.value.splice(index, 1)
+  localItems.value.splice(nextIndex, 0, item)
+  emit('reorder', localItems.value)
+}
+
 const getAlignClass = (align?: 'left' | 'center' | 'right') => {
   if (align === 'right') return 'text-right'
   if (align === 'center') return 'text-center'
@@ -77,7 +85,16 @@ const getAlignClass = (align?: 'left' | 'center' | 'right') => {
           <template #item="{ element, index }">
             <tr class="hover:bg-gray-50 transition-colors group">
               <td class="px-6 py-4 whitespace-nowrap text-gray-400 cursor-move drag-handle select-none">
-                <GripVertical class="w-5 h-5 pointer-events-none" />
+                <button
+                  type="button"
+                  class="inline-flex focus:outline-none focus-visible:text-blue-600"
+                  :aria-label="`第 ${index + 1} 行，方向键上/下可调整顺序`"
+                  @click.stop
+                  @keydown.arrow-up.prevent="moveItem(index, -1)"
+                  @keydown.arrow-down.prevent="moveItem(index, 1)"
+                >
+                  <GripVertical class="w-5 h-5 pointer-events-none" aria-hidden="true" />
+                </button>
               </td>
               <td
                 v-for="col in columns"

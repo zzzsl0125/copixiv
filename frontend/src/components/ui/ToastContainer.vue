@@ -6,7 +6,7 @@ defineProps<{ toasts: Toast[] }>()
 </script>
 
 <template>
-  <div class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 max-w-sm">
+  <div class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 max-w-sm" role="status" aria-live="polite">
     <div
       v-for="toast in toasts"
       :key="toast.id"

@@ -2,6 +2,8 @@
 import { ref, onMounted, computed, watch } from 'vue'
 import { Sparkles } from '@lucide/vue'
 import { tagPreferenceApi, tagAliasApi } from '../api'
+import { getApiErrorMessage } from '../api/errors'
+import { useToast } from '../composables'
 import type { TagPreference, TagAlias } from '../types'
 import PageHeader from '../components/features/PageHeader.vue'
 import SectionHeader from '../components/features/SectionHeader.vue'
@@ -10,7 +12,10 @@ import BaseModal from '../components/ui/BaseModal.vue'
 import AppInput from '../components/ui/AppInput.vue'
 import AliasSuggestModal from '../components/features/AliasSuggestModal.vue'
 
+defineOptions({ inheritAttrs: false })
 defineEmits<{ (e: 'toggle-sidebar'): void }>()
+
+const toast = useToast()
 
 const allTags = ref<TagPreference[]>([])
 const allAliases = ref<TagAlias[]>([])
@@ -55,13 +60,15 @@ async function fetchData() {
     } else {
       allTags.value = await tagPreferenceApi.getTagPreferences()
     }
-  } catch (err) { console.error('Failed to fetch tags/aliases:', err) }
-  finally { loading.value = false }
+  } catch (err: unknown) {
+    toast.error(getApiErrorMessage(err, '标签/别名加载失败'))
+  } finally { loading.value = false }
 }
 
 watch(activeTab, () => { fetchData() })
 
 async function saveTag() {
+  if (saving.value) return
   if (activeTab.value === 'alias') {
     if (!aliasSource.value.trim() || !aliasTarget.value.trim()) return
     saving.value = true
@@ -89,7 +96,7 @@ async function saveTag() {
       }
       await fetchData()
       closeModal()
-    } catch { alert('保存失败') }
+    } catch (err: unknown) { toast.error(getApiErrorMessage(err, '保存失败')) }
     finally { saving.value = false }
   } else {
     if (!currentTag.value.trim()) return
@@ -98,15 +105,15 @@ async function saveTag() {
       await tagPreferenceApi.setTagPreference(currentTag.value.trim(), activeTab.value as 'favourite' | 'blocked')
       await fetchData()
       closeModal()
-    } catch { alert('添加失败') }
+    } catch (err: unknown) { toast.error(getApiErrorMessage(err, '添加失败')) }
     finally { saving.value = false }
   }
 }
 
 async function removeTag(tag: TagPreference) {
   if (!confirm(`确定要删除标签 "${tag.tag}" 吗？`)) return
-  try { await tagPreferenceApi.deleteTagPreference(tag.tag); await fetchData() }
-  catch { alert('删除失败') }
+  try { await tagPreferenceApi.deleteTagPreference(tag.id); await fetchData() }
+  catch (err: unknown) { toast.error(getApiErrorMessage(err, '删除失败')) }
 }
 
 async function removeAliasGroup(group: GroupedAlias) {
@@ -114,7 +121,7 @@ async function removeAliasGroup(group: GroupedAlias) {
   try {
     for (const alias of group.aliases) await tagAliasApi.deleteTagAlias(alias.id)
     await fetchData()
-  } catch { alert('删除失败') }
+  } catch (err: unknown) { toast.error(getApiErrorMessage(err, '删除失败')) }
 }
 
 async function onDragEnd(updatedTags: unknown[]) {
@@ -126,7 +133,10 @@ async function onDragEnd(updatedTags: unknown[]) {
   try {
     await tagPreferenceApi.reorderTagPreferences(newOrderedTags.map(t => t.id))
     await fetchData()
-  } catch { alert('排序失败'); await fetchData() }
+  } catch (err: unknown) {
+    toast.error(getApiErrorMessage(err, '排序失败'))
+    await fetchData()
+  }
 }
 
 const openModal = () => {
@@ -200,12 +210,12 @@ const currentColumns = computed(() => activeTab.value === 'alias' ? aliasColumns
 
     <BaseModal :is-open="showModal" :title="activeTab === 'favourite' ? '添加喜爱标签' : activeTab === 'blocked' ? '添加厌恶标签' : (isEditingAlias ? '编辑别名映射' : '添加别名映射')" :loading="saving" @close="closeModal" @confirm="saveTag">
       <template v-if="activeTab !== 'alias'">
-        <AppInput :model-value="currentTag" @update:model-value="currentTag = $event" label="标签名称" required @keyup.enter="saveTag" />
+        <AppInput :model-value="currentTag" @update:model-value="currentTag = $event" label="标签名称" required />
       </template>
       <template v-else>
         <div class="space-y-4">
           <AppInput :model-value="aliasTarget" @update:model-value="aliasTarget = $event" label="聚合标签(目标)" placeholder="例如: NTR" required />
-          <AppInput :model-value="aliasSource" @update:model-value="aliasSource = $event" label="被聚合标签(原标签)" placeholder="例如: ntr, 绿帽 (使用逗号分隔多个)" required @keyup.enter="saveTag" />
+          <AppInput :model-value="aliasSource" @update:model-value="aliasSource = $event" label="被聚合标签(原标签)" placeholder="例如: ntr, 绿帽 (使用逗号分隔多个)" required />
         </div>
       </template>
     </BaseModal>

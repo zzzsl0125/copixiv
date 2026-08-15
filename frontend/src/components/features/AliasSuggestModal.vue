@@ -4,6 +4,8 @@ import BaseModal from '../ui/BaseModal.vue'
 import AppInput from '../ui/AppInput.vue'
 import AppCheckbox from '../ui/AppCheckbox.vue'
 import { tagAliasApi } from '../../api'
+import { getApiErrorMessage } from '../../api/errors'
+import { useToast } from '../../composables'
 import type { TagAliasSuggest } from '../../types'
 
 const props = defineProps<{
@@ -16,6 +18,7 @@ const emit = defineEmits<{
   (e: 'updated'): void
 }>()
 
+const toast = useToast()
 const loading = ref(false)
 const saving = ref(false)
 const suggestions = ref<TagAliasSuggest[]>([])
@@ -32,8 +35,9 @@ const fetchSuggestions = async () => {
     suggestions.value = data.items
     currentOffset.value = data.next_offset
     resetForm()
-  } catch { /* ignore */ }
-  finally { loading.value = false }
+  } catch (err: unknown) {
+    toast.error(getApiErrorMessage(err, '别名建议加载失败'))
+  } finally { loading.value = false }
 }
 
 const resetForm = () => {
@@ -74,7 +78,7 @@ const handleSave = async () => {
       }
     }
     nextSuggestion()
-  } catch { alert('保存失败') }
+  } catch (err: unknown) { toast.error(getApiErrorMessage(err, '保存失败')) }
   finally { saving.value = false }
 }
 

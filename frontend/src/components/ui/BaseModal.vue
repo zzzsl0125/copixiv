@@ -1,12 +1,12 @@
 <template>
-  <div v-if="isOpen" class="fixed inset-0 z-50 flex items-center justify-center" aria-labelledby="modal-title" role="dialog" aria-modal="true" data-testid="base-modal">
+  <div v-if="isOpen" class="fixed inset-0 z-50 flex items-center justify-center" :aria-labelledby="titleId" role="dialog" aria-modal="true" data-testid="base-modal">
     <!-- backdrop -->
     <div class="absolute inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true" @click="close"></div>
     <!-- dialog panel -->
-    <div class="relative bg-white rounded-lg text-left overflow-hidden shadow-xl transform transition-all max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto">
+    <div ref="panelRef" tabindex="-1" class="relative bg-white rounded-lg text-left overflow-hidden shadow-xl transform transition-all max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto focus:outline-none">
       <form @submit.prevent="confirm">
         <div class="bg-white px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
-          <h3 class="text-lg leading-6 font-medium text-gray-900 mb-4" id="modal-title">
+          <h3 class="text-lg leading-6 font-medium text-gray-900 mb-4" :id="titleId">
             {{ title }}
           </h3>
           <div class="space-y-4">
@@ -28,7 +28,7 @@
 </template>
 
 <script setup lang="ts">
-import { watch } from 'vue'
+import { ref, watch, nextTick, onUnmounted, useId } from 'vue'
 
 const props = withDefaults(defineProps<{
   isOpen: boolean
@@ -42,21 +42,58 @@ const props = withDefaults(defineProps<{
   cancelText: '取消',
 })
 
-watch(() => props.isOpen, (val) => {
-  console.log('[BaseModal] isOpen:', val, 'title:', props.title)
-})
-
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'confirm'): void
 }>()
 
+const titleId = useId()
+const panelRef = ref<HTMLElement | null>(null)
+
+const FOCUSABLE =
+  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+
+const handleKeydown = (event: KeyboardEvent) => {
+  if (event.key === 'Escape') {
+    close()
+    return
+  }
+  if (event.key !== 'Tab' || !panelRef.value) return
+  const focusable = Array.from(
+    panelRef.value.querySelectorAll<HTMLElement>(FOCUSABLE),
+  ).filter((el) => el.offsetParent !== null)
+  if (focusable.length === 0) return
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
+}
+
+watch(() => props.isOpen, (open) => {
+  if (open) {
+    document.addEventListener('keydown', handleKeydown)
+    nextTick(() => panelRef.value?.focus())
+  } else {
+    document.removeEventListener('keydown', handleKeydown)
+  }
+}, { immediate: true })
+
+onUnmounted(() => {
+  document.removeEventListener('keydown', handleKeydown)
+})
+
 const close = () => {
-  console.log('[BaseModal] close() called (backdrop click or cancel button)')
+  if (props.loading) return
   emit('close')
 }
+
 const confirm = () => {
-  console.log('[BaseModal] confirm() called (form submit)')
+  if (props.loading) return
   emit('confirm')
 }
 </script>

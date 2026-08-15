@@ -1,4 +1,5 @@
 import { ref, type Ref } from 'vue'
+import { getApiErrorMessage } from '../api/errors'
 
 export interface CursorPaginationResult<T> {
   items: Ref<T[]>
@@ -20,16 +21,31 @@ export function useCursorPagination<T>(
   const cursor = ref<unknown>(null)
   const noMoreData = ref(false)
 
+  // A reload requested while a fetch is in flight invalidates that fetch and
+  // is executed once it settles — otherwise a search during the first load
+  // would be swallowed by the `loading` guard and stale results would win.
+  let requestSeq = 0
+  let pendingReload = false
+
   const loadData = async (isLoadMore = false) => {
-    if (loading.value) return
+    if (loading.value) {
+      if (!isLoadMore) {
+        requestSeq++
+        pendingReload = true
+      }
+      return
+    }
     if (isLoadMore && noMoreData.value) return
 
+    const seq = ++requestSeq
     loading.value = true
     error.value = null
 
     try {
       const currentCursor = isLoadMore ? cursor.value : undefined
       const res = await fetcher(currentCursor)
+      if (seq !== requestSeq) return
+
       const newItems = res.items || []
 
       if (isLoadMore) {
@@ -46,10 +62,16 @@ export function useCursorPagination<T>(
         noMoreData.value = true
       }
     } catch (err: unknown) {
-      console.error(err)
-      error.value = err instanceof Error ? err.message : '加载失败，请检查网络或后端状态'
+      if (seq !== requestSeq) return
+      error.value = getApiErrorMessage(err, '加载失败，请检查网络或后端状态')
     } finally {
-      loading.value = false
+      if (seq === requestSeq) {
+        loading.value = false
+      } else if (pendingReload) {
+        pendingReload = false
+        loading.value = false
+        void loadData(false)
+      }
     }
   }
 

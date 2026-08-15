@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { ref, watch, onMounted, computed } from 'vue'
 import { taskApi } from '../../api'
+import { getApiErrorMessage } from '../../api/errors'
 import type { ScheduledTask, TaskMethod } from '../../types'
+import { useToast } from '../../composables'
 import BaseModal from '../ui/BaseModal.vue'
 import AppInput from '../ui/AppInput.vue'
 import AppCheckbox from '../ui/AppCheckbox.vue'
@@ -9,6 +11,7 @@ import AppCheckbox from '../ui/AppCheckbox.vue'
 const props = defineProps<{
   isOpen: boolean
   task: ScheduledTask | null
+  loading?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -16,6 +19,7 @@ const emit = defineEmits<{
   (e: 'save', payload: Record<string, unknown>): void
 }>()
 
+const toast = useToast()
 const availableMethods = ref<TaskMethod[]>([])
 const dynamicParams = ref<Record<string, unknown>>({})
 const cronMode = ref<'daily' | 'weekly' | 'monthly' | 'custom'>('daily')
@@ -33,12 +37,10 @@ const formState = ref({
 })
 
 onMounted(async () => {
-  console.log('[TaskEditModal] mounted, fetching task methods...')
   try {
     availableMethods.value = await taskApi.getTaskMethods()
-    console.log('[TaskEditModal] loaded methods:', availableMethods.value.length)
-  } catch (err) {
-    console.error('[TaskEditModal] Failed to load task methods:', err)
+  } catch (err: unknown) {
+    toast.error(getApiErrorMessage(err, '任务方法加载失败'))
   }
 })
 
@@ -96,11 +98,8 @@ watch([cronMode, cronTime, cronWeekDay, cronMonthDay], () => {
 }, { deep: true })
 
 watch(() => props.isOpen, (newVal) => {
-  console.log('[TaskEditModal] isOpen changed:', newVal, 'task:', props.task?.name || 'null (create mode)')
   if (newVal) {
-    console.log('[TaskEditModal] availableMethods count:', availableMethods.value.length)
     if (props.task) {
-      console.log('[TaskEditModal] editing task data:', JSON.parse(JSON.stringify(props.task)))
       formState.value = {
         name: props.task.name,
         task: props.task.task,
@@ -109,7 +108,6 @@ watch(() => props.isOpen, (newVal) => {
         config: props.task.config ? JSON.stringify(props.task.config, null, 2) : '{}',
         is_enabled: props.task.is_enabled,
       }
-      console.log('[TaskEditModal] formState set:', { ...formState.value, params: '(see above)' })
       parseCronToUI(props.task.cron)
       if (props.task.params) dynamicParams.value = { ...props.task.params }
     } else {
@@ -122,7 +120,6 @@ watch(() => props.isOpen, (newVal) => {
 })
 
 const handleSave = () => {
-  console.log('[TaskEditModal] handleSave called')
   try {
     const paramsObj = JSON.parse(formState.value.params)
     const configObj = JSON.parse(formState.value.config || '{}')
@@ -143,9 +140,8 @@ const handleSave = () => {
       config: configObj,
       is_enabled: formState.value.is_enabled,
     })
-  } catch (err) {
-    console.error('Failed to parse params:', err)
-    alert('保存失败，请检查参数格式')
+  } catch (err: unknown) {
+    toast.error(getApiErrorMessage(err, '参数格式错误，请检查 JSON'))
   }
 }
 
@@ -161,7 +157,7 @@ const weekDays = [
 </script>
 
 <template>
-  <BaseModal :is-open="isOpen" :title="task ? '编辑计划任务' : '新增计划任务'" @close="emit('close')" @confirm="handleSave">
+  <BaseModal :is-open="isOpen" :title="task ? '编辑计划任务' : '新增计划任务'" :loading="loading" @close="emit('close')" @confirm="handleSave">
     <AppInput v-model="formState.name" label="任务名称" placeholder="给任务起个名字" />
     <div>
       <label class="block text-sm font-medium text-gray-700">任务方法</label>

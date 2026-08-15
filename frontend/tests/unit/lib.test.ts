@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildQueries, formatNumber, safeFilename } from '../../src/lib/utils'
+import { buildQueries, formatNumber, filenameFromContentDisposition } from '../../src/lib/utils'
 
 describe('buildQueries', () => {
   it('returns empty object for blank input', () => {
@@ -42,12 +42,22 @@ describe('formatNumber', () => {
   })
 })
 
-describe('safeFilename', () => {
-  it('replaces illegal characters', () => {
-    expect(safeFilename('a<b>c:d"e/f\\g|h?i*j')).toBe('a_b_c_d_e_f_g_h_i_j')
+describe('filenameFromContentDisposition', () => {
+  it('decodes filename*=UTF-8 values', () => {
+    expect(
+      filenameFromContentDisposition(
+        "attachment; filename*=UTF-8''%E6%A0%87%E9%A2%98.zip",
+        'fallback.zip',
+      ),
+    ).toBe('标题.zip')
   })
 
-  it('returns "untitled" for whitespace-only input', () => {
-    expect(safeFilename('   ')).toBe('untitled')
+  it('falls back to plain filename', () => {
+    expect(filenameFromContentDisposition('attachment; filename="a.zip"', 'fallback')).toBe('a.zip')
+  })
+
+  it('returns the fallback for missing or malformed headers', () => {
+    expect(filenameFromContentDisposition(undefined, 'fallback.zip')).toBe('fallback.zip')
+    expect(filenameFromContentDisposition('', 'fallback.zip')).toBe('fallback.zip')
   })
 })

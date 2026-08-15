@@ -132,6 +132,10 @@ class TestNovelsList:
         assert novel["is_favourite"] == 0
         assert novel["is_special_follow"] == 0
         assert novel["has_epub"] == 0
+        # f453b20 regression guard: the response_model must keep author_id,
+        # otherwise the frontend author-search / special-follow buttons break.
+        assert novel["author_id"] == 2
+        assert [n["author_id"] for n in body["novels"]] == [2, 1]
         assert isinstance(novel["tags"], list)
 
     def test_cursor_pagination_roundtrip(self, client, session_factory, tmp_path):
@@ -210,6 +214,17 @@ class TestBatchDownload:
         names = sorted(zf.namelist())
         assert names == ["作者1/系列/#1_标题1_1.txt", "作者2/系列/#1_标题2_2.txt"]
         assert zf.read("作者1/系列/#1_标题1_1.txt").decode() == "正文1"
+
+    def test_accepts_limit_500(self, client, session_factory, tmp_path):
+        p = tmp_path / "1.txt"
+        p.write_text("正文", encoding="utf-8")
+        _seed_novel(session_factory, 1, "标题", str(p))
+
+        r = client.post("/api/novels/batch-download", json={
+            "order_by": "id", "limit": 500, "format_mode": "txt",
+        })
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("application/zip")
 
     def test_empty_match_maps_to_404(self, client):
         r = client.post("/api/novels/batch-download", json={

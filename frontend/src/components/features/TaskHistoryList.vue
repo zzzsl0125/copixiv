@@ -58,6 +58,10 @@ const formatDate = (dateStr?: string | null) => {
   if (!dateStr) return '-'
   return new Date(dateStr).toLocaleString()
 }
+
+/** Backend stores status values lowercase ("success"/"failed"/...). */
+const statusIs = (status: string, ...names: string[]) =>
+  names.includes(status.toLowerCase())
 </script>
 
 <template>
@@ -72,10 +76,10 @@ const formatDate = (dateStr?: string | null) => {
           <div class="flex items-center justify-between w-full">
             <div class="flex items-center min-w-0 flex-1">
               <div class="shrink-0 mr-4">
-                <div v-if="item.status === 'SUCCESS'" class="text-green-500"><CheckCircle class="w-8 h-8" /></div>
-                <div v-else-if="item.status === 'FAILED'" class="text-red-500"><XCircle class="w-8 h-8" /></div>
-                <div v-else-if="item.status === 'RUNNING'" class="text-blue-500 animate-spin"><RefreshCw class="w-8 h-8" /></div>
-                <div v-else-if="item.status === 'PENDING'" class="text-yellow-500"><Clock class="w-8 h-8" /></div>
+                <div v-if="statusIs(item.status, 'success')" class="text-green-500"><CheckCircle class="w-8 h-8" /></div>
+                <div v-else-if="statusIs(item.status, 'failed')" class="text-red-500"><XCircle class="w-8 h-8" /></div>
+                <div v-else-if="statusIs(item.status, 'running')" class="text-blue-500 animate-spin"><RefreshCw class="w-8 h-8" /></div>
+                <div v-else-if="statusIs(item.status, 'pending')" class="text-yellow-500"><Clock class="w-8 h-8" /></div>
                 <div v-else class="text-gray-400"><Clock class="w-8 h-8" /></div>
               </div>
               <div class="min-w-0 flex-1 ml-4 grid grid-cols-3 gap-4 items-center">
@@ -102,7 +106,7 @@ const formatDate = (dateStr?: string | null) => {
                       <FileText class="w-3.5 h-3.5 mr-1" /> 清单
                     </button>
                     <button
-                      v-if="item.result || item.status === 'FAILED'"
+                      v-if="item.result || statusIs(item.status, 'failed')"
                       @click="showLog(item.result || '')"
                       class="inline-flex items-center px-2.5 py-1.5 border border-gray-300 shadow-sm text-xs font-medium rounded text-gray-700 bg-white hover:bg-gray-50 focus:outline-none transition-colors"
                     >

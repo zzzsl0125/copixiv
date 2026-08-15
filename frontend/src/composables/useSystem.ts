@@ -6,19 +6,31 @@ const systemConfig = ref<SystemConfig | null>(null)
 const loading = ref(false)
 const error = ref<unknown>(null)
 
+// Dedupe concurrent callers (App + BatchDownloadModal both call useSystem()):
+// they share one in-flight request instead of firing duplicate GETs.
+let inflight: Promise<SystemConfig | null> | null = null
+
 export function useSystem() {
-  const fetchConfig = async () => {
-    if (systemConfig.value) return
+  const fetchConfig = (): Promise<SystemConfig | null> => {
+    if (systemConfig.value) return Promise.resolve(systemConfig.value)
+    if (inflight) return inflight
 
     loading.value = true
     error.value = null
-    try {
-      systemConfig.value = await systemApi.getConfig()
-    } catch (e) {
-      error.value = e
-    } finally {
-      loading.value = false
-    }
+    inflight = (async () => {
+      try {
+        systemConfig.value = await systemApi.getConfig()
+        return systemConfig.value
+      } catch (e) {
+        error.value = e
+        return null
+      } finally {
+        loading.value = false
+        inflight = null
+      }
+    })()
+
+    return inflight
   }
 
   onMounted(fetchConfig)

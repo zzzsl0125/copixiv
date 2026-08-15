@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { ref, toRef, onMounted } from 'vue'
-import NovelCard from '../components/features/NovelCard.vue'
+import NovelCard, { type NovelStateChange } from '../components/features/NovelCard.vue'
 import NovelHeader from '../components/features/NovelHeader.vue'
 import LoadMore from '../components/features/LoadMore.vue'
 import EmptyState from '../components/ui/EmptyState.vue'
 import { useMasonryLayout } from '../composables/useMasonryLayout'
 import { tagPreferenceApi } from '../api'
+import { getApiErrorMessage } from '../api/errors'
+import { useToast } from '../composables'
 import type { Novel, NovelFilters, TagPreference } from '../types'
 
 const props = defineProps<{
@@ -24,8 +26,10 @@ const emit = defineEmits<{
   (e: 'update:filters', filters: Partial<NovelFilters>): void
   (e: 'load-more'): void
   (e: 'logo-click'): void
+  (e: 'novel-state-changed', payload: NovelStateChange): void
 }>()
 
+const toast = useToast()
 const columnRefs = ref<HTMLElement[]>([])
 const activeCardId = ref<number | string | null>(null)
 const tagPreferences = ref<TagPreference[]>([])
@@ -38,8 +42,8 @@ const { columns } = useMasonryLayout(
 const fetchTagPreferences = async () => {
   try {
     tagPreferences.value = await tagPreferenceApi.getTagPreferences()
-  } catch (err) {
-    console.error('Failed to fetch tag preferences', err)
+  } catch (err: unknown) {
+    toast.error(getApiErrorMessage(err, '标签偏好加载失败'))
   }
 }
 
@@ -88,6 +92,7 @@ const handleToggleActive = (id: number | string) => {
             :tag-preferences="tagPreferences"
             @toggle-active="handleToggleActive"
             @search="(type, value) => emit('card-search', type, value)"
+            @state-changed="emit('novel-state-changed', $event)"
           />
         </div>
       </div>

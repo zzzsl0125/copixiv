@@ -12,8 +12,8 @@ export const tagPreferenceApi = {
     return response.data
   },
 
-  async deleteTagPreference(tag: string) {
-    const response = await apiClient.delete(`/tag-preferences/${tag}`)
+  async deleteTagPreference(prefId: number) {
+    const response = await apiClient.delete(`/tag-preferences/${prefId}`)
     return response.data
   },
 

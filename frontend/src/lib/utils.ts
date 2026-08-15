@@ -38,7 +38,36 @@ export function formatNumber(num?: number): string {
   return num.toString()
 }
 
-/** Sanitize a string into a safe filename (replaces illegal chars). */
-export function safeFilename(name: string): string {
-  return name.replace(/[<>:"/\\|?*]/g, '_').trim() || 'untitled'
+/**
+ * Parse a RFC 6266 `filename*` (UTF-8) or plain `filename` parameter.
+ * Falls back to a default name when the header is absent/malformed.
+ */
+export function filenameFromContentDisposition(
+  disposition: string | undefined,
+  fallback: string,
+): string {
+  if (!disposition) return fallback
+  const utf8 = disposition.match(/filename\*=UTF-8''([^;]+)/i)
+  if (utf8?.[1]) {
+    try {
+      return decodeURIComponent(utf8[1])
+    } catch {
+      // fall through to plain filename
+    }
+  }
+  const plain = disposition.match(/filename="?([^";]+)"?/i)
+  return plain?.[1] || fallback
+}
+
+/** Trigger a browser download for an in-memory Blob. */
+export function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  // Delay revocation slightly for Safari; the object URL is cheap.
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
 }

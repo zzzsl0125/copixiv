@@ -105,6 +105,7 @@ class SearchHistoryResponse(BaseModel):
 class NovelBase(BaseModel):
     id: int
     title: str
+    author_id: int | None = None
     author_name: str | None = None
     like: int = 0
     view: int = 0
@@ -236,7 +237,7 @@ class BatchDownloadRequest(BaseModel):
     order_direction: Literal["ASC", "DESC"] = "DESC"
     min_like: int | None = None
     min_text: int | None = None
-    limit: int = Field(default=50, ge=1, le=200)
+    limit: int = Field(default=50, ge=1, le=500)
     format_mode: Literal["txt", "prefer_epub"] = "txt"
     zip_name: str | None = None
     naming_template: str | None = None

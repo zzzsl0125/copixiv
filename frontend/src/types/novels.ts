@@ -3,7 +3,7 @@
 export interface Novel {
   id: number
   title: string
-  author_id?: number
+  author_id: number
   author_name?: string
   series_id?: number
   series_name?: string

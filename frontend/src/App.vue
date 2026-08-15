@@ -18,9 +18,21 @@ const {
   handleCardSearch,
 } = useNovels()
 
-const { systemConfig } = useSystem()
+const { systemConfig, fetchConfig } = useSystem()
 const { toasts } = useToast()
 const configLoadedAndApplied = ref(false)
+
+const syncActiveSection = () => {
+  if (filters.keyword === 'is_favourite:true;') {
+    activeSection.value = 'favourites'
+  } else if (filters.keyword === 'is_special_follow:true;') {
+    activeSection.value = 'special_follow'
+  } else if (filters.keyword) {
+    activeSection.value = null
+  } else {
+    activeSection.value = 'novels'
+  }
+}
 
 const applyConfigAndLoad = () => {
   if (configLoadedAndApplied.value) return
@@ -37,21 +49,11 @@ const applyConfigAndLoad = () => {
   }
 
   configLoadedAndApplied.value = true
-
-  if (filters.keyword === 'is_favourite:true;') {
-    activeSection.value = 'favourites'
-  } else if (filters.keyword === 'is_special_follow:true;') {
-    activeSection.value = 'special_follow'
-  } else if (filters.keyword) {
-    activeSection.value = null
-  } else {
-    activeSection.value = 'novels'
-  }
-
+  syncActiveSection()
   loadNovels()
 }
 
-watch(systemConfig, (newConfig) => {
+watch(() => systemConfig.value, (newConfig) => {
   if (newConfig && !configLoadedAndApplied.value) {
     applyConfigAndLoad()
   }
@@ -67,8 +69,15 @@ const isNovelsRoute = computed(() => route.path === '/')
 watch(route, (to) => {
   if (to.path !== '/') {
     activeSection.value = null
+  } else {
+    syncActiveSection()
   }
 })
+
+const handleNovelStateChanged = (payload: { id: number; field: 'is_favourite' | 'is_special_follow'; value: number }) => {
+  const novel = novels.value.find(n => n.id === payload.id)
+  if (novel) novel[payload.field] = payload.value
+}
 
 const handleSectionSearch = (keyword: string | undefined, section: 'novels' | 'favourites' | 'special_follow') => {
   activeSection.value = section
@@ -76,14 +85,11 @@ const handleSectionSearch = (keyword: string | undefined, section: 'novels' | 'f
 }
 
 const handleResetToDefaults = () => {
-  const config = systemConfig.value
-  if (!config) return
-
   filters.keyword = ''
   filters.order_by = 'random'
   filters.order_direction = 'DESC'
-  filters.min_like = config.default_min_like
-  filters.min_text = config.default_min_text
+  filters.min_like = systemConfig.value?.default_min_like
+  filters.min_text = systemConfig.value?.default_min_text
 
   activeSection.value = 'novels'
   handleSearch(undefined, { setOrdering: false })
@@ -97,10 +103,13 @@ const handleLogoClick = () => {
 onMounted(() => {
   if (route.path !== '/') {
     activeSection.value = null
-    loadNovels()
-    return
   }
-  if (systemConfig.value) applyConfigAndLoad()
+  // Load novels once the config attempt settles — success applies the
+  // defaults, failure still lets the home page browse with URL/current
+  // filters instead of waiting forever for a systemConfig that never comes.
+  fetchConfig().then(() => {
+    if (!configLoadedAndApplied.value) applyConfigAndLoad()
+  })
 })
 </script>
 
@@ -130,6 +139,7 @@ onMounted(() => {
         @load-more="handleLoadMore"
         @search="(keyword?: string) => handleSearch(keyword, { setOrdering: true })"
         @card-search="handleCardSearch"
+        @novel-state-changed="handleNovelStateChanged"
         @update:filters="($event: NovelFilters) => { Object.assign(filters, $event); handleSearch(); }"
         @toggle-sidebar="isSidebarOpen = !isSidebarOpen"
       />

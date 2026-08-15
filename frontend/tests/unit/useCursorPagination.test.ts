@@ -27,7 +27,7 @@ describe('useCursorPagination', () => {
       .mockResolvedValueOnce({ items: [{ id: 2 }], cursor: null })
 
     const { items, cursor, noMoreData, loadData, handleLoadMore } =
-      useCursorPagination(fetcher)
+      useCursorPagination<{ id: number }>(fetcher)
 
     await loadData()
     await handleLoadMore()
@@ -57,7 +57,7 @@ describe('useCursorPagination', () => {
       .mockResolvedValue({ items: [{ id: 9 }], cursor: null })
 
     const { items, cursor, loadData, reset, handleLoadMore } =
-      useCursorPagination(fetcher)
+      useCursorPagination<{ id: number }>(fetcher)
     await loadData()
 
     reset()
@@ -76,5 +76,32 @@ describe('useCursorPagination', () => {
     await loadData()
 
     expect(error.value).toMatch(/network down/)
+  })
+
+  it('reloads from the beginning when a reset arrives while a fetch is in flight', async () => {
+    let resolveFirst!: (value: { items: { id: number }[]; cursor: unknown }) => void
+    const fetcher = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<{ items: { id: number }[]; cursor: unknown }>((resolve) => {
+            resolveFirst = resolve
+          }),
+      )
+      .mockResolvedValueOnce({ items: [{ id: 2 }], cursor: null })
+
+    const { items, loadData, reset } = useCursorPagination<{ id: number }>(fetcher)
+
+    const firstLoad = loadData()
+    reset()
+    await loadData() // pre-fix: swallowed by the loading guard
+
+    resolveFirst({ items: [{ id: 1 }], cursor: { id: 1 } })
+    await firstLoad
+
+    await vi.waitFor(() => {
+      expect(fetcher).toHaveBeenCalledTimes(2)
+      expect(items.value.map((i) => i.id)).toEqual([2])
+    })
   })
 })

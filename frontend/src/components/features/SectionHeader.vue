@@ -26,10 +26,12 @@ defineEmits<{
   <div class="mb-6 border-b border-gray-200 flex justify-between min-h-[58px]">
     <div class="flex-1 flex items-end">
       <h1 v-if="title" class="text-2xl font-bold text-gray-900 py-4">{{ title }}</h1>
-      <nav v-else-if="tabs && tabs.length > 0" class="-mb-[1px] flex space-x-8" aria-label="Tabs">
+      <nav v-else-if="tabs && tabs.length > 0" class="-mb-[1px] flex space-x-8" aria-label="Tabs" role="tablist">
         <button
           v-for="tab in tabs"
           :key="tab.name"
+          role="tab"
+          :aria-selected="activeTab === tab.name"
           @click="$emit('update:activeTab', tab.name)"
           :class="[
             activeTab === tab.name ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300',
@@ -60,6 +62,7 @@ defineEmits<{
           @click="$emit('refresh')"
           class="p-2 text-gray-500 hover:text-blue-600 rounded-full hover:bg-gray-100 transition-colors"
           title="刷新"
+          aria-label="刷新"
         >
           <RefreshCw class="w-5 h-5" :class="{ 'animate-spin': loading }" />
         </button>

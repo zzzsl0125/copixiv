@@ -1,16 +1,19 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { taskApi } from '../api'
+import { getApiErrorMessage } from '../api/errors'
 import type { ScheduledTask } from '../types'
-import { usePagination } from '../composables'
+import { usePagination, useToast } from '../composables'
 import ScheduledTaskList from '../components/features/ScheduledTaskList.vue'
 import TaskHistoryList from '../components/features/TaskHistoryList.vue'
 import TaskEditModal from '../components/features/TaskEditModal.vue'
 import PageHeader from '../components/features/PageHeader.vue'
 import SectionHeader from '../components/features/SectionHeader.vue'
 
+defineOptions({ inheritAttrs: false })
 defineEmits<{ (e: 'toggle-sidebar'): void }>()
 
+const toast = useToast()
 const activeTab = ref<'scheduled' | 'history'>('scheduled')
 
 const {
@@ -21,6 +24,7 @@ const {
 
 const isModalOpen = ref(false)
 const editingTask = ref<ScheduledTask | null>(null)
+const savingTask = ref(false)
 
 const {
   items: history,
@@ -30,20 +34,19 @@ const {
 } = usePagination((offset, limit) => taskApi.getTaskHistory(limit, offset))
 
 const openModal = (task?: ScheduledTask) => {
-  console.log('[Tasks] openModal called, task:', task?.name || 'null (create)')
   editingTask.value = task || null
   isModalOpen.value = true
 }
 
 const closeModal = () => {
-  console.log('[Tasks] closeModal called')
-  console.trace('[Tasks] closeModal stack trace')
+  if (savingTask.value) return
   isModalOpen.value = false
   editingTask.value = null
 }
 
 const saveTask = async (payload: Record<string, unknown>) => {
-  console.log('[Tasks] saveTask called, payload:', payload)
+  if (savingTask.value) return
+  savingTask.value = true
   try {
     if (editingTask.value) {
       await taskApi.updateScheduledTask(editingTask.value.id, payload as unknown as Parameters<typeof taskApi.updateScheduledTask>[1])
@@ -52,9 +55,10 @@ const saveTask = async (payload: Record<string, unknown>) => {
     }
     closeModal()
     loadTasks()
-  } catch (err) {
-    console.error('Failed to save task:', err)
-    alert('保存失败，请检查网络或后端状态')
+  } catch (err: unknown) {
+    toast.error(getApiErrorMessage(err, '保存失败，请检查网络或后端状态'))
+  } finally {
+    savingTask.value = false
   }
 }
 
@@ -62,9 +66,8 @@ const toggleTask = async (task: ScheduledTask) => {
   try {
     await taskApi.updateScheduledTask(task.id, { is_enabled: !task.is_enabled })
     loadTasks()
-  } catch (err) {
-    console.error('Failed to toggle task:', err)
-    alert('切换状态失败')
+  } catch (err: unknown) {
+    toast.error(getApiErrorMessage(err, '切换状态失败'))
   }
 }
 
@@ -73,20 +76,18 @@ const deleteTask = async (id: number) => {
   try {
     await taskApi.deleteScheduledTask(id)
     loadTasks()
-  } catch (err) {
-    console.error('Failed to delete task:', err)
-    alert('删除失败')
+  } catch (err: unknown) {
+    toast.error(getApiErrorMessage(err, '删除失败'))
   }
 }
 
 const runTask = async (task: ScheduledTask) => {
   try {
     await taskApi.runScheduledTask(task.id)
-    alert(`任务 "${task.name}" 已加入队列`)
+    toast.success(`任务 "${task.name}" 已加入队列`)
     if (activeTab.value === 'history') loadHistory()
-  } catch (err) {
-    console.error('Failed to run task:', err)
-    alert('运行失败')
+  } catch (err: unknown) {
+    toast.error(getApiErrorMessage(err, '运行失败'))
   }
 }
 
@@ -94,9 +95,8 @@ const reorderTasks = async (newTasks: ScheduledTask[]) => {
   try {
     await taskApi.reorderScheduledTasks(newTasks.map(t => t.id))
     loadTasks()
-  } catch (err) {
-    console.error('Failed to reorder tasks:', err)
-    alert('排序失败')
+  } catch (err: unknown) {
+    toast.error(getApiErrorMessage(err, '排序失败'))
     loadTasks()
   }
 }
@@ -129,6 +129,6 @@ onMounted(() => { loadTasks(); loadHistory() })
       </div>
     </main>
 
-    <TaskEditModal :is-open="isModalOpen" :task="editingTask" @close="closeModal" @save="saveTask" />
+    <TaskEditModal :is-open="isModalOpen" :task="editingTask" :loading="savingTask" @close="closeModal" @save="saveTask" />
   </div>
 </template>

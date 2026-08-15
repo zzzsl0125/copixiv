@@ -91,16 +91,16 @@ const toggleFullscreen = () => { isFullscreen.value = !isFullscreen.value }
         <span class="text-xs text-gray-500 font-mono">{{ processedLines.length }} lines</span>
       </div>
       <div class="flex items-center space-x-2">
-        <button @click="showSearch = !showSearch" class="p-1.5 hover:bg-[#3c3c3c] rounded text-gray-400 hover:text-white transition-colors" title="Search">
+        <button @click="showSearch = !showSearch" class="p-1.5 hover:bg-[#3c3c3c] rounded text-gray-400 hover:text-white transition-colors" :title="showSearch ? '关闭搜索' : '搜索'" :aria-label="showSearch ? '关闭搜索' : '搜索日志'">
           <Search class="w-4 h-4" />
         </button>
-        <button @click="copyLog" class="p-1.5 hover:bg-[#3c3c3c] rounded text-gray-400 hover:text-white transition-colors" title="Copy All">
+        <button @click="copyLog" class="p-1.5 hover:bg-[#3c3c3c] rounded text-gray-400 hover:text-white transition-colors" title="复制全部" aria-label="复制全部日志">
           <Copy class="w-4 h-4" />
         </button>
-        <button @click="downloadLog" class="p-1.5 hover:bg-[#3c3c3c] rounded text-gray-400 hover:text-white transition-colors" title="Download">
+        <button @click="downloadLog" class="p-1.5 hover:bg-[#3c3c3c] rounded text-gray-400 hover:text-white transition-colors" title="下载" aria-label="下载日志">
           <Download class="w-4 h-4" />
         </button>
-        <button @click="toggleFullscreen" class="p-1.5 hover:bg-[#3c3c3c] rounded text-gray-400 hover:text-white transition-colors" :title="isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'">
+        <button @click="toggleFullscreen" class="p-1.5 hover:bg-[#3c3c3c] rounded text-gray-400 hover:text-white transition-colors" :title="isFullscreen ? '退出全屏' : '全屏'" :aria-label="isFullscreen ? '退出全屏' : '全屏'">
           <Minimize2 v-if="isFullscreen" class="w-4 h-4" />
           <Maximize2 v-else class="w-4 h-4" />
         </button>
@@ -109,12 +109,12 @@ const toggleFullscreen = () => { isFullscreen.value = !isFullscreen.value }
 
     <div v-if="showSearch" class="flex items-center px-4 py-2 bg-[#2d2d2d] border-b border-[#333]">
       <div class="relative flex-grow">
-        <input v-model="searchTerm" type="text" placeholder="Search..." class="w-full bg-[#1e1e1e] text-white text-xs rounded px-3 py-1.5 border border-[#3e3e42] focus:outline-none focus:border-blue-500" @keydown.enter="nextMatch">
+        <input v-model="searchTerm" type="text" placeholder="搜索日志内容…" aria-label="搜索日志内容" class="w-full bg-[#1e1e1e] text-white text-xs rounded px-3 py-1.5 border border-[#3e3e42] focus:outline-none focus:border-blue-500" @keydown.enter="nextMatch">
         <span v-if="matches.length > 0" class="absolute right-2 top-1.5 text-xs text-gray-500">{{ currentMatchIndex + 1 }}/{{ matches.length }}</span>
       </div>
       <div class="flex ml-2 space-x-1">
-        <button @click="prevMatch" class="p-1 hover:bg-[#3c3c3c] rounded text-gray-400"><ArrowUp class="w-4 h-4" /></button>
-        <button @click="nextMatch" class="p-1 hover:bg-[#3c3c3c] rounded text-gray-400"><ArrowDown class="w-4 h-4" /></button>
+        <button @click="prevMatch" class="p-1 hover:bg-[#3c3c3c] rounded text-gray-400" aria-label="上一个匹配"><ArrowUp class="w-4 h-4" /></button>
+        <button @click="nextMatch" class="p-1 hover:bg-[#3c3c3c] rounded text-gray-400" aria-label="下一个匹配"><ArrowDown class="w-4 h-4" /></button>
       </div>
     </div>
 

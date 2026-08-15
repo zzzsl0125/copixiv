@@ -10,6 +10,6 @@ export interface SearchHistory {
   id: number
   type: string
   value: string
-  display_value?: string
+  display_value?: string | null
   timestamp: string
 }

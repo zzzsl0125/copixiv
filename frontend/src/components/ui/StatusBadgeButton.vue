@@ -1,5 +1,6 @@
 <template>
   <button
+    type="button"
     @click="$emit('click', $event)"
     :class="computedClasses"
     class="px-3 py-1 inline-flex items-center text-xs leading-5 font-semibold rounded-full border transition-colors hover:shadow-sm"

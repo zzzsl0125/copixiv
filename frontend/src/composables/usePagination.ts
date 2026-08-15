@@ -1,4 +1,5 @@
 import { ref, type Ref } from 'vue'
+import { getApiErrorMessage } from '../api/errors'
 
 export interface PaginationResult<T> {
   items: Ref<T[]>
@@ -41,10 +42,13 @@ export function usePagination<T>(
       const newItems = result.items
       items.value = loadMore ? [...items.value, ...newItems] : newItems
       offset.value += newItems.length
-      hasMore.value = newItems.length >= pageSize
+      // Prefer the server's authoritative total; fall back to page size for
+      // endpoints that don't return one.
+      hasMore.value = result.total !== undefined
+        ? offset.value < result.total
+        : newItems.length >= pageSize
     } catch (err: unknown) {
-      error.value = err instanceof Error ? err.message : '加载失败'
-      console.error(err)
+      error.value = getApiErrorMessage(err, '加载失败')
     } finally {
       loading.value = false
     }

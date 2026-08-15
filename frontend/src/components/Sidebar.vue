@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Search, Settings, Download } from '@lucide/vue'
 import BatchDownloadModal from './features/BatchDownloadModal.vue'
+import { useToast } from '../composables'
 import type { NovelFilters } from '../types'
 
 const route = useRoute()
@@ -23,6 +24,7 @@ const emit = defineEmits<{
   (e: 'reset-to-defaults'): void
 }>()
 
+const toast = useToast()
 const isBatchModalOpen = ref(false)
 
 const updateFilter = (key: keyof typeof props.filters, value: unknown) => {
@@ -58,22 +60,22 @@ const navIconClass = 'mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500'
     <div class="flex-1 overflow-y-auto px-8 py-6">
       <h3 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">功能</h3>
       <nav class="space-y-2 mb-8">
-        <a href="#" :class="navItemClass(activeSection === 'novels')" @click.prevent="() => { if(route.path !== '/') router.push('/'); $emit('reset-to-defaults'); }">
+        <a href="#" :class="navItemClass(activeSection === 'novels')" @click.prevent="() => { if(route.path !== '/') router.push('/'); $emit('reset-to-defaults'); $emit('close'); }">
           <Search :class="navIconClass" /> 小说列表
         </a>
-        <a href="#" :class="navItemClass(activeSection === 'favourites')" @click.prevent="() => { if(route.path !== '/') router.push('/'); $emit('search', 'is_favourite:true;', 'favourites'); }">
+        <a href="#" :class="navItemClass(activeSection === 'favourites')" @click.prevent="() => { if(route.path !== '/') router.push('/'); $emit('search', 'is_favourite:true;', 'favourites'); $emit('close'); }">
           <Search :class="navIconClass" /> 我的收藏
         </a>
-        <a href="#" :class="navItemClass(activeSection === 'special_follow')" @click.prevent="() => { if(route.path !== '/') router.push('/'); $emit('search', 'is_special_follow:true;', 'special_follow'); }">
+        <a href="#" :class="navItemClass(activeSection === 'special_follow')" @click.prevent="() => { if(route.path !== '/') router.push('/'); $emit('search', 'is_special_follow:true;', 'special_follow'); $emit('close'); }">
           <Search :class="navIconClass" /> 特别关注
         </a>
-        <router-link to="/tasks" :class="[navItemClass(false), route.path === '/tasks' ? 'bg-gray-100' : '']">
+        <router-link to="/tasks" :class="[navItemClass(false), route.path === '/tasks' ? 'bg-gray-100' : '']" @click="$emit('close')">
           <Settings :class="navIconClass" /> 任务管理
         </router-link>
-        <router-link to="/tag-management" :class="[navItemClass(false), route.path === '/tag-management' ? 'bg-gray-100' : '']">
+        <router-link to="/tag-management" :class="[navItemClass(false), route.path === '/tag-management' ? 'bg-gray-100' : '']" @click="$emit('close')">
           <Settings :class="navIconClass" /> 标签管理
         </router-link>
-        <router-link to="/tokens" :class="[navItemClass(false), route.path === '/tokens' ? 'bg-gray-100' : '']">
+        <router-link to="/tokens" :class="[navItemClass(false), route.path === '/tokens' ? 'bg-gray-100' : '']" @click="$emit('close')">
           <Settings :class="navIconClass" /> 账号管理
         </router-link>
       </nav>
@@ -81,7 +83,7 @@ const navIconClass = 'mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500'
       <!-- Batch Download -->
       <template v-if="showFilters !== false && filters.keyword.trim()">
         <div class="my-6 border-t border-gray-200"></div>
-        <button @click="isBatchModalOpen = true; console.log('[Sidebar] 打包下载 clicked, keyword:', props.filters.keyword)" class="w-full flex items-center justify-center px-3 py-2 text-sm font-medium text-gray-700 hover:text-gray-900 hover:bg-gray-50 rounded-md transition-colors">
+        <button @click="isBatchModalOpen = true" class="w-full flex items-center justify-center px-3 py-2 text-sm font-medium text-gray-700 hover:text-gray-900 hover:bg-gray-50 rounded-md transition-colors">
           <Download class="mr-3 h-5 w-5 text-gray-400" /> 打包下载
         </button>
       </template>
@@ -135,5 +137,7 @@ const navIconClass = 'mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500'
     :min_like="props.filters.min_like"
     :min_text="props.filters.min_text"
     @close="isBatchModalOpen = false"
+    @download-success="toast.success(`已开始下载：${$event}`)"
+    @download-error="toast.error"
   />
 </template>

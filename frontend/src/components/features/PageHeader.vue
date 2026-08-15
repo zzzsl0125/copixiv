@@ -15,12 +15,12 @@ const goToHome = () => router.push('/')
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
       <div class="flex items-center justify-between h-16">
         <div class="flex items-center gap-4">
-          <button @click="$emit('toggle-sidebar')" class="md:hidden p-1 -ml-1 text-gray-500 hover:text-gray-700 focus:outline-none flex-shrink-0">
-            <Menu class="h-6 w-6" />
+          <button @click="$emit('toggle-sidebar')" class="md:hidden p-1 -ml-1 text-gray-500 hover:text-gray-700 focus:outline-none flex-shrink-0" aria-label="打开菜单">
+            <Menu class="h-6 w-6" aria-hidden="true" />
           </button>
           <AppLogo @click="goToHome" />
-          <span class="text-gray-500">/</span>
-          <span class="text-gray-700 font-medium">{{ title }}</span>
+          <span class="text-gray-500" aria-hidden="true">/</span>
+          <h1 class="text-gray-700 font-medium text-base m-0">{{ title }}</h1>
         </div>
       </div>
     </div>
