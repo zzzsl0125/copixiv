@@ -27,6 +27,7 @@ watch(() => props.filters.keyword, (newKeyword) => {
 })
 
 const performSearch = () => {
+  showHistory.value = false
   emit('search', localKeyword.value)
 }
 
