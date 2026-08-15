@@ -28,7 +28,12 @@ async def resolve_author_names(
 
     1. Batch-query the local ``author`` table for already-known names.
     2. For remaining unresolved IDs, call ``client.user_detail``.
-    3. Persist newly-resolved names to both ``novel`` and ``author`` tables.
+    3. Persist all resolved names to both ``novel`` and ``author`` tables.
+
+    Even locally-known names are written back to ``novel.author_name``:
+    webview downloads insert new novel rows with ``author_name=NULL``, so a
+    known ``author`` row alone is not enough to keep the UI from showing
+    "未知".
 
     Returns ``{author_id: author_name}`` for every successfully-resolved
     author.  IDs that could not be resolved (API failure, empty name) are
@@ -47,32 +52,34 @@ async def resolve_author_names(
 
     # -- remote ---------------------------------------------------------
     missing = author_ids - set(resolved.keys())
-    if not missing:
-        return resolved
-
-    results = await asyncio.gather(
-        *[client.user_detail(aid) for aid in missing],
-        return_exceptions=True,
-    )
-
     api_names: dict[int, str] = {}
-    for aid, result in zip(missing, results):
-        if isinstance(result, Exception):
-            logger.warning(
-                f"Failed to fetch name for author #{aid}: {result}"
-            )
-            continue
-        name = safe_get(result, "user.name", "")
-        if name:
-            api_names[aid] = name
+    if missing:
+        results = await asyncio.gather(
+            *[client.user_detail(aid) for aid in missing],
+            return_exceptions=True,
+        )
+
+        for aid, result in zip(missing, results):
+            if isinstance(result, Exception):
+                logger.warning(
+                    f"Failed to fetch name for author #{aid}: {result}"
+                )
+                continue
+            name = safe_get(result, "user.name", "")
+            if name:
+                api_names[aid] = name
 
     # -- persist --------------------------------------------------------
     # Persist happens inside the global write lock (db_write) so that
     # name updates never collide with concurrent task writes.
-    if api_names:
+    # Always backfill locally-known names too: new webview novels carry
+    # author_name=None, and update_author_name() copies the name into both
+    # the author row and every novel row for that author.
+    to_persist = {**resolved, **api_names}
+    if to_persist:
         async with db_write():
             async with uow.begin():
-                for aid, name in api_names.items():
+                for aid, name in to_persist.items():
                     await uow.authors.update_author_name(aid, name)
         resolved.update(api_names)
 

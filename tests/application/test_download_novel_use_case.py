@@ -123,6 +123,30 @@ class TestDownloadNovelUseCase:
             assert s.get(Author, 1).author_name == "测试作者"
         assert client.user_detail_calls == [1]
 
+    async def test_download_new_novel_backfills_known_author_name(
+        self, session_factory, tmp_path,
+    ):
+        # Author already known locally; webview download still inserts the
+        # novel with author_name=None and must be backfilled from author row.
+        with session_factory() as s:
+            s.add(Author(author_id=1, author_name="测试作者"))
+            s.commit()
+
+        client = FakeClient(_webview(100))
+        use_case = _make_use_case(
+            session_factory, tmp_path, client, FakeImageDownloader(),
+        )
+
+        result = await use_case.execute(100)
+
+        assert result.new_novel_count == 1
+        with session_factory() as s:
+            novel = s.get(Novel, 100)
+            assert novel is not None
+            assert novel.author_name == "测试作者"
+        # Locally-known name should not require another Pixiv API call.
+        assert client.user_detail_calls == []
+
     async def test_download_skips_existing(
         self, session_factory, tmp_path,
     ):
