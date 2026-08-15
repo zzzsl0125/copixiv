@@ -22,12 +22,27 @@ class SQLAlchemyTaskRepository(BaseRepository):
     async def add_task(self, name: str, arguments: dict) -> int:
         return self.add_task_sync(name, arguments)
 
+    def has_pending_or_running(self, name: str) -> bool:
+        """True when *name* already has a pending/running history row.
+
+        Used by the duplicate-run guard in ``TaskManagerSystem.run_task``.
+        """
+        row = self.session.execute(
+            select(models.TaskHistory.id)
+            .where(
+                models.TaskHistory.name == name,
+                models.TaskHistory.status.in_(("pending", "running")),
+            )
+            .limit(1)
+        ).first()
+        return row is not None
+
     def add_task_sync(self, name: str, arguments: dict) -> int:
         task = models.TaskHistory(
             name=name,
             arguments=json.dumps(arguments, ensure_ascii=False),
             status="pending",
-            start_time=datetime.now().isoformat(),
+            start_time=datetime.now().astimezone().isoformat(),
         )
         self.session.add(task)
         self.session.flush()
@@ -45,7 +60,10 @@ class SQLAlchemyTaskRepository(BaseRepository):
         task = self.session.get(models.TaskHistory, task_id)
         if task is not None:
             task.status = status
-            task.end_time = datetime.now().isoformat()
+            # end_time only on terminal states — "running" rows must not
+            # carry an end timestamp.
+            if status in ("success", "failed", "interrupted"):
+                task.end_time = datetime.now().astimezone().isoformat()
             if result is not None:
                 task.result = result
             if duration is not None:

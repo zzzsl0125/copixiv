@@ -144,6 +144,19 @@ class ScheduledTaskCreate(BaseModel):
     is_enabled: bool = False
     sort_index: int = 0
 
+    @field_validator("cron")
+    @classmethod
+    def _validate_cron(cls, v: str) -> str:
+        """Reject malformed cron expressions at the API boundary (422)
+        instead of letting them fail silently inside the scheduler."""
+        from apscheduler.triggers.cron import CronTrigger
+
+        try:
+            CronTrigger.from_crontab(v)
+        except ValueError as exc:
+            raise ValueError(f"Invalid cron expression: {exc}") from exc
+        return v
+
 
 class ScheduledTaskUpdate(BaseModel):
     name: str | None = None
@@ -153,6 +166,13 @@ class ScheduledTaskUpdate(BaseModel):
     config: dict[str, Any] | None = None
     is_enabled: bool | None = None
     sort_index: int | None = None
+
+    @field_validator("cron")
+    @classmethod
+    def _validate_cron_optional(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        return ScheduledTaskCreate._validate_cron(v)
 
 
 class ScheduledTaskResponse(ScheduledTaskCreate):

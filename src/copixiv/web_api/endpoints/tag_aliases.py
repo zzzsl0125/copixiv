@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Depends, Query
 
 from copixiv.domain.exceptions import NotFoundError, ValidationError
-from copixiv.web_api.deps import get_uow
+from copixiv.web_api.deps import get_uow, get_write_uow
 from copixiv.infrastructure.database.uow import SqlUnitOfWork
 from copixiv.web_api.schemas import TagAliasBase, TagAliasSuggestListResponse
 
@@ -26,7 +26,7 @@ async def suggest_tag_aliases(
 
 
 @router.post("/")
-async def create_tag_alias(data: TagAliasBase, uow: SqlUnitOfWork = Depends(get_uow)):
+async def create_tag_alias(data: TagAliasBase, uow: SqlUnitOfWork = Depends(get_write_uow)):
     if data.source == data.target:
         raise ValidationError("原标签不能和目标标签相同")
     alias = await uow.tags.create_alias(data.model_dump())
@@ -35,7 +35,7 @@ async def create_tag_alias(data: TagAliasBase, uow: SqlUnitOfWork = Depends(get_
 
 
 @router.delete("/{alias_id}")
-async def delete_tag_alias(alias_id: int, uow: SqlUnitOfWork = Depends(get_uow)):
+async def delete_tag_alias(alias_id: int, uow: SqlUnitOfWork = Depends(get_write_uow)):
     if not await uow.tags.delete_alias(alias_id):
         raise NotFoundError(f"Tag alias {alias_id} not found")
     return {"ok": True}

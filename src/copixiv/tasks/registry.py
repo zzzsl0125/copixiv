@@ -45,14 +45,7 @@ def describe_tasks() -> list[dict]:
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
             ):
                 continue
-            param_type = "str"
-            if param.annotation != inspect.Parameter.empty:
-                if param.annotation is int:
-                    param_type = "int"
-                elif param.annotation is bool:
-                    param_type = "bool"
-                elif param.annotation is float:
-                    param_type = "float"
+            param_type = _annotation_type_name(param.annotation)
 
             default_val = None
             required = True
@@ -68,7 +61,28 @@ def describe_tasks() -> list[dict]:
             })
         methods.append({
             "name": name,
-            "description": func.__doc__,
+            "description": (func.__doc__ or "").strip(),
             "arguments": arguments,
         })
     return methods
+
+
+def _annotation_type_name(annotation) -> str:
+    """Map a task-parameter annotation to a display type name.
+
+    Handles ``int``/``bool``/``float``/``str``, ``X | None`` unions (the
+    non-None member wins), and falls back to ``"str"`` for anything else
+    (the API contract documents task arguments as JSON scalars).
+    """
+    if annotation is inspect.Parameter.empty:
+        return "str"
+    origin = getattr(annotation, "__origin__", None)
+    if origin is None:
+        return {
+            int: "int", bool: "bool", float: "float", str: "str",
+        }.get(annotation, "str")
+    # Union (e.g. ``int | None``) — pick the first non-NoneType member.
+    for member in getattr(annotation, "__args__", ()) or ():
+        if member is not type(None):
+            return _annotation_type_name(member)
+    return "str"

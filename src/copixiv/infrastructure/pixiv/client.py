@@ -8,14 +8,30 @@ RequestManager.
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime
+from urllib.parse import parse_qs, urlparse
 
 from dateutil import parser as date_parser
+from pixivpy3 import PixivError
+from requests.exceptions import RequestException
 
-from copixiv.domain.services.parsing import safe_get
 from .account import AccountStrategy, RateLimitError, AccountInvalidError
 from .accounts import AccountPool
 
 from copixiv.app.logger import logger
+
+
+def _get_next_url(result):
+    """Return ``next_url`` from a Pydantic model or plain dict result."""
+    if isinstance(result, dict):
+        return result.get("next_url")
+    return getattr(result, "next_url", None)
+
+
+def _get_novels(result):
+    """Return the ``novels`` list from a Pydantic model or plain dict result."""
+    if isinstance(result, dict):
+        return result.get("novels", []) or []
+    return getattr(result, "novels", []) or []
 
 
 class PixivClient:
@@ -133,6 +149,9 @@ class PixivClient:
     _BACKOFF_BASE: float = 1.0     # seconds — doubled each attempt
     _BACKOFF_CAP: float = 10.0     # seconds
 
+    # Pagination guard — never follow more than this many pages.
+    _MAX_PAGES: int = 200
+
     @staticmethod
     def _backoff(attempt: int) -> float:
         """Exponential backoff: 1s, 2s, 4s, capped at 10s."""
@@ -172,7 +191,10 @@ class PixivClient:
                 last_error = RateLimitError(str(account))
                 if attempt < self._MAX_RETRIES:
                     await asyncio.sleep(self._backoff(attempt))
-            except Exception as e:
+            except (PixivError, RequestException, ConnectionError) as e:
+                # PixivError covers API-level errors; RequestException covers
+                # requests' own network errors; builtin ConnectionError is kept
+                # as a network-error stand-in used by the existing test suite.
                 logger.warning(
                     f"API error on {account}: {e}, "
                     f"retry {attempt + 1}/{self._MAX_RETRIES + 1}"
@@ -206,28 +228,47 @@ class PixivClient:
         """Follow ``next_url`` across pages, collecting results."""
         page = 1
 
-        novels_count = len(safe_get(result, "novels", []))
+        novels_count = len(_get_novels(result))
         logger.info(f"Paginate {method}: page {page} — {novels_count} items")
 
-        while result.next_url:
+        next_url = _get_next_url(result)
+        while next_url:
             page += 1
-            account = self.pool.select()
-            next_qs = account.api.parse_qs(result.next_url)
+            if page > self._MAX_PAGES:
+                logger.warning(
+                    f"Paginate {method}: exceeded {self._MAX_PAGES} pages, "
+                    f"stopping",
+                )
+                break
+
+            # pixivpy3's parse_qs flattens single-value params; replicate it
+            # here without touching the account pool (which would disturb LRU).
+            next_qs = {
+                k: v[0] for k, v in parse_qs(urlparse(next_url).query).items()
+            }
 
             async with self._semaphore:
                 next_result = await self._execute_with_retry(
                     method, **next_qs
                 )
 
-            result.next_url = safe_get(next_result, "next_url")
-            result.novels += safe_get(next_result, "novels", [])
+            next_novels = _get_novels(next_result)
+            new_next_url = _get_next_url(next_result)
 
-            next_novels = safe_get(next_result, "novels", [])
+            if isinstance(result, dict):
+                result.setdefault("novels", []).extend(next_novels)
+                result["next_url"] = new_next_url
+            else:
+                result.novels += next_novels
+                result.next_url = new_next_url
+
             novels_count += len(next_novels)
             logger.info(
                 f"Paginate {method}: page {page} — "
                 f"{len(next_novels)} items (total: {novels_count})",
             )
+
+            next_url = new_next_url
 
             if next_novels and self._should_stop(
                 next_novels[-1], fetch_til, fetch_minlike
@@ -247,8 +288,20 @@ class PixivClient:
     def _should_stop(last_item, fetch_til, fetch_minlike) -> bool:
         """Determine if pagination should stop based on date or bookmark thresholds."""
         if fetch_til and "create_date" in last_item:
-            if date_parser.parse(last_item["create_date"]) < fetch_til:
-                return True
+            try:
+                create_dt = date_parser.parse(last_item["create_date"])
+                # Pixiv create_date is naive while fetch_til comes from
+                # datetime.now().astimezone(); comparing naive vs aware raises
+                # TypeError, so strip the tzinfo whenever they disagree.
+                if create_dt.tzinfo is not None and fetch_til.tzinfo is None:
+                    create_dt = create_dt.replace(tzinfo=None)
+                elif create_dt.tzinfo is None and fetch_til.tzinfo is not None:
+                    fetch_til = fetch_til.replace(tzinfo=None)
+                if create_dt < fetch_til:
+                    return True
+            except Exception:
+                # Unparseable/ambiguous dates must never interrupt pagination.
+                return False
         if fetch_minlike and "total_bookmarks" in last_item:
             if last_item["total_bookmarks"] < fetch_minlike:
                 return True

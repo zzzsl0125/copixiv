@@ -172,6 +172,8 @@ class Container:
             tokens, tag_aliases,
         )
         from copixiv.web_api.middleware import AccessLogMiddleware
+        from copixiv.web_api.host_middleware import HostValidationMiddleware
+        from copixiv.web_api.api_key_middleware import APIAuthMiddleware
         from copixiv.infrastructure.pixiv.account import AccountStatus
 
         @asynccontextmanager
@@ -225,17 +227,40 @@ class Container:
                 status_code=exc.status_code, content={"detail": exc.detail},
             )
 
-        # Access-log middleware — innermost (added first) so it sees the
-        # real status code from the handler, not CORS preflight noise.
+        # ------------------------------------------------------------------
+        # Security middlewares
+        #
+        # The server still binds 0.0.0.0 (see main.py) so it stays reachable
+        # from the LAN — that is an intentional feature and must not change.
+        # Because the socket is open to the whole network, the trust boundary
+        # is enforced here in the middleware stack instead:
+        #   - Host validation blocks DNS-rebinding (a malicious page resolving
+        #     its own domain to this server and reading /api/tokens).
+        #   - An optional shared API key gates every /api/ call.
+        #   - CORS is restricted to a small origin whitelist.
+        #
+        # Starlette's add_middleware inserts at index 0, so the first one
+        # added ends up outermost.  Order: Host → api_key → AccessLog → CORS.
+        # Host wraps everything so a rejected Host never reaches any router.
+        app.add_middleware(
+            HostValidationMiddleware,
+            allowed_hosts=self.config.security.allowed_hosts,
+        )
+        app.add_middleware(
+            APIAuthMiddleware, api_key=self.config.security.api_key,
+        )
+
+        # Access-log middleware — added after the security middlewares (so it
+        # sits inside them) but before CORS, so it still sees the real status
+        # code from the handler, not CORS preflight noise.
         app.add_middleware(AccessLogMiddleware)
 
-        # allow_origins=["*"] combined with allow_credentials=True is
-        # rejected by browsers (wildcard origins cannot carry credentials),
-        # and the frontend never sends cookies cross-origin — so drop
-        # credentials and let the wildcard be honored.
+        # CORS — innermost of the security layers.  Whitelist replaces the old
+        # wildcard: allow_credentials stays False (the frontend never sends
+        # cookies cross-origin), and allow_methods/headers stay permissive.
         app.add_middleware(
             CORSMiddleware,
-            allow_origins=["*"],
+            allow_origins=self.config.security.allowed_origins,
             allow_credentials=False,
             allow_methods=["*"],
             allow_headers=["*"],

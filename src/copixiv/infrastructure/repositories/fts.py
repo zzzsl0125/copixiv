@@ -142,8 +142,12 @@ class FTSManager:
         """Remove an FTS entry for a deleted novel.
 
         Plain rowid DELETE — safe on the standalone novel_fts table
-        and a no-op when the row doesn't exist.
+        and a no-op when the row doesn't exist.  Skips silently when the
+        FTS table itself is missing (unlike the sibling update path, this
+        used to raise ``no such table`` and roll back the whole delete).
         """
+        if not self._fts_table_exists():
+            return
         self.session.execute(
             _text(f"DELETE FROM {C.TABLE_NOVEL_FTS} WHERE rowid = :id"),
             {"id": novel_id},
@@ -215,18 +219,19 @@ class FTSManager:
 
         # Corruption check: INSERT INTO ..._fts(..._fts) VALUES('rebuild')
         # If the index is corrupt, this will raise an error.
+        # A SAVEPOINT (begin_nested) scopes the rollback to the probe row
+        # only — a plain session.rollback() here would also discard any
+        # unrelated pending writes in the caller's transaction.
         try:
-            self.session.execute(
-                _text(
-                    f"INSERT INTO {C.TABLE_NOVEL_FTS}({C.TABLE_NOVEL_FTS}) "
-                    f"VALUES('rebuild')"
+            with self.session.begin_nested():
+                self.session.execute(
+                    _text(
+                        f"INSERT INTO {C.TABLE_NOVEL_FTS}({C.TABLE_NOVEL_FTS}) "
+                        f"VALUES('rebuild')"
+                    )
                 )
-            )
-            # Remove the test row
-            self.session.rollback()
         except Exception as e:
             result["error"] = f"Integrity check failed: {e}"
-            self.session.rollback()
             return result
 
         # Check for orphan entries (FTS rows pointing to nonexistent novels)

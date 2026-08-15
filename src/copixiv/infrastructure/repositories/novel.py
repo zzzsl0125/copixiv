@@ -12,7 +12,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from copixiv.infrastructure.database import models
 from copixiv.infrastructure.database import constants as C
-from copixiv.domain.models.novel import EpubStatus
+from copixiv.domain.models.novel import EpubStatus, Novel
 from .base import BaseRepository, model_to_dict
 from .fts import FTSManager
 from .tag import SQLAlchemyTagRepository
@@ -79,6 +79,7 @@ class SQLAlchemyNovelRepository(BaseRepository):
         # Validate fields
         if order_by:
             self._validate_query_field(order_by)
+        self._validate_order_direction(order_direction)
         if queries:
             for q_type in queries.values():
                 self._validate_query_field(q_type)
@@ -179,9 +180,12 @@ class SQLAlchemyNovelRepository(BaseRepository):
     # ---- write ---------------------------------------------------------------
 
     async def upsert_novels(
-        self, novels: list[dict], force_update: list[str] | None = None
+        self, novels: list[Novel], force_update: list[str] | None = None
     ) -> int:
         """Insert or update novels, then sync tags and FTS index.
+
+        Accepts :class:`Novel` domain models (canonical write-path object);
+        plain dicts are still tolerated for callers that only have row data.
 
         Heavy write path (alias resolution, batch upsert, tag sync, FTS
         index update) — runs in a worker thread so the event loop is not
@@ -192,11 +196,18 @@ class SQLAlchemyNovelRepository(BaseRepository):
         )
 
     def _upsert_novels_sync(
-        self, novels: list[dict], force_update: list[str] | None = None
+        self, novels: list[Novel], force_update: list[str] | None = None
     ) -> int:
         """Insert or update novels, then sync tags and FTS index."""
         if not novels:
             return 0
+
+        # Normalize: accept both Novel models and legacy dicts at the edge.
+        from pydantic import BaseModel
+        novels = [
+            n.model_dump() if isinstance(n, BaseModel) else dict(n)
+            for n in novels
+        ]
 
         force_update = force_update or []
 
@@ -226,12 +237,19 @@ class SQLAlchemyNovelRepository(BaseRepository):
     def _resolve_tag_aliases(
         self, novels: list[dict],
     ) -> dict[int, set[str]]:
-        """Pop tags from each novel dict and apply alias mapping."""
+        """Pop tags from each novel dict and apply alias mapping.
+
+        The canonical key is ``tags`` (``Novel.tags``); legacy callers may
+        still pass ``tag`` — both are accepted and popped.
+        """
         tag_repo = SQLAlchemyTagRepository(self.session)
         alias_map = tag_repo.get_alias_map_sync()
         novel_tags_map: dict[int, set[str]] = {}
         for n in novels:
-            mapped_tags = {alias_map.get(t, t) for t in n.pop("tag", [])}
+            raw_tags = n.pop("tags", None)
+            if raw_tags is None:
+                raw_tags = n.pop("tag", [])
+            mapped_tags = {alias_map.get(t, t) for t in raw_tags}
             nid = n.get("id")
             if nid is not None:
                 novel_tags_map[nid] = mapped_tags
@@ -279,6 +297,10 @@ class SQLAlchemyNovelRepository(BaseRepository):
                 k: v for k, v in novel.items()
                 if k in self.VALID_NOVEL_FIELDS
             }
+            # has_epub=None means "don't overwrite" (metadata-only refresh
+            # from build_from_novel_info) — drop the key entirely.
+            if filtered.get(C.COL_HAS_EPUB) is None:
+                filtered.pop(C.COL_HAS_EPUB, None)
             nid = int(novel["id"]) if novel.get("id") is not None else None
             existing = existing_map.get(nid)
 
@@ -329,12 +351,25 @@ class SQLAlchemyNovelRepository(BaseRepository):
             setattr(novel, field, value)
 
     async def delete(self, novel_id: int) -> None:
-        FTSManager(self.session).delete_novel_fts(novel_id)
+        """Delete a novel row, keeping tag reference counts consistent.
+
+        ``rewrite_tags(novel_id, set())`` removes the novel_tag links AND
+        decrements the affected tags' ``reference_count`` — without it the
+        denormalized counter drifts permanently after every delete.
+        """
         novel = self.session.get(models.Novel, novel_id)
-        if novel is not None:
-            self.session.delete(novel)
+        if novel is None:
+            return
+        self.rewrite_tags(novel_id, set())
+        FTSManager(self.session).delete_novel_fts(novel_id)
+        self.session.delete(novel)
 
     async def toggle_favourite(self, novel_id: int) -> None:
+        from copixiv.domain.exceptions import NotFoundError
+
+        novel = self.session.get(models.Novel, novel_id)
+        if novel is None:
+            raise NotFoundError(f"Novel {novel_id} not found")
         fav = self.session.execute(
             select(models.Favourite).where(
                 models.Favourite.novel_id == novel_id
@@ -346,6 +381,11 @@ class SQLAlchemyNovelRepository(BaseRepository):
             self.session.add(models.Favourite(novel_id=novel_id))
 
     async def toggle_special_follow(self, author_id: int) -> None:
+        from copixiv.domain.exceptions import NotFoundError
+
+        author = self.session.get(models.Author, author_id)
+        if author is None:
+            raise NotFoundError(f"Author {author_id} not found")
         follow = self.session.execute(
             select(models.SpecialFollow).where(
                 models.SpecialFollow.author_id == author_id
@@ -379,14 +419,12 @@ class SQLAlchemyNovelRepository(BaseRepository):
     # ---- tags ----------------------------------------------------------------
 
     def rewrite_tags(self, novel_id: int, new_tags: set[str]) -> None:
-        if not new_tags:
-            self.session.execute(
-                _delete(models.NovelTag).where(
-                    models.NovelTag.novel_id == novel_id
-                )
-            )
-            return
+        """Replace a novel's tag set, keeping ``tag.reference_count`` exact.
 
+        Handles the empty-set case through the same decrement path — the
+        old early return deleted the links without decrementing the
+        counter, so every novel delete permanently inflated the counts.
+        """
         existing = set(self.session.execute(
             select(models.Tag.name)
             .join(models.NovelTag, models.Tag.id == models.NovelTag.tag_id)
@@ -548,5 +586,16 @@ class SQLAlchemyNovelRepository(BaseRepository):
     # ---- helpers -------------------------------------------------------------
 
     def _validate_query_field(self, field: str) -> None:
+        from copixiv.domain.exceptions import ValidationError
+
         if field not in self.VALID_NOVEL_QUERY_FIELDS:
-            raise ValueError(f"Invalid query field: {field}")
+            raise ValidationError(f"Invalid query field: {field}")
+
+    @staticmethod
+    def _validate_order_direction(order_direction: str) -> None:
+        from copixiv.domain.exceptions import ValidationError
+
+        if order_direction.upper() not in ("ASC", "DESC"):
+            raise ValidationError(
+                f"Invalid order_direction: {order_direction} (expected ASC/DESC)"
+            )

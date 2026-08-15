@@ -11,6 +11,7 @@ from copixiv.infrastructure.repositories.series import SQLAlchemySeriesRepositor
 from copixiv.infrastructure.repositories.tag import SQLAlchemyTagRepository
 from copixiv.infrastructure.repositories.token import SQLAlchemyTokenRepository
 from copixiv.infrastructure.repositories.task import SQLAlchemyTaskRepository
+from copixiv.infrastructure.repositories.failed_novel import FailedNovelRepository
 from copixiv.infrastructure.repositories.search_history import (
     SQLAlchemySearchHistoryRepository,
 )
@@ -61,6 +62,7 @@ class SqlUnitOfWork:
         self._tokens: SQLAlchemyTokenRepository | None = None
         self._tasks: SQLAlchemyTaskRepository | None = None
         self._search_history: SQLAlchemySearchHistoryRepository | None = None
+        self._failed_novels: FailedNovelRepository | None = None
 
     # -- repositories as properties (lazy) -----------------------------------
 
@@ -105,6 +107,12 @@ class SqlUnitOfWork:
         if self._search_history is None:
             self._search_history = SQLAlchemySearchHistoryRepository(self.session)
         return self._search_history
+
+    @property
+    def failed_novels(self) -> FailedNovelRepository:
+        if self._failed_novels is None:
+            self._failed_novels = FailedNovelRepository(self.session)
+        return self._failed_novels
 
     @property
     def session_factory(self):
@@ -157,6 +165,7 @@ class SqlUnitOfWork:
                 self._tokens = None
                 self._tasks = None
                 self._search_history = None
+                self._failed_novels = None
 
     async def commit(self) -> None:
         if self._session is not None:

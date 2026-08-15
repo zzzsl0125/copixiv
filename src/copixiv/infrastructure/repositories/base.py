@@ -146,10 +146,32 @@ class BaseRepository:
 
     def _reorder(
         self, model_class: type[ModelType], sort_field: str, ids: list[int]
-    ) -> bool:
-        """Assign sort indices 0..n-1 to the rows in *ids* order."""
+    ) -> int:
+        """Assign sort indices 0..n-1 to the rows in *ids* order.
+
+        Afterwards every row of the table gets a dense re-index (rows not
+        listed keep their relative order), so no duplicate / gapped
+        sort_index values can accumulate.  Returns the number of listed
+        rows that were actually found and updated.
+        """
+        matched = 0
         for idx, obj_id in enumerate(ids):
             obj = self.session.get(model_class, obj_id)
             if obj is not None:
                 setattr(obj, sort_field, idx)
-        return True
+                matched += 1
+
+        # Flush so the dense re-index below reads the NEW values (the
+        # SELECT would otherwise order by the stale pre-update indices).
+        self.session.flush()
+
+        # Dense re-index: keep the (new) order, close any gaps left by
+        # rows that kept stale indices.
+        remaining = self.session.execute(
+            select(model_class).order_by(
+                getattr(model_class, sort_field), model_class.id
+            )
+        ).scalars().all()
+        for idx, obj in enumerate(remaining):
+            setattr(obj, sort_field, idx)
+        return matched

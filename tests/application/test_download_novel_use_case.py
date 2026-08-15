@@ -19,7 +19,9 @@ from sqlalchemy.pool import StaticPool
 
 from copixiv.application.novel.download_novel import DownloadNovelUseCase
 from copixiv.application.novel.persist import persist_novels
+from copixiv.domain.services.novel_factory import build_novel
 from copixiv.infrastructure.database.engine import create_session_factory
+from copixiv.infrastructure.database.write_lock import DbWriteLock
 from copixiv.infrastructure.database.models import (
     Base, Author, FailedNovel, Novel, Series,
 )
@@ -68,7 +70,8 @@ class FakeImageDownloader:
         self.processed: list[int] = []
 
     async def process_novel_assets(self, data, force=False):
-        self.processed.append(data["id"])
+        # data is now a Novel domain model (M9 contract)
+        self.processed.append(data.id)
 
     async def await_all(self):
         return list(self._failures)
@@ -91,6 +94,7 @@ def _make_use_case(session_factory, tmp_path, client, downloader):
         uow=SqlUnitOfWork(session_factory),
         file_storage=FakeStorage(tmp_path),
         image_downloader=downloader,
+        write_lock=DbWriteLock(),
     )
 
 
@@ -104,6 +108,7 @@ class TestDownloadNovelUseCase:
         use_case = DownloadNovelUseCase(
             client=client, uow=SqlUnitOfWork(session_factory),
             file_storage=storage, image_downloader=downloader,
+            write_lock=DbWriteLock(),
         )
 
         result = await use_case.execute(100)
@@ -209,6 +214,7 @@ class TestDownloadNovelUseCase:
         use_case = DownloadNovelUseCase(
             client=client, uow=SqlUnitOfWork(session_factory),
             file_storage=storage, image_downloader=FakeImageDownloader(),
+            write_lock=DbWriteLock(),
         )
         await use_case.execute(100, redownload=True)
         assert storage.saved == [(100, "新小说", True)]
@@ -219,11 +225,11 @@ class TestPersistNovels:
         self, session_factory,
     ):
         uow = SqlUnitOfWork(session_factory)
-        novel = {
-            "id": 300, "title": "T", "author_id": 3, "series_id": 5,
-            "path": "/tmp/300.txt", "like": 10, "view": 20, "text": 100,
-            "tag": ["测试标签"],
-        }
+        novel = build_novel(
+            id=300, title="T", author_id=3, series_id=5,
+            like=10, view=20, text=100,
+            tags=["测试标签"],
+        )
 
         count = await persist_novels(uow, [novel])
 
@@ -247,9 +253,9 @@ class TestPersistNovels:
             s.commit()
 
         uow = SqlUnitOfWork(session_factory)
-        count = await persist_novels(uow, [{
-            "id": 300, "title": "T", "author_id": 3, "path": "/tmp/300.txt",
-        }])
+        count = await persist_novels(uow, [
+            build_novel(id=300, title="T", author_id=3),
+        ])
         assert count == 0
 
     async def test_empty_input_is_noop(self, session_factory):

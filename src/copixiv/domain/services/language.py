@@ -1,6 +1,11 @@
 """Language detection — pure functions (with optional langid I/O)."""
 
+import logging
 import re
+
+# stdlib logging keeps this domain module free of app-layer imports; the
+# app's loguru bridge forwards these records.
+logger = logging.getLogger(__name__)
 
 # Regex matching any Japanese kana character
 _JAPANESE_REGEX: re.Pattern[str] = re.compile(r"[぀-ゟ゠-ヿ]")
@@ -30,7 +35,7 @@ def is_chinese(
     if tags and any(t in _CHINESE_TAG_KEYWORDS for t in tags):
         return True
 
-    sample = title + caption
+    sample = (title or "") + (caption or "")
     if not sample.strip():
         return False
 
@@ -41,13 +46,26 @@ def is_chinese(
     try:
         import langid
         return langid.classify(sample)[0] == "zh"
+    except ModuleNotFoundError:
+        # langid missing means every non-tagged novel silently reads as
+        # "not Chinese" — surface that degradation once instead of hiding it.
+        if not is_chinese._langid_warning_emitted:  # type: ignore[attr-defined]
+            logger.warning(
+                "langid is not installed — language detection degrades to "
+                "tag-keyword + kana heuristics only."
+            )
+            is_chinese._langid_warning_emitted = True  # type: ignore[attr-defined]
+        return False
     except Exception:
         return False
 
 
-def has_image_placeholders(content: str) -> bool:
+def has_image_placeholders(content: str | None) -> bool:
     """Check whether the novel text contains image placeholders.
 
     Placeholders look like ``[uploadedimage:12345]`` or ``[pixivimage:67890]``.
+    ``None`` / empty content → ``False`` (no images to convert).
     """
+    if not content:
+        return False
     return bool(re.search(_HAS_IMAGE_PATTERN, content))

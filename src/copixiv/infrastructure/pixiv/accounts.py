@@ -78,7 +78,7 @@ class AccountPool:
             wait = best.cooldown_remaining
             if wait > 0:
                 logger.warning(
-                    f"All accounts in cooldown, waiting {wait:.0f}s for {best}",
+                    f"返回冷却中的账号 {best}，execute 将等待 {wait:.0f} 秒",
                 )
             return best
 
@@ -86,8 +86,12 @@ class AccountPool:
         # Update last_req_time immediately so concurrent selectors won't
         # pick the same account (V1's pattern).
         chosen = min(ready, key=lambda a: a.last_req_time)
-        idle = time.time() - chosen.last_req_time if chosen.last_req_time else -1
-        chosen.last_req_time = time.time()
+        idle = (
+            time.monotonic() - chosen.last_req_time
+            if chosen.last_req_time
+            else -1
+        )
+        chosen.last_req_time = time.monotonic()
         logger.debug(
             f"Account LRU: {chosen} (was idle {idle:.0f}s, "
             f"{len(ready)}/{len(candidates)} ready)",

@@ -10,12 +10,13 @@ starts or commits a transaction itself.
 
 from __future__ import annotations
 
+from copixiv.domain.models.novel import Novel
 from copixiv.domain.ports.unit_of_work import UnitOfWork
 
 
 async def persist_novels(
     uow: UnitOfWork,
-    novels: list[dict],
+    novels: list[Novel],
     force_update: list[str] | None = None,
 ) -> int:
     """Upsert *novels* and refresh author/series summaries.
@@ -29,8 +30,8 @@ async def persist_novels(
     if not novels:
         return 0
 
-    author_ids = {n["author_id"] for n in novels}
-    series_ids = {sid for n in novels if (sid := n.get("series_id"))}
+    author_ids = {n.author_id for n in novels}
+    series_ids = {n.series_id for n in novels if n.series_id}
 
     uow.authors.ensure_exists(author_ids)
     uow.series.ensure_exists(series_ids)

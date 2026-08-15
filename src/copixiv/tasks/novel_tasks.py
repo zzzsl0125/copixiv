@@ -103,11 +103,13 @@ async def novel_fetch(
     uow,
     file_storage,
     image_downloader,
+    write_lock,
 ):
     """Download and persist a single novel by ID."""
     use_case = DownloadNovelUseCase(
         client=client, uow=uow,
         file_storage=file_storage, image_downloader=image_downloader,
+        write_lock=write_lock,
     )
     return await use_case.execute(id, redownload=redownload)
 
@@ -122,6 +124,7 @@ async def novel_follow(
     file_storage,
     image_downloader,
     config,
+    write_lock,
 ):
     """Fetch new novels from followed users.
 
@@ -146,7 +149,9 @@ async def novel_follow(
     )
 
     if new_author_ids:
-        await resolve_author_names(new_author_ids, client=client, uow=uow)
+        await resolve_author_names(
+            new_author_ids, client=client, uow=uow, write_lock=write_lock,
+        )
 
     return TaskResult(
         summary=f"关注更新: 新增 {len(titles)} 本小说",
@@ -165,6 +170,7 @@ async def author_fetch(
     file_storage,
     image_downloader,
     config,
+    write_lock,
 ):
     """Fetch all novels by an author.
 
@@ -209,7 +215,7 @@ async def author_fetch(
 
     # Resolve author name — webview API doesn't return it.
     resolved = await resolve_author_names(
-        {author_id}, client=client, uow=uow,
+        {author_id}, client=client, uow=uow, write_lock=write_lock,
     )
     name = resolved.get(author_id, "")
 
@@ -248,6 +254,7 @@ async def author_special_follow(
     uow,
     file_storage,
     image_downloader,
+    write_lock,
 ):
     """Check for new novels from specially-followed authors."""
     async with uow.begin():
@@ -281,7 +288,9 @@ async def author_special_follow(
     )
 
     if new_author_ids:
-        await resolve_author_names(new_author_ids, client=client, uow=uow)
+        await resolve_author_names(
+            new_author_ids, client=client, uow=uow, write_lock=write_lock,
+        )
 
     return TaskResult(
         summary=f"特别关注: 新增 {len(titles)} 本小说",
@@ -303,7 +312,7 @@ async def novel_ranking(
 ):
     """Fetch novel rankings."""
     titles: list[str] = []
-    for delta in range(1, max(2, days)):
+    for delta in range(1, days + 1):  # days=3 → 昨天/前天/大前天（当天榜单不全，跳过）
         target = datetime.now().astimezone() - timedelta(days=delta)
         resp = await client.novel_ranking(mode=mode, date=target, fetch_all=True)
         novels = safe_get(resp, "novels", [])
@@ -343,7 +352,7 @@ async def novel_search(
     For each Chinese novel found, the author's full catalogue is fetched
     via :func:`author_fetch` — same pattern as :func:`novel_ranking`.
     """
-    end = datetime.now() - timedelta(days=1)
+    end = datetime.now().astimezone() - timedelta(days=1)
     end_date = datetime(end.year, end.month, end.day)
 
     all_titles: list[str] = []

@@ -83,6 +83,26 @@ class BackupConfig(BaseModel):
     keep_count: int = 4
 
 
+class SecurityConfig(BaseModel):
+    """Security hardening settings for the web API.
+
+    The server still listens on ``0.0.0.0`` (LAN access), so the trust
+    boundary is pushed into these three layers instead:
+    - ``api_key``: optional shared secret required on every ``/api/`` call
+      (empty string disables it).
+    - ``allowed_hosts``: extra Host-header values allowed past the
+      Host-validation middleware (``localhost`` and IP literals always pass).
+    - ``allowed_origins``: CORS origin whitelist (no wildcard).
+    """
+
+    api_key: str = ""  # 空=关闭 API key 校验
+    allowed_hosts: list[str] = Field(default_factory=list)  # 额外放行的域名/IP
+    allowed_origins: list[str] = Field(default_factory=lambda: [
+        "http://localhost:5173", "http://127.0.0.1:5173",
+        "http://localhost:4173", "http://127.0.0.1:4173",
+    ])
+
+
 class AppConfig(BaseModel):
     """Root configuration object."""
 
@@ -98,6 +118,7 @@ class AppConfig(BaseModel):
         default_factory=BatchDownloadConfig
     )
     backup: BackupConfig = Field(default_factory=BackupConfig)
+    security: SecurityConfig = Field(default_factory=SecurityConfig)
 
 
 # ---------------------------------------------------------------------------

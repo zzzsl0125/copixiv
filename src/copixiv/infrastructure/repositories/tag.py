@@ -126,7 +126,17 @@ class SQLAlchemyTagRepository(BaseRepository):
 
     async def create_alias(self, alias_data: dict) -> dict:
         """Create a tag alias.  *alias_data* should have 'source' and 'target'
-        as tag *names* — they are resolved to tag IDs internally."""
+        as tag *names* — they are resolved to tag IDs internally.
+
+        Raises:
+            ValidationError: If the source tag is already aliased
+                (unique constraint) — mapped to 400 instead of a raw
+                IntegrityError 500.
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        from copixiv.domain.exceptions import ValidationError
+
         source_name = alias_data["source"]
         target_name = alias_data["target"]
 
@@ -135,7 +145,15 @@ class SQLAlchemyTagRepository(BaseRepository):
 
         alias = models.TagAlias(source=source_id, target=target_id)
         self.session.add(alias)
-        self.session.flush()
+        try:
+            # SAVEPOINT — a duplicate alias fails only this statement,
+            # leaving the surrounding transaction intact.
+            with self.session.begin_nested():
+                self.session.flush()
+        except IntegrityError as exc:
+            raise ValidationError(
+                f"Tag '{source_name}' is already aliased"
+            ) from exc
 
         return {
             "id": alias.id,

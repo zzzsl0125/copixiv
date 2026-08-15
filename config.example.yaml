@@ -19,3 +19,11 @@ pixiv_accounts:
   follow: "YOUR_PIXIV_EMAIL"
 batch_download:
   naming: "{author_name}/{series_name}/#{series_index}_{title}_{id}"
+security:
+  api_key: ""
+  allowed_hosts: []
+  allowed_origins:
+    - "http://localhost:5173"
+    - "http://127.0.0.1:5173"
+    - "http://localhost:4173"
+    - "http://127.0.0.1:4173"

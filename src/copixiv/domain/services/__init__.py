@@ -10,7 +10,7 @@ from .parsing import (
     parse_search_keyword,
 )
 from .archive import build_batch_zip
-from .novel_factory import build_novel_dict
+from .novel_factory import build_novel, build_from_novel_info, build_from_webview
 
 __all__ = [
     "parse_tags",
@@ -24,5 +24,7 @@ __all__ = [
     "guess_series_order",
     "parse_search_keyword",
     "build_batch_zip",
-    "build_novel_dict",
+    "build_novel",
+    "build_from_novel_info",
+    "build_from_webview",
 ]

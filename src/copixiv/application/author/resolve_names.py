@@ -11,8 +11,8 @@ import asyncio
 
 from copixiv.domain.ports.pixiv import PixivNovelPort
 from copixiv.domain.ports.unit_of_work import UnitOfWork
+from copixiv.domain.ports.write_lock import WriteLockPort
 from copixiv.domain.services.parsing import safe_get
-from copixiv.infrastructure.database.write_lock import db_write
 from copixiv.app.logger import logger
 
 
@@ -21,6 +21,7 @@ async def resolve_author_names(
     *,
     client: PixivNovelPort,
     uow: UnitOfWork,
+    write_lock: WriteLockPort,
 ) -> dict[int, str]:
     """Resolve author names for the given IDs.
 
@@ -51,7 +52,7 @@ async def resolve_author_names(
     resolved = await uow.authors.get_names_by_ids(author_ids)
 
     # -- remote ---------------------------------------------------------
-    missing = author_ids - set(resolved.keys())
+    missing = sorted(author_ids - set(resolved.keys()))
     api_names: dict[int, str] = {}
     if missing:
         results = await asyncio.gather(
@@ -77,7 +78,7 @@ async def resolve_author_names(
     # the author row and every novel row for that author.
     to_persist = {**resolved, **api_names}
     if to_persist:
-        async with db_write():
+        async with write_lock():
             async with uow.begin():
                 for aid, name in to_persist.items():
                     await uow.authors.update_author_name(aid, name)

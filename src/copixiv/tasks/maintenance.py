@@ -155,6 +155,7 @@ async def sync_empty_name(
     *,
     client,
     uow,
+    write_lock,
 ):
     """Fix novels whose ``author_name`` is NULL.
 
@@ -174,12 +175,15 @@ async def sync_empty_name(
         return TaskResult(summary="作者名同步: 无需修复")
 
     author_ids = {row.author_id for row in rows}
-    resolved = await resolve_author_names(author_ids, client=client, uow=uow)
+    resolved = await resolve_author_names(
+        author_ids, client=client, uow=uow, write_lock=write_lock,
+    )
 
-    total_fixed = len(rows)
+    # 诚实统计：resolved 才是实际成功解析的作者数；novel 行由
+    # update_author_name 按作者批量补齐（rows 全部会被处理）。
     author_count = len(resolved)
     return TaskResult(
-        summary=f"作者名同步: 修复了 {total_fixed} 本小说 ({author_count} 位作者)"
+        summary=f"作者名同步: 处理 {len(rows)} 本空名小说 ({author_count} 位作者解析成功)"
     )
 
 
@@ -266,7 +270,7 @@ async def fix_series_index(
     )
 
     done = 0
-    fixed = 0
+    processed = 0
     for sid in series_ids:
         resp = await client.novel_series(sid, fetch_all=True)
         novels = safe_get(resp, "novels", [])
@@ -276,15 +280,16 @@ async def fix_series_index(
         novels.sort(key=lambda n: safe_get(n, "id", 0))
         for i, n in enumerate(novels):
             safe_set(n, "series.index", i + 1)
-        novel_dicts = [build_from_novel_info(n) for n in novels]
+        novel_models = [build_from_novel_info(n) for n in novels]
         async with db_write():
             async with uow.begin():
-                fixed += await _batch_upsert(novel_dicts, uow)
+                await _batch_upsert(novel_models, uow)
         done += 1
+        processed += len(novel_models)
 
     if done == 0:
         return TaskResult(summary="系列章节号检查: API 请求全部失败")
 
     return TaskResult(
-        summary=f"系列章节号修复: {done}/{total} 个系列, 更新 {fixed} 本小说"
+        summary=f"系列章节号修复: {done}/{total} 个系列, 处理 {processed} 本小说"
     )

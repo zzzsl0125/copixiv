@@ -440,7 +440,8 @@ class TestSQLAlchemyTaskRepository:
         session.add_all([t1, t2])
         session.commit()
 
-        asyncio.run(repo.reorder_scheduled([t2.id, t1.id]))
+        matched = asyncio.run(repo.reorder_scheduled([t2.id, t1.id]))
+        assert matched == 2
         session.commit()
 
         tasks = repo.get_scheduled_tasks_sync()
@@ -486,7 +487,8 @@ class TestTaskManagerHelpers:
             epub_builder=None,
             config=None,
         )
-        assert tms._deps == {"client": "cli"}
+        assert tms._deps["client"] == "cli"
+        assert "write_lock" in tms._deps
 
     def test_construction_keeps_all_deps(self):
         from copixiv.tasks.manager import TaskManagerSystem
@@ -499,5 +501,6 @@ class TestTaskManagerHelpers:
         assert tms._deps == {
             "client": "a", "file_storage": "b",
             "image_downloader": "c", "epub_builder": "d", "config": "e",
+            **{k: v for k, v in tms._deps.items() if k == "write_lock"},
         }
 

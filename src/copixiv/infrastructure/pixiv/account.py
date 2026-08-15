@@ -127,7 +127,9 @@ class PixivAccount:
     # -- actions -------------------------------------------------------------
 
     def start_cooldown(self, duration: float | None = None) -> None:
-        self._cooldown_until = time.monotonic() + (duration or self.cooling_duration)
+        self._cooldown_until = time.monotonic() + (
+            self.cooling_duration if duration is None else duration
+        )
 
     def _create_api(self, proxy_http: str, proxy_https: str) -> AppPixivAPI:
         proxies = {"http": proxy_http, "https": proxy_https}
@@ -170,6 +172,14 @@ class PixivAccount:
     async def execute(self, method: str, *args, **kwargs):
         """Call an API method on this account, handling auth and rate limits."""
         await self.authenticate()
+
+        # Honor any active cooldown before touching the request lock, so a
+        # cooling account returned by select() (including the force_account
+        # path) is made to actually wait before issuing its next request.
+        if self.in_cooldown:
+            wait = self.cooldown_remaining
+            logger.warning(f"{self} 处于冷却中，等待 {wait:.0f} 秒")
+            await asyncio.sleep(wait)
 
         # Per-account rate limiting: ensure min_interval since the
         # *last completed* API call on this account (not since select).

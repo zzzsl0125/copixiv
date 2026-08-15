@@ -1,10 +1,7 @@
 """Unit of Work port — transaction boundary."""
 
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from collections.abc import AsyncIterator
-
-if TYPE_CHECKING:
-    from sqlalchemy.orm import Session
+from typing import Protocol, runtime_checkable
 
 from .repositories import (
     NovelRepository,
@@ -14,6 +11,7 @@ from .repositories import (
     TokenRepository,
     TaskRepository,
     SearchHistoryRepository,
+    FailedNovelRepositoryPort,
 )
 
 
@@ -23,6 +21,10 @@ class UnitOfWork(Protocol):
 
     FastAPI endpoints use Depends(get_db) for request-scoped sessions.
     Background tasks use `async with uow.begin()` for explicit transactions.
+
+    Note: no ``session`` attribute is exposed — the domain layer stays
+    free of ORM types; concrete repositories are reached via the
+    properties below.
     """
 
     novels: NovelRepository
@@ -32,14 +34,8 @@ class UnitOfWork(Protocol):
     tokens: TokenRepository
     tasks: TaskRepository
     search_history: SearchHistoryRepository
+    failed_novels: FailedNovelRepositoryPort
 
     def begin(self) -> AsyncIterator[None]: ...
     async def commit(self) -> None: ...
     async def rollback(self) -> None: ...
-
-    @property
-    def session(self) -> "Session":
-        """The underlying SQLAlchemy session (type-only import — the
-        domain layer stays runtime-free of SQLAlchemy).
-        Used by failure-ledger code inside write transactions."""
-        ...

@@ -7,21 +7,17 @@ background task.  The batch pipeline (``tasks/pipeline.py``) reuses
 so the two paths never drift apart.
 """
 
+from copixiv.domain.models.novel import Novel
 from copixiv.domain.models.task_result import TaskResult
 from copixiv.domain.services.novel_factory import build_from_webview
 from copixiv.domain.ports.unit_of_work import UnitOfWork
 from copixiv.domain.ports.storage import FileStoragePort
 from copixiv.domain.ports.storage import ImageDownloaderPort
 from copixiv.domain.ports.pixiv import PixivNovelPort
+from copixiv.domain.ports.write_lock import WriteLockPort
 
 from copixiv.application.author.resolve_names import resolve_author_names
 from copixiv.application.novel.persist import persist_novels
-
-# Documented infrastructure compromise (same precedent as resolve_names.py /
-# record.py): the failure ledger has no port yet, and use cases may not
-# reach the composition root.
-from copixiv.infrastructure.database.write_lock import db_write
-from copixiv.infrastructure.repositories.failed_novel import FailedNovelRepository
 
 
 async def fetch_novel_and_assets(
@@ -30,7 +26,7 @@ async def fetch_novel_and_assets(
     file_storage: FileStoragePort,
     image_downloader: ImageDownloaderPort,
     redownload: bool = False,
-) -> dict | None:
+) -> Novel | None:
     """Fetch a novel from Pixiv and persist its text + assets.
 
     Shared by :class:`DownloadNovelUseCase` (persists immediately) and the
@@ -38,8 +34,9 @@ async def fetch_novel_and_assets(
     write lock).  Both do the same first four steps of the download
     journey; only the persist step differs.
 
-    Returns the canonical novel dict (with ``content`` popped) or ``None``
-    when the API returned nothing.
+    Returns the canonical :class:`Novel` model (transient ``content`` still
+    attached — the repository's column whitelist excludes it from the DB)
+    or ``None`` when the API returned nothing.
     """
     resp = await client.webview_novel(novel_id)
     if resp is None:
@@ -48,9 +45,9 @@ async def fetch_novel_and_assets(
     data = build_from_webview(resp, file_storage.download_dir)
 
     # Save text
-    if content := data.pop("content", None):
+    if data.content:
         file_storage.save_novel_text(
-            data["id"], data["title"], content, force=redownload
+            data.id, data.title, data.content, force=redownload
         )
 
     # Download assets in background
@@ -74,11 +71,13 @@ class DownloadNovelUseCase:
         uow: UnitOfWork,
         file_storage: FileStoragePort,
         image_downloader: ImageDownloaderPort,
+        write_lock: WriteLockPort,
     ):
         self._client = client
         self._uow = uow
         self._file_storage = file_storage
         self._image_downloader = image_downloader
+        self._write_lock = write_lock
 
     async def execute(
         self, novel_id: int, redownload: bool = False
@@ -98,9 +97,9 @@ class DownloadNovelUseCase:
         if data is None:
             # A failed fetch must leave a trace in failed_novel, otherwise
             # permanently-gone novels silently linger forever.
-            async with db_write():
+            async with self._write_lock():
                 async with self._uow.begin():
-                    FailedNovelRepository(self._uow.session).record(
+                    self._uow.failed_novels.record(
                         novel_id, "download", "webview_novel 返回空"
                     )
             return TaskResult(summary=f"小说 #{novel_id} 获取失败")
@@ -110,20 +109,20 @@ class DownloadNovelUseCase:
         # recorded in the same write transaction as the upsert.
         asset_failures = await self._image_downloader.await_all()
 
-        async with db_write():
+        async with self._write_lock():
             async with self._uow.begin():
-                failed_repo = FailedNovelRepository(self._uow.session)
                 for nid, reason in asset_failures:
-                    failed_repo.record(nid, "download", reason)
+                    self._uow.failed_novels.record(nid, "download", reason)
                 count = await persist_novels(self._uow, [data])
 
         # Resolve author name — webview API doesn't return it.
         if count:
             await resolve_author_names(
-                {data["author_id"]}, client=self._client, uow=self._uow,
+                {data.author_id}, client=self._client, uow=self._uow,
+                write_lock=self._write_lock,
             )
 
-        title = data.get("title", "")
+        title = data.title
         if count:
             return TaskResult(
                 summary=f"下载完成: {title}",

@@ -29,6 +29,7 @@ from apscheduler.events import (
 )
 
 from copixiv.domain.models.task_result import TaskResult
+from copixiv.domain.exceptions import TaskAlreadyRunningError
 from copixiv.infrastructure.database.uow import SqlUnitOfWork
 from copixiv.tasks.registry import get_task
 import copixiv.tasks.novel_tasks  # ensure @register decorators fire  # noqa: F401
@@ -60,6 +61,8 @@ class TaskManagerSystem:
         config=None,
         notifier=None,
     ):
+        from copixiv.infrastructure.database.write_lock import DbWriteLock
+
         self._session_factory = session_factory
         self._notifier = notifier
         self._deps = {
@@ -68,9 +71,15 @@ class TaskManagerSystem:
             "image_downloader": image_downloader,
             "epub_builder": epub_builder,
             "config": config,
+            "write_lock": DbWriteLock(),
         }
         # Strip Nones — tasks that don't need a dep simply don't declare it.
         self._deps = {k: v for k, v in self._deps.items() if v is not None}
+
+        # In-process duplicate-run guard (task name → in-flight).
+        # Checked-and-set inside the sync run_task(), so it is atomic on
+        # the event loop; cleared by the wrapper's ``finally``.
+        self._running_names: set[str] = set()
 
         self.scheduler = AsyncIOScheduler()
         self.scheduler.add_listener(
@@ -83,10 +92,50 @@ class TaskManagerSystem:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Start the scheduler and load cron jobs from the database."""
+        """Start the scheduler, recover stale tasks, load cron jobs."""
         self.scheduler.start()
+        self._recover_stale_tasks()
         self._load_cron_jobs()
         logger.info("TaskManagerSystem started — cron jobs loaded.")
+
+    def _recover_stale_tasks(self) -> None:
+        """Mark tasks stuck in pending/running as interrupted.
+
+        A process crash (or ``stop()`` with ``wait=False``) leaves
+        ``task_history`` rows in pending/running forever — without this,
+        the UI shows them as eternally running and the duplicate-run
+        guard keeps treating the task name as busy.
+        """
+        from sqlalchemy import select as _select, update as _update
+        from copixiv.infrastructure.database import models
+
+        try:
+            with self._session_factory() as session:
+                stale_ids = session.execute(
+                    _select(models.TaskHistory.id).where(
+                        models.TaskHistory.status.in_(("pending", "running"))
+                    )
+                ).scalars().all()
+                if not stale_ids:
+                    return
+                session.execute(
+                    _update(models.TaskHistory)
+                    .where(models.TaskHistory.id.in_(stale_ids))
+                    .values(
+                        status="interrupted",
+                        end_time=datetime.now().astimezone().isoformat(),
+                        result=json.dumps(
+                            {"summary": "服务重启导致中断"}, ensure_ascii=False,
+                        ),
+                    )
+                )
+                session.commit()
+                logger.warning(
+                    "Recovered {} stale task history rows → interrupted.",
+                    len(stale_ids),
+                )
+        except Exception:
+            logger.exception("Failed to recover stale task history rows.")
 
     def stop(self) -> None:
         """Shut down the scheduler gracefully."""
@@ -160,9 +209,20 @@ class TaskManagerSystem:
     def _trigger_cron_job(
         self, name: str, func: Callable, params: dict
     ) -> None:
-        """Fires when a cron trigger is hit.  Enqueues via :meth:`run_task`."""
+        """Fires when a cron trigger is hit.  Enqueues via :meth:`run_task`.
+
+        A cron firing while a manual run of the same task is still active
+        is skipped (the duplicate-run guard raises) instead of stacking a
+        concurrent duplicate.
+        """
         logger.info("Cron triggered: {}", name)
-        self.run_task(name, func, params)
+        try:
+            self.run_task(name, func, params)
+        except TaskAlreadyRunningError:
+            logger.warning(
+                "Cron for '{}' skipped — a run is already pending/running.",
+                name,
+            )
 
     # ------------------------------------------------------------------
     # Task execution
@@ -179,18 +239,36 @@ class TaskManagerSystem:
         This is the entry point for both cron-triggered and manually-triggered
         runs.  The task is scheduled as a one-shot APScheduler job so that
         history recording and error handling happen in the wrapper.
+
+        Raises:
+            TaskAlreadyRunningError: If the same task name already has a
+                pending/running history row (or is in-flight in-process).
         """
         params = params or {}
 
+        # Duplicate-run guard: in-process set (atomic on the event loop —
+        # run_task is sync) + DB check (covers rows from previous process
+        # lifetimes).  Without this, "manual run + cron" or double clicks
+        # execute the same task concurrently.
+        if name in self._running_names:
+            raise TaskAlreadyRunningError(
+                f"Task '{name}' is already running in this process."
+            )
         with self._session_factory() as session:
             from copixiv.infrastructure.repositories.task import SQLAlchemyTaskRepository
             repo = SQLAlchemyTaskRepository(session)
+            busy = repo.has_pending_or_running(name)
+            if busy:
+                raise TaskAlreadyRunningError(
+                    f"Task '{name}' is already pending or running."
+                )
             # Short INSERT outside db_write() — task enqueue happens in
             # sync API paths; 60s busy_timeout covers the rare collision.
             task_id = repo.add_task_sync(name, params)
             session.commit()
             logger.info("Task '{}' (id={}) enqueued.", name, task_id)
 
+        self._running_names.add(name)
         self.scheduler.add_job(
             self._run_task_wrapper,
             args=(task_id, name, func, params),
@@ -202,7 +280,13 @@ class TaskManagerSystem:
         """Look up a scheduled task by DB id and run it immediately.
 
         Used by the ``POST /api/tasks/scheduled/{id}/run`` endpoint.
+
+        Raises:
+            NotFoundError: unknown scheduled-task id.
+            ValidationError: the scheduled task references an unknown
+                task function.
         """
+        from copixiv.domain.exceptions import NotFoundError, ValidationError
         from copixiv.infrastructure.repositories.task import SQLAlchemyTaskRepository
 
         with self._session_factory() as session:
@@ -210,11 +294,11 @@ class TaskManagerSystem:
             tasks = repo.get_scheduled_tasks_sync()
             task = next((t for t in tasks if t.id == task_id), None)
             if task is None:
-                raise ValueError(f"Scheduled task id={task_id} not found.")
+                raise NotFoundError(f"Scheduled task id={task_id} not found.")
 
             func = get_task(task.task)
             if func is None:
-                raise ValueError(f"Unknown task function: {task.task}")
+                raise ValidationError(f"Unknown task function: {task.task}")
 
             params = self._parse_json(task.params)
 
@@ -233,6 +317,29 @@ class TaskManagerSystem:
     ) -> None:
         """Execute a task, record history, and send notifications."""
         logger.info("Starting task '{}' (id={})...", name, task_id)
+        start_time = time.time()
+        status: str = "running"
+        error_msg: str | None = None
+        result_val: Any = None
+
+        try:
+            await self._run_task_inner(
+                task_id, name, func, params,
+            )
+            return
+        finally:
+            # Release the in-process duplicate-run guard in every exit
+            # path (success / failure / cancellation).
+            self._running_names.discard(name)
+
+    async def _run_task_inner(
+        self,
+        task_id: int,
+        name: str,
+        func: Callable,
+        params: dict,
+    ) -> None:
+        """Body of the task wrapper — status tracking + execution."""
         start_time = time.time()
         status: str = "running"
         error_msg: str | None = None
@@ -263,6 +370,32 @@ class TaskManagerSystem:
                 status = "failed"
                 error_msg = "Task timed out after 30 minutes"
                 logger.error("Task '{}' (id={}) timed out.", name, task_id)
+            except asyncio.CancelledError:
+                # Cancellation (e.g. scheduler shutdown) is BaseException —
+                # without this branch the row stays "running" forever.
+                # Record the interruption best-effort, then re-raise so
+                # cancellation semantics are preserved.
+                duration = time.time() - start_time
+                try:
+                    await self._update_history(
+                        task_id, "interrupted",
+                        result=json.dumps(
+                            {
+                                "log": get_logs(),
+                                "summary": "任务被中断（服务关闭/重启）",
+                                "new_novels_count": 0,
+                                "new_novel_titles": [],
+                            },
+                            ensure_ascii=False,
+                        ),
+                        duration=duration,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to record interrupted status for task '{}' "
+                        "(id={}).", name, task_id,
+                    )
+                raise
             except Exception as exc:
                 status = "failed"
                 error_msg = str(exc)
@@ -356,13 +489,31 @@ class TaskManagerSystem:
 
     @staticmethod
     def _parse_json(value: Any) -> dict:
-        """Parse a JSON string or return the dict as-is."""
+        """Parse a JSON string or return the dict as-is.
+
+        Malformed JSON is a configuration error — warn loudly instead of
+        silently running the task with an empty parameter set.
+        """
         if isinstance(value, str):
             try:
-                return json.loads(value)
+                parsed = json.loads(value)
             except json.JSONDecodeError:
+                logger.warning(
+                    "Task params are not valid JSON — running with empty "
+                    "params. Raw value: {!r:.200}",
+                    value,
+                )
                 return {}
-        return value if isinstance(value, dict) else {}
+            return parsed if isinstance(parsed, dict) else {}
+        if isinstance(value, dict):
+            return value
+        if value is None:
+            return {}
+        logger.warning(
+            "Task params have unexpected type {} — running with empty params.",
+            type(value).__name__,
+        )
+        return {}
 
     # ------------------------------------------------------------------
     # APScheduler error listener

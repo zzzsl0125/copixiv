@@ -25,3 +25,8 @@ class NotFoundError(DomainError):
 class ValidationError(DomainError):
     """Input validation failed."""
     status_code = 400
+
+
+class TaskAlreadyRunningError(DomainError):
+    """A task with the same name is already pending or running."""
+    status_code = 409

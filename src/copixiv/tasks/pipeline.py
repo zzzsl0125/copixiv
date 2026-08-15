@@ -12,6 +12,7 @@ from pathlib import Path
 
 from copixiv.infrastructure.database.write_lock import db_write
 
+from copixiv.domain.models.novel import Novel
 from copixiv.domain.services.language import is_chinese
 from copixiv.application.novel.download_novel import fetch_novel_and_assets
 from copixiv.application.novel.persist import persist_novels
@@ -20,8 +21,6 @@ from copixiv.domain.services.novel_factory import (
     NovelInfoLike, build_from_novel_info,
 )
 from copixiv.domain.services.parsing import safe_get
-
-from copixiv.infrastructure.repositories.failed_novel import FailedNovelRepository
 
 from copixiv.app.logger import logger
 
@@ -70,7 +69,7 @@ def _filter_chinese_novels(novels: list) -> list:
 
 
 async def _batch_upsert(
-    novels: list[dict], uow, force_update: list[str] | None = None,
+    novels: list[Novel], uow, force_update: list[str] | None = None,
 ) -> int:
     """Upsert novels and update author/series summaries.
 
@@ -85,8 +84,8 @@ async def _batch_upsert(
     novels = [n for n in novels if n]
     if novels:
         logger.info(
-            f"_batch_upsert: upsert_novels returned {count} for "
-            f"{len(novels)} input novels (sample id: {novels[0].get('id')!r})"
+            f"_batch_upsert: {count} newly inserted out of "
+            f"{len(novels)} input novels (sample id: {novels[0].id!r})"
         )
     return count
 
@@ -102,7 +101,7 @@ async def _download_novels(
     file_storage,
     image_downloader,
     redownload: bool = False,
-) -> tuple[list[dict], list[tuple[int, str]]]:
+) -> tuple[list[Novel], list[tuple[int, str]]]:
     """Download novels via webview concurrently.
 
     Fires all webview_novel calls in parallel — the client semaphore + LRU
@@ -117,7 +116,7 @@ async def _download_novels(
     if not novel_ids:
         return [], []
 
-    async def _fetch_one(nid: int) -> dict | None:
+    async def _fetch_one(nid: int) -> Novel | None:
         data = await fetch_novel_and_assets(
             nid, client, file_storage, image_downloader, redownload,
         )
@@ -130,7 +129,7 @@ async def _download_novels(
         return_exceptions=True,
     )
 
-    valid: list[dict] = []
+    valid: list[Novel] = []
     failed_records: list[tuple[int, str]] = []
     for nid, result in zip(novel_ids, results):
         if isinstance(result, Exception):
@@ -156,8 +155,8 @@ async def _plan_batch(
     novels: list[NovelInfoLike],
     uow,
     redownload: bool = False,
-    failed_repo: FailedNovelRepository | None = None,
-) -> tuple[list[dict], list[int]]:
+    failed_repo=None,
+) -> tuple[list[Novel], list[int]]:
     """Plan phase (read-only): decide what to download and what to upsert.
 
     Must run outside the write lock — it only reads.  Returns
@@ -185,7 +184,7 @@ async def _plan_batch(
         f"{len(need_download)} need download",
     )
 
-    existing_meta: list[dict] = []
+    existing_meta: list[Novel] = []
     if not redownload:
         existing_meta = [
             build_from_novel_info(n) for n in novels if n.id in existing
@@ -196,11 +195,11 @@ async def _plan_batch(
 
 
 async def _persist_batch(
-    existing_meta: list[dict],
-    downloaded: list[dict],
+    existing_meta: list[Novel],
+    downloaded: list[Novel],
     uow,
     failed_records: list[tuple[int, str]] | None = None,
-    failed_repo: FailedNovelRepository | None = None,
+    failed_repo=None,
 ) -> tuple[list[str], set[int]]:
     """Persist phase (write-only): run inside ``db_write()`` + ``uow.begin()``.
 
@@ -224,12 +223,12 @@ async def _persist_batch(
         )
 
     if downloaded:
-        success_ids = {d["id"] for d in downloaded}
+        success_ids = {d.id for d in downloaded}
         await _batch_upsert(downloaded, uow)
         if failed_repo is not None:
             failed_repo.forget_many(success_ids)
-        titles = [d["title"] for d in downloaded if "title" in d]
-        new_author_ids = {d["author_id"] for d in downloaded if d.get("author_id")}
+        titles = [d.title for d in downloaded if d.title]
+        new_author_ids = {d.author_id for d in downloaded if d.author_id}
         logger.info(
             f"_persist_batch: {len(downloaded)} novels downloaded and upserted",
         )
@@ -266,13 +265,12 @@ async def _batch_handle(
     # 1. Plan — read-only, short transaction, no lock.
     uow = SqlUnitOfWork(session_factory)
     async with uow.begin():
-        failed_repo = FailedNovelRepository(uow.session)
         existing_meta, download_ids = await _plan_batch(
-            novels, uow, redownload=redownload, failed_repo=failed_repo,
+            novels, uow, redownload=redownload, failed_repo=uow.failed_novels,
         )
 
     # 2. Download — concurrent network/file I/O, no database.
-    downloaded: list[dict] = []
+    downloaded: list[Novel] = []
     failed_records: list[tuple[int, str]] = []
     if download_ids:
         if client and file_storage and image_downloader:
@@ -302,11 +300,10 @@ async def _batch_handle(
     # 3. Persist — one write transaction inside the global write lock.
     async with db_write():
         async with uow.begin():
-            failed_repo = FailedNovelRepository(uow.session)
             titles, new_author_ids = await _persist_batch(
                 existing_meta, downloaded, uow,
                 failed_records=failed_records + asset_failures,
-                failed_repo=failed_repo,
+                failed_repo=uow.failed_novels,
             )
 
     return titles, new_author_ids

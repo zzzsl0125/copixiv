@@ -46,7 +46,7 @@ class TestNovel:
         assert n.like == 0
         assert n.view == 0
         assert n.text == 0
-        assert n.has_epub == 0
+        assert n.has_epub is None
         assert n.author_name is None
         assert n.series_id is None
 

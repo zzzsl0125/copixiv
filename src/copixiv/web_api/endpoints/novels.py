@@ -7,8 +7,8 @@ from urllib.parse import quote
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Body, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
-from copixiv.web_api.deps import get_uow, parse_json_param
-from copixiv.web_api.schemas import BatchDownloadRequest
+from copixiv.web_api.deps import get_uow, get_write_uow, parse_json_param
+from copixiv.web_api.schemas import BatchDownloadRequest, NovelListResponse
 from copixiv.infrastructure.database.uow import SqlUnitOfWork
 from copixiv.infrastructure.database import constants as C
 from copixiv.application.search_history.record import record_search_history
@@ -30,7 +30,7 @@ def _iter_zip(buffer) -> Iterator[bytes]:
         buffer.close()
 
 
-@router.get("/", response_model=dict)
+@router.get("/", response_model=NovelListResponse)
 async def get_novels(
     request: Request,
     background_tasks: BackgroundTasks,
@@ -39,7 +39,7 @@ async def get_novels(
     order_by: str = C.ORDER_BY_RANDOM,
     order_direction: str = "DESC",
     cursor: str | None = None,
-    per_page: int = 20,
+    per_page: int = Query(20, ge=1, le=200),
     min_like: int | None = None,
     min_text: int | None = None,
 ):
@@ -79,22 +79,25 @@ async def count_novels(
 
 
 @router.post("/{novel_id}/favourite", status_code=204)
-async def toggle_favourite(novel_id: int, uow: SqlUnitOfWork = Depends(get_uow)):
+async def toggle_favourite(novel_id: int, uow: SqlUnitOfWork = Depends(get_write_uow)):
     await uow.novels.toggle_favourite(novel_id)
 
 
 @router.post("/author/{author_id}/follow", status_code=204)
-async def toggle_special_follow(author_id: int, uow: SqlUnitOfWork = Depends(get_uow)):
+async def toggle_special_follow(author_id: int, uow: SqlUnitOfWork = Depends(get_write_uow)):
     await uow.novels.toggle_special_follow(author_id)
 
 
 @router.get("/{novel_id}/download")
 async def download_novel(
+    request: Request,
     novel_id: int,
     uow: SqlUnitOfWork = Depends(get_uow),
     format: Literal["txt", "epub"] = "txt",
 ):
-    use_case = GetNovelFileUseCase(uow.novels)
+    use_case = GetNovelFileUseCase(
+        uow.novels, request.app.state.file_storage.download_dir,
+    )
     file_path, media_type = await use_case.execute(novel_id, format)
     headers = {
         "Content-Disposition": f"attachment; filename*=UTF-8''{quote(file_path.name)}"
@@ -123,9 +126,11 @@ async def batch_download_novels(
         naming_template=body.naming_template,
     )
 
+    from copixiv.domain.services.filename import safe_filename
+    desc = safe_filename(result.search_desc.rstrip(".zip").rstrip(".ZIP"))
     headers = {
         "Content-Disposition": (
-            f"attachment; filename*=UTF-8''{quote(result.search_desc + '.zip')}"
+            f"attachment; filename*=UTF-8''{quote(desc + '.zip')}"
         ),
     }
     if result.missing_ids:
@@ -163,7 +168,7 @@ async def batch_download_preview(
 async def delete_novel(
     request: Request,
     novel_id: int,
-    uow: SqlUnitOfWork = Depends(get_uow),
+    uow: SqlUnitOfWork = Depends(get_write_uow),
 ):
     use_case = DeleteNovelUseCase(
         uow.novels, request.app.state.file_storage

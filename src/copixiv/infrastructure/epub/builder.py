@@ -2,6 +2,7 @@
 
 import html
 import io
+import os
 import re
 from pathlib import Path
 
@@ -110,14 +111,21 @@ class EpubBuilder:
         spine.append(main_page)
         book.spine = spine
 
-        # Write
+        # Write — atomic: build into a sibling temp file, then os.replace so
+        # a crash never leaves a truncated EPUB at the final path.
         safe_title = safe_filename(title)
         output_path = parent_dir / f"{safe_title}_{novel_id}.epub"
+        tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
         try:
-            epub.write_epub(output_path, book, {})
+            epub.write_epub(tmp_path, book, {})
+            os.replace(tmp_path, output_path)
             logger.info(f"Made Epub: ({data['id']}){data['title']}")
             return True
         except Exception:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
             logger.exception(f"Failed to write EPUB: {output_path}")
             return False
 

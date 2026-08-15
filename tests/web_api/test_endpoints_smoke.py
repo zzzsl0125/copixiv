@@ -58,7 +58,8 @@ class _FakeTaskManager:
     def run_task_now(self, task_id: int) -> None:
         self.runs.append(task_id)
         if task_id == 999:
-            raise ValueError("no such scheduled task")
+            # 真实实现抛 NotFoundError（DomainError → 404）
+            raise NotFoundError("no such scheduled task")
 
 
 @pytest.fixture

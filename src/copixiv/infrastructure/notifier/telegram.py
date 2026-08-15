@@ -156,7 +156,10 @@ class TelegramNotifier:
             resp.raise_for_status()
             logger.info("Telegram notification sent successfully.")
         except Exception as exc:
-            logger.error("Failed to send Telegram message: {}", exc)
+            logger.error(
+                "Failed to send Telegram message: {}",
+                str(exc).replace(self._token, "***"),
+            )
 
     async def _send_document(
         self, caption: str, file_content: str, file_name: str
@@ -183,4 +186,7 @@ class TelegramNotifier:
             resp.raise_for_status()
             logger.info("Telegram document sent successfully.")
         except Exception as exc:
-            logger.error("Failed to send Telegram document: {}", exc)
+            logger.error(
+                "Failed to send Telegram document: {}",
+                str(exc).replace(self._token, "***"),
+            )

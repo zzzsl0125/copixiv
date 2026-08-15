@@ -23,9 +23,13 @@ def parse_tags(tags: list[str | dict]) -> list[str]:
     # so the output is deterministic (set iteration order is not).
     result: dict[str, None] = {}
     for tag in tags:
+        if tag is None:
+            continue  # junk entry — never str(None) → "none"
         tag_text: str = (
             tag.get("name", "") if isinstance(tag, dict) else str(tag)
         )
+        if not tag_text:
+            continue
         cleaned = _CLEAN_PATTERN.sub("", tag_text)
         for part in _SPLIT_PATTERN.split(cleaned):
             part = normalize_tag(part)

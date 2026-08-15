@@ -42,3 +42,14 @@ async def db_write() -> AsyncIterator[None]:
     """
     async with _db_write_lock:
         yield
+
+
+class DbWriteLock:
+    """Callable adapter satisfying ``domain.ports.write_lock.WriteLockPort``.
+
+    Injected into application-layer use cases by the task runner so they
+    depend on the domain port instead of importing this module directly.
+    """
+
+    def __call__(self) -> AsyncIterator[None]:
+        return db_write()

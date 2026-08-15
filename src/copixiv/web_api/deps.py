@@ -34,6 +34,24 @@ async def get_uow(db: Session = Depends(get_db)) -> AsyncIterator[SqlUnitOfWork]
         yield uow
 
 
+async def get_write_uow(
+    db: Session = Depends(get_db),
+) -> AsyncIterator[SqlUnitOfWork]:
+    """Yield a request-scoped UoW **inside the global write lock**.
+
+    Write endpoints must use this dependency so API writes serialize with
+    background-task writes through the same ``db_write()`` lock — the
+    lock covers begin → commit, exactly like the task pipeline.  Read-only
+    endpoints keep using :func:`get_uow` (WAL reads need no lock).
+    """
+    from copixiv.infrastructure.database.write_lock import db_write
+
+    uow = SqlUnitOfWork(db)
+    async with db_write():
+        async with uow.begin():
+            yield uow
+
+
 def parse_json_param(value: str | None, name: str) -> dict | None:
     """Parse a JSON string request parameter into a dict.
 

@@ -16,7 +16,12 @@ class DeleteNovelUseCase:
         self._file_storage = file_storage
 
     async def execute(self, novel_id: int) -> None:
-        """Delete a novel by ID, cleaning up associated files first.
+        """Delete a novel by ID, then clean up its files best-effort.
+
+        DB first, files second: a failed DB delete must not leave the
+        database pointing at files that no longer exist (a dangling row
+        is worse than orphaned files — orphans are easy to spot and the
+        weekly ``check_epub``-style sweeps can reclaim them).
 
         Raises:
             NotFoundError: If the novel doesn't exist.
@@ -25,7 +30,10 @@ class DeleteNovelUseCase:
         if not novel:
             raise NotFoundError(f"Novel {novel_id} not found")
 
-        if novel_path := novel.get("path"):
-            self._file_storage.delete_novel_files(novel_path)
-
+        novel_path = novel.get("path")
         await self._repo.delete(novel_id)
+
+        if novel_path:
+            # Best-effort cleanup — a failure here must not fail the API
+            # call (the row is already gone).
+            self._file_storage.delete_novel_files(novel_path)

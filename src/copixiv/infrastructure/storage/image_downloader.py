@@ -3,6 +3,7 @@
 import asyncio
 import atexit
 import os
+import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,8 @@ class ImageDownloader:
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
         self._epub_builder = epub_builder
         self._futures: list[tuple[int, Future]] = []
+        self._in_flight: set[int] = set()
+        self._in_flight_lock = threading.Lock()
         atexit.register(self.shutdown)
 
     def __del__(self) -> None:
@@ -54,13 +57,15 @@ class ImageDownloader:
         self, url: str, save_path: Path, session: requests.Session | None = None
     ) -> bool:
         """Download a single image to *save_path*. Returns True on success."""
-        if save_path.exists():
+        if save_path.exists() and save_path.stat().st_size > 0:
             return True
 
         local_session = session or _create_session()
         should_close = session is None
+        tmp_path = save_path.with_suffix(save_path.suffix + ".tmp")
 
         try:
+            save_path.parent.mkdir(parents=True, exist_ok=True)
             proxies = {
                 "http": config.proxy.http,
                 "https": config.proxy.https,
@@ -71,7 +76,7 @@ class ImageDownloader:
             expected_size = int(response.headers.get("content-length", 0))
             downloaded_size = 0
 
-            with open(save_path, "wb") as f:
+            with open(tmp_path, "wb") as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
@@ -81,13 +86,13 @@ class ImageDownloader:
                 raise RuntimeError(
                     f"Incomplete download: expected {expected_size}, got {downloaded_size}"
                 )
+            os.replace(tmp_path, save_path)
             return True
         except Exception:
-            if save_path.exists():
-                try:
-                    os.remove(save_path)
-                except OSError:
-                    pass
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
             return False
         finally:
             if should_close:
@@ -98,6 +103,12 @@ class ImageDownloader:
 
         Runs in the thread pool; returns immediately (fire-and-forget).
         """
+        # Normalise the input: callers may pass a Pydantic Novel model or a
+        # plain dict.  The rest of this method (and _download_assets) uses
+        # dict access, so convert the model to a dict first.
+        if hasattr(data, "model_dump"):
+            data = data.model_dump()
+
         path_str = data.get("path")
         if not path_str:
             return
@@ -111,8 +122,26 @@ class ImageDownloader:
         if not images and not illusts:
             return
 
-        future = self._executor.submit(self._download_assets, data.copy())
-        self._futures.append((data["id"], future))
+        novel_id = data["id"]
+        with self._in_flight_lock:
+            if novel_id in self._in_flight:
+                return
+            self._in_flight.add(novel_id)
+
+        try:
+            future = self._executor.submit(self._download_assets, data.copy())
+        except Exception:
+            with self._in_flight_lock:
+                self._in_flight.discard(novel_id)
+            raise
+
+        self._futures.append((novel_id, future))
+        future.add_done_callback(lambda _f, nid=novel_id: self._release(nid))
+
+    def _release(self, novel_id: int) -> None:
+        """Remove *novel_id* from the in-flight set (called from the worker thread)."""
+        with self._in_flight_lock:
+            self._in_flight.discard(novel_id)
 
     async def await_all(self) -> list[tuple[int, str]]:
         """Wait for all in-flight asset tasks (image download + EPUB) to finish.

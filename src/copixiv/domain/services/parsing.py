@@ -58,15 +58,23 @@ def safe_set(data: Any, path: str, value: Any) -> None:
 def guess_series_order(navigation: Any) -> int | None:
     """Infer a novel's position in its series from Pixiv navigation data.
 
-    Looks at ``prevNovel.contentOrder`` or ``nextNovel.contentOrder``.
+    Looks at ``prevNovel.contentOrder`` first (current = prev + 1), and
+    falls back to ``nextNovel.contentOrder`` (current = next - 1) when the
+    previous pointer exists but carries no order.
     """
     try:
-        if prev := safe_get(navigation, "prevNovel"):
-            return int(safe_get(prev, "contentOrder")) + 1
-        if nxt := safe_get(navigation, "nextNovel"):
-            return int(safe_get(nxt, "contentOrder")) - 1
+        prev = safe_get(navigation, "prevNovel")
+        if prev is not None:
+            order = safe_get(prev, "contentOrder")
+            if order is not None:
+                return int(order) + 1
+        nxt = safe_get(navigation, "nextNovel")
+        if nxt is not None:
+            order = safe_get(nxt, "contentOrder")
+            if order is not None:
+                return int(order) - 1
         return None
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 

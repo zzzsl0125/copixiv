@@ -96,6 +96,23 @@ class SQLAlchemyAuthorRepository(BaseRepository):
         ).scalars().all()
 
         if novel_ids:
+            # Decrement tag reference counts BEFORE deleting the links —
+            # without this the denormalized counter drifts permanently.
+            links = self.session.execute(
+                _select(models.NovelTag.novel_id, models.Tag.name)
+                .join(models.Tag, models.NovelTag.tag_id == models.Tag.id)
+                .where(models.NovelTag.novel_id.in_(novel_ids))
+            ).all()
+            tag_link_counts: dict[str, int] = {}
+            for _nid, tag_name in links:
+                tag_link_counts[tag_name] = tag_link_counts.get(tag_name, 0) + 1
+            for tag_name, cnt in tag_link_counts.items():
+                self.session.execute(
+                    _update(models.Tag)
+                    .where(models.Tag.name == tag_name)
+                    .values(reference_count=models.Tag.reference_count - cnt)
+                )
+
             fts = FTSManager(self.session)
             for nid in novel_ids:
                 fts.delete_novel_fts(nid)

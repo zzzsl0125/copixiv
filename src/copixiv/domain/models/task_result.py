@@ -23,8 +23,9 @@ class TaskResult(BaseModel):
             persisted** during this task run.  Only populated by tasks that
             actually fetch/download novels (e.g. ``novel_follow``,
             ``author_fetch``).  Maintenance tasks leave this empty.
-        new_novel_count: Total count of newly persisted novels.  Mirrors
-            ``len(new_novel_titles)`` for novel tasks; 0 for maintenance.
+        new_novel_count: Total count of newly persisted novels.  Always
+            mirrors ``len(new_novel_titles)`` (enforced by a validator), so
+            callers never need to set it explicitly.
     """
 
     summary: str = ""
@@ -33,6 +34,8 @@ class TaskResult(BaseModel):
 
     @model_validator(mode="after")
     def _sync_count(self) -> "TaskResult":
-        if self.new_novel_count == 0 and self.new_novel_titles:
+        if self.new_novel_titles:
             self.new_novel_count = len(self.new_novel_titles)
+        else:
+            self.new_novel_count = 0
         return self

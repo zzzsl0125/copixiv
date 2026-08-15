@@ -17,7 +17,7 @@ from sqlalchemy import create_engine, event
 from copixiv.infrastructure.database.engine import create_session_factory
 from copixiv.infrastructure.database import models
 from copixiv.infrastructure.database.uow import SqlUnitOfWork
-from copixiv.infrastructure.database.write_lock import db_write
+from copixiv.infrastructure.database.write_lock import db_write, DbWriteLock
 from copixiv.infrastructure.repositories.fts import FTSManager
 from copixiv.tasks import novel_tasks
 from copixiv.tasks.pipeline import _batch_handle
@@ -95,6 +95,7 @@ class TestChineseFiltering:
         result = await novel_tasks.author_fetch(
             1, force=True, client=FakeClient([CN_NOVEL, EN_NOVEL]),
             uow=uow, file_storage=None, image_downloader=None, config=None,
+            write_lock=DbWriteLock(),
         )
 
         assert [n["id"] for n in seen["novels"]] == [100]
@@ -116,6 +117,7 @@ class TestChineseFiltering:
         result = await novel_tasks.novel_follow(
             client=FakeClient([CN_NOVEL, EN_NOVEL]),
             uow=uow, file_storage=None, image_downloader=None, config=None,
+            write_lock=DbWriteLock(),
         )
 
         assert [n["id"] for n in seen["novels"]] == [100]
@@ -201,6 +203,7 @@ class TestNovelFetchFailureRecorded:
             uow=uow,
             file_storage=None,
             image_downloader=None,
+            write_lock=DbWriteLock(),
         )
 
         assert "获取失败" in result.summary

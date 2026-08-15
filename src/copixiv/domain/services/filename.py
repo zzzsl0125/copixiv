@@ -101,6 +101,12 @@ def _sanitize_path_segment(segment: str) -> str:
     if not segment:
         return "untitled"
 
+    # Strip leading dots BEFORE the reserved-name check — ``.CON`` /
+    # ``..CON`` must not slip past the Windows reserved-name guard.
+    segment = segment.lstrip(".")
+    if not segment:
+        return "untitled"
+
     name, _dot, ext = segment.partition(".")
     if name.upper() in _WINDOWS_RESERVED:
         if ext:
@@ -108,8 +114,7 @@ def _sanitize_path_segment(segment: str) -> str:
         else:
             segment = name + "[WinReserved]"
 
-    segment = segment.lstrip(".")
-    if segment and segment[-1] == ".":
+    if segment[-1] == ".":
         segment = segment[:-1] + "．"
 
     return segment or "untitled"
@@ -118,29 +123,38 @@ def _sanitize_path_segment(segment: str) -> str:
 def _remove_empty_token(text: str, placeholder: str) -> str:
     """Replace *placeholder* and any adjacent separator chars with ``""``.
 
-    ``#{series_index}_`` wrapping an empty ``{series_index}`` is removed
-    entirely, while ``/`` (not a separator) is left in place.
+    All occurrences are removed (a template may repeat a token), including
+    ``#{series_index}_`` wrapping an empty ``{series_index}``; ``/`` (not a
+    separator) is left in place.
     """
-    idx = text.find(placeholder)
-    if idx == -1:
+    if placeholder not in text:
         return text
 
-    left = idx
-    while left > 0 and text[left - 1] in _SEPARATORS:
-        left -= 1
-    right = idx + len(placeholder)
-    while right < len(text) and text[right] in _SEPARATORS:
-        right += 1
-
-    return text[:left] + text[right:]
+    while True:
+        idx = text.find(placeholder)
+        if idx == -1:
+            break
+        left = idx
+        while left > 0 and text[left - 1] in _SEPARATORS:
+            left -= 1
+        right = idx + len(placeholder)
+        while right < len(text) and text[right] in _SEPARATORS:
+            right += 1
+        text = text[:left] + text[right:]
+    return text
 
 
 def _post_process(path: str) -> str:
-    """Final cleanup: sanitize each ``/`` segment, discard empties, rejoin."""
+    """Final cleanup: sanitize each ``/`` segment, discard empties, rejoin.
+
+    Literal characters in the template (e.g. a user-written ``:``) are
+    sanitized the same way token values are, so the produced path is legal
+    on Windows as well as Linux.
+    """
     segments = path.split("/")
     cleaned: list[str] = []
     for seg in segments:
-        seg = seg.strip()
+        seg = _replace_illegal_chars(seg.strip())
         if not seg:
             continue
         cleaned.append(_sanitize_path_segment(seg))
