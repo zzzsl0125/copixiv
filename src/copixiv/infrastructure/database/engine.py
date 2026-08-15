@@ -45,6 +45,11 @@ def create_database_engine(
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA synchronous=NORMAL")
+        # Keep SQLite's temporary B-tree / large IN-list spill in memory.
+        # The database is ~500 MB with at most ~220k intermediate rowids,
+        # so this avoids disk temp files (and "unable to open database
+        # file" in restricted environments) without excessive memory use.
+        cursor.execute("PRAGMA temp_store=MEMORY")
         # Writes are serialized in-process via db_write() (see
         # infrastructure/database/write_lock.py), so this timeout is only
         # a fallback for short external writers (e.g. FastAPI sessions).

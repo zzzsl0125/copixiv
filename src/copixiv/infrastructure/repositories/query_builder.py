@@ -48,6 +48,14 @@ _FTS5_RESERVED: frozenset[str] = frozenset({
     "and", "or", "not", "near",
 })
 
+# Adaptive filter thresholds (benchmarked on the real 232k-novel database).
+# For list queries, low-selectivity tag/keyword filters are faster as
+# ``WHERE id IN (...)``, while high-selectivity filters are faster as
+# correlated ``EXISTS`` (which can stop early along the ORDER BY index).
+# These thresholds sit at the measured crossover point.
+_ADAPTIVE_TAG_THRESHOLD = 3000
+_ADAPTIVE_KEYWORD_THRESHOLD = 15000
+
 
 def reset_fts_cache() -> None:
     """Reset the FTS availability cache (call after FTS index rebuild)."""
@@ -259,9 +267,9 @@ class NovelQueryBuilder(BaseQueryBuilder):
         # Filter JOINs for favourite / special_follow (WHERE-IN subqueries)
         main = self._join_field_filter_tables(main, field_filters)
 
-        # Tag and FTS filters — use EXISTS for list queries so SQLite
-        # can walk the covering index for ORDER BY + LIMIT without a
-        # temporary B-Tree (benchmarked: 347 ms → 1 ms).
+        # Tag and FTS filters — adaptive for list queries: rare filters
+        # use WHERE-IN, popular filters use EXISTS so SQLite can walk the
+        # covering index for ORDER BY + LIMIT without a temporary B-Tree.
         main = self._where_tag_filter(main, tags, use_exists=True)
         main = self._where_fts_filter(main, keywords, use_exists=True)
 
@@ -299,11 +307,12 @@ class NovelQueryBuilder(BaseQueryBuilder):
             return None
 
         stmt = select(func.count()).select_from(self.main_model)
-        stmt = self._join_field_filter_tables(stmt, field_filters)
-        # COUNT queries keep WHERE-IN for tags/FTS: EXISTS evaluates the
-        # correlated subquery once per row (22 s for 58 K rows), whereas
-        # WHERE-IN materialises once (317 ms).
-        stmt = self._where_tag_filter(stmt, tags, use_exists=False)
+        # COUNT queries: special_follow uses IN instead of EXISTS (avoids
+        # a full novel scan), and tags use JOINs instead of a large IN list.
+        stmt = self._join_field_filter_tables(
+            stmt, field_filters, use_exists_for_special_follow=False,
+        )
+        stmt = self._join_tag_filter(stmt, tags)
         stmt = self._where_fts_filter(stmt, keywords, use_exists=False)
         stmt = self._where_field_filters(stmt, field_filters)
         stmt = self._where_thresholds(stmt)
@@ -387,37 +396,54 @@ class NovelQueryBuilder(BaseQueryBuilder):
     # Internal: tag filter — WHERE-IN (count) or EXISTS (list)
     # ------------------------------------------------------------------
 
+    def _get_tag_reference_counts(
+        self, tag_names: set[str],
+    ) -> dict[str, int]:
+        """Return ``{tag_name: reference_count}`` for the given tag names."""
+        if not tag_names:
+            return {}
+        rows = self.session.execute(
+            select(models.Tag.name, models.Tag.reference_count)
+            .where(models.Tag.name.in_(tag_names))
+        ).all()
+        return {name: count for name, count in rows}
+
     def _where_tag_filter(
         self, stmt: Select, tag_names: set[str], use_exists: bool = False,
+        adaptive: bool = True,
     ) -> Select:
         """Add tag filter conditions.
 
-        Two strategies depending on the caller:
+        For list queries (``use_exists=True``) the strategy is adaptive:
+        rare tags use ``WHERE id IN (...)``, popular tags use correlated
+        ``EXISTS``.  The threshold is based on ``tag.reference_count``,
+        which is maintained incrementally and is cheap to read.
 
-        *use_exists=True* (list queries with ORDER BY + LIMIT):
-            ``WHERE EXISTS (SELECT 1 FROM novel_tag JOIN tag
-            WHERE novel_tag.novel_id = novel.id AND tag.name = 'X')``
+        * ``reference_count < _ADAPTIVE_TAG_THRESHOLD`` → IN
+        * otherwise → EXISTS
 
-            The correlated subquery lets SQLite walk the covering index
-            (e.g. ``idx_novel_like_text_id``) for ORDER BY + LIMIT and
-            probe each novel for the tag — early termination after ~55
-            rows for popular tags.  Benchmark: **1 ms** vs 347 ms.
-
-        *use_exists=False* (COUNT and filter-only queries):
-            ``WHERE novel.id IN (SELECT novel_id FROM novel_tag JOIN tag
-            WHERE tag.name = 'X')``
-
-            The independent subquery is materialised once, which is much
-            faster when every matching row must be visited (COUNT has no
-            LIMIT to stop early).  Benchmark: **317 ms** vs 22 424 ms.
-
-        Multiple tags use chained conditions (AND semantics).
+        For count/filter-only queries (``use_exists=False``) the method
+        keeps the ``WHERE id IN (...)`` form (the count path now prefers
+        ``_join_tag_filter`` for large result sets).
         """
         if not tag_names:
             return stmt
 
+        ref_counts = (
+            self._get_tag_reference_counts(tag_names)
+            if use_exists and adaptive else {}
+        )
+
         for tag_name in tag_names:
+            use_in = False
             if use_exists:
+                if adaptive:
+                    ref = ref_counts.get(tag_name)
+                    # Missing tag means zero occurrences → treat as rare/IN.
+                    use_in = ref is None or ref < _ADAPTIVE_TAG_THRESHOLD
+                # else: adaptive=False keeps legacy EXISTS behaviour.
+
+            if use_exists and not use_in:
                 exists_subq = _exists(
                     select(literal_column("1"))
                     .select_from(models.NovelTag)
@@ -437,24 +463,64 @@ class NovelQueryBuilder(BaseQueryBuilder):
                 stmt = stmt.where(self.main_model.id.in_(tag_ids_subq))
         return stmt
 
+    def _join_tag_filter(
+        self, stmt: Select, tag_names: set[str],
+    ) -> Select:
+        """Add tag filters as INNER JOINs (used by COUNT queries).
+
+        A direct join avoids materialising a large ``id IN (SELECT ...)``
+        list; for very popular tags this is faster and uses less temp space
+        (measured 249 ms → 171 ms for R-18 on 232k novels).
+        """
+        for idx, tag_name in enumerate(tag_names, start=1):
+            nt_alias = models.NovelTag.__table__.alias(f"nt_{idx}")
+            t_alias = models.Tag.__table__.alias(f"t_{idx}")
+            stmt = stmt.join(
+                nt_alias,
+                self.main_model.id == nt_alias.c.novel_id,
+            )
+            stmt = stmt.join(
+                t_alias,
+                nt_alias.c.tag_id == t_alias.c.id,
+            )
+            stmt = stmt.where(t_alias.c.name == tag_name)
+        return stmt
+
     # ------------------------------------------------------------------
     # Internal: FTS / keyword filter — WHERE-IN (count) or EXISTS (list)
     # ------------------------------------------------------------------
 
+    def _count_fts_matches(self, fts_query: str) -> int | None:
+        """Return the number of FTS rows matching *fts_query*.
+
+        This is a pure FTS5 count (no join to novel), which is very fast
+        even for large vocabularies (measured ~0–20 ms on 232k rows).
+        """
+        try:
+            return self.session.execute(
+                _text(
+                    f"SELECT count(*) FROM {C.TABLE_NOVEL_FTS} "
+                    f"WHERE {C.TABLE_NOVEL_FTS} MATCH :fts_query"
+                ).bindparams(fts_query=fts_query)
+            ).scalar() or 0
+        except Exception:
+            return None
+
     def _where_fts_filter(
         self, stmt: Select, keywords: set[str], use_exists: bool = False,
+        adaptive: bool = True,
     ) -> Select:
         """Add FTS keyword filter.
 
-        Two strategies (same trade-off as ``_where_tag_filter``):
+        For list queries (``use_exists=True``) the strategy is adaptive:
+        a cheap pure-FTS count decides between ``WHERE id IN (...)`` for
+        low-selectivity keywords and correlated ``EXISTS`` for popular
+        keywords.
 
-        *use_exists=True* (list queries):
-            ``WHERE EXISTS (SELECT 1 FROM novel_fts
-            WHERE novel_fts MATCH 'q' AND rowid = novel.id)``
+        * FTS match count < _ADAPTIVE_KEYWORD_THRESHOLD → IN
+        * otherwise → EXISTS
 
-        *use_exists=False* (COUNT / filter-only):
-            ``WHERE novel.id IN (SELECT rowid FROM novel_fts
-            WHERE novel_fts MATCH 'q')``
+        Pass ``adaptive=False`` to force the legacy EXISTS behaviour.
         """
         if not keywords:
             return stmt
@@ -470,6 +536,11 @@ class NovelQueryBuilder(BaseQueryBuilder):
         # Result is cached at module level — only probes DB once per process.
         if not _check_fts_available(self.session):
             return stmt
+
+        if use_exists and adaptive:
+            fts_count = self._count_fts_matches(fts_query)
+            if fts_count is not None and fts_count < _ADAPTIVE_KEYWORD_THRESHOLD:
+                use_exists = False
 
         if use_exists:
             # Use _fts_table (a sqlalchemy.table() reference) instead of
@@ -503,6 +574,7 @@ class NovelQueryBuilder(BaseQueryBuilder):
 
     def _join_field_filter_tables(
         self, stmt: Select, field_filters: dict,
+        use_exists_for_special_follow: bool = True,
     ) -> Select:
         """Add filters for favourite / special_follow.
 
@@ -513,10 +585,13 @@ class NovelQueryBuilder(BaseQueryBuilder):
 
         *is_favourite* filters by novel PK, which is always efficient.
 
-        *is_special_follow* uses EXISTS (same pattern as tag/FTS filters)
-        so SQLite can walk the PK index for ORDER BY + LIMIT instead of
-        building a TEMP B-TREE over all matching rows (benchmarked:
-        1.7 ms vs 4.5 ms for the WHERE-IN approach).
+        *is_special_follow* uses EXISTS for list queries (same pattern as
+        tag/FTS filters) so SQLite can walk the PK index for ORDER BY +
+        LIMIT instead of building a TEMP B-TREE over all matching rows
+        (benchmarked: 1.7 ms vs 4.5 ms for the WHERE-IN approach).
+        For COUNT queries there is no LIMIT, so EXISTS forces a full scan;
+        the caller passes ``use_exists_for_special_follow=False`` to use
+        ``author_id IN (SELECT ...)`` instead (measured 187 ms → 3 ms).
         """
         for qtype, _value in field_filters.items():
             if qtype == C.FIELD_IS_FAVOURITE:
@@ -526,16 +601,23 @@ class NovelQueryBuilder(BaseQueryBuilder):
                     )
                 )
             elif qtype == C.FIELD_IS_SPECIAL_FOLLOW:
-                stmt = stmt.where(
-                    _exists(
-                        select(literal_column("1"))
-                        .select_from(models.SpecialFollow)
-                        .where(
-                            models.SpecialFollow.author_id
-                            == self.main_model.author_id,
+                if use_exists_for_special_follow:
+                    stmt = stmt.where(
+                        _exists(
+                            select(literal_column("1"))
+                            .select_from(models.SpecialFollow)
+                            .where(
+                                models.SpecialFollow.author_id
+                                == self.main_model.author_id,
+                            )
                         )
                     )
-                )
+                else:
+                    stmt = stmt.where(
+                        self.main_model.author_id.in_(
+                            select(models.SpecialFollow.author_id)
+                        )
+                    )
         return stmt
 
     # ------------------------------------------------------------------
@@ -568,17 +650,24 @@ class NovelQueryBuilder(BaseQueryBuilder):
     def _where_thresholds(self, stmt: Select) -> Select:
         """Add WHERE conditions for min_like / min_text thresholds.
 
+        Values of 0 are treated as "no threshold": the frontend uses 0 to
+        mean 不限, and generating ``like >= 0`` prevents SQLite from using
+        the more specific ``(author_id, id)`` / ``(series_id, id)``
+        indexes for ORDER BY id.
+
         Uses bare column comparisons (no COALESCE) so SQLite can do a
         direct index range scan.  The ``novel.like`` column has zero NULL
         values in this dataset, and ``NULL >= 500`` evaluates to NULL
         (falsy) in any case, so COALESCE is unnecessary.
         """
-        if self.params.get("min_like") is not None:
+        min_like = self.params.get("min_like")
+        min_text = self.params.get("min_text")
+        if min_like is not None and min_like > 0:
             stmt = stmt.where(
-                self.main_model.like >= self.params["min_like"]
+                self.main_model.like >= min_like
             )
-        if self.params.get("min_text") is not None:
+        if min_text is not None and min_text > 0:
             stmt = stmt.where(
-                self.main_model.text >= self.params["min_text"]
+                self.main_model.text >= min_text
             )
         return stmt

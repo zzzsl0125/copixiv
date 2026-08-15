@@ -99,6 +99,7 @@ class Novel(Base):
     __table_args__ = (
         Index("idx_novel_author_likes", "author_id", "like"),
         Index("idx_novel_series_likes", "series_id", "like"),
+        Index("idx_novel_series_id", "series_id", "id"),
         Index("idx_novel_like_text_id", "like", "text", "id"),
         Index("idx_novel_author_id", "author_id", "id"),
         Index("ix_novel_shuffle_like_text", "shuffle", "like", "text"),

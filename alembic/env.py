@@ -96,6 +96,8 @@ def run_migrations_online() -> None:
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA synchronous=NORMAL")
+        # Keep temp B-trees (e.g. CREATE INDEX on 232k rows) in memory.
+        cursor.execute("PRAGMA temp_store=MEMORY")
         cursor.execute("PRAGMA busy_timeout=10000")
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
