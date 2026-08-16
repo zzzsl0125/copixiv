@@ -103,3 +103,28 @@ def test_build_from_webview_text_none_does_not_crash():
     novel = build_from_webview(wv)  # 当前实现：len(None) → TypeError
     assert novel.text == 0
     assert novel.has_epub == EpubStatus.NO
+
+
+# M14 -------------------------------------------------------------
+
+
+def test_build_from_webview_images_illusts_empty_list_normalised():
+    """webview API 对无图小说返回 images/illusts 为 []（而非 dict）。
+
+    曾导致 Novel 校验崩溃：ValidationError (images/illusts
+    Input should be a valid dictionary)。工厂应把非 dict 归一化为 None。
+    """
+    wv = _Webview()
+    wv.images = []
+    wv.illusts = []
+    novel = build_from_webview(wv)
+    assert novel.images is None
+    assert novel.illusts is None
+
+
+def test_build_from_webview_images_dict_preserved():
+    """dict 形式的 images/illusts 原样保留（有图小说的正常路径）。"""
+    wv = _Webview()
+    wv.images = {"1": {"urls": {"original": "http://x/a.jpg"}}}
+    novel = build_from_webview(wv)
+    assert novel.images == {"1": {"urls": {"original": "http://x/a.jpg"}}}

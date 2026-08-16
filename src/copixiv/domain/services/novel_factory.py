@@ -135,8 +135,10 @@ def build_from_webview(data: Any, download_dir: str = "download") -> Novel:
         has_epub=EpubStatus.PENDING if has_image_placeholders(body) else EpubStatus.NO,
         tags=data.tags,
         content=body,
-        images=data.images,
-        illusts=data.illusts,
+        # The webview API returns ``images``/``illusts`` as empty *lists*
+        # (not dicts) for novels without images — normalise to None.
+        images=data.images if isinstance(data.images, dict) else None,
+        illusts=data.illusts if isinstance(data.illusts, dict) else None,
         cover_url=data.cover_url,
         download_dir=download_dir,
     )

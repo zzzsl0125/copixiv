@@ -45,6 +45,7 @@ async def _fan_out_author_fetch(
     file_storage,
     image_downloader,
     config,
+    write_lock,
 ) -> list[str]:
     """Given a list of Pixiv API novel objects, filter to Chinese novels,
     extract unique author IDs, and fan out ``author_fetch`` concurrently.
@@ -77,6 +78,7 @@ async def _fan_out_author_fetch(
                 file_storage=file_storage,
                 image_downloader=image_downloader,
                 config=config,
+                write_lock=write_lock,
             )
             for a in authors
         ])
@@ -309,6 +311,7 @@ async def novel_ranking(
     file_storage,
     image_downloader,
     config,
+    write_lock,
 ):
     """Fetch novel rankings."""
     titles: list[str] = []
@@ -324,6 +327,7 @@ async def novel_ranking(
             file_storage=file_storage,
             image_downloader=image_downloader,
             config=config,
+            write_lock=write_lock,
         )
         titles.extend(t)
 
@@ -345,6 +349,7 @@ async def novel_search(
     file_storage,
     image_downloader,
     config,
+    write_lock,
 ):
     """Search novels by keyword over a time range.
 
@@ -373,6 +378,7 @@ async def novel_search(
                 file_storage=file_storage,
                 image_downloader=image_downloader,
                 config=config,
+                write_lock=write_lock,
             )
             all_titles.extend(t)
 
