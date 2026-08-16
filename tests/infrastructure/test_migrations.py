@@ -22,7 +22,7 @@ from sqlalchemy import create_engine
 from copixiv.infrastructure.database.engine import run_migrations
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-HEAD_REVISION = "b7c8d9e0f1a2"
+HEAD_REVISION = "c8d9e0f1a2b3"
 
 # v1 schema — the shape the old project left behind.  Deliberately
 # *different* from the migrations' own baseline where v1 differed:
@@ -289,6 +289,7 @@ class TestUpgradeV1Database:
             "ix_search_history_type_timestamp",
             "idx_novel_author_id",
             "ix_novel_shuffle_like_text",
+            "ix_novel_shuffle_id",
         } <= indexes
         # the old shuffle-only index was replaced
         assert "ix_novel_shuffle" not in indexes

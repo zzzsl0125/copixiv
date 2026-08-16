@@ -23,9 +23,9 @@ frontend/dist-ssr/
 *.local
 
 # === Database (local data, not source) ===
-database/database.db
-database/database.db-shm
-database/database.db-wal
+database/*.db
+database/*.db-shm
+database/*.db-wal
 database/backups/
 
 # === Log files ===

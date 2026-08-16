@@ -103,6 +103,7 @@ class Novel(Base):
         Index("idx_novel_like_text_id", "like", "text", "id"),
         Index("idx_novel_author_id", "author_id", "id"),
         Index("ix_novel_shuffle_like_text", "shuffle", "like", "text"),
+        Index("ix_novel_shuffle_id", "shuffle", "id"),
     )
 
     def __repr__(self) -> str:
