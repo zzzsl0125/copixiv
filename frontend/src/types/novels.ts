@@ -28,7 +28,7 @@ export interface NovelFilters {
 }
 
 export interface GetNovelsParams {
-  queries?: Record<string, unknown>
+  keyword?: string
   order_by?: string
   order_direction?: string
   cursor?: Record<string, unknown>

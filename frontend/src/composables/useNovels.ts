@@ -1,6 +1,5 @@
 import { reactive, onMounted, onUnmounted } from 'vue'
 import { novelApi } from '../api'
-import { buildQueries } from '../lib/utils'
 import type { Novel, NovelFilters } from '../types'
 import { useCursorPagination } from './useCursorPagination'
 
@@ -16,10 +15,8 @@ export function useNovels() {
   })
 
   const fetchNovels = async (cursor?: unknown) => {
-    const queries = buildQueries(filters.keyword)
-
     const res = await novelApi.getNovels({
-      queries: Object.keys(queries).length > 0 ? (queries as unknown as Record<string, unknown>) : undefined,
+      keyword: filters.keyword.trim() || undefined,
       order_by: filters.order_by,
       order_direction: filters.order_direction,
       min_like: filters.min_like,
@@ -79,7 +76,7 @@ export function useNovels() {
           isSpecialCase = true
         }
       } else if (/^\d{7,}$/.test(condition.trim())) {
-        // Bare 7+ digit number — auto-detected as novel ID by buildQueries.
+        // Bare 7+ digit number — the backend parser treats it as a novel ID.
         filters.order_by = 'id'
         filters.order_direction = 'DESC'
         isSpecialCase = true

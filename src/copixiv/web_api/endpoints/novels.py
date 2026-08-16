@@ -8,6 +8,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Query, Body, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
 from copixiv.web_api.deps import get_uow, get_write_uow, parse_json_param
+from copixiv.domain.services.parsing import parse_search_keyword
 from copixiv.web_api.schemas import BatchDownloadRequest, NovelListResponse
 from copixiv.infrastructure.database.uow import SqlUnitOfWork
 from copixiv.infrastructure.database import constants as C
@@ -35,7 +36,7 @@ async def get_novels(
     request: Request,
     background_tasks: BackgroundTasks,
     uow: SqlUnitOfWork = Depends(get_uow),
-    queries: str | None = Query(None),
+    keyword: str | None = Query(None),
     order_by: str = C.ORDER_BY_RANDOM,
     order_direction: str = "DESC",
     cursor: str | None = None,
@@ -43,11 +44,11 @@ async def get_novels(
     min_like: int | None = None,
     min_text: int | None = None,
 ):
-    queries_dict = parse_json_param(queries, "queries")
+    conditions = parse_search_keyword(keyword) if keyword else None
     cursor_dict = parse_json_param(cursor, "cursor")
 
     results = await uow.novels.get_novels(
-        queries=queries_dict,
+        conditions=conditions,
         order_by=order_by,
         order_direction=order_direction,
         cursor=cursor_dict,
@@ -56,9 +57,9 @@ async def get_novels(
         min_text=min_text,
     )
 
-    if queries_dict and background_tasks:
+    if conditions and background_tasks:
         background_tasks.add_task(
-            record_search_history, queries_dict, request.app.state.session_factory,
+            record_search_history, conditions, request.app.state.session_factory,
         )
 
     return results
@@ -67,12 +68,12 @@ async def get_novels(
 @router.get("/count")
 async def count_novels(
     uow: SqlUnitOfWork = Depends(get_uow),
-    queries: str | None = Query(None),
+    keyword: str | None = Query(None),
     min_like: int | None = Query(None),
     min_text: int | None = Query(None),
 ):
     total = await uow.novels.count_novels(
-        queries=parse_json_param(queries, "queries"),
+        conditions=parse_search_keyword(keyword) if keyword else None,
         min_like=min_like, min_text=min_text,
     )
     return {"total": total}
@@ -111,11 +112,11 @@ async def batch_download_novels(
     body: BatchDownloadRequest = Body(...),
     uow: SqlUnitOfWork = Depends(get_uow),
 ):
-    queries = parse_json_param(body.queries, "queries")
+    conditions = parse_search_keyword(body.keyword) if body.keyword else None
     naming = request.app.state.config.batch_download.naming
     use_case = BatchDownloadUseCase(uow.novels, naming)
     result = await use_case.execute(
-        queries,
+        conditions,
         order_by=body.order_by,
         order_direction=body.order_direction,
         limit=body.limit,
@@ -149,11 +150,11 @@ async def batch_download_preview(
     body: BatchDownloadRequest = Body(...),
     uow: SqlUnitOfWork = Depends(get_uow),
 ):
-    queries = parse_json_param(body.queries, "queries")
+    conditions = parse_search_keyword(body.keyword) if body.keyword else None
     naming = request.app.state.config.batch_download.naming
     use_case = BatchDownloadUseCase(uow.novels, naming)
     path = await use_case.preview(
-        queries,
+        conditions,
         order_by=body.order_by,
         order_direction=body.order_direction,
         min_like=body.min_like,

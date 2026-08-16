@@ -3,7 +3,7 @@ import { ref, watch, computed, onUnmounted } from 'vue'
 import BaseModal from '../ui/BaseModal.vue'
 import { novelApi } from '../../api'
 import { getApiErrorMessage } from '../../api/errors'
-import { buildQueries, downloadBlob, filenameFromContentDisposition } from '../../lib/utils'
+import { downloadBlob, filenameFromContentDisposition } from '../../lib/utils'
 import { useSystem } from '../../composables'
 
 const DOWNLOAD_LIMIT_CAP = 500
@@ -41,12 +41,11 @@ let previewSeq = 0
 
 async function fetchPreview() {
   const seq = ++previewSeq
-  const queries = buildQueries(props.keyword)
   previewLoading.value = true
   previewError.value = ''
   try {
     const result = await novelApi.batchDownloadPreview({
-      queries: Object.keys(queries).length > 0 ? JSON.stringify(queries) : undefined,
+      keyword: props.keyword.trim() || undefined,
       order_by: props.order_by,
       order_direction: props.order_direction,
       min_like: props.min_like,
@@ -139,9 +138,8 @@ watch(() => props.isOpen, async (open) => {
   namingTemplate.value = systemConfig.value?.batch_download_naming || ''
   countLoading.value = true
   try {
-    const queries = buildQueries(props.keyword)
     const result = await novelApi.countNovels({
-      queries: Object.keys(queries).length > 0 ? queries : undefined,
+      keyword: props.keyword.trim() || undefined,
       min_like: props.min_like,
       min_text: props.min_text,
     })
@@ -162,10 +160,8 @@ async function handleConfirm() {
   const limit = Math.min(Math.max(Math.floor(downloadLimit.value) || 1, 1), DOWNLOAD_LIMIT_CAP)
   loading.value = true
   try {
-    const queries = buildQueries(props.keyword)
-    const queryJson = Object.keys(queries).length > 0 ? JSON.stringify(queries) : undefined
     const response = await novelApi.batchDownload({
-      queries: queryJson,
+      keyword: props.keyword.trim() || undefined,
       order_by: props.order_by,
       order_direction: props.order_direction,
       min_like: props.min_like,

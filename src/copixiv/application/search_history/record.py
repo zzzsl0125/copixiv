@@ -14,12 +14,14 @@ from collections.abc import Callable
 
 from sqlalchemy.orm import Session
 
+from copixiv.domain.services.parsing import SearchConditions
+
 
 def record_search_history(
-    queries_dict: dict[str, str],
+    conditions: SearchConditions,
     session_factory: Callable[[], Session],
 ) -> None:
-    """Record search history entries for a set of query parameters.
+    """Record search history entries for a list of search conditions.
 
     Creates its own short-lived UoW/session (the request-scoped session is
     already closed by the time the background task fires).  Bad entries
@@ -27,8 +29,9 @@ def record_search_history(
     whole batch.
 
     Args:
-        queries_dict: Mapping of query value → query type (e.g.
-            ``{"12345": "author_id", "keyword": "keyword"}``).
+        conditions: Ordered ``(type, value)`` pairs from
+            :func:`parse_search_keyword` (e.g.
+            ``[("author_id", "12345"), ("keyword", "R-18")]``).
         session_factory: A callable that returns a new SQLAlchemy
             ``Session`` (typically ``app.state.session_factory``).
     """
@@ -41,7 +44,7 @@ def record_search_history(
         # A single asyncio.run() around the whole batch drives the async
         # repository methods (BackgroundTasks threads have no event loop).
         async with uow.begin():
-            for value, qtype in queries_dict.items():
+            for qtype, value in conditions:
                 try:
                     display_value = None
                     if qtype == "author_id" and value.isdigit():

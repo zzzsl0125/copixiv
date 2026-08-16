@@ -2,11 +2,10 @@
 
 import asyncio
 import pytest
-from sqlalchemy import create_engine, event
-from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from copixiv.infrastructure.database.models import (
-    Base, Novel, Author, Tag, TagAlias, Favourite,
+    Novel, Author, Tag, TagAlias, Favourite,
     TaskHistory, ScheduledTask,
 )
 from copixiv.infrastructure.database.engine import create_session_factory
@@ -14,33 +13,12 @@ from copixiv.infrastructure.repositories.novel import SQLAlchemyNovelRepository
 from copixiv.infrastructure.repositories.author import SQLAlchemyAuthorRepository
 from copixiv.infrastructure.repositories.tag import SQLAlchemyTagRepository
 
-
-@pytest.fixture
-def engine():
-    # StaticPool: share one connection across all sessions/threads — a
-    # plain ":memory:" SQLite gives each connection its own empty
-    # database, which breaks once repos run in worker threads.
-    from sqlalchemy.pool import StaticPool
-    eng = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},  # repos run in worker threads
-        poolclass=StaticPool,
-        echo=False,
-    )
-
-    @event.listens_for(eng, "connect")
-    def _set_pragmas(dbapi_connection, _connection_record):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
-
-    Base.metadata.create_all(bind=eng)
-    return eng
+# engine (sqlite_engine) and file_engine come from tests/conftest.py.
 
 
 @pytest.fixture
-def session(engine):
-    sf = create_session_factory(engine)
+def session(sqlite_engine):
+    sf = create_session_factory(sqlite_engine)
     s = sf()
     yield s
     s.close()
@@ -170,7 +148,7 @@ class TestSQLAlchemyTagRepository:
         session.flush()
 
         session.add(TagAlias(source=1, target=999))
-        with pytest.raises(Exception):
+        with pytest.raises(IntegrityError):
             session.commit()
         session.rollback()
 
@@ -182,7 +160,7 @@ class TestSQLAlchemyTagRepository:
         session.commit()
 
         session.add(TagAlias(source=ids["src"], target=ids["tgt2"]))
-        with pytest.raises(Exception):
+        with pytest.raises(IntegrityError):
             session.commit()
         session.rollback()
 
@@ -282,26 +260,6 @@ class TestSQLAlchemyTagRepository:
 class TestConcurrentAccess:
     """Phase 4: Concurrent access should not cause 'database is locked'."""
 
-    @pytest.fixture
-    def file_engine(self, tmp_path):
-        """File-based engine for cross-thread access."""
-        import tempfile
-        db_path = tmp_path / "test_concurrent.db"
-        eng = create_engine(
-            f"sqlite:///{db_path}",
-            connect_args={"check_same_thread": False},
-            echo=False,
-        )
-        from sqlalchemy import event
-        @event.listens_for(eng, "connect")
-        def _set_pragmas(dbapi_connection, _connection_record):
-            cursor = dbapi_connection.cursor()
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.close()
-
-        Base.metadata.create_all(bind=eng)
-        return eng
-
     def test_concurrent_reads(self, file_engine):
         """10 threads reading simultaneously should not error."""
         import concurrent.futures
@@ -318,7 +276,7 @@ class TestConcurrentAccess:
 
         errors = []
 
-        def read_page(offset: int):
+        def read_page():
             try:
                 with Session() as s:
                     repo = SQLAlchemyNovelRepository(s)
@@ -332,7 +290,7 @@ class TestConcurrentAccess:
                 return 0
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
-            futures = [pool.submit(read_page, i * 10) for i in range(10)]
+            futures = [pool.submit(read_page) for _ in range(10)]
             results = [f.result() for f in futures]
 
         assert not errors, f"Concurrent reads failed: {errors}"
@@ -407,7 +365,6 @@ class TestSQLAlchemyTaskRepository:
         repo = SQLAlchemyTaskRepository(session)
 
         # Create
-        t = session.begin_nested()
         created = asyncio.run(repo.create_scheduled({
             "name": "crud-test", "task": "novel_follow",
             "cron": "0 6 * * *", "is_enabled": True, "sort_index": 2,
@@ -498,9 +455,14 @@ class TestTaskManagerHelpers:
             client="a", file_storage="b", image_downloader="c",
             epub_builder="d", config="e",
         )
-        assert tms._deps == {
+        assert {
+            k: tms._deps[k]
+            for k in ("client", "file_storage", "image_downloader",
+                      "epub_builder", "config")
+        } == {
             "client": "a", "file_storage": "b",
             "image_downloader": "c", "epub_builder": "d", "config": "e",
-            **{k: v for k, v in tms._deps.items() if k == "write_lock"},
         }
+        # write_lock is always added by the manager itself
+        assert "write_lock" in tms._deps
 

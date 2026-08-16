@@ -9,10 +9,7 @@ M9 期望（Pydantic 统一）：
 M11 期望：webview 响应缺失 text 时不崩溃。
 """
 
-import pytest
-
 from copixiv.domain.models.novel import Novel, EpubStatus
-from copixiv.domain.services import novel_factory as nf
 from copixiv.domain.services.novel_factory import (
     build_novel, build_from_novel_info, build_from_webview,
 )

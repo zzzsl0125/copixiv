@@ -251,6 +251,7 @@ def _index_names(db_path: Path) -> set[str]:
     return {r[0] for r in rows}
 
 
+@pytest.mark.slow
 class TestUpgradeV1Database:
     def test_v1_db_upgrades_to_head(self, v1_db):
         run_migrations(str(v1_db), project_root=str(REPO_ROOT))
@@ -314,6 +315,7 @@ class TestUpgradeV1Database:
             ).fetchone()[0] == 2
 
 
+@pytest.mark.slow
 class TestFreshDatabase:
     def test_empty_db_upgrades_to_head(self, tmp_path):
         db = tmp_path / "fresh.db"

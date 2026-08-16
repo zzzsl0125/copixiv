@@ -1,6 +1,8 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
-const routes = [
+// Exported so tests can pin the real route table (path/name/component wiring)
+// instead of re-declaring a parallel copy that can silently drift.
+export const routes = [
   {
     path: '/',
     name: 'novels',

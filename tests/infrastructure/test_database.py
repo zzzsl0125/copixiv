@@ -2,6 +2,7 @@
 
 import pytest
 from sqlalchemy import create_engine, text, event
+from sqlalchemy.exc import IntegrityError
 
 from copixiv.infrastructure.database.models import (
     Base, Novel, Author, Favourite, Tag, TagAlias, NovelTag,
@@ -68,7 +69,7 @@ class TestModels:
 
         f2 = Favourite(novel_id=1)
         session.add(f2)
-        with pytest.raises(Exception):
+        with pytest.raises(IntegrityError):
             session.commit()
         session.rollback()
 
@@ -80,7 +81,7 @@ class TestForeignKeyIntegrity:
         """Inserting a novel with non-existent author_id should fail."""
         n = Novel(id=1, title="Orphan", author_id=999, path="/tmp/orphan.txt")
         session.add(n)
-        with pytest.raises(Exception):
+        with pytest.raises(IntegrityError):
             session.commit()
         session.rollback()
 
@@ -90,7 +91,7 @@ class TestForeignKeyIntegrity:
         session.flush()
         nt = NovelTag(novel_id=999, tag_id=1)
         session.add(nt)
-        with pytest.raises(Exception):
+        with pytest.raises(IntegrityError):
             session.commit()
         session.rollback()
 
@@ -101,7 +102,7 @@ class TestForeignKeyIntegrity:
         session.flush()
         nt = NovelTag(novel_id=1, tag_id=999)
         session.add(nt)
-        with pytest.raises(Exception):
+        with pytest.raises(IntegrityError):
             session.commit()
         session.rollback()
 
@@ -111,7 +112,7 @@ class TestForeignKeyIntegrity:
         session.flush()
         ta = TagAlias(source=1, target=999)
         session.add(ta)
-        with pytest.raises(Exception):
+        with pytest.raises(IntegrityError):
             session.commit()
         session.rollback()
 
@@ -121,7 +122,7 @@ class TestForeignKeyIntegrity:
         session.flush()
         ta = TagAlias(source=999, target=1)
         session.add(ta)
-        with pytest.raises(Exception):
+        with pytest.raises(IntegrityError):
             session.commit()
         session.rollback()
 
@@ -297,7 +298,7 @@ class TestFtsTagsIndexing:
         reset_fts_cache()
         repo = SQLAlchemyNovelRepository(session)
         result = asyncio.run(repo.get_novels(
-            queries={keyword: "keyword"}, order_by="id", per_page=50,
+            conditions=[("keyword", keyword)], order_by="id", per_page=50,
         ))
         return [n["id"] for n in result["novels"]]
 

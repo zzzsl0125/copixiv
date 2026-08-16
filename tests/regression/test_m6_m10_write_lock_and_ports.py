@@ -39,17 +39,40 @@ def test_get_write_uow_holds_global_lock(session):
 def test_write_endpoints_declare_write_uow():
     """期望：所有写端点声明 Depends(get_write_uow) 而非 get_uow。
 
-    读端点保持 get_uow。抽查关键写端点的源码（静态契约测试）。
+    读端点保持 get_uow。用 AST 全量扫描 endpoints 目录（而非字符串匹配），
+    新增端点文件也在检查范围内。
     """
     src_root = Path(__file__).resolve().parents[2] / "src" / "copixiv" / "web_api"
-    texts = {
-        "novels": (src_root / "endpoints" / "novels.py").read_text(),
-        "tasks": (src_root / "endpoints" / "tasks.py").read_text(),
-        "tokens": (src_root / "endpoints" / "tokens.py").read_text(),
-        "tag_preferences": (src_root / "endpoints" / "tag_preferences.py").read_text(),
-        "tag_aliases": (src_root / "endpoints" / "tag_aliases.py").read_text(),
-        "search_history": (src_root / "endpoints" / "search_history.py").read_text(),
-    }
+    endpoints_dir = src_root / "endpoints"
+
+    # Map: endpoint file (without .py) → function name → does its signature
+    # contain Depends(get_write_uow)?
+    write_uow_users: dict[str, set[str]] = {}
+    for py_file in sorted(endpoints_dir.glob("*.py")):
+        if py_file.name == "__init__.py":
+            continue
+        tree = ast.parse(py_file.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            defaults = [
+                d for d in node.args.defaults + node.args.kw_defaults
+                if isinstance(d, ast.AST)
+            ]
+            for default in defaults:
+                for call in ast.walk(default):
+                    if (
+                        isinstance(call, ast.Call)
+                        and isinstance(call.func, ast.Name)
+                        and call.func.id == "Depends"
+                        and call.args
+                        and isinstance(call.args[0], ast.Name)
+                        and call.args[0].id == "get_write_uow"
+                    ):
+                        write_uow_users.setdefault(
+                            py_file.name, set(),
+                        ).add(node.name)
+
     # 每个写端点的签名必须包含 Depends(get_write_uow)
     for fn in (
         "toggle_favourite", "toggle_special_follow", "delete_novel",
@@ -61,9 +84,7 @@ def test_write_endpoints_declare_write_uow():
         "create_tag_alias", "delete_tag_alias",
         "clear_search_history", "delete_search_history",
     ):
-        found = any(f"def {fn}" in t and "get_write_uow" in
-                    t.split(f"def {fn}")[1].split("):")[0]
-                    for t in texts.values())
+        found = any(fn in fns for fns in write_uow_users.values())
         assert found, f"写端点 {fn} 未声明 Depends(get_write_uow)"
 
 

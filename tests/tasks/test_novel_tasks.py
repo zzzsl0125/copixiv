@@ -12,7 +12,7 @@ Covers the two regressions the refactor could have introduced:
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
-from sqlalchemy import create_engine, event
+import pytest
 
 from copixiv.infrastructure.database.engine import create_session_factory
 from copixiv.infrastructure.database import models
@@ -23,26 +23,11 @@ from copixiv.tasks import novel_tasks
 from copixiv.tasks.pipeline import _batch_handle
 
 
-def _make_engine(path):
-    """File-backed SQLite engine with WAL, like production."""
-    engine = create_engine(
-        f"sqlite:///{path}",
-        connect_args={"check_same_thread": False},
-        pool_size=8,
-        max_overflow=0,
-    )
-
-    @event.listens_for(engine, "connect")
-    def _set_pragmas(dbapi_connection, _connection_record):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA busy_timeout=5000")
-        cursor.close()
-
-    models.Base.metadata.create_all(bind=engine)
-    with engine.connect() as conn:
+def _engine_with_fts(file_engine):
+    """Conftest file engine + a rebuilt novel_fts table (pipeline needs it)."""
+    with file_engine.connect() as conn:
         FTSManager(conn).rebuild_novel_fts()
-    return engine
+    return file_engine
 
 
 CN_NOVEL = {
@@ -73,11 +58,12 @@ class FakeClient:
         return {"novels": self._novels}
 
 
+@pytest.mark.slow
 class TestChineseFiltering:
     """Regression: collect mode must still filter to Chinese novels."""
 
-    async def test_author_fetch_filters_chinese(self, monkeypatch, tmp_path):
-        engine = _make_engine(tmp_path / "author_filter.db")
+    async def test_author_fetch_filters_chinese(self, monkeypatch, file_engine):
+        engine = _engine_with_fts(file_engine)
         session_factory = create_session_factory(engine)
         uow = SqlUnitOfWork(session_factory)
         async with db_write():
@@ -101,8 +87,8 @@ class TestChineseFiltering:
         assert [n["id"] for n in seen["novels"]] == [100]
         assert result.new_novel_titles == []
 
-    async def test_novel_follow_filters_chinese(self, monkeypatch, tmp_path):
-        engine = _make_engine(tmp_path / "follow_filter.db")
+    async def test_novel_follow_filters_chinese(self, monkeypatch, file_engine):
+        engine = _engine_with_fts(file_engine)
         session_factory = create_session_factory(engine)
         uow = SqlUnitOfWork(session_factory)
 
@@ -124,11 +110,12 @@ class TestChineseFiltering:
         assert result.new_novel_titles == []
 
 
+@pytest.mark.slow
 class TestBatchHandleEndToEnd:
     """plan → download → persist writes land in the DB exactly once."""
 
-    async def test_new_novel_persisted(self, tmp_path):
-        engine = _make_engine(tmp_path / "pipeline.db")
+    async def test_new_novel_persisted(self, tmp_path, file_engine):
+        engine = _engine_with_fts(file_engine)
         session_factory = create_session_factory(engine)
 
         class FakeClient:
@@ -188,12 +175,13 @@ class _NullWebviewClient:
         return None
 
 
+@pytest.mark.slow
 class TestNovelFetchFailureRecorded:
     """Regression: novel_fetch must record fetch failures into failed_novel
     (aligned with the batch path), so deleted novels leave a trace."""
 
-    async def test_fetch_failure_recorded(self, tmp_path):
-        engine = _make_engine(tmp_path / "novel_fetch_fail.db")
+    async def test_fetch_failure_recorded(self, file_engine):
+        engine = _engine_with_fts(file_engine)
         session_factory = create_session_factory(engine)
         uow = SqlUnitOfWork(session_factory)
 

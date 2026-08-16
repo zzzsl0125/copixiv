@@ -12,37 +12,16 @@ These tests pin down the two invariants that replaced the bug:
 
 import asyncio
 
-from sqlalchemy import create_engine, event, select
+import pytest
+from sqlalchemy import select
 
 from copixiv.infrastructure.database.engine import create_session_factory
-from copixiv.infrastructure.database.models import Author, Base
+from copixiv.infrastructure.database.models import Author
 from copixiv.infrastructure.database.uow import SqlUnitOfWork
 from copixiv.infrastructure.database.write_lock import db_write
 
-
-def _make_engine(path):
-    """File-backed SQLite engine with WAL + busy_timeout, like production.
-
-    A real file (not ``:memory:``) is required: in-memory databases are
-    per-connection, so they cannot reproduce cross-connection write
-    contention.
-    """
-    engine = create_engine(
-        f"sqlite:///{path}",
-        connect_args={"check_same_thread": False},
-        pool_size=16,
-        max_overflow=0,
-    )
-
-    @event.listens_for(engine, "connect")
-    def _set_pragmas(dbapi_connection, _connection_record):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA busy_timeout=5000")
-        cursor.close()
-
-    Base.metadata.create_all(bind=engine)
-    return engine
+# file_engine comes from tests/conftest.py (file-backed WAL engine —
+# a real file is required to reproduce cross-connection write contention).
 
 
 class TestDbWriteSerializes:
@@ -65,15 +44,15 @@ class TestDbWriteSerializes:
         ]
 
 
+@pytest.mark.slow
 class TestConcurrentWrites:
     """Fan-out pattern: N coroutines, each with its own UoW, all writing."""
 
     N_WRITERS = 16
 
-    async def test_concurrent_writes_no_lock_error(self, tmp_path):
+    async def test_concurrent_writes_no_lock_error(self, file_engine):
         """Mirrors _fan_out_author_fetch: per-coroutine UoW + db_write()."""
-        engine = _make_engine(tmp_path / "concurrent.db")
-        session_factory = create_session_factory(engine)
+        session_factory = create_session_factory(file_engine)
 
         async def worker(i: int) -> None:
             uow = SqlUnitOfWork(session_factory)

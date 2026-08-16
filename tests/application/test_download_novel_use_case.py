@@ -13,30 +13,16 @@ delegates here) with fake client/storage/downloader — no network:
 
 from types import SimpleNamespace
 
-import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.pool import StaticPool
-
 from copixiv.application.novel.download_novel import DownloadNovelUseCase
 from copixiv.application.novel.persist import persist_novels
 from copixiv.domain.services.novel_factory import build_novel
-from copixiv.infrastructure.database.engine import create_session_factory
 from copixiv.infrastructure.database.write_lock import DbWriteLock
 from copixiv.infrastructure.database.models import (
-    Base, Author, FailedNovel, Novel, Series,
+    Author, FailedNovel, Novel, Series,
 )
 from copixiv.infrastructure.database.uow import SqlUnitOfWork
 
-
-@pytest.fixture
-def session_factory():
-    engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    Base.metadata.create_all(bind=engine)
-    return create_session_factory(engine)
+# session_factory comes from tests/conftest.py (shared in-memory engine).
 
 
 class FakeClient:

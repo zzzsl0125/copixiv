@@ -1,56 +1,67 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { createRouter, createWebHistory } from 'vue-router'
+import { describe, it, expect } from 'vitest'
+import { createRouter, createMemoryHistory, type RouteRecordRaw } from 'vue-router'
+import router, { routes } from '../../src/router'
 
 /**
- * E2E-style tests: mount full views and verify rendering.
- * These use jsdom (no real browser) but validate the integration
- * of router + views + composables together.
+ * E2E-style tests: pin the REAL route table from ``src/router``.
+ *
+ * A previous version of this file declared its own inline route table and
+ * tested that — a regression in ``src/router/index.ts`` would have passed
+ * all green.  Now every assertion runs against the exported routes /
+ * router, so a renamed path, a removed route, or a stub replacing a real
+ * view component fails here.
  */
 
-// Mock axios before importing any API module
-vi.mock('axios', () => ({
-  default: {
-    create: () => ({
-      get: vi.fn().mockResolvedValue({ data: {} }),
-      post: vi.fn().mockResolvedValue({ data: {} }),
-      put: vi.fn().mockResolvedValue({ data: {} }),
-      delete: vi.fn().mockResolvedValue({ data: {} }),
-    }),
-  },
-}))
+const EXPECTED: Array<{ path: string; name: string; view: string }> = [
+  { path: '/', name: 'novels', view: 'Novels.vue' },
+  { path: '/tasks', name: 'tasks', view: 'Tasks.vue' },
+  { path: '/tag-management', name: 'tag-management', view: 'TagManagement.vue' },
+  { path: '/tokens', name: 'tokens', view: 'Tokens.vue' },
+]
 
-const router = createRouter({
-  history: createWebHistory(),
-  routes: [
-    { path: '/', name: 'novels', component: { template: '<div>NovelsPage</div>' } },
-    { path: '/tasks', name: 'tasks', component: { template: '<div>TasksPage</div>' } },
-    { path: '/tag-management', name: 'tag-management', component: { template: '<div>TagsPage</div>' } },
-    { path: '/tokens', name: 'tokens', component: { template: '<div>TokensPage</div>' } },
-  ],
-})
+describe('Router configuration (real route table)', () => {
+  it('registers exactly the four app routes', () => {
+    const actual = router
+      .getRoutes()
+      .filter((r) => r.path !== '/:pathMatch(.*)*')
+      .map((r) => ({ path: r.path, name: r.name }))
 
-describe('Router configuration', () => {
-  beforeEach(async () => {
-    await router.push('/')
-    await router.isReady()
+    expect(actual).toEqual(EXPECTED.map(({ path, name }) => ({ path, name })))
   })
 
-  it('resolves / to novels route', () => {
-    expect(router.currentRoute.value.name).toBe('novels')
+  it('wires every route to a real lazy view component', () => {
+    const byPath = new Map(routes.map((r) => [r.path, r]))
+
+    for (const { path, view } of EXPECTED) {
+      const record = byPath.get(path) as RouteRecordRaw
+      expect(record.component, `route ${path} has no component`).toBeTruthy()
+      // The component loader must reference the real view file — a stub
+      // like { template: '<div/>' } is a plain object, not a loader.
+      // Vite rewrites the lazy import to /src/views/<File>; both dev and
+      // test transforms keep the "/views/<File>" part stable.
+      expect(record.component).toBeTypeOf('function')
+      expect(String(record.component)).toContain(`/views/${view}`)
+    }
   })
 
-  it('resolves /tasks to tasks route', async () => {
-    await router.push('/tasks')
-    expect(router.currentRoute.value.name).toBe('tasks')
+  it('resolves each path to the expected route name', () => {
+    for (const { path, name } of EXPECTED) {
+      expect(router.resolve(path).name).toBe(name)
+    }
   })
 
-  it('resolves /tag-management to tag-management route', async () => {
-    await router.push('/tag-management')
-    expect(router.currentRoute.value.name).toBe('tag-management')
-  })
+  it('navigates between routes using the real routes', async () => {
+    const testRouter = createRouter({
+      history: createMemoryHistory(),
+      routes: routes as RouteRecordRaw[],
+    })
+    await testRouter.push('/')
+    await testRouter.isReady()
+    expect(testRouter.currentRoute.value.name).toBe('novels')
 
-  it('resolves /tokens to tokens route', async () => {
-    await router.push('/tokens')
-    expect(router.currentRoute.value.name).toBe('tokens')
+    for (const { path, name } of EXPECTED.slice(1)) {
+      await testRouter.push(path)
+      expect(testRouter.currentRoute.value.name).toBe(name)
+    }
   })
 })

@@ -1,7 +1,5 @@
 """domain 层 Minor 问题复现（文件名引擎三漏洞 / parse_tags / series order / TaskResult）。"""
 
-import pytest
-
 from copixiv.domain.models.task_result import TaskResult
 from copixiv.domain.services.filename import NovelNamingTemplate, _sanitize_path_segment
 from copixiv.domain.services.parsing import guess_series_order

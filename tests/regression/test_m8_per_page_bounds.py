@@ -3,19 +3,13 @@
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
-from copixiv.infrastructure.database.models import Base
 from copixiv.web_api.endpoints import novels as novels_endpoint
 
 
 @pytest.fixture()
-def client(tmp_path):
-    engine = create_engine(f"sqlite:///{tmp_path / 'test.db'}")
-    Base.metadata.create_all(engine)
-    factory = sessionmaker(bind=engine, expire_on_commit=False)
-
+def client(file_session_factory):
+    factory = file_session_factory
     app = FastAPI(title="test")
     app.state.session_factory = factory
     app.include_router(novels_endpoint.router, prefix="/api/novels", tags=["novels"])

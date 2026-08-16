@@ -1,0 +1,61 @@
+name: CI
+
+# 触发时机：push 到任意分支 + 任何 Pull Request。
+# 同一分支上多次快速 push 时取消仍在运行的旧任务（节省额度）。
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # dev extras 含 pytest / pytest-asyncio / httpx；pixivpy3 是 git
+      # 依赖（pyproject 里的 direct reference），runner 自带 git。
+      # 测试全部离线（SQLite 内存/临时文件 + 假件），不需要真实 token。
+      - name: Install dependencies
+        run: pip install ".[dev]"
+
+      # 默认跑全部 327 个用例（含 slow 标记的迁移链/并发测试）。
+      # 需要快速门禁时可加 -m "not slow"（见 pyproject.toml 的 markers 注释）。
+      - name: Run tests
+        run: python -m pytest -q
+
+  frontend:
+    name: Frontend (vitest + build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm run test
+
+      # vue-tsc 会连带对 tests/**/*.ts 做严格类型检查，再产出生产构建。
+      - name: Type-check and build
+        run: npm run build

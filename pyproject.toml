@@ -49,5 +49,5 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 pythonpath = ["src"]
 markers = [
-    "slow: long-running tests (concurrency/IO heavy)",
+    "slow: long-running tests (migration chains / heavy concurrency). Default runs include them; CI may use '-m not slow' for a fast gate.",
 ]

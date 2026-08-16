@@ -11,24 +11,12 @@ touch commit/rollback.  These tests pin the contract:
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.pool import StaticPool
 
-from copixiv.infrastructure.database.engine import create_session_factory
-from copixiv.infrastructure.database.models import Base, Author
+from copixiv.infrastructure.database.models import Author
 from copixiv.infrastructure.database.uow import SqlUnitOfWork
 from copixiv.web_api.deps import get_uow
 
-
-@pytest.fixture
-def session_factory():
-    engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    Base.metadata.create_all(bind=engine)
-    return create_session_factory(engine)
+# session_factory comes from tests/conftest.py (shared in-memory engine).
 
 
 @pytest.fixture

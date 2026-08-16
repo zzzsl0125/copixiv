@@ -1,30 +1,13 @@
-import { describe, it, expect } from 'vitest'
-import { buildQueries, formatNumber, filenameFromContentDisposition } from '../../src/lib/utils'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import {
+  formatNumber,
+  filenameFromContentDisposition,
+  downloadBlob,
+} from '../../src/lib/utils'
 
-describe('buildQueries', () => {
-  it('returns empty object for blank input', () => {
-    expect(buildQueries('')).toEqual({})
-    expect(buildQueries('  ')).toEqual({})
-  })
-
-  it('parses simple keyword', () => {
-    expect(buildQueries('R-18')).toEqual({ 'R-18': 'keyword' })
-  })
-
-  it('parses typed conditions with colons', () => {
-    expect(buildQueries('keyword:R-18;author_id:12345;tag:NTR;')).toEqual({
-      'R-18': 'keyword',
-      '12345': 'author_id',
-      'NTR': 'tag',
-    })
-  })
-
-  it('supports Chinese semicolons as separators', () => {
-    expect(buildQueries('is_favourite:true；is_special_follow:true')).toEqual({
-      true: 'is_special_follow',
-    })
-  })
-})
+// Search-condition parsing moved to the backend (parse_search_keyword) —
+// the frontend sends the raw keyword string.  See tests/domain for the
+// parser contract (ordered conditions, no value collisions).
 
 describe('formatNumber', () => {
   it('returns "0" for falsy input', () => {
@@ -59,5 +42,29 @@ describe('filenameFromContentDisposition', () => {
   it('returns the fallback for missing or malformed headers', () => {
     expect(filenameFromContentDisposition(undefined, 'fallback.zip')).toBe('fallback.zip')
     expect(filenameFromContentDisposition('', 'fallback.zip')).toBe('fallback.zip')
+  })
+})
+
+describe('downloadBlob', () => {
+  const createObjectURL = vi.fn(() => 'blob:mock-url')
+  const revokeObjectURL = vi.fn()
+
+  beforeEach(() => {
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    Object.defineProperty(URL, 'createObjectURL', { value: createObjectURL, configurable: true })
+    Object.defineProperty(URL, 'revokeObjectURL', { value: revokeObjectURL, configurable: true })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('creates a temporary link and triggers the download', () => {
+    const blob = new Blob(['payload'])
+
+    downloadBlob(blob, 'novel.txt')
+
+    expect(createObjectURL).toHaveBeenCalledWith(blob)
+    expect(HTMLAnchorElement.prototype.click).toHaveBeenCalledTimes(1)
   })
 })

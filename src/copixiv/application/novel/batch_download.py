@@ -9,6 +9,7 @@ from copixiv.domain.exceptions import NotFoundError, ValidationError
 from copixiv.domain.models.novel import EpubStatus
 from copixiv.domain.services.archive import build_batch_zip
 from copixiv.domain.services.filename import NovelNamingTemplate
+from copixiv.domain.services.parsing import SearchConditions
 from copixiv.domain.ports.repositories import NovelRepository
 
 
@@ -44,7 +45,7 @@ class BatchDownloadUseCase:
 
     async def execute(
         self,
-        queries: dict[str, str] | None = None,
+        conditions: SearchConditions | None = None,
         *,
         order_by: str = "id",
         order_direction: str = "DESC",
@@ -56,7 +57,7 @@ class BatchDownloadUseCase:
         naming_template: str | None = None,
     ) -> BatchDownloadResult:
         results = await self._repo.get_novels(
-            queries=queries,
+            conditions=conditions,
             order_by=order_by,
             order_direction=order_direction,
             per_page=limit,
@@ -76,7 +77,7 @@ class BatchDownloadUseCase:
             raise NotFoundError("未找到可下载的有效文件")
 
         zip_buf.seek(0)
-        search_desc = zip_name or _build_search_desc(queries or {})
+        search_desc = zip_name or _build_search_desc(conditions or [])
         return BatchDownloadResult(
             zip_buffer=zip_buf,
             titles=titles,
@@ -86,7 +87,7 @@ class BatchDownloadUseCase:
 
     async def preview(
         self,
-        queries: dict[str, str] | None = None,
+        conditions: SearchConditions | None = None,
         *,
         order_by: str = "id",
         order_direction: str = "DESC",
@@ -105,7 +106,7 @@ class BatchDownloadUseCase:
             ValidationError: If the template does not contain ``{id}``.
         """
         results = await self._repo.get_novels(
-            queries=queries,
+            conditions=conditions,
             order_by=order_by,
             order_direction=order_direction,
             per_page=1,
@@ -136,11 +137,10 @@ class BatchDownloadUseCase:
         return template.resolve(novel) + "." + actual_fmt
 
 
-def _build_search_desc(queries: dict[str, str]) -> str:
+def _build_search_desc(conditions: SearchConditions) -> str:
     """Build a human-readable description for the download filename."""
-    search_desc = f"批量下载"
-    if queries:
-        keywords = [k for k, v in queries.items() if v == "keyword"]
-        if keywords:
-            search_desc = f"{'_'.join(keywords[:3])}"
+    search_desc = "批量下载"
+    keywords = [value for qtype, value in conditions if qtype == "keyword"]
+    if keywords:
+        search_desc = "_".join(keywords[:3])
     return search_desc

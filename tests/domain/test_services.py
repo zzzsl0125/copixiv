@@ -1,6 +1,5 @@
 """Pure unit tests for domain services — zero I/O."""
 
-import io
 
 import pytest
 
@@ -162,23 +161,39 @@ class TestGuessSeriesOrder:
 
 class TestParseSearchKeyword:
     def test_simple_keyword(self):
-        assert parse_search_keyword("R-18") == {"R-18": "keyword"}
+        assert parse_search_keyword("R-18") == [("keyword", "R-18")]
 
     def test_typed_conditions(self):
         result = parse_search_keyword("keyword:R-18;author_id:12345")
-        assert result == {"R-18": "keyword", "12345": "author_id"}
+        assert result == [("keyword", "R-18"), ("author_id", "12345")]
 
     def test_chinese_semicolon(self):
         result = parse_search_keyword("tag:NTR；keyword:abc")
-        assert result == {"NTR": "tag", "abc": "keyword"}
+        assert result == [("tag", "NTR"), ("keyword", "abc")]
 
     def test_empty(self):
-        assert parse_search_keyword("") == {}
-        assert parse_search_keyword("   ") == {}
+        assert parse_search_keyword("") == []
+        assert parse_search_keyword("   ") == []
 
     def test_empty_segment(self):
         result = parse_search_keyword("a;;b")
-        assert result == {"a": "keyword", "b": "keyword"}
+        assert result == [("keyword", "a"), ("keyword", "b")]
+
+    def test_order_and_duplicates_preserved(self):
+        """The list must keep order and duplicates — the old {value: type}
+        dict silently dropped colliding conditions."""
+        result = parse_search_keyword("keyword:X;tag:X;keyword:X")
+        assert result == [
+            ("keyword", "X"), ("tag", "X"), ("keyword", "X"),
+        ]
+
+    def test_bare_seven_digit_number_is_id(self):
+        assert parse_search_keyword("1285180") == [("id", "1285180")]
+        # Shorter numbers stay keywords (they can never be a valid ID).
+        assert parse_search_keyword("123456") == [("keyword", "123456")]
+
+    def test_empty_value_segment_skipped(self):
+        assert parse_search_keyword("keyword:;R-18") == [("keyword", "R-18")]
 
 
 # ---- archive ----

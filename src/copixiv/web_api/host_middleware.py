@@ -51,7 +51,11 @@ class HostValidationMiddleware:
     Pass-through conditions (any one suffices):
     - the host is an IP literal (IPv4/IPv6, brackets already stripped)
     - ``host.lower()`` is ``localhost`` or is listed in *allowed_hosts*
-    - ``host == "testserver"`` (TestClient's default, keeps tests working)
+
+    Tests reach this middleware through the real configuration: their app
+    config declares the host they use (e.g. ``allowed_hosts: [testserver]``
+    for ``TestClient``'s default Host header) — there is no special case
+    for test hosts in production code.
     """
 
     def __init__(self, app, allowed_hosts: list[str] | None = None):
@@ -72,9 +76,6 @@ class HostValidationMiddleware:
 
     def _is_allowed(self, host: str) -> bool:
         lowered = host.lower()
-        # TestClient's default Host — keep existing tests working.
-        if lowered == "testserver":
-            return True
         if _is_ip_literal(host):
             return True
         if lowered == "localhost":

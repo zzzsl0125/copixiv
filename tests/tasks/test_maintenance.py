@@ -3,28 +3,20 @@
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, text
-from sqlalchemy.pool import StaticPool
+from sqlalchemy import text
 
-from copixiv.infrastructure.database.engine import create_session_factory
-from copixiv.infrastructure.database.models import Base, Author, Novel
+from copixiv.infrastructure.database.models import Author, Novel
 from copixiv.infrastructure.database.uow import SqlUnitOfWork
 from copixiv.tasks.maintenance import check_epub, check_fts, rebuild_fts
 
 
 @pytest.fixture
-def session_factory():
-    engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    Base.metadata.create_all(bind=engine)
-    sf = create_session_factory(engine)
-    with sf() as s:
+def session_factory(session_factory):
+    """The shared conftest factory, pre-seeded with Author(1) for FK needs."""
+    with session_factory() as s:
         s.add(Author(author_id=1, author_name="作者"))
         s.commit()
-    return sf
+    return session_factory
 
 
 async def _seed_pending(sf, nid: int, txt_text: str, epub: bool, tmp_path: Path):

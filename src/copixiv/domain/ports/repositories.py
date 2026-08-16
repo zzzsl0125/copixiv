@@ -8,6 +8,7 @@ from copixiv.domain.models.token import Token
 from copixiv.domain.models.task import TaskHistory, ScheduledTask
 from copixiv.domain.models.search import SearchHistory
 from copixiv.domain.models.novel import EpubStatus
+from copixiv.domain.services.parsing import SearchConditions
 
 
 @runtime_checkable
@@ -17,7 +18,7 @@ class NovelRepository(Protocol):
     async def get_by_id(self, novel_id: int) -> dict | None: ...
     async def get_novels(
         self,
-        queries: dict[str, str] | None = None,
+        conditions: SearchConditions | None = None,
         order_by: str = "like",
         order_direction: str = "DESC",
         cursor: dict | None = None,
@@ -27,7 +28,7 @@ class NovelRepository(Protocol):
     ) -> dict: ...
     async def count_novels(
         self,
-        queries: dict[str, str] | None = None,
+        conditions: SearchConditions | None = None,
         min_like: int | None = None,
         min_text: int | None = None,
     ) -> int: ...

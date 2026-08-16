@@ -253,8 +253,8 @@ class NovelQueryBuilder(BaseQueryBuilder):
 
     def build(self) -> tuple[Select, dict]:
         """Build the main list query."""
-        queries = self.params.get("queries") or {}
-        tags, keywords, field_filters = self._categorize(queries)
+        conditions = self.params.get("conditions") or []
+        tags, keywords, field_filters = self._categorize(conditions)
 
         # Skip display-flag JOINs when the query already filters by them
         skip_fav = C.FIELD_IS_FAVOURITE in field_filters
@@ -295,8 +295,8 @@ class NovelQueryBuilder(BaseQueryBuilder):
         Returns None when there are no filters (caller can use a cheap
         ``SELECT COUNT(*) FROM novel``).
         """
-        queries = self.params.get("queries") or {}
-        tags, keywords, field_filters = self._categorize(queries)
+        conditions = self.params.get("conditions") or []
+        tags, keywords, field_filters = self._categorize(conditions)
 
         has_filters = bool(
             tags or keywords or field_filters
@@ -376,12 +376,20 @@ class NovelQueryBuilder(BaseQueryBuilder):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _categorize(queries: dict) -> tuple[set, set, dict]:
-        """Split query dict into (tags, keywords, field_filters)."""
+    def _categorize(conditions) -> tuple[set, set, dict]:
+        """Split an ordered condition list into (tags, keywords, field_filters).
+
+        - ``tags`` / ``keywords`` accumulate (AND semantics — every value
+          becomes its own WHERE branch downstream).
+        - Scalar field filters keep the LAST value per type: under AND
+          semantics two different values for the same column are
+          contradictory, and the ordered list makes the winner
+          deterministic.
+        """
         tags: set[str] = set()
         keywords: set[str] = set()
         field_filters: dict[str, str] = {}
-        for value, qtype in queries.items():
+        for qtype, value in conditions:
             if not isinstance(value, str) or value.strip() == "":
                 continue
             if qtype == C.FIELD_TAGS:

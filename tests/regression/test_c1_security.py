@@ -20,7 +20,9 @@ from copixiv.domain.exceptions import DomainError
 from copixiv.infrastructure.database.engine import create_session_factory
 from copixiv.infrastructure.database.models import Base, Token
 from copixiv.web_api.endpoints import tokens
-from copixiv.web_api.host_middleware import HostValidationMiddleware
+from copixiv.web_api.host_middleware import (
+    HostValidationMiddleware, _normalize_host,
+)
 from copixiv.web_api.api_key_middleware import APIAuthMiddleware
 
 
@@ -122,6 +124,44 @@ class TestTokenMasking:
         assert body["token"] == "****-999"
         assert "updated-secret-999" not in r.text
 
+    def test_short_token_masks_to_just_stars(self, client, session_factory):
+        """Tokens with ≤4 chars must not leak any suffix."""
+        _seed_token(session_factory, name="short", token="abcd")
+        r = client.get("/api/tokens/")
+        body = [t for t in r.json() if t["name"] == "short"][0]
+        assert body["token"] == "****"
+        assert "abcd" not in r.text
+
+    def test_update_without_token_keeps_secret(self, client, session_factory):
+        """Editing name/premium/valid must not overwrite the stored token."""
+        _seed_token(session_factory)
+        token_id = client.get("/api/tokens/").json()[0]["id"]
+        r = client.put(f"/api/tokens/{token_id}", json={"name": "renamed"})
+        assert r.status_code == 200
+        assert r.json()["token"] == "****7890"
+        with session_factory() as s:
+            stored = s.get(Token, token_id)
+            assert stored.token == "abcdef1234567890", (
+                "token was overwritten by a name-only update"
+            )
+
+    def test_delete_and_reorder(self, client, session_factory):
+        _seed_token(session_factory, name="a1")
+        _seed_token(session_factory, name="a2")
+        ids = [t["id"] for t in client.get("/api/tokens/").json()]
+
+        r = client.post("/api/tokens/reorder/", json=list(reversed(ids)))
+        assert r.status_code == 200
+
+        r = client.delete(f"/api/tokens/{ids[0]}")
+        assert r.status_code == 200
+        remaining = client.get("/api/tokens/").json()
+        assert [t["id"] for t in remaining] == [ids[1]]
+
+    def test_delete_missing_token_is_404(self, client):
+        r = client.delete("/api/tokens/999")
+        assert r.status_code == 404
+
 
 class TestHostValidation:
     def test_evil_host_rejected(self, session_factory):
@@ -134,8 +174,50 @@ class TestHostValidation:
             assert r.json() == {"detail": "Invalid Host header"}
 
     def test_testserver_host_allowed(self, client):
+        # testserver passes because the fixture config explicitly allows it
+        # — not because the middleware special-cases test hosts.
         r = client.get("/api/tokens/")
         assert r.status_code == 200
+
+    def test_testserver_not_special_cased_without_config(self, session_factory):
+        """TestClient's default Host must NOT be magically allow-listed:
+        without an explicit entry in allowed_hosts it is rejected."""
+        config = AppConfig()
+        config.security.allowed_hosts = []  # no testserver
+        app = _build_app(session_factory, config)
+        with TestClient(app) as c:  # default Host header: testserver
+            r = c.get("/api/tokens/")
+        assert r.status_code == 400
+        assert r.json() == {"detail": "Invalid Host header"}
+
+
+class TestHostNormalizationBranches:
+    """Port stripping / IPv6 / IP literals / allow-list casing."""
+
+    def _mw(self, allowed_hosts=None) -> HostValidationMiddleware:
+        return HostValidationMiddleware(None, allowed_hosts or [])
+
+    def test_port_is_stripped(self):
+        assert _normalize_host("good.example:8000") == "good.example"
+        assert _normalize_host("127.0.0.1:8000") == "127.0.0.1"
+
+    def test_ipv6_brackets_stripped_but_bare_ipv6_kept(self):
+        assert _normalize_host("[::1]:8000") == "::1"
+        assert _normalize_host("::1") == "::1"
+
+    def test_ip_literals_always_allowed(self):
+        mw = self._mw()
+        assert mw._is_allowed("192.168.1.10") is True
+        assert mw._is_allowed("::1") is True
+
+    def test_localhost_always_allowed(self):
+        assert self._mw()._is_allowed("localhost") is True
+
+    def test_allowlist_is_case_insensitive(self):
+        mw = self._mw(["Good.Example"])
+        assert mw._is_allowed("good.example") is True
+        assert mw._is_allowed("GOOD.EXAMPLE") is True
+        assert mw._is_allowed("evil.example") is False
 
 
 class TestCors:
@@ -168,5 +250,25 @@ class TestApiKey:
         assert r.status_code == 200
 
     def test_options_bypasses_api_key(self, keyed_client):
+        # Plain OPTIONS has no route handler → 405 from routing, not 401
+        # from the API-key middleware: the bypass is proven by the status.
         r = keyed_client.options("/api/tokens/")
-        assert r.status_code != 401
+        assert r.status_code == 405
+
+    def test_cors_preflight_answered_without_key(self, keyed_client):
+        r = keyed_client.options(
+            "/api/tokens/",
+            headers={
+                "Origin": "http://localhost:5173",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        assert r.status_code == 200
+
+    def test_empty_api_key_disables_check(self, session_factory):
+        config = AppConfig()
+        config.security.allowed_hosts = ["testserver"]
+        config.security.api_key = ""  # default: auth disabled
+        app = _build_app(session_factory, config)
+        with TestClient(app) as c:
+            assert c.get("/api/tokens/").status_code == 200

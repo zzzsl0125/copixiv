@@ -1,6 +1,5 @@
 """Pure unit tests for domain models — zero I/O."""
 
-import pytest
 from copixiv.domain.models.novel import Novel
 from copixiv.domain.models.author import Author
 from copixiv.domain.models.series import Series

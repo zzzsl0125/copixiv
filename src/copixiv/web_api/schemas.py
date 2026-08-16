@@ -232,7 +232,7 @@ class SystemConfigResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class BatchDownloadRequest(BaseModel):
-    queries: str | None = None
+    keyword: str | None = None
     order_by: Literal["id", "like", "view", "text", "create_time", "random"] = "id"
     order_direction: Literal["ASC", "DESC"] = "DESC"
     min_like: int | None = None

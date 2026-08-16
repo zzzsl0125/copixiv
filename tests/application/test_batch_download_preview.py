@@ -33,14 +33,12 @@ def _novel(**overrides):
     return base
 
 
-@pytest.mark.asyncio
 async def test_preview_resolves_first_novel():
     use_case = BatchDownloadUseCase(_FakeNovelRepo([_novel()]))
     path = await use_case.preview(naming_template="{author_name}/{title}_{id}")
     assert path == "作者A/测试标题_123.txt"
 
 
-@pytest.mark.asyncio
 async def test_preview_prefers_epub_when_available():
     use_case = BatchDownloadUseCase(_FakeNovelRepo([_novel(has_epub=2)]))
     path = await use_case.preview(
@@ -49,21 +47,18 @@ async def test_preview_prefers_epub_when_available():
     assert path == "测试标题_123.epub"
 
 
-@pytest.mark.asyncio
 async def test_preview_returns_none_when_no_match():
     use_case = BatchDownloadUseCase(_FakeNovelRepo([]))
     path = await use_case.preview(naming_template="{id}")
     assert path is None
 
 
-@pytest.mark.asyncio
 async def test_preview_rejects_template_without_id():
     use_case = BatchDownloadUseCase(_FakeNovelRepo([_novel()]))
     with pytest.raises(ValidationError, match="must contain '\\{id\\}'"):
         await use_case.preview(naming_template="{title}")
 
 
-@pytest.mark.asyncio
 async def test_preview_uses_configured_default_template():
     use_case = BatchDownloadUseCase(
         _FakeNovelRepo([_novel()]), naming_template="{id}_{title}"

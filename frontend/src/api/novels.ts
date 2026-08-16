@@ -4,9 +4,6 @@ import type { Novel, GetNovelsParams } from '../types'
 export const novelApi = {
   async getNovels(params: GetNovelsParams) {
     const queryParams: Record<string, unknown> = { ...params }
-    if (params.queries) {
-      queryParams.queries = JSON.stringify(params.queries)
-    }
     if (params.cursor) {
       queryParams.cursor = JSON.stringify(params.cursor)
     }
@@ -32,15 +29,12 @@ export const novelApi = {
 
   async countNovels(params: GetNovelsParams) {
     const queryParams: Record<string, unknown> = { ...params }
-    if (params.queries) {
-      queryParams.queries = JSON.stringify(params.queries)
-    }
     const response = await apiClient.get('/novels/count', { params: queryParams })
     return response.data as { total: number }
   },
 
   async batchDownload(params: {
-    queries?: string
+    keyword?: string
     order_by?: string
     order_direction?: string
     min_like?: number
@@ -57,7 +51,7 @@ export const novelApi = {
   },
 
   async batchDownloadPreview(params: {
-    queries?: string
+    keyword?: string
     order_by?: string
     order_direction?: string
     min_like?: number

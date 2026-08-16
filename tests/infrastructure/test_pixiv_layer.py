@@ -206,7 +206,10 @@ class TestClientRetry:
 class TestPixivPatches:
     """Monkey-patch tolerance — no network involved."""
 
-    def test_apply_is_idempotent(self):
+    def test_apply_is_idempotent(self, monkeypatch):
+        # Reset through monkeypatch so the module-global flag is restored
+        # after the test — later tests rely on the default False state.
+        monkeypatch.setattr(pixiv_patch, "_patches_applied", False)
         pixiv_patch.apply()
         pixiv_patch.apply()  # second call is a no-op, must not raise
         assert pixiv_patch._patches_applied is True

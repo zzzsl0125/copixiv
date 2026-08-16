@@ -13,6 +13,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from copixiv.infrastructure.database import models
 from copixiv.infrastructure.database import constants as C
 from copixiv.domain.models.novel import EpubStatus, Novel
+from copixiv.domain.services.parsing import SearchConditions
 from .base import BaseRepository, model_to_dict
 from .fts import FTSManager
 from .tag import SQLAlchemyTagRepository
@@ -47,7 +48,7 @@ class SQLAlchemyNovelRepository(BaseRepository):
 
     async def get_novels(
         self,
-        queries: dict[str, str] | None = None,
+        conditions: SearchConditions | None = None,
         order_by: str = C.COL_LIKES,
         order_direction: str = "DESC",
         cursor: dict | None = None,
@@ -62,13 +63,13 @@ class SQLAlchemyNovelRepository(BaseRepository):
         """
         return await asyncio.to_thread(
             self._get_novels_sync,
-            queries, order_by, order_direction, cursor, per_page,
+            conditions, order_by, order_direction, cursor, per_page,
             min_like, min_text,
         )
 
     def _get_novels_sync(
         self,
-        queries: dict[str, str] | None = None,
+        conditions: SearchConditions | None = None,
         order_by: str = C.COL_LIKES,
         order_direction: str = "DESC",
         cursor: dict | None = None,
@@ -80,15 +81,15 @@ class SQLAlchemyNovelRepository(BaseRepository):
         if order_by:
             self._validate_query_field(order_by)
         self._validate_order_direction(order_direction)
-        if queries:
-            for q_type in queries.values():
+        if conditions:
+            for q_type, _qvalue in conditions:
                 self._validate_query_field(q_type)
 
         # Random browsing — use precomputed shuffle column for fast index seek.
         # First page: pick a random starting point in the shuffle space so
         # each visit shows a different slice.  Wrap around if the tail
         # doesn't have enough rows.
-        if order_by == "random" and not queries:
+        if order_by == "random" and not conditions:
             import random as _random
             if not cursor:
                 novels = self._get_random_novels_shuffle(
@@ -105,7 +106,7 @@ class SQLAlchemyNovelRepository(BaseRepository):
             # else: has cursor → fall through to query builder below
 
         params = {
-            "queries": queries,
+            "conditions": conditions,
             "order_by": order_by,
             "order_direction": order_direction,
             "cursor": cursor,
@@ -142,27 +143,27 @@ class SQLAlchemyNovelRepository(BaseRepository):
 
     async def count_novels(
         self,
-        queries: dict[str, str] | None = None,
+        conditions: SearchConditions | None = None,
         min_like: int | None = None,
         min_text: int | None = None,
     ) -> int:
         """Count novels matching filters (runs in a worker thread)."""
         return await asyncio.to_thread(
-            self._count_novels_sync, queries, min_like, min_text,
+            self._count_novels_sync, conditions, min_like, min_text,
         )
 
     def _count_novels_sync(
         self,
-        queries: dict[str, str] | None = None,
+        conditions: SearchConditions | None = None,
         min_like: int | None = None,
         min_text: int | None = None,
     ) -> int:
-        if queries:
-            for q_type in queries.values():
+        if conditions:
+            for q_type, _qvalue in conditions:
                 self._validate_query_field(q_type)
 
         params = {
-            "queries": queries or {},
+            "conditions": conditions or [],
             "min_like": min_like,
             "min_text": min_text,
         }

@@ -9,29 +9,18 @@ teardown（handler 返回后）才提交，reload 用另一连接读不到未提
 """
 
 import asyncio
-import os
-import tempfile
 
 import pytest
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
 from copixiv.domain.exceptions import DomainError
-from copixiv.infrastructure.database.models import Base
 from copixiv.infrastructure.repositories.task import SQLAlchemyTaskRepository
 from copixiv.tasks.manager import TaskManagerSystem
 from copixiv.web_api.endpoints import tasks as tasks_endpoint
 
 
-@pytest.fixture()
-def db_path(tmp_path):
-    path = str(tmp_path / "test.db")
-    engine = create_engine(f"sqlite:///{path}")
-    Base.metadata.create_all(engine)
-    factory = sessionmaker(bind=engine, expire_on_commit=False)
-    return path, factory
+# file_session_factory comes from tests/conftest.py
 
 
 def _cron_job_ids(tm: TaskManagerSystem) -> list[str]:
@@ -43,13 +32,13 @@ def _cron_job_ids(tm: TaskManagerSystem) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def test_reload_sees_pending_insert_after_commit_only(db_path):
+def test_reload_sees_pending_insert_after_commit_only(file_session_factory):
     """复现原始机制：未提交时 reload 看不到新任务；提交后能看到。
 
     期望行为：只要 reload 发生在 commit 之后（修复后的时序），
     调度器一定包含新任务 —— 本测试固定「commit 后可见」这一不变量。
     """
-    _, factory = db_path
+    factory = file_session_factory
 
     async def scenario():
         tm = TaskManagerSystem(session_factory=factory, client=None)
@@ -80,11 +69,11 @@ def test_reload_sees_pending_insert_after_commit_only(db_path):
 
 
 @pytest.fixture()
-def client(db_path):
+def client(file_session_factory):
     from contextlib import asynccontextmanager
     from fastapi.testclient import TestClient
 
-    _, factory = db_path
+    factory = file_session_factory
 
     tm = TaskManagerSystem(session_factory=factory, client=None)
 

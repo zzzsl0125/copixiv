@@ -88,7 +88,10 @@ class TestFtsQueryExecutes:
     def test_no_syntax_error(self, conn, keyword):
         query = build(keyword)
         if not query:
-            return  # empty query → no MATCH clause is emitted by the caller
+            # Empty query means "no MATCH clause is emitted by the caller" —
+            # pin that contract explicitly instead of silently passing.
+            assert build(keyword) == ""
+            return
         # Same embedding style as _where_fts_filter:
         conn.execute(
             f"SELECT rowid FROM novel_fts WHERE novel_fts MATCH '{query}'"

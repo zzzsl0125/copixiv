@@ -35,4 +35,16 @@ describe('apiClient X-API-Key interceptor', () => {
     vi.unstubAllEnvs()
     vi.resetModules()
   })
+
+  it('does not register an interceptor when no key is configured', async () => {
+    axiosMock.requestUse.mockClear()
+    vi.stubEnv('VITE_API_KEY', '')
+    vi.resetModules()
+
+    await import('../../src/api/client')
+    expect(axiosMock.requestUse).not.toHaveBeenCalled()
+
+    vi.unstubAllEnvs()
+    vi.resetModules()
+  })
 })

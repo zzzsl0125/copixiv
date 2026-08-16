@@ -3,8 +3,9 @@ import { tokenApi } from '../api'
 import { getApiErrorMessage } from '../api/errors'
 import type { Token, TokenUpdate } from '../types'
 
-/** Backend masks responses as ``****`` (≤4 chars) or ``****`` + last 4 chars. */
-const isMaskedToken = (value: string) => value === '****' || /^\*{4}.{4}$/.test(value)
+/** Backend masks responses as ``****`` (≤4 chars) or ``****`` + last 4 chars.
+ * Exported so the masking contract is unit-testable. */
+export const isMaskedToken = (value: string) => value === '****' || /^\*{4}.{4}$/.test(value)
 
 export function useTokens() {
   const tokens = ref<Token[]>([])

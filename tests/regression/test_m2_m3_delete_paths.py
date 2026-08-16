@@ -3,20 +3,14 @@
 import asyncio
 
 import pytest
-from sqlalchemy import create_engine, select, text
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import select
 
 from copixiv.infrastructure.database import models
-from copixiv.infrastructure.database.models import Base
 from copixiv.infrastructure.repositories.novel import SQLAlchemyNovelRepository
 from copixiv.infrastructure.repositories.author import SQLAlchemyAuthorRepository
 
-
-@pytest.fixture()
-def factory(tmp_path):
-    engine = create_engine(f"sqlite:///{tmp_path / 'test.db'}")
-    Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine, expire_on_commit=False)
+# factory = file_session_factory from tests/conftest.py
+factory = pytest.fixture(name="factory")(lambda file_session_factory: file_session_factory)
 
 
 # M2 -------------------------------------------------------------
@@ -34,6 +28,7 @@ def test_delete_novel_decrements_tag_reference_count(factory):
     """期望：删除小说后，其标签的 reference_count 递减到 0。"""
     async def scenario():
         with factory() as s:
+            s.add(models.Author(author_id=1, author_name="作者"))
             repo = SQLAlchemyNovelRepository(s)
             await repo.upsert_novels([_novel_payload()])
             s.commit()
@@ -56,6 +51,7 @@ def test_delete_author_decrements_tag_reference_count(factory):
     """期望：作者级删除同样递减计数。"""
     async def scenario():
         with factory() as s:
+            s.add(models.Author(author_id=1, author_name="作者"))
             repo = SQLAlchemyNovelRepository(s)
             await repo.upsert_novels([_novel_payload()])
             s.commit()
@@ -81,6 +77,7 @@ def test_delete_novel_works_when_fts_table_missing(factory):
     """期望：FTS 表不存在时删除小说仍然成功（跳过 FTS 清理）。"""
     async def scenario():
         with factory() as s:
+            s.add(models.Author(author_id=1, author_name="作者"))
             repo = SQLAlchemyNovelRepository(s)
             # 用一个没有 novel_fts 表的干净库（create_all 不建 FTS 虚拟表）
             await repo.upsert_novels([_novel_payload()])
@@ -99,6 +96,7 @@ def test_delete_author_works_when_fts_table_missing(factory):
     """期望：FTS 表不存在时作者级删除同样成功。"""
     async def scenario():
         with factory() as s:
+            s.add(models.Author(author_id=1, author_name="作者"))
             repo = SQLAlchemyNovelRepository(s)
             await repo.upsert_novels([_novel_payload()])
             s.commit()
