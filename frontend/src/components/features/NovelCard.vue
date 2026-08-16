@@ -16,12 +16,15 @@ const props = defineProps({
   novel: { type: Object as PropType<Novel>, required: true },
   isActive: { type: Boolean, required: true },
   tagPreferences: { type: Array as PropType<TagPreference[]>, default: () => [] },
+  batchMode: { type: Boolean, default: false },
+  batchSelected: { type: Boolean, default: false },
 })
 
 const emit = defineEmits<{
   (e: 'search', type: 'author' | 'series' | 'tag', value: string | number): void
   (e: 'toggle-active', id: number | string): void
   (e: 'state-changed', payload: NovelStateChange): void
+  (e: 'toggle-batch-select', id: number): void
 }>()
 
 const toast = useToast()
@@ -29,12 +32,25 @@ const downloading = ref(false)
 const showMobileActions = computed(() => props.isActive)
 const hasEpubReady = computed(() => props.novel.has_epub === 2)
 
-const toggleActions = (e: Event) => {
-  e.stopPropagation()
+const handleCardClick = () => {
+  if (props.batchMode) {
+    emit('toggle-batch-select', props.novel.id)
+    return
+  }
   emit('toggle-active', props.novel.id)
 }
 
 const stopPropagation = (e: Event) => { e.stopPropagation() }
+
+const handleTitleClick = (e: Event) => {
+  if (props.batchMode) {
+    e.preventDefault()
+    e.stopPropagation()
+    emit('toggle-batch-select', props.novel.id)
+    return
+  }
+  stopPropagation(e)
+}
 
 const handleSeriesClick = (e: Event) => {
   if (!props.novel.series_id) return
@@ -100,6 +116,11 @@ const handleDownload = async (e: Event) => {
 }
 
 const likeBorderClass = computed(() => {
+  // Batch mode: the blue ring OVERRIDES the like-tier ring only while the
+  // card is selected — unselected cards keep their like-colored border.
+  if (props.batchMode && props.batchSelected) {
+    return 'ring-2 ring-blue-400 border-transparent shadow-[0_0_15px_rgba(59,130,246,0.25)]'
+  }
   const likes = props.novel.like || 0
   if (likes >= 5000) return 'ring-2 ring-red-200 border-transparent shadow-[0_0_15px_rgba(239,68,68,0.15)]'
   if (likes >= 2500) return 'ring-2 ring-yellow-200 border-transparent shadow-[0_0_15px_rgba(234,179,8,0.15)]'
@@ -119,15 +140,15 @@ const getTagClass = (tag: string) => {
   <div
     class="relative group bg-white rounded-xl shadow-sm hover:shadow-xl transition-all duration-300 overflow-hidden flex flex-col border cursor-pointer"
     :class="likeBorderClass"
-    @click="toggleActions"
+    @click="handleCardClick"
   >
     <button
       type="button"
       class="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-10 focus:px-3 focus:py-1.5 focus:rounded-md focus:bg-white focus:border focus:border-gray-300 focus:text-sm"
       :aria-expanded="isActive"
-      @click="toggleActions"
+      @click="handleCardClick"
     >
-      {{ isActive ? '收起操作' : '展开操作' }}
+      {{ batchMode ? (batchSelected ? '取消勾选' : '勾选') : (isActive ? '收起操作' : '展开操作') }}
     </button>
     <div class="p-5 grow flex flex-col">
       <div class="mb-1">
@@ -137,7 +158,7 @@ const getTagClass = (tag: string) => {
           rel="noopener noreferrer"
           class="text-lg font-bold text-gray-900 hover:text-blue-600 inline-block"
           :title="novel.title"
-          @click="stopPropagation"
+          @click="handleTitleClick"
         >
           {{ novel.title }}
         </a>
@@ -174,7 +195,7 @@ const getTagClass = (tag: string) => {
 
     <div class="px-5 py-4 bg-gray-50 border-t border-gray-100 flex flex-col gap-3 relative overflow-hidden">
       <div class="flex justify-between items-center text-xs text-gray-500 transition-opacity duration-300"
-           :class="[showMobileActions ? 'opacity-0' : 'opacity-100 group-hover:opacity-0']">
+           :class="[batchMode ? 'opacity-100' : (showMobileActions ? 'opacity-0' : 'opacity-100 group-hover:opacity-0')]">
         <div class="flex items-center gap-3">
           <span class="flex items-center gap-1" title="喜爱">❤️ {{ formatNumber(novel.like) }}</span>
           <span class="flex items-center gap-1" title="字数">📝 {{ formatNumber(novel.text) }}</span>
@@ -184,6 +205,7 @@ const getTagClass = (tag: string) => {
       </div>
 
       <div
+        v-if="!batchMode"
         class="absolute inset-0 bg-white/95 backdrop-blur-sm border-t border-gray-100 flex items-center px-3 py-2 gap-2 transition-transform duration-300"
         :class="['translate-y-full', 'group-hover:translate-y-0', showMobileActions ? 'translate-y-0!' : '']"
         @click="stopPropagation"

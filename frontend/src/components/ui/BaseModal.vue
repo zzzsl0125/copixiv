@@ -1,7 +1,7 @@
 <template>
   <div v-if="isOpen" class="fixed inset-0 z-50 flex items-center justify-center" :aria-labelledby="titleId" role="dialog" aria-modal="true" data-testid="base-modal">
     <!-- backdrop -->
-    <div class="absolute inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true" @click="close"></div>
+    <div class="absolute inset-0 bg-gray-500/75 transition-opacity" aria-hidden="true" @click="close"></div>
     <!-- dialog panel -->
     <div ref="panelRef" tabindex="-1" class="relative bg-white rounded-lg text-left overflow-hidden shadow-xl transform transition-all max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto focus:outline-none">
       <form @submit.prevent="confirm">
@@ -14,7 +14,7 @@
           </div>
         </div>
         <div class="bg-gray-50 px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse">
-          <button type="submit" :disabled="loading" class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-blue-600 text-base font-medium text-white hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 sm:ml-3 sm:w-auto sm:text-sm disabled:opacity-50 transition-colors">
+          <button type="submit" :disabled="loading || confirmDisabled" class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-blue-600 text-base font-medium text-white hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 sm:ml-3 sm:w-auto sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
             {{ loading ? confirmText.replace(/保存/g, '保存中').replace(/确认/g, '确认中') : confirmText }}
           </button>
           <slot name="extra-buttons"></slot>
@@ -36,10 +36,13 @@ const props = withDefaults(defineProps<{
   loading?: boolean
   confirmText?: string
   cancelText?: string
+  /** Extra disable condition for the confirm button (e.g. validation). */
+  confirmDisabled?: boolean
 }>(), {
   loading: false,
   confirmText: '保存',
   cancelText: '取消',
+  confirmDisabled: false,
 })
 
 const emit = defineEmits<{

@@ -6,8 +6,6 @@ import { getApiErrorMessage } from '../../api/errors'
 import { downloadBlob, filenameFromContentDisposition } from '../../lib/utils'
 import { useSystem } from '../../composables'
 
-const DOWNLOAD_LIMIT_CAP = 500
-
 const props = defineProps<{
   isOpen: boolean
   keyword: string
@@ -15,18 +13,24 @@ const props = defineProps<{
   order_direction: string
   min_like?: number
   min_text?: number
+  /** Batch-mode selection: when set, downloads exactly these novels. */
+  novelIds?: number[]
 }>()
 
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'download-success', filename: string): void
   (e: 'download-error', message: string): void
+  (e: 'task-submitted', payload: { task_id: number; matched: number }): void
 }>()
+
+/** Beyond this size the ZIP is built as a background task (~21s per 2000
+ *  novels measured on the real library — the sync path must stay snappy). */
+const EXPORT_TASK_THRESHOLD = 1000
 
 const loading = ref(false)
 const countLoading = ref(false)
 const totalCount = ref(0)
-const downloadLimit = ref(50)
 const formatMode = ref<'txt' | 'prefer_epub'>('txt')
 const { systemConfig } = useSystem()
 
@@ -39,6 +43,12 @@ const previewError = ref('')
 let previewTimer: ReturnType<typeof setTimeout> | undefined
 let previewSeq = 0
 let previewAbort: AbortController | null = null
+
+/** ids-mode selection makes the API count call unnecessary. */
+const isIdsMode = computed(() => (props.novelIds?.length ?? 0) > 0)
+
+/** Large exports run as a background task (page can be closed). */
+const useTaskExport = computed(() => totalCount.value > EXPORT_TASK_THRESHOLD)
 
 async function fetchPreview() {
   const seq = ++previewSeq
@@ -58,6 +68,7 @@ async function fetchPreview() {
       min_text: props.min_text,
       format_mode: formatMode.value,
       naming_template: namingTemplate.value || undefined,
+      novel_ids: props.novelIds,
     }, controller.signal)
     if (seq !== previewSeq) return
     previewPath.value = result.path
@@ -86,6 +97,7 @@ watch(
     () => props.order_direction,
     () => props.min_like,
     () => props.min_text,
+    () => props.novelIds,
   ],
   () => {
     if (props.isOpen) schedulePreview()
@@ -141,10 +153,14 @@ const orderByDisplay = computed(() => {
 watch(() => props.isOpen, async (open) => {
   if (!open) return
   totalCount.value = 0
-  downloadLimit.value = 50
   formatMode.value = 'txt'
   zipName.value = defaultZipName()
   namingTemplate.value = systemConfig.value?.batch_download_naming || ''
+  if (isIdsMode.value) {
+    totalCount.value = props.novelIds?.length ?? 0
+    schedulePreview()
+    return
+  }
   countLoading.value = true
   try {
     const result = await novelApi.countNovels({
@@ -153,7 +169,6 @@ watch(() => props.isOpen, async (open) => {
       min_text: props.min_text,
     })
     totalCount.value = result.total
-    downloadLimit.value = Math.min(50, result.total || 1)
     zipName.value = defaultZipName()
     schedulePreview()
   } catch (err: unknown) {
@@ -166,19 +181,32 @@ watch(() => props.isOpen, async (open) => {
 
 async function handleConfirm() {
   if (loading.value || totalCount.value === 0) return
-  const limit = Math.min(Math.max(Math.floor(downloadLimit.value) || 1, 1), DOWNLOAD_LIMIT_CAP)
+  // 范围已在批量模式中决定——选多少下多少，不再二次决定数量。
   loading.value = true
   try {
+    if (useTaskExport.value) {
+      const res = await novelApi.submitBatchExport({
+        novel_ids: props.novelIds ?? [],
+        format_mode: formatMode.value,
+        zip_name: zipName.value || undefined,
+        naming_template: namingTemplate.value || undefined,
+      })
+      emit('task-submitted', res)
+      emit('close')
+      return
+    }
+
     const response = await novelApi.batchDownload({
       keyword: props.keyword.trim() || undefined,
       order_by: props.order_by,
       order_direction: props.order_direction,
       min_like: props.min_like,
       min_text: props.min_text,
-      limit,
+      limit: totalCount.value,
       format_mode: formatMode.value,
       zip_name: zipName.value || undefined,
       naming_template: namingTemplate.value || undefined,
+      novel_ids: props.novelIds,
     })
 
     const blob = response.data as Blob
@@ -219,7 +247,11 @@ async function handleConfirm() {
 <template>
   <BaseModal :is-open="isOpen" title="📦 打包下载" :loading="loading" confirm-text="确认下载" @close="$emit('close')" @confirm="handleConfirm">
     <div class="text-sm text-gray-600 space-y-1">
-      <div class="flex items-center gap-2"><span class="font-medium text-gray-700 w-16 shrink-0">关键词：</span><span class="truncate text-gray-900">{{ keywordDisplay }}</span></div>
+      <div v-if="isIdsMode" class="flex items-center gap-2">
+        <span class="font-medium text-gray-700 w-16 shrink-0">范围：</span>
+        <span class="truncate text-gray-900">已勾选 {{ novelIds?.length ?? 0 }} 篇</span>
+      </div>
+      <div v-else class="flex items-center gap-2"><span class="font-medium text-gray-700 w-16 shrink-0">关键词：</span><span class="truncate text-gray-900">{{ keywordDisplay }}</span></div>
       <div class="flex items-center gap-2"><span class="font-medium text-gray-700 w-16 shrink-0">排序：</span><span class="text-gray-900">{{ orderByDisplay }}</span></div>
       <div v-if="min_like || min_text" class="flex items-center gap-2">
         <span class="font-medium text-gray-700 w-16 shrink-0">筛选：</span>
@@ -236,16 +268,11 @@ async function handleConfirm() {
       <span v-if="countLoading" class="text-gray-400">正在统计…</span>
       <span v-else class="text-lg font-bold" :class="totalCount > 0 ? 'text-blue-600' : 'text-gray-400'">{{ totalCount > 0 ? `${totalCount} 篇` : '无匹配结果' }}</span>
     </div>
+    <p v-if="useTaskExport" class="text-xs bg-blue-50 border border-blue-200 text-blue-700 rounded-md px-3 py-2">
+      选择超过 {{ EXPORT_TASK_THRESHOLD }} 篇，将作为后台任务打包——提交后可关闭页面，进度与下载入口在「任务管理」页。
+    </p>
+    <p v-else-if="totalCount > 500" class="text-xs text-gray-400">打包生成可能需要一些时间，请稍候。</p>
     <div v-if="totalCount > 0" class="space-y-3">
-      <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">下载数量</label>
-        <div class="flex items-center gap-2">
-          <input v-model.number="downloadLimit" type="number" min="1" :max="Math.min(totalCount, DOWNLOAD_LIMIT_CAP)" class="block w-24 px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm" />
-          <span class="text-sm text-gray-500">/ 共 {{ totalCount }} 篇</span>
-          <button v-if="totalCount > DOWNLOAD_LIMIT_CAP" type="button" class="text-sm text-blue-600 hover:text-blue-800" @click="downloadLimit = DOWNLOAD_LIMIT_CAP">下载全部（最多 500）</button>
-        </div>
-        <p v-if="totalCount > DOWNLOAD_LIMIT_CAP" class="mt-1 text-xs text-gray-400">单次最多下载 {{ DOWNLOAD_LIMIT_CAP }} 篇，可分批下载。</p>
-      </div>
       <div>
         <label class="block text-sm font-medium text-gray-700 mb-1">文件格式</label>
         <div class="flex gap-4">

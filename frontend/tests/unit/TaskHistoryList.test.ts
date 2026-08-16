@@ -32,7 +32,6 @@ function mountWithStatus(status: string) {
       stubs: {
         LoadMore: true,
         LogViewer: true,
-        StatusBadge: true,
       },
     },
   })
@@ -61,5 +60,42 @@ describe('TaskHistoryList (lowercase status contract)', () => {
   it('tolerates uppercase statuses from a misbehaving backend', () => {
     const wrapper = mountWithStatus('SUCCESS')
     expect(wrapper.find('.text-green-500').exists()).toBe(true)
+  })
+})
+
+describe('TaskHistoryList row identity across polls', () => {
+  function makeItem(id: number, summary: string) {
+    return {
+      id,
+      name: 'batch_export',
+      arguments: { novel_ids: [1], format_mode: 'txt' },
+      status: 'running',
+      start_time: '2026-01-01T00:00:00',
+      end_time: null,
+      duration: null,
+      result: { summary },
+    }
+  }
+
+  it('reuses the same DOM elements when history is refreshed in place', async () => {
+    const wrapper = mount(TaskHistoryList, {
+      props: {
+        history: [makeItem(10, '打包中 1/10 篇'), makeItem(9, '其他')],
+        loading: false,
+        hasMore: false,
+      },
+      global: { stubs: { LoadMore: true, LogViewer: true } },
+    })
+
+    const before = wrapper.findAll('li').map((li) => li.element)
+
+    // Simulate a silent poll: brand-new objects, same ids.
+    await wrapper.setProps({
+      history: [makeItem(10, '打包中 5/10 篇'), makeItem(9, '其他')],
+    })
+
+    const after = wrapper.findAll('li').map((li) => li.element)
+    expect(after.length).toBe(before.length)
+    after.forEach((el, i) => expect(el).toBe(before[i]))
   })
 })

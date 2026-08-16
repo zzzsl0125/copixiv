@@ -1,9 +1,6 @@
 <script setup lang="ts">
-import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Search, Settings, Download } from '@lucide/vue'
-import BatchDownloadModal from './features/BatchDownloadModal.vue'
-import { useToast } from '../composables'
+import { Search, Settings, ListChecks } from '@lucide/vue'
 import type { NovelFilters } from '../types'
 
 const route = useRoute()
@@ -15,6 +12,7 @@ const props = defineProps<{
   activeSection: 'novels' | 'favourites' | 'special_follow' | null
   configLoadedAndApplied?: boolean
   filters: NovelFilters
+  isBatchMode: boolean
 }>()
 
 const emit = defineEmits<{
@@ -22,10 +20,8 @@ const emit = defineEmits<{
   (e: 'search', keyword: string | undefined, section: 'novels' | 'favourites' | 'special_follow'): void
   (e: 'update:filters', filters: NovelFilters): void
   (e: 'reset-to-defaults'): void
+  (e: 'toggle-batch-mode'): void
 }>()
-
-const toast = useToast()
-const isBatchModalOpen = ref(false)
 
 const updateFilter = (key: keyof typeof props.filters, value: unknown) => {
   const newFilters = { ...props.filters, [key]: value }
@@ -47,7 +43,7 @@ const navIconClass = 'mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500'
 <template>
   <div
     v-if="isOpen"
-    class="fixed inset-0 bg-gray-600 bg-opacity-75 z-20 md:hidden transition-opacity"
+    class="fixed inset-0 bg-gray-900/30 z-20 md:hidden transition-opacity"
     @click="$emit('close')"
   ></div>
 
@@ -58,8 +54,9 @@ const navIconClass = 'mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500'
     ]"
   >
     <div class="flex-1 overflow-y-auto px-8 py-6">
-      <h3 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">功能</h3>
       <nav class="space-y-2 mb-8">
+        <!-- 阅览 -->
+        <h3 class="pt-1 text-sm font-semibold text-gray-500 uppercase tracking-wider mb-1">阅览</h3>
         <a href="#" :class="navItemClass(activeSection === 'novels')" @click.prevent="() => { if(route.path !== '/') router.push('/'); $emit('reset-to-defaults'); $emit('close'); }">
           <Search :class="navIconClass" /> 小说列表
         </a>
@@ -69,6 +66,9 @@ const navIconClass = 'mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500'
         <a href="#" :class="navItemClass(activeSection === 'special_follow')" @click.prevent="() => { if(route.path !== '/') router.push('/'); $emit('search', 'is_special_follow:true;', 'special_follow'); $emit('close'); }">
           <Search :class="navIconClass" /> 特别关注
         </a>
+
+        <!-- 配置 -->
+        <h3 class="pt-4 text-sm font-semibold text-gray-500 uppercase tracking-wider mb-1">配置</h3>
         <router-link to="/tasks" :class="[navItemClass(false), route.path === '/tasks' ? 'bg-gray-100' : '']" @click="$emit('close')">
           <Settings :class="navIconClass" /> 任务管理
         </router-link>
@@ -78,18 +78,24 @@ const navIconClass = 'mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500'
         <router-link to="/tokens" :class="[navItemClass(false), route.path === '/tokens' ? 'bg-gray-100' : '']" @click="$emit('close')">
           <Settings :class="navIconClass" /> 账号管理
         </router-link>
-      </nav>
 
-      <!-- Batch Download -->
-      <template v-if="showFilters !== false && filters.keyword.trim()">
-        <div class="my-6 border-t border-gray-200"></div>
-        <button @click="isBatchModalOpen = true" class="w-full flex items-center justify-center px-3 py-2 text-sm font-medium text-gray-700 hover:text-gray-900 hover:bg-gray-50 rounded-md transition-colors">
-          <Download class="mr-3 h-5 w-5 text-gray-400" /> 打包下载
-        </button>
-      </template>
+        <!-- 其他：批量操作 — 小说页常驻，位于与筛选区之间的横线上方 -->
+        <template v-if="showFilters !== false">
+          <h3 class="pt-4 text-sm font-semibold text-gray-500 uppercase tracking-wider mb-1">其他</h3>
+          <button
+            @click="() => { if(route.path !== '/') router.push('/'); $emit('toggle-batch-mode'); $emit('close'); }"
+            class="group w-full flex items-center justify-center px-3 py-2 text-sm font-medium rounded-md transition-colors"
+            :class="isBatchMode ? 'bg-blue-500 text-white' : 'text-gray-700 hover:text-gray-900 hover:bg-gray-50'"
+          >
+            <ListChecks class="mr-3 h-5 w-5" :class="isBatchMode ? 'text-white' : 'text-gray-400 group-hover:text-gray-500'" />
+            批量操作
+          </button>
+        </template>
+      </nav>
 
       <!-- Filters -->
       <template v-if="showFilters !== false && configLoadedAndApplied">
+        <div class="my-6 border-t border-gray-200"></div>
         <h3 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">排序</h3>
         <div class="space-y-3 mb-8">
           <div class="grid grid-cols-3 gap-2">
@@ -128,16 +134,4 @@ const navIconClass = 'mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500'
       </template>
     </div>
   </div>
-
-  <BatchDownloadModal
-    :is-open="isBatchModalOpen"
-    :keyword="props.filters.keyword"
-    :order_by="props.filters.order_by"
-    :order_direction="props.filters.order_direction"
-    :min_like="props.filters.min_like"
-    :min_text="props.filters.min_text"
-    @close="isBatchModalOpen = false"
-    @download-success="toast.success(`已开始下载：${$event}`)"
-    @download-error="toast.error"
-  />
 </template>

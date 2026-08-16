@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { taskApi } from '../api'
 import { getApiErrorMessage } from '../api/errors'
 import type { ScheduledTask } from '../types'
@@ -30,6 +30,7 @@ const {
   items: history,
   loading: loadingHistory,
   loadData: loadHistory,
+  refresh: refreshHistory,
   hasMore: hasMoreHistory,
 } = usePagination((offset, limit) => taskApi.getTaskHistory(limit, offset))
 
@@ -102,6 +103,29 @@ const reorderTasks = async (newTasks: ScheduledTask[]) => {
 }
 
 onMounted(() => { loadTasks(); loadHistory() })
+
+// ---- live progress: poll the history while any task is pending/running
+// (batch_operation rows self-report progress into their result summary) ----
+const hasRunningTask = computed(() =>
+  history.value.some(h => ['pending', 'running'].includes((h.status || '').toLowerCase())),
+)
+
+let pollTimer: ReturnType<typeof setInterval> | null = null
+
+watch(hasRunningTask, (running) => {
+  if (running && pollTimer === null) {
+    // Silent in-place refresh — no list clear, no loading spinner, so the
+    // progress updates render without the page flickering.
+    pollTimer = setInterval(() => { void refreshHistory({ silent: true }) }, 5000)
+  } else if (!running && pollTimer !== null) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+})
+
+onBeforeUnmount(() => {
+  if (pollTimer !== null) clearInterval(pollTimer)
+})
 </script>
 
 <template>

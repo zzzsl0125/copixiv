@@ -106,6 +106,10 @@ class NovelQueryBuilder(BaseQueryBuilder):
         main = self._where_field_filters(main, field_filters)
         main = self._where_thresholds(main)
 
+        exclude_ids = self.params.get("exclude_ids") or []
+        if exclude_ids:
+            main = main.where(self.main_model.id.not_in(exclude_ids))
+
         # Pagination, ordering, limit — applied last so indexes can serve ORDER BY
         main = self._apply_cursor(
             main, self.params.get("cursor"), self.params["order_by"],
@@ -117,6 +121,35 @@ class NovelQueryBuilder(BaseQueryBuilder):
         main = self._apply_limit(main, self.params["per_page"])
 
         return main, self.params
+
+    def build_ids(self) -> Select:
+        """Build an ID-only query with the same filters, without limit.
+
+        Used by batch operations to resolve the full matching ID set in a
+        single lightweight scan (no display-flag JOINs, no column payload).
+        """
+        conditions = self.params.get("conditions") or []
+        tags, keywords, field_filters = self._categorize(conditions)
+
+        stmt = select(self.main_model.id).select_from(self.main_model)
+        stmt = self._join_field_filter_tables(
+            stmt, field_filters, use_exists_for_special_follow=False,
+        )
+        stmt = self._join_tag_filter(stmt, tags)
+        stmt = self._where_fts_filter(stmt, keywords, use_exists=False)
+        stmt = self._where_field_filters(stmt, field_filters)
+        stmt = self._where_thresholds(stmt)
+
+        # Optional membership constraint: only return IDs from this set
+        # (used by match-ids to intersect the selection with the scope).
+        id_set = self.params.get("ids")
+        if id_set:
+            stmt = stmt.where(self.main_model.id.in_(id_set))
+
+        exclude_ids = self.params.get("exclude_ids") or []
+        if exclude_ids:
+            stmt = stmt.where(self.main_model.id.not_in(exclude_ids))
+        return stmt
 
     def build_count(self) -> Select | None:
         """Build a COUNT(*) query with the same filters, without limit.
@@ -131,6 +164,7 @@ class NovelQueryBuilder(BaseQueryBuilder):
             tags or keywords or field_filters
             or self.params.get("min_like") is not None
             or self.params.get("min_text") is not None
+            or self.params.get("exclude_ids")
         )
         if not has_filters:
             return None
@@ -145,6 +179,10 @@ class NovelQueryBuilder(BaseQueryBuilder):
         stmt = self._where_fts_filter(stmt, keywords, use_exists=False)
         stmt = self._where_field_filters(stmt, field_filters)
         stmt = self._where_thresholds(stmt)
+
+        exclude_ids = self.params.get("exclude_ids") or []
+        if exclude_ids:
+            stmt = stmt.where(self.main_model.id.not_in(exclude_ids))
         return stmt
 
     # ------------------------------------------------------------------

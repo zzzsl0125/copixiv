@@ -6,6 +6,7 @@ from typing import Any
 
 from sqlalchemy import (
     select, func, case, and_, update, delete as _delete, text,
+    table, column, Integer,
 )
 from sqlalchemy.orm import Session
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -56,6 +57,7 @@ class SQLAlchemyNovelRepository(BaseRepository):
         per_page: int = 50,
         min_like: int | None = None,
         min_text: int | None = None,
+        exclude_ids: list[int] | None = None,
     ) -> dict:
         """Retrieve a paginated, filtered list of novels.
 
@@ -65,7 +67,7 @@ class SQLAlchemyNovelRepository(BaseRepository):
         return await asyncio.to_thread(
             self._get_novels_sync,
             conditions, order_by, order_direction, cursor, per_page,
-            min_like, min_text,
+            min_like, min_text, exclude_ids,
         )
 
     def _get_novels_sync(
@@ -77,6 +79,7 @@ class SQLAlchemyNovelRepository(BaseRepository):
         per_page: int = 50,
         min_like: int | None = None,
         min_text: int | None = None,
+        exclude_ids: list[int] | None = None,
     ) -> dict:
         # Validate fields
         if order_by:
@@ -114,6 +117,7 @@ class SQLAlchemyNovelRepository(BaseRepository):
             "per_page": per_page + 1,  # +1 to detect if there are more pages
             "min_like": min_like,
             "min_text": min_text,
+            "exclude_ids": exclude_ids or [],
         }
 
         builder = NovelQueryBuilder(self, **params)
@@ -147,10 +151,12 @@ class SQLAlchemyNovelRepository(BaseRepository):
         conditions: SearchConditions | None = None,
         min_like: int | None = None,
         min_text: int | None = None,
+        exclude_ids: list[int] | None = None,
     ) -> int:
         """Count novels matching filters (runs in a worker thread)."""
         return await asyncio.to_thread(
             self._count_novels_sync, conditions, min_like, min_text,
+            exclude_ids,
         )
 
     def _count_novels_sync(
@@ -158,6 +164,7 @@ class SQLAlchemyNovelRepository(BaseRepository):
         conditions: SearchConditions | None = None,
         min_like: int | None = None,
         min_text: int | None = None,
+        exclude_ids: list[int] | None = None,
     ) -> int:
         if conditions:
             for q_type, _qvalue in conditions:
@@ -167,6 +174,7 @@ class SQLAlchemyNovelRepository(BaseRepository):
             "conditions": conditions or [],
             "min_like": min_like,
             "min_text": min_text,
+            "exclude_ids": exclude_ids or [],
         }
         builder = NovelQueryBuilder(self, **params)
         count_stmt = builder.build_count()
@@ -425,6 +433,327 @@ class SQLAlchemyNovelRepository(BaseRepository):
         )
         reset_fts_cache()
         return count
+
+    # ---- batch operations ----------------------------------------------------
+
+    async def list_matching_ids(
+        self,
+        conditions: SearchConditions | None = None,
+        min_like: int | None = None,
+        min_text: int | None = None,
+        exclude_ids: list[int] | None = None,
+    ) -> list[int]:
+        """Return every novel ID matching the filters, without pagination.
+
+        Batch operations resolve their scope server-side through this
+        lightweight ID-only scan (no column payload, no display-flag JOINs).
+        Runs in a worker thread.
+        """
+        return await asyncio.to_thread(
+            self._list_matching_ids_sync,
+            conditions, min_like, min_text, exclude_ids,
+        )
+
+    def _list_matching_ids_sync(
+        self,
+        conditions: SearchConditions | None = None,
+        min_like: int | None = None,
+        min_text: int | None = None,
+        exclude_ids: list[int] | None = None,
+    ) -> list[int]:
+        if conditions:
+            for q_type, _qvalue in conditions:
+                self._validate_query_field(q_type)
+
+        params = {
+            "conditions": conditions or [],
+            "min_like": min_like,
+            "min_text": min_text,
+            "exclude_ids": exclude_ids or [],
+        }
+        builder = NovelQueryBuilder(self, **params)
+        stmt = builder.build_ids()
+        return list(self.session.execute(stmt).scalars())
+
+    async def filter_ids_in_scope(
+        self,
+        novel_ids: list[int],
+        conditions: SearchConditions | None = None,
+        min_like: int | None = None,
+        min_text: int | None = None,
+    ) -> list[int]:
+        """Return the subset of *novel_ids* matching the filters.
+
+        Powers the scoped 「清除选择」action — intersect the accumulated
+        selection with the current search scope.  Cost is bounded by the
+        input ID list, not by the size of the matched set.
+        """
+        return await asyncio.to_thread(
+            self._filter_ids_in_scope_sync,
+            novel_ids, conditions, min_like, min_text,
+        )
+
+    def _filter_ids_in_scope_sync(
+        self,
+        novel_ids: list[int],
+        conditions: SearchConditions | None = None,
+        min_like: int | None = None,
+        min_text: int | None = None,
+    ) -> list[int]:
+        if not novel_ids:
+            return []
+        if conditions:
+            for q_type, _qvalue in conditions:
+                self._validate_query_field(q_type)
+
+        params = {
+            "conditions": conditions or [],
+            "min_like": min_like,
+            "min_text": min_text,
+            "ids": list(novel_ids),
+        }
+        builder = NovelQueryBuilder(self, **params)
+        stmt = builder.build_ids()
+        return list(self.session.execute(stmt).scalars())
+
+    async def get_novels_by_ids(self, novel_ids: list[int]) -> list[dict]:
+        """Return full novel dicts for the given IDs, in the given order.
+
+        Missing IDs are silently dropped.  Tags and display flags are
+        batch-loaded exactly like the list-query path.
+        """
+        return await asyncio.to_thread(self._get_novels_by_ids_sync, novel_ids)
+
+    def _get_novels_by_ids_sync(self, novel_ids: list[int]) -> list[dict]:
+        if not novel_ids:
+            return []
+        rows = self.session.execute(
+            select(models.Novel).where(models.Novel.id.in_(novel_ids))
+        ).scalars().all()
+        by_id = {n.id: model_to_dict(n) for n in rows}
+
+        present_ids = [nid for nid in novel_ids if nid in by_id]
+        if present_ids:
+            tag_map = self._batch_load_tags(present_ids)
+            fav_ids = set(self.session.execute(
+                select(models.Favourite.novel_id).where(
+                    models.Favourite.novel_id.in_(present_ids)
+                )
+            ).scalars().all())
+            sf_author_ids = set(self.session.execute(
+                select(models.SpecialFollow.author_id)
+            ).scalars().all())
+            for nid in present_ids:
+                novel = by_id[nid]
+                novel[C.COL_TAGS] = tag_map.get(nid, [])
+                novel[C.FIELD_IS_FAVOURITE] = nid in fav_ids
+                novel[C.FIELD_IS_SPECIAL_FOLLOW] = (
+                    novel.get(C.COL_AUTHOR_ID) in sf_author_ids
+                )
+
+        return [by_id[nid] for nid in novel_ids if nid in by_id]
+
+    async def delete_many(self, novel_ids: list[int]) -> list[str]:
+        """Delete many novels, keeping tag reference counts and FTS exact.
+
+        Returns the ``path`` of each deleted novel — best-effort file
+        cleanup is the caller's job (mirrors :class:`DeleteNovelUseCase`).
+        Runs in a worker thread.
+        """
+        return await asyncio.to_thread(self._delete_many_sync, novel_ids)
+
+    def _delete_many_sync(self, novel_ids: list[int]) -> list[str]:
+        if not novel_ids:
+            return []
+        paths = list(self.session.execute(
+            select(models.Novel.path).where(models.Novel.id.in_(novel_ids))
+        ).scalars().all())
+
+        # Decrement tag reference counts for every doomed link, then drop
+        # the links themselves — per-novel rewrite_tags would be O(N)
+        # queries and drift the denormalized counter if not careful.
+        link_rows = self.session.execute(
+            select(models.NovelTag.tag_id, func.count())
+            .where(models.NovelTag.novel_id.in_(novel_ids))
+            .group_by(models.NovelTag.tag_id)
+        ).all()
+        # Benchmarked on the real 232k DB: a per-tag UPDATE loop here costs
+        # ~13s fixed per chunk (thousands of distinct tags × 1 statement
+        # each).  One temp-table-backed UPDATE collapses it to ~2 statements.
+        self._apply_tag_count_deltas({tid: -cnt for tid, cnt in link_rows})
+        self.session.execute(
+            _delete(models.NovelTag).where(
+                models.NovelTag.novel_id.in_(novel_ids)
+            )
+        )
+        self.session.execute(
+            _delete(models.Favourite).where(
+                models.Favourite.novel_id.in_(novel_ids)
+            )
+        )
+        self.session.execute(
+            _delete(models.FailedNovel).where(
+                models.FailedNovel.novel_id.in_(novel_ids)
+            )
+        )
+        FTSManager(self.session).delete_novel_fts_many(novel_ids)
+        self.session.execute(
+            _delete(models.Novel).where(models.Novel.id.in_(novel_ids))
+        )
+        return [p for p in paths if p]
+
+    async def add_tags_to_novels(
+        self, novel_ids: list[int], tags: set[str]
+    ) -> int:
+        """Add *tags* to every listed novel.
+
+        Returns the number of novels that actually received at least one
+        new tag.  FTS entries of changed novels are refreshed (tags are
+        indexed columns).
+        """
+        return await asyncio.to_thread(
+            self._add_tags_to_novels_sync, novel_ids, tags,
+        )
+
+    def _add_tags_to_novels_sync(
+        self, novel_ids: list[int], tags: set[str]
+    ) -> int:
+        if not novel_ids or not tags:
+            return 0
+
+        self.session.execute(
+            sqlite_insert(models.Tag)
+            .values([{"name": t} for t in tags])
+            .on_conflict_do_nothing(index_elements=["name"])
+        )
+        tag_ids = list(self.session.execute(
+            select(models.Tag.id).where(models.Tag.name.in_(tags))
+        ).scalars().all())
+
+        existing = set(self.session.execute(
+            select(models.NovelTag.novel_id, models.NovelTag.tag_id)
+            .where(
+                models.NovelTag.novel_id.in_(novel_ids),
+                models.NovelTag.tag_id.in_(tag_ids),
+            )
+        ).all())
+        new_pairs = [
+            (nid, tid)
+            for nid in novel_ids
+            for tid in tag_ids
+            if (nid, tid) not in existing
+        ]
+        if not new_pairs:
+            return 0
+
+        self.session.execute(
+            sqlite_insert(models.NovelTag).values(
+                [{"novel_id": nid, "tag_id": tid} for nid, tid in new_pairs]
+            )
+        )
+
+        per_tag: dict[int, int] = {}
+        for _nid, tid in new_pairs:
+            per_tag[tid] = per_tag.get(tid, 0) + 1
+        self._apply_tag_count_deltas(per_tag)
+
+        changed_ids = sorted({nid for nid, _tid in new_pairs})
+        FTSManager(self.session).update_novel_fts_index(changed_ids)
+        return len(changed_ids)
+
+    async def remove_tags_from_novels(
+        self, novel_ids: list[int], tags: set[str]
+    ) -> int:
+        """Remove *tags* from every listed novel.
+
+        Returns the number of novels that actually lost at least one tag.
+        FTS entries of changed novels are refreshed.
+        """
+        return await asyncio.to_thread(
+            self._remove_tags_from_novels_sync, novel_ids, tags,
+        )
+
+    def _remove_tags_from_novels_sync(
+        self, novel_ids: list[int], tags: set[str]
+    ) -> int:
+        if not novel_ids or not tags:
+            return 0
+
+        tag_ids = list(self.session.execute(
+            select(models.Tag.id).where(models.Tag.name.in_(tags))
+        ).scalars().all())
+        if not tag_ids:
+            return 0
+
+        doomed_pairs = self.session.execute(
+            select(models.NovelTag.novel_id, models.NovelTag.tag_id)
+            .where(
+                models.NovelTag.novel_id.in_(novel_ids),
+                models.NovelTag.tag_id.in_(tag_ids),
+            )
+        ).all()
+        if not doomed_pairs:
+            return 0
+
+        self.session.execute(
+            _delete(models.NovelTag).where(
+                models.NovelTag.novel_id.in_(novel_ids),
+                models.NovelTag.tag_id.in_(tag_ids),
+            )
+        )
+
+        per_tag: dict[int, int] = {}
+        for _nid, tid in doomed_pairs:
+            per_tag[tid] = per_tag.get(tid, 0) + 1
+        self._apply_tag_count_deltas({tid: -cnt for tid, cnt in per_tag.items()})
+
+        changed_ids = sorted({nid for nid, _tid in doomed_pairs})
+        FTSManager(self.session).update_novel_fts_index(changed_ids)
+        return len(changed_ids)
+
+    def _apply_tag_count_deltas(self, deltas: dict[int, int]) -> None:
+        """Apply many ``reference_count`` deltas in ~2 statements.
+
+        A per-tag UPDATE loop costs ~1.2ms × distinct-tag-count — the
+        measured ~13s fixed overhead of every batch transaction on the
+        real 232k DB.  Staging the deltas in a connection-local temp table
+        and joining collapses the same work to one UPDATE.
+        """
+        if not deltas:
+            return
+        # Lightweight TableClause — a TextClause has no .selectable and
+        # crashes the ORM compile state when used as a subquery source.
+        deltas_table = table(
+            "_tag_count_deltas",
+            column("tag_id", Integer),
+            column("delta", Integer),
+        )
+        self.session.execute(
+            text(
+                "CREATE TEMP TABLE IF NOT EXISTS _tag_count_deltas "
+                "(tag_id INTEGER PRIMARY KEY, delta INTEGER)"
+            )
+        )
+        self.session.execute(
+            text("DELETE FROM _tag_count_deltas")
+        )
+        self.session.execute(
+            text(
+                "INSERT INTO _tag_count_deltas (tag_id, delta) "
+                "VALUES (:tag_id, :delta)"
+            ),
+            [{"tag_id": tid, "delta": d} for tid, d in deltas.items()],
+        )
+        self.session.execute(
+            update(models.Tag)
+            .where(models.Tag.id.in_(select(deltas_table.c.tag_id)))
+            .values(
+                reference_count=models.Tag.reference_count
+                + select(deltas_table.c.delta)
+                .where(deltas_table.c.tag_id == models.Tag.id)
+                .scalar_subquery()
+            )
+        )
 
     # ---- tags ----------------------------------------------------------------
 

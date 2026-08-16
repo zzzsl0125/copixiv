@@ -84,4 +84,40 @@ describe('useMasonryLayout', () => {
     expect(state.columns.value[0]).toBe(firstColumn)
     expect(state.columns.value[0]).toEqual([1, 2, 3, 4])
   })
+
+  it('replacing the items array relayouts without duplicating items', async () => {
+    setInnerWidth(1200)
+    const { state, itemsRef } = mountMasonry([1, 2, 3], [0, 0, 0])
+    await flushPromises()
+
+    // Simulate a full list replacement (initial load / search / view swap)
+    // — historically two concurrent layout loops each pushed all items,
+    // rendering every novel twice.
+    itemsRef.value = [4, 5, 6]
+    await flushPromises()
+    state.relayout()
+    await flushPromises()
+
+    const flattened = state.columns.value.flat()
+    expect(flattened).toHaveLength(3)
+    expect(new Set(flattened).size).toBe(3)
+    expect([...flattened].sort()).toEqual([4, 5, 6])
+  })
+
+  it('relayout() forces a rebuild even when the length stays equal', async () => {
+    setInnerWidth(1200)
+    const { state, itemsRef } = mountMasonry([1, 2, 3], [0, 0, 0])
+    await flushPromises()
+
+    // Same-length replacement — the load-more heuristic would misread it
+    // as an append; an explicit forced relayout must rebuild from scratch.
+    itemsRef.value = [7, 8, 9]
+    await flushPromises()
+    state.relayout()
+    await flushPromises()
+
+    const flattened = state.columns.value.flat()
+    expect(flattened).toHaveLength(3)
+    expect([...flattened].sort()).toEqual([7, 8, 9])
+  })
 })

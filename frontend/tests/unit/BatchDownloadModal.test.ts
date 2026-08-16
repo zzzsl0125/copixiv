@@ -6,6 +6,7 @@ const apiMock = vi.hoisted(() => ({
   countNovels: vi.fn(),
   batchDownloadPreview: vi.fn(),
   batchDownload: vi.fn(),
+  submitBatchExport: vi.fn(),
   getConfig: vi.fn(),
 }))
 
@@ -14,6 +15,7 @@ vi.mock('../../src/api', () => ({
     countNovels: apiMock.countNovels,
     batchDownloadPreview: apiMock.batchDownloadPreview,
     batchDownload: apiMock.batchDownload,
+    submitBatchExport: apiMock.submitBatchExport,
   },
   systemApi: {
     getConfig: apiMock.getConfig,
@@ -55,7 +57,7 @@ async function openAndCount(wrapper: ReturnType<typeof mountModal>, total: numbe
   await flushPromises()
 }
 
-describe('BatchDownloadModal (single-request limit contract)', () => {
+describe('BatchDownloadModal (选多少下多少 — no download-count decision)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     apiMock.batchDownloadPreview.mockResolvedValue({ path: '作者/标题_1.txt' })
@@ -67,36 +69,27 @@ describe('BatchDownloadModal (single-request limit contract)', () => {
     })
   })
 
-  it('caps "下载全部" at 500 even when the matched total is larger', async () => {
+  it('has no download-count input — the scope decides the quantity', async () => {
     const wrapper = mountModal()
     await openAndCount(wrapper, 1000)
 
-    const downloadAll = wrapper
-      .findAll('button')
-      .find((button) => button.text().includes('下载全部'))
-    expect(downloadAll).toBeTruthy()
-    await downloadAll!.trigger('click')
-
-    const limitInput = wrapper.find('input[type="number"]')
-      .element as HTMLInputElement
-    expect(limitInput.value).toBe('500')
+    expect(wrapper.find('input[type="number"]').exists()).toBe(false)
+    expect(
+      wrapper.findAll('button').some((b) => b.text().includes('下载全部')),
+    ).toBe(false)
   })
 
-  it('sends limit=500 in the actual download request when total > 500', async () => {
+  it('sends the FULL matched count as limit regardless of size', async () => {
     const wrapper = mountModal()
     await openAndCount(wrapper, 1000)
 
-    await wrapper
-      .findAll('button')
-      .find((button) => button.text().includes('下载全部'))!
-      .trigger('click')
     await wrapper.find('form').trigger('submit')
     await flushPromises()
 
     expect(apiMock.batchDownload).toHaveBeenCalledTimes(1)
     expect(apiMock.batchDownload).toHaveBeenCalledWith(
       expect.objectContaining({
-        limit: 500,
+        limit: 1000,
         order_by: 'id',
         order_direction: 'DESC',
         format_mode: 'txt',
@@ -106,16 +99,36 @@ describe('BatchDownloadModal (single-request limit contract)', () => {
     expect(downloadBlobMock).toHaveBeenCalledWith(ZIP_BLOB, 'test.zip')
   })
 
-  it('sends the matched count as limit when total <= 500 (no false cap)', async () => {
+  it('ids-mode selection sends exactly the selected count as limit', async () => {
     const wrapper = mountModal()
-    await openAndCount(wrapper, 30)
+    await wrapper.setProps({
+      isOpen: true,
+      novelIds: [11, 22, 33, 44, 55],
+    })
+    await flushPromises()
 
     await wrapper.find('form').trigger('submit')
     await flushPromises()
 
-    expect(apiMock.batchDownload).toHaveBeenCalledTimes(1)
     expect(apiMock.batchDownload).toHaveBeenCalledWith(
-      expect.objectContaining({ limit: 30 }),
+      expect.objectContaining({ limit: 5, novel_ids: [11, 22, 33, 44, 55] }),
     )
+  })
+
+  it('routes selections over 1000 to the background export task', async () => {
+    apiMock.submitBatchExport.mockResolvedValue({ task_id: 77, matched: 1500 })
+    const wrapper = mountModal()
+    await openAndCount(wrapper, 1500)
+
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(apiMock.batchDownload).not.toHaveBeenCalled()
+    expect(apiMock.submitBatchExport).toHaveBeenCalledWith(
+      expect.objectContaining({ novel_ids: [] }),
+    )
+    expect(wrapper.emitted('task-submitted')?.[0]).toEqual([
+      { task_id: 77, matched: 1500 },
+    ])
   })
 })

@@ -153,6 +153,21 @@ class FTSManager:
             {"id": novel_id},
         )
 
+    def delete_novel_fts_many(self, novel_ids: list[int]) -> None:
+        """Remove FTS entries for many deleted novels in one statement.
+
+        Same semantics as :meth:`delete_novel_fts` — a plain rowid DELETE
+        with an expanding bind parameter, a no-op for empty input or a
+        missing FTS table.
+        """
+        if not novel_ids or not self._fts_table_exists():
+            return
+        self.session.execute(
+            _text(f"DELETE FROM {C.TABLE_NOVEL_FTS} WHERE rowid IN :nids")
+            .bindparams(bindparam("nids", expanding=True)),
+            {"nids": novel_ids},
+        )
+
     # ------------------------------------------------------------------
     # Batch operations (Phase 2)
     # ------------------------------------------------------------------

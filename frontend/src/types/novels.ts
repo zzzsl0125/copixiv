@@ -35,4 +35,41 @@ export interface GetNovelsParams {
   per_page?: number
   min_like?: number
   min_text?: number
+  excluded_ids?: number[]
+}
+
+/** Which novels a batch operation applies to (mirrors backend BatchScope). */
+export interface BatchScope {
+  mode: 'ids' | 'all_matched'
+  novel_ids: number[]
+  keyword?: string
+  min_like?: number
+  min_text?: number
+  excluded_ids: number[]
+}
+
+export type BatchOperation = 'delete' | 'add_tags' | 'remove_tags'
+
+export interface BatchOperationResult {
+  matched: number
+  affected: number
+}
+
+/** Matching IDs for the 「全选匹配」bulk-add action. */
+export interface NovelIdsResponse {
+  ids: number[]
+  total: number
+  truncated: boolean
+}
+
+/** Novels fetched by explicit ID list (「查看已选」view). */
+export interface NovelsByIdsResponse {
+  novels: Novel[]
+  truncated: boolean
+}
+
+/** Intersection of a selection with the current search scope (scoped clear). */
+export interface MatchIdsResult {
+  matching_ids: number[]
+  truncated: boolean
 }

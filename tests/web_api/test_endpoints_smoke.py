@@ -351,11 +351,17 @@ class TestRequestBounds:
         })
         assert r.status_code == 200
 
-    def test_batch_download_limit_501_rejected(self, client):
+    def test_batch_download_limit_above_500_accepted(self, client, session_factory, tmp_path):
+        # 选多少下多少 — the old 500-per-zip cap is gone; large limits
+        # are the caller's explicit choice.
+        p = tmp_path / "1.txt"
+        p.write_text("正文", encoding="utf-8")
+        _seed_novel(session_factory, 1, "标题", str(p))
+
         r = client.post("/api/novels/batch-download", json={
-            "order_by": "id", "limit": 501, "format_mode": "txt",
+            "order_by": "id", "limit": 1000, "format_mode": "txt",
         })
-        assert r.status_code == 422
+        assert r.status_code == 200
 
     def test_batch_download_limit_zero_rejected(self, client):
         r = client.post("/api/novels/batch-download", json={

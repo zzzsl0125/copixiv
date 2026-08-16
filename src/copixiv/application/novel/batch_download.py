@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import BinaryIO
 
@@ -55,22 +56,40 @@ class BatchDownloadUseCase:
         format_mode: str = "txt",
         zip_name: str | None = None,
         naming_template: str | None = None,
+        novel_ids: list[int] | None = None,
+        excluded_ids: list[int] | None = None,
     ) -> BatchDownloadResult:
-        results = await self._repo.get_novels(
-            conditions=conditions,
-            order_by=order_by,
-            order_direction=order_direction,
-            per_page=limit,
-            min_like=min_like,
-            min_text=min_text,
-        )
-        novels = results.get("novels", [])
-        if not novels:
-            raise NotFoundError("未找到匹配条件的小说")
+        if novel_ids:
+            # Explicit selection — filters/order are irrelevant; a stable
+            # id-descending order keeps the result deterministic.
+            all_novels = await self._repo.get_novels_by_ids(novel_ids)
+            novels = sorted(
+                all_novels, key=lambda n: n.get("id") or 0, reverse=True,
+            )[:limit]
+            if not novels:
+                raise NotFoundError("未找到匹配条件的小说")
+        else:
+            results = await self._repo.get_novels(
+                conditions=conditions,
+                order_by=order_by,
+                order_direction=order_direction,
+                per_page=limit,
+                min_like=min_like,
+                min_text=min_text,
+                exclude_ids=excluded_ids,
+            )
+            novels = results.get("novels", [])
+            if not novels:
+                raise NotFoundError("未找到匹配条件的小说")
 
         naming = naming_template or self._naming_template
         try:
-            zip_buf, titles, missing = build_batch_zip(novels, format_mode, naming)
+            # ZIP_DEFLATED compression is pure CPU — run it in a worker
+            # thread so a large export (选多少下多少, no size cap) never
+            # freezes the event loop / background tasks.
+            zip_buf, titles, missing = await asyncio.to_thread(
+                build_batch_zip, novels, format_mode, naming,
+            )
         except ValueError as exc:
             raise ValidationError(str(exc)) from exc
         if not titles:
@@ -95,6 +114,8 @@ class BatchDownloadUseCase:
         min_text: int | None = None,
         format_mode: str = "txt",
         naming_template: str | None = None,
+        novel_ids: list[int] | None = None,
+        excluded_ids: list[int] | None = None,
     ) -> str | None:
         """Resolve the naming template for the first matching novel.
 
@@ -105,15 +126,22 @@ class BatchDownloadUseCase:
         Raises:
             ValidationError: If the template does not contain ``{id}``.
         """
-        results = await self._repo.get_novels(
-            conditions=conditions,
-            order_by=order_by,
-            order_direction=order_direction,
-            per_page=1,
-            min_like=min_like,
-            min_text=min_text,
-        )
-        novels = results.get("novels", [])
+        if novel_ids:
+            all_novels = await self._repo.get_novels_by_ids(novel_ids)
+            novels = sorted(
+                all_novels, key=lambda n: n.get("id") or 0, reverse=True,
+            )[:1]
+        else:
+            results = await self._repo.get_novels(
+                conditions=conditions,
+                order_by=order_by,
+                order_direction=order_direction,
+                per_page=1,
+                min_like=min_like,
+                min_text=min_text,
+                exclude_ids=excluded_ids,
+            )
+            novels = results.get("novels", [])
         if not novels:
             return None
 

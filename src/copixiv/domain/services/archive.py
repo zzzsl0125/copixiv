@@ -3,7 +3,7 @@
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Callable
 
 from .filename import NovelNamingTemplate
 from copixiv.domain.models.novel import EpubStatus
@@ -12,11 +12,16 @@ from copixiv.domain.models.novel import EpubStatus
 # spill to a disk-backed temp file instead of exhausting RAM.
 _SPOOL_MAX = 8 * 1024 * 1024
 
+# Progress callback fires every N processed files (used by the background
+# batch_export task to report live progress).
+_PROGRESS_EVERY = 500
+
 
 def build_batch_zip(
     novels: list[dict[str, Any]],
     format_mode: str = "txt",
     naming_template: str | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> tuple[BinaryIO, list[str], list[str]]:
     """Build a ZIP of novel files matching the given criteria.
 
@@ -27,6 +32,8 @@ def build_batch_zip(
         format_mode: ``'txt'`` or ``'prefer_epub'`` (prefers EPUB when available).
         naming_template: Token-based naming template for ZIP arcnames.
                 Defaults to ``{author_name}/{series_name}/#{series_index}_{title}_{id}``.
+        progress: Optional callback ``(processed, total)`` invoked every
+                ~500 files — lets long-running exports report progress.
 
     Returns:
         ``(zip_buffer, added_titles, missing_ids)`` — the ZIP as a seekable
@@ -43,7 +50,7 @@ def build_batch_zip(
 
     try:
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            for novel in novels:
+            for index, novel in enumerate(novels, start=1):
                 novel_id = novel.get("id")
                 novel_path_str = novel.get("path")
                 title = novel.get("title", str(novel_id))
@@ -57,16 +64,17 @@ def build_batch_zip(
 
                 if not novel_path_str:
                     missing_ids.append(str(novel_id))
-                    continue
+                else:
+                    file_path = Path(novel_path_str).with_suffix("." + actual_fmt)
+                    if not file_path.is_file():
+                        missing_ids.append(str(novel_id))
+                    else:
+                        arcname = template.resolve(novel) + "." + actual_fmt
+                        zf.write(str(file_path), arcname)
+                        added_titles.append(title)
 
-                file_path = Path(novel_path_str).with_suffix("." + actual_fmt)
-                if not file_path.is_file():
-                    missing_ids.append(str(novel_id))
-                    continue
-
-                arcname = template.resolve(novel) + "." + actual_fmt
-                zf.write(str(file_path), arcname)
-                added_titles.append(title)
+                if progress is not None and index % _PROGRESS_EVERY == 0:
+                    progress(index, len(novels))
     except Exception:
         # Never leak the spooled file on partial builds.
         zip_buffer.close()

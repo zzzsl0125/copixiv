@@ -3,8 +3,8 @@ import { ref, computed, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import Sidebar from './components/Sidebar.vue'
 import ToastContainer from './components/ui/ToastContainer.vue'
-import { useNovels, useSystem, useToast } from './composables'
-import type { NovelFilters } from './types'
+import { useNovels, useSystem, useToast, useBatchMode } from './composables'
+import type { NovelFilters, BatchOperationResult } from './types'
 
 const {
   novels,
@@ -19,8 +19,104 @@ const {
 } = useNovels()
 
 const { systemConfig, fetchConfig } = useSystem()
-const { toasts } = useToast()
+const { toasts, success: toastSuccess, warning: toastWarning, info: toastInfo } = useToast()
 const configLoadedAndApplied = ref(false)
+
+const isSidebarOpen = ref(false)
+const route = useRoute()
+const router = useRouter()
+const activeSection = ref<'novels' | 'favourites' | 'special_follow' | null>('novels')
+
+const isNovelsRoute = computed(() => route.path === '/')
+
+// ---- batch mode (selection lives at App level; Sidebar toggles it,
+// Novels renders the bar/cards/checkboxes) ----
+const {
+  isBatchMode,
+  matchedCount,
+  countLoading,
+  selectAllLoading,
+  selectedCount,
+  hasSelection,
+  hasFilter,
+  scope: batchScope,
+  enter: enterBatchMode,
+  exit: exitBatchMode,
+  toggleCard: toggleBatchCard,
+  isCardSelected,
+  selectAllMatched,
+  clearSelection: clearBatchSelection,
+  clearSelectionInScope,
+} = useBatchMode(filters)
+
+const handleToggleBatchMode = () => {
+  if (isBatchMode.value) exitBatchMode()
+  else enterBatchMode()
+}
+
+const handleBatchSelectAll = async () => {
+  const result = await selectAllMatched()
+  if (!result) return
+  if (result.truncated) {
+    toastWarning(
+      `已全选匹配中的前 ${result.added} 篇（共匹配 ${result.total} 篇，` +
+      `超过单次操作上限）。可继续搜索细分后再次全选，已选不会丢失。`,
+    )
+  } else {
+    toastSuccess(`已将 ${result.added} 篇匹配小说加入选择（当前已选 ${selectedCount.value} 篇）`)
+  }
+}
+
+/** Scoped clear (列表视图): remove only the picks inside the current scope. */
+const handleBatchClearScope = async () => {
+  const result = await clearSelectionInScope()
+  if (!result) return
+  if (result.remaining === 0) {
+    toastInfo(`已清空全部选择（${result.removed} 篇）`)
+  } else {
+    toastInfo(
+      `已清除当前范围勾选的 ${result.removed} 篇，` +
+      `另有 ${result.remaining} 篇来自其他搜索仍保留在已选中`,
+    )
+  }
+}
+
+const handleBatchOperationSuccess = (payload: {
+  operation: string
+  result: BatchOperationResult
+}) => {
+  const { operation, result } = payload
+  if (operation === 'delete') {
+    toastSuccess(`已删除 ${result.affected} 篇小说`)
+  } else if (operation === 'add_tags') {
+    toastSuccess(`已为 ${result.affected} 篇小说添加标签`)
+  } else if (operation === 'remove_tags') {
+    toastSuccess(`已从 ${result.affected} 篇小说移除标签`)
+  }
+  clearBatchSelection()
+  // Refresh the list in place (keep current filters & URL).
+  handleSearch(undefined, { updateUrl: false })
+}
+
+const handleBatchTaskSubmitted = (payload: {
+  operation: string
+  task_id: number
+  matched: number
+}) => {
+  const labels: Record<string, string> = {
+    delete: '批量删除',
+    add_tags: '批量添加标签',
+    remove_tags: '批量移除标签',
+    export: '批量导出',
+  }
+  const isExport = payload.operation === 'export'
+  toastInfo(
+    `${labels[payload.operation] ?? '批量操作'}已提交为后台任务 #${payload.task_id}` +
+    `（共 ${payload.matched} 篇）。可关闭页面，到「任务管理」查看进度` +
+    (isExport ? '，完成后在任务队列中点击下载。' : '。'),
+  )
+  clearBatchSelection()
+}
 
 const syncActiveSection = () => {
   if (filters.keyword === 'is_favourite:true;') {
@@ -58,13 +154,6 @@ watch(() => systemConfig.value, (newConfig) => {
     applyConfigAndLoad()
   }
 })
-
-const isSidebarOpen = ref(false)
-const route = useRoute()
-const router = useRouter()
-const activeSection = ref<'novels' | 'favourites' | 'special_follow' | null>('novels')
-
-const isNovelsRoute = computed(() => route.path === '/')
 
 watch(route, (to) => {
   if (to.path !== '/') {
@@ -121,10 +210,12 @@ onMounted(() => {
       :show-filters="isNovelsRoute"
       :active-section="activeSection"
       :config-loaded-and-applied="configLoadedAndApplied"
+      :is-batch-mode="isBatchMode"
       @close="isSidebarOpen = false"
       @search="handleSectionSearch"
       @update:filters="($event: NovelFilters) => { Object.assign(filters, $event); handleSearch(); }"
       @reset-to-defaults="handleResetToDefaults"
+      @toggle-batch-mode="handleToggleBatchMode"
     />
 
     <div class="flex-1 flex flex-col min-w-0">
@@ -135,6 +226,15 @@ onMounted(() => {
         :loading="loading"
         :error="error"
         :no-more-data="noMoreData"
+        :batch-mode="isNovelsRoute ? isBatchMode : undefined"
+        :matched-count="isNovelsRoute ? matchedCount : undefined"
+        :count-loading="isNovelsRoute ? countLoading : undefined"
+        :select-all-loading="isNovelsRoute ? selectAllLoading : undefined"
+        :selected-count="isNovelsRoute ? selectedCount : undefined"
+        :has-selection="isNovelsRoute ? hasSelection : undefined"
+        :has-filter="isNovelsRoute ? hasFilter : undefined"
+        :batch-scope="isNovelsRoute ? batchScope : undefined"
+        :is-batch-selected="isNovelsRoute ? isCardSelected : undefined"
         @logo-click="handleLogoClick"
         @load-more="handleLoadMore"
         @search="(keyword?: string) => handleSearch(keyword, { setOrdering: true })"
@@ -142,6 +242,12 @@ onMounted(() => {
         @novel-state-changed="handleNovelStateChanged"
         @update:filters="($event: NovelFilters) => { Object.assign(filters, $event); handleSearch(); }"
         @toggle-sidebar="isSidebarOpen = !isSidebarOpen"
+        @batch-toggle-card="toggleBatchCard"
+        @batch-select-all="handleBatchSelectAll"
+        @batch-clear="clearBatchSelection"
+        @batch-clear-scope="handleBatchClearScope"
+        @batch-operation-success="handleBatchOperationSuccess"
+        @batch-task-submitted="handleBatchTaskSubmitted"
       />
     </div>
 

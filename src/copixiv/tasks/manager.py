@@ -33,6 +33,7 @@ from copixiv.domain.exceptions import TaskAlreadyRunningError
 from copixiv.infrastructure.database.uow import SqlUnitOfWork
 from copixiv.tasks.registry import get_task
 import copixiv.tasks.novel_tasks  # ensure @register decorators fire  # noqa: F401
+import copixiv.tasks.batch_tasks  # ensure @register decorators fire  # noqa: F401
 
 from copixiv.app.logger import logger, capture_logs
 
@@ -233,12 +234,15 @@ class TaskManagerSystem:
         name: str,
         func: Callable,
         params: dict | None = None,
-    ) -> None:
+    ) -> int:
         """Enqueue a task for immediate background execution.
 
         This is the entry point for both cron-triggered and manually-triggered
         runs.  The task is scheduled as a one-shot APScheduler job so that
         history recording and error handling happen in the wrapper.
+
+        Returns:
+            The new task-history row id (the task id).
 
         Raises:
             TaskAlreadyRunningError: If the same task name already has a
@@ -275,6 +279,7 @@ class TaskManagerSystem:
             id=f"manual_{task_id}",
             max_instances=1,
         )
+        return task_id
 
     def run_task_now(self, task_id: int) -> None:
         """Look up a scheduled task by DB id and run it immediately.
@@ -361,6 +366,10 @@ class TaskManagerSystem:
                         injected[dep_name] = dep_value
                 if "uow" in sig.parameters:
                     injected["uow"] = uow
+                # Tasks that report live progress declare ``task_id`` and
+                # update their own history row via uow.tasks.update_task.
+                if "task_id" in sig.parameters:
+                    injected["task_id"] = task_id
 
                 result_val = await self._execute_func(func, params, injected)
                 status = "success"

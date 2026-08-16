@@ -25,10 +25,11 @@ export function useMasonryLayout<T>(
     return 1
   })
 
-  const layoutItems = async () => {
+  const runLayout = async (force: boolean) => {
     const count = columnCount.value
     const totalRendered = columns.value.reduce((acc, col) => acc + col.length, 0)
-    const isLoadMore = items.value.length > totalRendered && totalRendered !== 0
+    const isLoadMore =
+      !force && items.value.length > totalRendered && totalRendered !== 0
 
     let startIndex = 0
 
@@ -36,7 +37,6 @@ export function useMasonryLayout<T>(
       const newColumns: T[][] = Array.from({ length: count }, () => [])
       columns.value = newColumns as T[][]
       await nextTick()
-      startIndex = 0
     } else {
       startIndex = totalRendered
     }
@@ -70,14 +70,47 @@ export function useMasonryLayout<T>(
     }
   }
 
+  // Serialized runner — only ONE layout loop may run at a time.  A second
+  // trigger arriving mid-run is coalesced and re-executed afterwards.
+  // Without this, two triggers in the same flush (e.g. two watchers, or a
+  // watcher + explicit relayout) interleaved their async loops and each
+  // pushed every item into the shared columns → every novel rendered twice.
+  let layoutRunning = false
+  // null = nothing pending; false = heuristic run; true = forced rebuild
+  // (a forced rebuild subsumes a queued heuristic append).
+  let layoutPending: boolean | null = null
+
+  const layoutItems = (force = false) => {
+    if (layoutRunning) {
+      layoutPending = layoutPending === null ? force : layoutPending || force
+      return
+    }
+    layoutRunning = true
+    void runLayout(force).finally(() => {
+      layoutRunning = false
+      if (layoutPending !== null) {
+        const next = layoutPending
+        layoutPending = null
+        layoutItems(next)
+      }
+    })
+  }
+
   watch(columnCount, () => {
-    columns.value = []
-    layoutItems()
+    layoutItems(true)
   })
 
+  // Length changes cover load-more (in-place push → append via the
+  // totalRendered heuristic) and the initial load.  Whole-array swaps
+  // (e.g. the batch-mode 「查看已选」view) cannot be told apart from
+  // load-more by length alone, so callers invoke relayout() explicitly.
   watch(() => items.value.length, () => {
     layoutItems()
   }, { immediate: true })
 
-  return { windowWidth, columnCount, columns }
+  const relayout = () => {
+    layoutItems(true)
+  }
+
+  return { windowWidth, columnCount, columns, relayout }
 }

@@ -1,0 +1,122 @@
+"""Use cases: batch delete and batch tag operations on novel scopes."""
+
+from __future__ import annotations
+
+from copixiv.domain.exceptions import NotFoundError, ValidationError
+from copixiv.domain.ports.repositories import NovelRepository, TagRepository
+from copixiv.domain.ports.storage import FileStoragePort
+from copixiv.domain.services.parsing import parse_search_keyword
+
+# Hard safety cap per SYNCHRONOUS batch operation — one HTTP request must
+# never walk the whole library.  The frontend prompts the user to narrow
+# the scope when the matched set is large; selections beyond this run as
+# background tasks (POST /api/novels/batch-task).
+BATCH_MAX_NOVELS = 5000
+BATCH_MAX_TAGS = 20
+
+# Internal chunk size for statements that address an explicit ID list
+# (match-ids intersection, task safety fallback).  Keeps every ``IN (...)``
+# well under SQLite's compiled MAX_VARIABLE_NUMBER (250000).
+BATCH_ID_CHUNK_SIZE = 200_000
+
+
+async def resolve_batch_scope(
+    novel_repo: NovelRepository,
+    *,
+    mode: str,
+    novel_ids: list[int],
+    keyword: str | None,
+    min_like: int | None,
+    min_text: int | None,
+    excluded_ids: list[int],
+) -> list[int]:
+    """Resolve the effective novel ID list for a batch operation.
+
+    Raises:
+        ValidationError: Empty scope, or scope larger than
+            :data:`BATCH_MAX_NOVELS`.
+        NotFoundError: Filter-matched scope contains no novels.
+    """
+    if mode == "ids":
+        ids = sorted({int(i) for i in novel_ids})
+        if not ids:
+            raise ValidationError("请先勾选要操作的小说")
+        if len(ids) > BATCH_MAX_NOVELS:
+            raise ValidationError(
+                f"已勾选 {len(ids)} 篇，单次批量操作上限为 "
+                f"{BATCH_MAX_NOVELS} 篇，请减少勾选数量"
+            )
+        return ids
+
+    conditions = parse_search_keyword(keyword) if keyword else None
+    matched = await novel_repo.count_novels(
+        conditions=conditions, min_like=min_like, min_text=min_text,
+    )
+    if matched > BATCH_MAX_NOVELS:
+        raise ValidationError(
+            f"当前筛选匹配 {matched} 篇，超过单次批量操作上限 "
+            f"{BATCH_MAX_NOVELS} 篇，请先缩小筛选范围"
+        )
+
+    ids = await novel_repo.list_matching_ids(
+        conditions=conditions,
+        min_like=min_like,
+        min_text=min_text,
+        exclude_ids=excluded_ids or [],
+    )
+    if not ids:
+        raise NotFoundError("当前范围内没有可操作的小说")
+    return ids
+
+
+class BatchDeleteUseCase:
+    """Delete all novels in a resolved ID list, then clean up their files.
+
+    DB first, files second — the same order as :class:`DeleteNovelUseCase`:
+    a failed DB delete must not leave rows pointing at deleted files.
+    File cleanup stays best-effort so a disk hiccup cannot fail the API
+    call after the rows are already gone.
+    """
+
+    def __init__(self, novel_repo: NovelRepository, file_storage: FileStoragePort):
+        self._repo = novel_repo
+        self._file_storage = file_storage
+
+    async def execute(self, novel_ids: list[int]) -> int:
+        paths = await self._repo.delete_many(novel_ids)
+        for path in paths:
+            if path:
+                self._file_storage.delete_novel_files(path)
+        return len(novel_ids)
+
+
+class BatchTagUseCase:
+    """Add or remove tags on all novels in a resolved ID list.
+
+    Tag names are normalized (stripped, deduped) and resolved through the
+    alias map so a batch add behaves exactly like the write path.
+    """
+
+    def __init__(self, novel_repo: NovelRepository, tag_repo: TagRepository):
+        self._repo = novel_repo
+        self._tag_repo = tag_repo
+
+    async def execute(
+        self, operation: str, novel_ids: list[int], tags: list[str],
+    ) -> int:
+        tag_set = {t.strip() for t in tags if t and t.strip()}
+        if not tag_set:
+            raise ValidationError("请至少输入一个标签")
+        if len(tag_set) > BATCH_MAX_TAGS:
+            raise ValidationError(
+                f"一次最多操作 {BATCH_MAX_TAGS} 个标签（当前 {len(tag_set)} 个）"
+            )
+
+        alias_map = await self._tag_repo.get_alias_map()
+        resolved = {alias_map.get(t, t) for t in tag_set}
+
+        if operation == "add_tags":
+            return await self._repo.add_tags_to_novels(novel_ids, resolved)
+        if operation == "remove_tags":
+            return await self._repo.remove_tags_from_novels(novel_ids, resolved)
+        raise ValidationError(f"未知的批量操作: {operation}")

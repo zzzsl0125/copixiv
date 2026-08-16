@@ -237,10 +237,108 @@ class BatchDownloadRequest(BaseModel):
     order_direction: Literal["ASC", "DESC"] = "DESC"
     min_like: int | None = None
     min_text: int | None = None
-    limit: int = Field(default=50, ge=1, le=500)
+    limit: int = Field(default=500, ge=1)
     format_mode: Literal["txt", "prefer_epub"] = "txt"
     zip_name: str | None = None
     naming_template: str | None = None
+    # Batch-mode selection scope — when ``novel_ids`` is set, the download
+    # is restricted to exactly those novels (filters are ignored).
+    novel_ids: list[int] | None = None
+    # IDs to skip — only applies to the filter-based path (novel_ids=None).
+    excluded_ids: list[int] | None = None
+
+
+# ---------------------------------------------------------------------------
+# Batch operations (delete / add_tags / remove_tags)
+# ---------------------------------------------------------------------------
+
+class BatchScope(BaseModel):
+    """Which novels a batch operation applies to.
+
+    Two modes mirror the frontend selection model:
+    - ``ids``: an explicit list of selected novel IDs.
+    - ``all_matched``: the full filter-matched set (optionally minus
+      ``excluded_ids`` — the "select all, then uncheck a few" case).
+    """
+
+    mode: Literal["ids", "all_matched"] = "all_matched"
+    novel_ids: list[int] = []
+    keyword: str | None = None
+    min_like: int | None = None
+    min_text: int | None = None
+    excluded_ids: list[int] = []
+
+
+class BatchOperationRequest(BaseModel):
+    operation: Literal["delete", "add_tags", "remove_tags"]
+    scope: BatchScope
+    tags: list[str] = []
+
+
+class BatchOperationResponse(BaseModel):
+    matched: int
+    affected: int
+
+
+# ---------------------------------------------------------------------------
+# Batch-mode selection helpers (search is a picking surface — the selection
+# itself is an ID set independent of the current filters)
+# ---------------------------------------------------------------------------
+
+class NovelIdsResponse(BaseModel):
+    """Matching novel IDs for the 「全选匹配」 bulk-add action.
+
+    *limit*-truncated when the match set is larger than the batch cap;
+    ``truncated`` tells the frontend to warn the user.
+    """
+
+    ids: list[int]
+    total: int
+    truncated: bool
+
+
+class NovelsByIdsRequest(BaseModel):
+    novel_ids: list[int]
+
+
+class NovelsByIdsResponse(BaseModel):
+    novels: list[NovelBase]
+    truncated: bool
+
+
+class MatchIdsRequest(BaseModel):
+    """Intersect a selection with the current search scope (scoped clear)."""
+
+    novel_ids: list[int]
+    keyword: str | None = None
+    min_like: int | None = None
+    min_text: int | None = None
+
+
+class MatchIdsResponse(BaseModel):
+    matching_ids: list[int]
+    truncated: bool
+
+
+class BatchTaskResponse(BaseModel):
+    """A batch operation enqueued into the background task system."""
+
+    task_id: int
+    matched: int
+
+
+class BatchExportRequest(BaseModel):
+    """Background-task export (large selections — the ZIP is built offline)."""
+
+    novel_ids: list[int]
+    format_mode: Literal["txt", "prefer_epub"] = "txt"
+    zip_name: str | None = None
+    naming_template: str | None = None
+
+
+class BatchExportResponse(BaseModel):
+    task_id: int
+    matched: int
 
 
 # ---------------------------------------------------------------------------

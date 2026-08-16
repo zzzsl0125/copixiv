@@ -7,6 +7,7 @@ export interface PaginationResult<T> {
   error: Ref<string | null>
   hasMore: Ref<boolean>
   loadData: (loadMore?: boolean) => Promise<void>
+  refresh: (options?: { silent?: boolean }) => Promise<void>
 }
 
 export function usePagination<T>(
@@ -54,5 +55,69 @@ export function usePagination<T>(
     }
   }
 
-  return { items, loading, error, hasMore, loadData }
+  /** Replace the first page IN PLACE — for polling (no flicker).
+   *
+   * ``loadData()`` clears the list before fetching, which flashes an empty
+   * state on every poll.  Instead of replacing every object, this MERGES
+   * the fresh rows by ``id`` into the existing ones: unchanged rows keep
+   * their object identity (and therefore produce zero DOM writes), only
+   * genuinely changed fields are patched — the visible update is a single
+   * text node (e.g. the progress summary), never a row re-render.
+   * ``silent`` skips the loading flag (no spinner blips on background polls).
+   */
+  const refresh = async (options: { silent?: boolean } = {}) => {
+    if (loading.value) return
+    if (!options.silent) loading.value = true
+    try {
+      const result = await fetcher(0, pageSize)
+      const newItems = Array.isArray(result) ? result : result.items
+
+      const byId = new Map<unknown, T>()
+      for (const it of items.value) {
+        const id = (it as { id?: unknown }).id
+        if (id !== undefined && id !== null) byId.set(id, it)
+      }
+
+      // Value comparison: items.value holds reactive PROXIES of the rows,
+      // so identity comparison against the fresh raw objects would always
+      // report "changed" and defeat the whole point of the merge.
+      const sameValue = (a: unknown, b: unknown) =>
+        a === b || JSON.stringify(a) === JSON.stringify(b)
+
+      const merged: T[] = []
+      let changed = newItems.length !== items.value.length
+      for (const fresh of newItems) {
+        const freshObj = fresh as { id?: unknown }
+        const old = freshObj.id !== undefined && freshObj.id !== null
+          ? byId.get(freshObj.id)
+          : undefined
+        if (old !== undefined) {
+          const oldObj = old as Record<string, unknown>
+          const freshRecord = freshObj as Record<string, unknown>
+          for (const key of Object.keys(freshRecord)) {
+            if (!sameValue(oldObj[key], freshRecord[key])) {
+              oldObj[key] = freshRecord[key]
+              changed = true
+            }
+          }
+          merged.push(old)
+        } else {
+          changed = true
+          merged.push(fresh)
+        }
+      }
+
+      if (changed) items.value = merged
+      offset.value = newItems.length
+      hasMore.value = Array.isArray(result) || result.total === undefined
+        ? newItems.length >= pageSize
+        : offset.value < result.total
+    } catch (err: unknown) {
+      error.value = getApiErrorMessage(err, '加载失败')
+    } finally {
+      loading.value = false
+    }
+  }
+
+  return { items, loading, error, hasMore, loadData, refresh }
 }

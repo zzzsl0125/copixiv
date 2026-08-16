@@ -40,6 +40,23 @@ vi.mock('../../src/composables', () => ({
     info: vi.fn(),
     warning: vi.fn(),
   }),
+  useBatchMode: () => ({
+    isBatchMode: { value: false },
+    matchedCount: { value: 0 },
+    countLoading: { value: false },
+    selectAllLoading: { value: false },
+    selectedCount: { value: 0 },
+    hasSelection: { value: false },
+    hasFilter: { value: false },
+    scope: { value: null },
+    enter: vi.fn(),
+    exit: vi.fn(),
+    toggleCard: vi.fn(),
+    isCardSelected: vi.fn(),
+    selectAllMatched: vi.fn(),
+    clearSelection: vi.fn(),
+    clearSelectionInScope: vi.fn(),
+  }),
 }))
 
 describe('App bootstrap resilience', () => {

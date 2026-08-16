@@ -1,5 +1,11 @@
 import { apiClient } from './client'
-import type { Novel, GetNovelsParams } from '../types'
+import type {
+  Novel, GetNovelsParams, BatchScope, BatchOperation, BatchOperationResult,
+  NovelIdsResponse, NovelsByIdsResponse, MatchIdsResult,
+} from '../types'
+
+/** 同步批量操作上限（与后端 BATCH_MAX_NOVELS 一致）；超过走后台任务。 */
+export const BATCH_MAX_NOVELS = 5000
 
 export const novelApi = {
   async getNovels(params: GetNovelsParams) {
@@ -29,7 +35,13 @@ export const novelApi = {
 
   async countNovels(params: GetNovelsParams) {
     const queryParams: Record<string, unknown> = { ...params }
-    const response = await apiClient.get('/novels/count', { params: queryParams })
+    const response = await apiClient.get('/novels/count', {
+      params: queryParams,
+      // Serialize excluded_ids as repeated keys (excluded_ids=1&excluded_ids=2)
+      // — FastAPI binds repeated params to list[int]; the axios default
+      // (excluded_ids[]=...) would produce a differently-named key.
+      paramsSerializer: { indexes: null },
+    })
     return response.data as { total: number }
   },
 
@@ -43,9 +55,13 @@ export const novelApi = {
     format_mode?: string
     zip_name?: string
     naming_template?: string
+    novel_ids?: number[]
+    excluded_ids?: number[]
   }) {
     const response = await apiClient.post('/novels/batch-download', params, {
       responseType: 'blob',
+      // ZIP 打包耗时随篇数增长——不用全局 30s 超时（大导出走任务端点）。
+      timeout: 0,
     })
     return response
   },
@@ -59,6 +75,8 @@ export const novelApi = {
       min_text?: number
       format_mode?: string
       naming_template?: string
+      novel_ids?: number[]
+      excluded_ids?: number[]
     },
     signal?: AbortSignal,
   ) {
@@ -66,5 +84,70 @@ export const novelApi = {
       signal,
     })
     return response.data as { path: string | null }
+  },
+
+  /** Batch delete / add_tags / remove_tags against a resolved scope. */
+  async batchOperation(params: {
+    operation: BatchOperation
+    scope: BatchScope
+    tags?: string[]
+  }) {
+    const response = await apiClient.post('/novels/batch', params)
+    return response.data as BatchOperationResult
+  },
+
+  /** All IDs matching the filters — powers the 「全选匹配」bulk-add action. */
+  async getNovelIds(params: GetNovelsParams) {
+    const queryParams: Record<string, unknown> = { ...params }
+    const response = await apiClient.get('/novels/ids', { params: queryParams })
+    return response.data as NovelIdsResponse
+  },
+
+  /** Novel details by explicit ID list — powers the 「查看已选」view. */
+  async getNovelsByIds(novelIds: number[]) {
+    const response = await apiClient.post('/novels/by-ids', {
+      novel_ids: novelIds,
+    })
+    return response.data as NovelsByIdsResponse
+  },
+
+  /** Subset of the selection matching the current scope — scoped clear. */
+  async matchNovelIds(params: {
+    novel_ids: number[]
+    keyword?: string
+    min_like?: number
+    min_text?: number
+  }) {
+    const response = await apiClient.post('/novels/match-ids', params)
+    return response.data as MatchIdsResult
+  },
+
+  /** Enqueue a batch operation into the background task system (any size). */
+  async submitBatchTask(params: {
+    operation: BatchOperation
+    scope: BatchScope
+    tags?: string[]
+  }) {
+    const response = await apiClient.post('/novels/batch-task', params)
+    return response.data as { task_id: number; matched: number }
+  },
+
+  /** Enqueue a batch export into the background task system (large ZIPs). */
+  async submitBatchExport(params: {
+    novel_ids: number[]
+    format_mode?: string
+    zip_name?: string
+    naming_template?: string
+  }) {
+    const response = await apiClient.post('/novels/batch-export', params)
+    return response.data as { task_id: number; matched: number }
+  },
+
+  /** Download a completed background export ZIP. */
+  async downloadExportFile(taskId: number) {
+    return apiClient.get(`/novels/export/${taskId}/download`, {
+      responseType: 'blob',
+      timeout: 0,
+    })
   },
 }
