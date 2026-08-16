@@ -15,6 +15,9 @@ from copixiv.infrastructure.repositories.failed_novel import FailedNovelReposito
 from copixiv.infrastructure.repositories.search_history import (
     SQLAlchemySearchHistoryRepository,
 )
+from copixiv.infrastructure.repositories.settings import (
+    SQLAlchemySettingRepository,
+)
 
 
 class SqlUnitOfWork:
@@ -63,6 +66,7 @@ class SqlUnitOfWork:
         self._tasks: SQLAlchemyTaskRepository | None = None
         self._search_history: SQLAlchemySearchHistoryRepository | None = None
         self._failed_novels: FailedNovelRepository | None = None
+        self._settings: SQLAlchemySettingRepository | None = None
 
     # -- repositories as properties (lazy) -----------------------------------
 
@@ -113,6 +117,12 @@ class SqlUnitOfWork:
         if self._failed_novels is None:
             self._failed_novels = FailedNovelRepository(self.session)
         return self._failed_novels
+
+    @property
+    def settings(self) -> SQLAlchemySettingRepository:
+        if self._settings is None:
+            self._settings = SQLAlchemySettingRepository(self.session)
+        return self._settings
 
     @property
     def session_factory(self):

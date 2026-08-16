@@ -365,7 +365,7 @@ class TestCountExcluded:
             "excluded_ids": [2, 3],
         })
         assert r.status_code == 200
-        assert r.json() == {"total": 1}
+        assert r.json() == {"total": 1, "excluded": 0}
 
 
 # ---------------------------------------------------------------------------

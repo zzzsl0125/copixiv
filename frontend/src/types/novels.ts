@@ -36,6 +36,14 @@ export interface GetNovelsParams {
   min_like?: number
   min_text?: number
   excluded_ids?: number[]
+  /** 排除厌恶标签小说：true/undefined → 排除；false → 本次不排除 */
+  exclude_blocked?: boolean
+}
+
+/** /api/novels/count 响应：total 可见数，excluded 被厌恶标签隐藏数 */
+export interface NovelCountResult {
+  total: number
+  excluded: number
 }
 
 /** Which novels a batch operation applies to (mirrors backend BatchScope). */

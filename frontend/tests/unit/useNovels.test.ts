@@ -5,6 +5,7 @@ import { useNovels } from '../../src/composables/useNovels'
 
 const novelApiMock = vi.hoisted(() => ({
   getNovels: vi.fn(),
+  countNovels: vi.fn(),
 }))
 
 vi.mock('../../src/api', () => ({
@@ -30,6 +31,7 @@ describe('useNovels', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     novelApiMock.getNovels.mockResolvedValue({ novels: [{ id: 1 }], cursor: null })
+    novelApiMock.countNovels.mockResolvedValue({ total: 1, excluded: 0 })
   })
 
   it('parses filters from the URL on setup', () => {
@@ -209,5 +211,31 @@ describe('useNovels', () => {
     expect(novelApiMock.getNovels).toHaveBeenCalledWith(
       expect.objectContaining({ keyword: '第一词' }),
     )
+  })
+
+  it('excludes blocked tags by default and reports the excluded count for searches', async () => {
+    novelApiMock.countNovels.mockResolvedValue({ total: 10, excluded: 3 })
+    const state = mountUseNovels('/?keyword=猫')
+
+    await state.loadNovels()
+    await flushPromises()
+
+    expect(novelApiMock.getNovels).toHaveBeenCalledWith(
+      expect.objectContaining({ exclude_blocked: true }),
+    )
+    expect(novelApiMock.countNovels).toHaveBeenCalledWith(
+      expect.objectContaining({ keyword: '猫', exclude_blocked: true }),
+    )
+    expect(state.excludedCount.value).toBe(3)
+  })
+
+  it('skips the excluded-count fetch on random browse (no keyword)', async () => {
+    const state = mountUseNovels('/')
+
+    await state.loadNovels()
+    await flushPromises()
+
+    expect(novelApiMock.countNovels).not.toHaveBeenCalled()
+    expect(state.excludedCount.value).toBe(0)
   })
 })

@@ -16,6 +16,7 @@ const {
   handleSearch,
   handleLoadMore,
   handleCardSearch,
+  excludedCount,
 } = useNovels()
 
 const { systemConfig, fetchConfig } = useSystem()
@@ -26,6 +27,9 @@ const isSidebarOpen = ref(false)
 const route = useRoute()
 const router = useRouter()
 const activeSection = ref<'novels' | 'favourites' | 'special_follow' | null>('novels')
+
+// 集合视图（查看已选/查看被排除）活跃时，侧边栏禁用「随机」排序
+const inCollectionView = ref(false)
 
 const isNovelsRoute = computed(() => route.path === '/')
 
@@ -155,6 +159,17 @@ watch(() => systemConfig.value, (newConfig) => {
   }
 })
 
+// 全局「排除厌恶标签」开关在标签管理页变更后，回到列表页时立即生效
+// （首次赋值 old=undefined 跳过，避免与初始加载重复）。
+watch(
+  () => systemConfig.value?.exclude_blocked_tag_novels,
+  (val, old) => {
+    if (val !== undefined && old !== undefined && configLoadedAndApplied.value) {
+      handleSearch(undefined, { updateUrl: false })
+    }
+  },
+)
+
 watch(route, (to) => {
   if (to.path !== '/') {
     activeSection.value = null
@@ -211,6 +226,7 @@ onMounted(() => {
       :active-section="activeSection"
       :config-loaded-and-applied="configLoadedAndApplied"
       :is-batch-mode="isBatchMode"
+      :random-disabled="isNovelsRoute && inCollectionView"
       @close="isSidebarOpen = false"
       @search="handleSectionSearch"
       @update:filters="($event: NovelFilters) => { Object.assign(filters, $event); handleSearch(); }"
@@ -234,6 +250,7 @@ onMounted(() => {
         :has-selection="isNovelsRoute ? hasSelection : undefined"
         :has-filter="isNovelsRoute ? hasFilter : undefined"
         :batch-scope="isNovelsRoute ? batchScope : undefined"
+        :excluded-count="isNovelsRoute ? excludedCount : undefined"
         :is-batch-selected="isNovelsRoute ? isCardSelected : undefined"
         @logo-click="handleLogoClick"
         @load-more="handleLoadMore"
@@ -242,6 +259,7 @@ onMounted(() => {
         @novel-state-changed="handleNovelStateChanged"
         @update:filters="($event: NovelFilters) => { Object.assign(filters, $event); handleSearch(); }"
         @toggle-sidebar="isSidebarOpen = !isSidebarOpen"
+        @collection-view="(active: boolean) => (inCollectionView = active)"
         @batch-toggle-card="toggleBatchCard"
         @batch-select-all="handleBatchSelectAll"
         @batch-clear="clearBatchSelection"

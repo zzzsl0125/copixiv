@@ -174,7 +174,9 @@ class TestRealRouterMounting:
         assert r.status_code == 200
         assert set(r.json()) == {
             "default_min_like", "default_min_text", "batch_download_naming",
+            "exclude_blocked_tag_novels",
         }
+        assert r.json()["exclude_blocked_tag_novels"] is True
 
     def test_migrations_ran_against_real_config_path(self, container):
         """The container's build must have created the configured database."""

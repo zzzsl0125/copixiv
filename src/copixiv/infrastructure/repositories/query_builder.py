@@ -44,6 +44,33 @@ _fts_table = table(
 _ADAPTIVE_TAG_THRESHOLD = 3000
 _ADAPTIVE_KEYWORD_THRESHOLD = 15000
 
+# Blocked-tag exclusion: below this many blocked novels the count is
+# computed by restricting on the blocked-id list (PK lookups, ~18ms on
+# 232k rows); above it the correlated NOT EXISTS form is faster because
+# it short-circuits on the first match (~150ms for a 92%-coverage tag).
+_BLOCKED_COUNT_THRESHOLD = 30000
+
+
+def blocked_tags_not_exists(names):
+    """Build a ``NOT EXISTS`` clause excluding novels carrying any of *names*.
+
+    Correlated subquery over ``novel_tag JOIN tag`` — keeps the outer
+    query's covering-index walk (ORDER BY + LIMIT early termination)
+    intact.  Returns None for an empty name set so callers can skip the
+    condition entirely (zero overhead when nothing is blocked).
+    """
+    if not names:
+        return None
+    return ~_exists(
+        select(literal_column("1"))
+        .select_from(models.NovelTag)
+        .join(models.Tag, models.NovelTag.tag_id == models.Tag.id)
+        .where(
+            models.NovelTag.novel_id == models.Novel.id,
+            models.Tag.name.in_(names),
+        )
+    )
+
 
 class NovelQueryBuilder(BaseQueryBuilder):
     """Builds single-phase Novel list and count queries.
@@ -106,6 +133,11 @@ class NovelQueryBuilder(BaseQueryBuilder):
         main = self._where_field_filters(main, field_filters)
         main = self._where_thresholds(main)
 
+        # Blocked-tag exclusion (NOT EXISTS; skipped entirely when empty)
+        blocked = self.params.get("blocked_tag_names")
+        if blocked:
+            main = main.where(blocked_tags_not_exists(blocked))
+
         exclude_ids = self.params.get("exclude_ids") or []
         if exclude_ids:
             main = main.where(self.main_model.id.not_in(exclude_ids))
@@ -165,6 +197,8 @@ class NovelQueryBuilder(BaseQueryBuilder):
             or self.params.get("min_like") is not None
             or self.params.get("min_text") is not None
             or self.params.get("exclude_ids")
+            or self.params.get("restrict_ids")
+            or self.params.get("blocked_tag_names")
         )
         if not has_filters:
             return None
@@ -179,6 +213,14 @@ class NovelQueryBuilder(BaseQueryBuilder):
         stmt = self._where_fts_filter(stmt, keywords, use_exists=False)
         stmt = self._where_field_filters(stmt, field_filters)
         stmt = self._where_thresholds(stmt)
+
+        # Blocked-tag exclusion: restrict to / exclude from a set of ids.
+        restrict_ids = self.params.get("restrict_ids")
+        if restrict_ids:
+            stmt = stmt.where(self.main_model.id.in_(restrict_ids))
+        blocked = self.params.get("blocked_tag_names")
+        if blocked:
+            stmt = stmt.where(blocked_tags_not_exists(blocked))
 
         exclude_ids = self.params.get("exclude_ids") or []
         if exclude_ids:

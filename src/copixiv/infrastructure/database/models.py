@@ -220,6 +220,21 @@ class TagPreference(Base):
     sort_index = Column(Integer, default=0)
 
 
+class Setting(Base):
+    """Runtime settings key-value store (UI-changeable, survives restarts).
+
+    Separate from config.yaml: static deployment config stays in YAML,
+    while settings that the web UI may change at runtime live here.
+    """
+
+    __tablename__ = C.TABLE_SETTINGS
+    key = Column(String(255), primary_key=True)
+    value = Column(String(255), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<Setting(key={self.key!r}, value={self.value!r})>"
+
+
 class TagAlias(Base):
     __tablename__ = C.TABLE_TAG_ALIAS
     id = Column(Integer, primary_key=True, autoincrement=True)

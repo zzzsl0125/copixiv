@@ -13,6 +13,8 @@ const props = defineProps<{
   configLoadedAndApplied?: boolean
   filters: NovelFilters
   isBatchMode: boolean
+  /** 集合视图（查看已选/查看被排除）活跃时禁用「随机」排序 */
+  randomDisabled?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -101,7 +103,7 @@ const navIconClass = 'mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500'
           <div class="grid grid-cols-3 gap-2">
             <button @click="updateFilter('order_by', 'like')" :class="btnClass(filters.order_by === 'like')">点赞</button>
             <button @click="updateFilter('order_by', 'id')" :class="btnClass(filters.order_by === 'create_time' || filters.order_by === 'id')">时间</button>
-            <button @click="updateFilter('order_by', 'random')" :class="btnClass(filters.order_by === 'random')">随机</button>
+            <button @click="updateFilter('order_by', 'random')" :class="btnClass(filters.order_by === 'random')" :disabled="randomDisabled" :style="randomDisabled ? 'opacity: 0.5; cursor: not-allowed;' : ''">随机</button>
           </div>
           <div class="grid grid-cols-3 gap-2">
             <button @click="updateFilter('order_direction', 'ASC')" :class="btnClass(filters.order_direction === 'ASC')" :disabled="filters.order_by === 'random'" :style="filters.order_by === 'random' ? 'opacity: 0.5; cursor: not-allowed;' : ''">升序</button>

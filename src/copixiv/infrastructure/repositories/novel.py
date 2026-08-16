@@ -18,7 +18,11 @@ from copixiv.domain.services.parsing import SearchConditions
 from .base import BaseRepository, model_to_dict
 from .fts import FTSManager
 from .tag import SQLAlchemyTagRepository
-from .query_builder import NovelQueryBuilder
+from .query_builder import (
+    NovelQueryBuilder,
+    _BLOCKED_COUNT_THRESHOLD,
+    blocked_tags_not_exists,
+)
 from .query_builder_base import reset_fts_cache
 
 
@@ -48,6 +52,110 @@ class SQLAlchemyNovelRepository(BaseRepository):
         stmt = select(models.Novel.id).where(models.Novel.id.in_(novel_ids))
         return set(self.session.execute(stmt).scalars().all())
 
+    # ---- blocked-tag exclusion helpers -------------------------------------
+
+    SETTING_EXCLUDE_BLOCKED = "exclude_blocked_tag_novels"
+
+    def _exclusion_active(self, explicit: bool | None) -> bool:
+        """Resolve whether blocked-tag exclusion applies to this query.
+
+        *explicit* (from the API ``exclude_blocked`` param) wins when
+        given; otherwise the global runtime setting applies (default on
+        when the settings row is missing).  Reads are tiny single-row
+        lookups — no caching, so toggles take effect immediately.
+        """
+        if explicit is not None:
+            return explicit
+        row = self.session.execute(
+            select(models.Setting).where(
+                models.Setting.key == self.SETTING_EXCLUDE_BLOCKED
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return True
+        return row.value.strip().lower() in ("1", "true", "yes", "on")
+
+    def _blocked_tag_names(self) -> frozenset[str]:
+        """Names of user-blocked (厌恶) tags; empty set when none."""
+        rows = self.session.execute(
+            select(models.TagPreference.tag).where(
+                models.TagPreference.preference
+                == models.TagPreferenceORM.blocked
+            )
+        ).scalars().all()
+        return frozenset(rows)
+
+    def _blocked_novel_ids(self, names: frozenset[str]) -> list[int]:
+        """All novel IDs carrying any blocked tag (index-driven scan)."""
+        if not names:
+            return []
+        return list(self.session.execute(
+            select(models.NovelTag.novel_id)
+            .join(models.Tag, models.NovelTag.tag_id == models.Tag.id)
+            .where(models.Tag.name.in_(names))
+        ).scalars().all())
+
+    async def list_blocked_ids(self) -> list[int]:
+        """All novel IDs carrying blocked tags; [] when exclusion is off.
+
+        Powers the 「查看被排除」view — the endpoint filters this list
+        down to the current search scope.
+        """
+        if not self._exclusion_active(None):
+            return []
+        return self._blocked_novel_ids(self._blocked_tag_names())
+
+    # Same value as BATCH_ID_CHUNK_SIZE in application.novel — kept local
+    # so the repository layer doesn't import the application layer.
+    _ID_CHUNK_SIZE = 30_000
+
+    async def sort_novel_ids(
+        self,
+        novel_ids: list[int],
+        order_by: str = C.COL_LIKES,
+        order_direction: str = "DESC",
+    ) -> list[int]:
+        """Return *novel_ids* ordered by a novel column (id / like / text).
+
+        Sort keys are fetched chunked from the novel table and ordered in
+        Python — SQLite cannot serve ORDER BY through a large IN-list via
+        its indexes.  Unsupported orders (e.g. ``random``) return the
+        input order unchanged.  Missing IDs are dropped.  Runs in a worker
+        thread (chunked fetches can touch hundreds of thousands of rows).
+        """
+        return await asyncio.to_thread(
+            self._sort_novel_ids_sync, novel_ids, order_by, order_direction,
+        )
+
+    def _sort_novel_ids_sync(
+        self,
+        novel_ids: list[int],
+        order_by: str = C.COL_LIKES,
+        order_direction: str = "DESC",
+    ) -> list[int]:
+        if not novel_ids or order_by not in (C.COL_ID, C.COL_LIKES, C.COL_TEXTS):
+            return list(novel_ids)
+
+        keys: dict[int, tuple[int, int]] = {}  # id -> (sort_key, id)
+        for i in range(0, len(novel_ids), self._ID_CHUNK_SIZE):
+            chunk = novel_ids[i:i + self._ID_CHUNK_SIZE]
+            rows = self.session.execute(
+                select(models.Novel.id, models.Novel.like, models.Novel.text)
+                .where(models.Novel.id.in_(chunk))
+            ).all()
+            for nid, like, text in rows:
+                if order_by == C.COL_LIKES:
+                    key = like or 0
+                elif order_by == C.COL_TEXTS:
+                    key = text or 0
+                else:
+                    key = nid
+                keys[nid] = (key, nid)
+
+        reverse = order_direction.upper() == "DESC"
+        ordered = [nid for nid, _ in sorted(keys.items(), key=lambda kv: kv[1], reverse=reverse)]
+        return ordered
+
     async def get_novels(
         self,
         conditions: SearchConditions | None = None,
@@ -58,16 +166,19 @@ class SQLAlchemyNovelRepository(BaseRepository):
         min_like: int | None = None,
         min_text: int | None = None,
         exclude_ids: list[int] | None = None,
+        exclude_blocked_tags: bool | None = None,
     ) -> dict:
         """Retrieve a paginated, filtered list of novels.
 
         Heavy query — executes in a worker thread so the event loop is
         never blocked by SQLite work (tag/FTS subqueries, sorting).
+
+        ``exclude_blocked_tags``: None → global setting; True/False → override.
         """
         return await asyncio.to_thread(
             self._get_novels_sync,
             conditions, order_by, order_direction, cursor, per_page,
-            min_like, min_text, exclude_ids,
+            min_like, min_text, exclude_ids, exclude_blocked_tags,
         )
 
     def _get_novels_sync(
@@ -80,6 +191,7 @@ class SQLAlchemyNovelRepository(BaseRepository):
         min_like: int | None = None,
         min_text: int | None = None,
         exclude_ids: list[int] | None = None,
+        exclude_blocked_tags: bool | None = None,
     ) -> dict:
         # Validate fields
         if order_by:
@@ -89,6 +201,12 @@ class SQLAlchemyNovelRepository(BaseRepository):
             for q_type, _qvalue in conditions:
                 self._validate_query_field(q_type)
 
+        blocked_names = (
+            self._blocked_tag_names()
+            if self._exclusion_active(exclude_blocked_tags)
+            else frozenset()
+        )
+
         # Random browsing — use precomputed shuffle column for fast index seek.
         # First page: pick a random starting point in the shuffle space so
         # each visit shows a different slice.  Wrap around if the tail
@@ -97,7 +215,7 @@ class SQLAlchemyNovelRepository(BaseRepository):
             import random as _random
             if not cursor:
                 novels = self._get_random_novels_shuffle(
-                    per_page, min_like or 0, min_text or 0,
+                    per_page, min_like or 0, min_text or 0, blocked_names,
                 )
                 cursor_out = None
                 if novels and len(novels) >= per_page:
@@ -118,6 +236,7 @@ class SQLAlchemyNovelRepository(BaseRepository):
             "min_like": min_like,
             "min_text": min_text,
             "exclude_ids": exclude_ids or [],
+            "blocked_tag_names": blocked_names,
         }
 
         builder = NovelQueryBuilder(self, **params)
@@ -152,11 +271,17 @@ class SQLAlchemyNovelRepository(BaseRepository):
         min_like: int | None = None,
         min_text: int | None = None,
         exclude_ids: list[int] | None = None,
+        exclude_blocked_tags: bool | None = None,
     ) -> int:
-        """Count novels matching filters (runs in a worker thread)."""
+        """Count VISIBLE novels matching filters (runs in a worker thread).
+
+        Applies blocked-tag exclusion (unless overridden off) so the
+        count matches the list.  ``exclude_blocked_tags``: None → global
+        setting; True/False → override.
+        """
         return await asyncio.to_thread(
             self._count_novels_sync, conditions, min_like, min_text,
-            exclude_ids,
+            exclude_ids, exclude_blocked_tags,
         )
 
     def _count_novels_sync(
@@ -165,27 +290,116 @@ class SQLAlchemyNovelRepository(BaseRepository):
         min_like: int | None = None,
         min_text: int | None = None,
         exclude_ids: list[int] | None = None,
+        exclude_blocked_tags: bool | None = None,
     ) -> int:
         if conditions:
             for q_type, _qvalue in conditions:
                 self._validate_query_field(q_type)
 
-        params = {
+        blocked_names = (
+            self._blocked_tag_names()
+            if self._exclusion_active(exclude_blocked_tags)
+            else frozenset()
+        )
+
+        base_params = {
             "conditions": conditions or [],
             "min_like": min_like,
             "min_text": min_text,
             "exclude_ids": exclude_ids or [],
         }
+
+        # No blocked tags — the existing cheap paths unchanged.
+        if not blocked_names:
+            return self._count_with_params(base_params)
+
+        base_total = self._count_with_params(base_params)
+        blocked_ids = self._blocked_novel_ids(blocked_names)
+        if not blocked_ids:
+            return base_total
+
+        if len(blocked_ids) <= _BLOCKED_COUNT_THRESHOLD:
+            # Sparse blocked set: count the blocked∩filters intersection via
+            # PK lookups on the blocked-id list (~18ms measured) and subtract.
+            params = dict(base_params, restrict_ids=blocked_ids)
+            excluded = self._count_with_params(params)
+            return base_total - excluded
+
+        # Dense blocked set: correlated NOT EXISTS short-circuits faster
+        # (~150-200ms for a 92%-coverage tag vs ~200ms+ for the IN form).
+        params = dict(base_params, blocked_tag_names=blocked_names)
+        return self._count_with_params(params)
+
+    def _count_with_params(self, params: dict) -> int:
+        """Execute a COUNT built from *params*; plain COUNT(*) when
+        the builder reports no filters (cheap whole-table count)."""
         builder = NovelQueryBuilder(self, **params)
         count_stmt = builder.build_count()
         if count_stmt is None:
-            # No filters — cheap COUNT(*) on the whole table
             result = self.session.execute(
                 select(func.count()).select_from(models.Novel)
             )
         else:
             result = self.session.execute(count_stmt)
         return result.scalar()
+
+    async def count_excluded_novels(
+        self,
+        conditions: SearchConditions | None = None,
+        min_like: int | None = None,
+        min_text: int | None = None,
+        exclude_ids: list[int] | None = None,
+        exclude_blocked_tags: bool | None = None,
+    ) -> int:
+        """Count novels matching filters that carry blocked tags.
+
+        Returns 0 when exclusion is off or no tags are blocked.  Powers
+        the ``excluded`` field of ``GET /api/novels/count`` so the UI can
+        show how many novels were hidden for the current search scope.
+        """
+        return await asyncio.to_thread(
+            self._count_excluded_novels_sync, conditions, min_like,
+            min_text, exclude_ids, exclude_blocked_tags,
+        )
+
+    def _count_excluded_novels_sync(
+        self,
+        conditions: SearchConditions | None = None,
+        min_like: int | None = None,
+        min_text: int | None = None,
+        exclude_ids: list[int] | None = None,
+        exclude_blocked_tags: bool | None = None,
+    ) -> int:
+        if not self._exclusion_active(exclude_blocked_tags):
+            return 0
+        if conditions:
+            for q_type, _qvalue in conditions:
+                self._validate_query_field(q_type)
+
+        blocked_names = self._blocked_tag_names()
+        if not blocked_names:
+            return 0
+        blocked_ids = self._blocked_novel_ids(blocked_names)
+        if not blocked_ids:
+            return 0
+
+        base_params = {
+            "conditions": conditions or [],
+            "min_like": min_like,
+            "min_text": min_text,
+            "exclude_ids": exclude_ids or [],
+        }
+
+        if len(blocked_ids) <= _BLOCKED_COUNT_THRESHOLD:
+            params = dict(base_params, restrict_ids=blocked_ids)
+            return self._count_with_params(params)
+
+        # Dense: total minus visible (both via the builder).
+        base_total = self._count_with_params(base_params)
+        visible = self._count_with_params(
+            dict(base_params, blocked_tag_names=blocked_names)
+        )
+        return base_total - visible
 
     # ---- write ---------------------------------------------------------------
 
@@ -442,8 +656,12 @@ class SQLAlchemyNovelRepository(BaseRepository):
         min_like: int | None = None,
         min_text: int | None = None,
         exclude_ids: list[int] | None = None,
+        exclude_blocked_tags: bool | None = None,
     ) -> list[int]:
-        """Return every novel ID matching the filters, without pagination.
+        """Return every VISIBLE novel ID matching the filters, unpaginated.
+
+        Blocked-tag exclusion is applied as a set difference (much faster
+        than per-row NOT EXISTS for full ID scans: ~105ms vs ~634ms).
 
         Batch operations resolve their scope server-side through this
         lightweight ID-only scan (no column payload, no display-flag JOINs).
@@ -452,6 +670,7 @@ class SQLAlchemyNovelRepository(BaseRepository):
         return await asyncio.to_thread(
             self._list_matching_ids_sync,
             conditions, min_like, min_text, exclude_ids,
+            exclude_blocked_tags,
         )
 
     def _list_matching_ids_sync(
@@ -460,6 +679,7 @@ class SQLAlchemyNovelRepository(BaseRepository):
         min_like: int | None = None,
         min_text: int | None = None,
         exclude_ids: list[int] | None = None,
+        exclude_blocked_tags: bool | None = None,
     ) -> list[int]:
         if conditions:
             for q_type, _qvalue in conditions:
@@ -473,7 +693,20 @@ class SQLAlchemyNovelRepository(BaseRepository):
         }
         builder = NovelQueryBuilder(self, **params)
         stmt = builder.build_ids()
-        return list(self.session.execute(stmt).scalars())
+        ids = list(self.session.execute(stmt).scalars())
+
+        return self._apply_blocked_exclusion(ids, exclude_blocked_tags)
+
+    def _apply_blocked_exclusion(
+        self, ids: list[int], exclude_blocked_tags: bool | None,
+    ) -> list[int]:
+        """Subtract blocked-tag novels from *ids* (sorted for determinism)."""
+        if not ids or not self._exclusion_active(exclude_blocked_tags):
+            return ids
+        blocked = set(self._blocked_novel_ids(self._blocked_tag_names()))
+        if not blocked:
+            return ids
+        return sorted(set(ids) - blocked)
 
     async def filter_ids_in_scope(
         self,
@@ -481,6 +714,7 @@ class SQLAlchemyNovelRepository(BaseRepository):
         conditions: SearchConditions | None = None,
         min_like: int | None = None,
         min_text: int | None = None,
+        exclude_blocked_tags: bool | None = None,
     ) -> list[int]:
         """Return the subset of *novel_ids* matching the filters.
 
@@ -491,6 +725,7 @@ class SQLAlchemyNovelRepository(BaseRepository):
         return await asyncio.to_thread(
             self._filter_ids_in_scope_sync,
             novel_ids, conditions, min_like, min_text,
+            exclude_blocked_tags,
         )
 
     def _filter_ids_in_scope_sync(
@@ -499,6 +734,7 @@ class SQLAlchemyNovelRepository(BaseRepository):
         conditions: SearchConditions | None = None,
         min_like: int | None = None,
         min_text: int | None = None,
+        exclude_blocked_tags: bool | None = None,
     ) -> list[int]:
         if not novel_ids:
             return []
@@ -514,7 +750,9 @@ class SQLAlchemyNovelRepository(BaseRepository):
         }
         builder = NovelQueryBuilder(self, **params)
         stmt = builder.build_ids()
-        return list(self.session.execute(stmt).scalars())
+        ids = list(self.session.execute(stmt).scalars())
+
+        return self._apply_blocked_exclusion(ids, exclude_blocked_tags)
 
     async def get_novels_by_ids(self, novel_ids: list[int]) -> list[dict]:
         """Return full novel dicts for the given IDs, in the given order.
@@ -816,7 +1054,8 @@ class SQLAlchemyNovelRepository(BaseRepository):
     # ---- random selection ----------------------------------------------------
 
     def _get_random_novels_shuffle(
-        self, limit: int, min_likes: int, min_texts: int
+        self, limit: int, min_likes: int, min_texts: int,
+        blocked_tag_names: frozenset[str] = frozenset(),
     ) -> list[dict]:
         """Return *limit* novels in shuffle order, starting from a random offset.
 
@@ -829,10 +1068,16 @@ class SQLAlchemyNovelRepository(BaseRepository):
         allows SQLite to evaluate the like/text filters directly from the index
         without main-table lookups for candidate rows that don't pass.
 
+        ``blocked_tag_names`` adds the blocked-tag NOT EXISTS condition to
+        both SELECTs — the index seek stays intact; SQLite simply walks on
+        past excluded rows until *limit* visible ones are collected.
+
         Tags, favourite, and special_follow flags are loaded in batch after
         the main query — no per-row correlated subqueries.
         """
         import random as _random
+
+        blocked_clause = blocked_tags_not_exists(blocked_tag_names)
 
         # Query the max shuffle value so the random start is within range.
         max_shuffle = self.session.scalar(
@@ -850,6 +1095,7 @@ class SQLAlchemyNovelRepository(BaseRepository):
                 models.Novel.like >= min_likes,
                 models.Novel.text >= min_texts,
                 models.Novel.shuffle >= start,
+                *((blocked_clause,) if blocked_clause is not None else ()),
             )
             .order_by(models.Novel.shuffle.asc(), models.Novel.id.asc())
             .limit(limit)
@@ -867,6 +1113,7 @@ class SQLAlchemyNovelRepository(BaseRepository):
                     models.Novel.like >= min_likes,
                     models.Novel.text >= min_texts,
                     models.Novel.shuffle >= 0,
+                    *((blocked_clause,) if blocked_clause is not None else ()),
                 )
                 .order_by(models.Novel.shuffle.asc(), models.Novel.id.asc())
                 .limit(remaining + len(seen_ids))

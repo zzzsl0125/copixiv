@@ -1,7 +1,8 @@
-import { reactive, onMounted, onUnmounted } from 'vue'
+import { reactive, ref, onMounted, onUnmounted } from 'vue'
 import { novelApi } from '../api'
 import type { Novel, NovelFilters } from '../types'
 import { useCursorPagination } from './useCursorPagination'
+import { useSystem } from './useSystem'
 
 export function useNovels() {
   const urlParams = new URLSearchParams(window.location.search)
@@ -14,6 +15,35 @@ export function useNovels() {
     min_text: urlParams.get('min_text') ? Number(urlParams.get('min_text')) : undefined,
   })
 
+  // ---- 厌恶标签排除（跟随全局设置；临时查看被排除的交互在 Novels.vue）----
+  const { systemConfig } = useSystem()
+  const excludedCount = ref(0)
+  let countSeq = 0
+
+  /** 本次请求是否排除厌恶标签小说（跟随全局设置，缺省视为开启）。 */
+  const excludeBlocked = () =>
+    systemConfig.value ? systemConfig.value.exclude_blocked_tag_novels : true
+
+  const fetchExcludedCount = async () => {
+    // 随机推荐（关键词为空）不展示排除条 → 省掉这次计数请求
+    if (!filters.keyword.trim() || !excludeBlocked()) {
+      excludedCount.value = 0
+      return
+    }
+    const seq = ++countSeq
+    try {
+      const result = await novelApi.countNovels({
+        keyword: filters.keyword.trim() || undefined,
+        min_like: filters.min_like,
+        min_text: filters.min_text,
+        exclude_blocked: true,
+      })
+      if (seq === countSeq) excludedCount.value = result.excluded || 0
+    } catch {
+      if (seq === countSeq) excludedCount.value = 0
+    }
+  }
+
   const fetchNovels = async (cursor?: unknown) => {
     const res = await novelApi.getNovels({
       keyword: filters.keyword.trim() || undefined,
@@ -23,7 +53,11 @@ export function useNovels() {
       min_text: filters.min_text,
       cursor: (cursor as Record<string, unknown>) || undefined,
       per_page: 30,
+      exclude_blocked: excludeBlocked(),
     })
+
+    // 首页加载后顺带拉一次被排除的计数（供 ExclusionBar 展示）
+    if (!cursor) void fetchExcludedCount()
 
     return {
       items: res.novels || [],
@@ -195,5 +229,6 @@ export function useNovels() {
     handleLoadMore,
     handleCardSearch,
     resetFilters,
+    excludedCount,
   }
 }

@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue'
 import { Sparkles } from '@lucide/vue'
-import { tagPreferenceApi, tagAliasApi } from '../api'
+import { tagPreferenceApi, tagAliasApi, systemApi } from '../api'
 import { getApiErrorMessage } from '../api/errors'
-import { useToast } from '../composables'
+import { useToast, useSystem } from '../composables'
 import type { TagPreference, TagAlias } from '../types'
 import PageHeader from '../components/features/PageHeader.vue'
 import SectionHeader from '../components/features/SectionHeader.vue'
@@ -16,6 +16,29 @@ defineOptions({ inheritAttrs: false })
 defineEmits<{ (e: 'toggle-sidebar'): void }>()
 
 const toast = useToast()
+const { systemConfig, fetchConfig } = useSystem()
+
+// ---- 全局开关：在列表中排除厌恶标签小说 ----
+const excludeBlocked = ref(true)
+const savingSetting = ref(false)
+
+async function toggleExclude() {
+  if (savingSetting.value) return
+  savingSetting.value = true
+  try {
+    const updated = await systemApi.updateConfig({
+      exclude_blocked_tag_novels: !excludeBlocked.value,
+    })
+    excludeBlocked.value = updated.exclude_blocked_tag_novels
+    // 写回共享单例 → App 的 watcher 会刷新小说列表
+    systemConfig.value = updated
+    toast.success(updated.exclude_blocked_tag_novels
+      ? '已开启：带厌恶标签的小说将从列表中排除'
+      : '已关闭：带厌恶标签的小说将正常显示')
+  } catch (err: unknown) {
+    toast.error(getApiErrorMessage(err, '设置保存失败'))
+  } finally { savingSetting.value = false }
+}
 
 const allTags = ref<TagPreference[]>([])
 const allAliases = ref<TagAlias[]>([])
@@ -158,7 +181,11 @@ const closeModal = () => {
   isEditingAlias.value = false; editingAliasOriginalTarget.value = ''
 }
 
-onMounted(() => { fetchData() })
+onMounted(async () => {
+  fetchData()
+  await fetchConfig()
+  excludeBlocked.value = systemConfig.value?.exclude_blocked_tag_novels ?? true
+})
 
 const tagColumns: TableColumn[] = [{ key: 'tag', label: '标签名称' }, { key: 'actions', label: '操作', align: 'right' }]
 const aliasColumns: TableColumn[] = [{ key: 'target', label: '聚合标签' }, { key: 'sources', label: '原标签' }, { key: 'actions', label: '操作', align: 'right' }]
@@ -185,6 +212,28 @@ const currentColumns = computed(() => activeTab.value === 'alias' ? aliasColumns
           </button>
         </template>
       </SectionHeader>
+
+      <!-- 厌恶标签的全局排除开关 -->
+      <div v-if="activeTab === 'blocked'" class="mb-4 bg-white border border-gray-200 rounded-lg px-4 py-3 flex items-center justify-between gap-4">
+        <div class="min-w-0">
+          <p class="text-sm font-medium text-gray-900">在浏览列表中排除厌恶标签小说</p>
+          <p class="text-xs text-gray-500 mt-0.5">带厌恶标签的小说将从列表、搜索、计数与全选中隐藏（抓取入库不受影响）</p>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          :aria-checked="excludeBlocked"
+          :disabled="savingSetting"
+          class="relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50"
+          :class="excludeBlocked ? 'bg-indigo-600' : 'bg-gray-300'"
+          @click="toggleExclude"
+        >
+          <span
+            class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"
+            :class="excludeBlocked ? 'translate-x-6' : 'translate-x-1'"
+          />
+        </button>
+      </div>
 
       <DraggableTable :items="activeTab === 'alias' ? groupedAliases : filteredTags" :columns="currentColumns" :loading="loading" :empty-text="activeTab === 'alias' ? '暂无别名映射' : '暂无标签'" @reorder="onDragEnd">
         <template #tag="{ item: tag }" v-if="activeTab !== 'alias'">

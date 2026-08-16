@@ -225,6 +225,11 @@ class SystemConfigResponse(BaseModel):
     default_min_like: int
     default_min_text: int
     batch_download_naming: str
+    exclude_blocked_tag_novels: bool = True
+
+
+class SystemConfigUpdate(BaseModel):
+    exclude_blocked_tag_novels: bool | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +318,14 @@ class MatchIdsRequest(BaseModel):
     keyword: str | None = None
     min_like: int | None = None
     min_text: int | None = None
+
+
+class SortIdsRequest(BaseModel):
+    """Order an explicit id list by a novel column — 「查看已选」排序."""
+
+    novel_ids: list[int]
+    order_by: Literal["id", "like", "text"]
+    order_direction: Literal["ASC", "DESC"] = "DESC"
 
 
 class MatchIdsResponse(BaseModel):

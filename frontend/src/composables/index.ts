@@ -1,6 +1,7 @@
 export { useCursorPagination } from './useCursorPagination'
 export { usePagination } from './usePagination'
 export { useNovels } from './useNovels'
+export { usePagedNovelIdView } from './usePagedNovelIdView'
 export { useSystem } from './useSystem'
 export { useTokens } from './useTokens'
 export { useMasonryLayout } from './useMasonryLayout'

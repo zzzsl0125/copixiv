@@ -22,7 +22,7 @@ from sqlalchemy import create_engine
 from copixiv.infrastructure.database.engine import run_migrations
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-HEAD_REVISION = "c8d9e0f1a2b3"
+HEAD_REVISION = "e1f2a3b4c5d6"
 
 # v1 schema — the shape the old project left behind.  Deliberately
 # *different* from the migrations' own baseline where v1 differed:

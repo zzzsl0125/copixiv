@@ -18,6 +18,7 @@ TABLE_SCHEDULED_TASK = "scheduled_tasks"
 TABLE_TAG_PREFERENCE = "tag_preferences"
 TABLE_TAG_ALIAS = "tag_aliases"
 TABLE_TOKEN = "tokens"
+TABLE_SETTINGS = "settings"
 
 # Column Names
 COL_ID = "id"

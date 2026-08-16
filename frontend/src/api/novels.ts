@@ -1,7 +1,7 @@
 import { apiClient } from './client'
 import type {
   Novel, GetNovelsParams, BatchScope, BatchOperation, BatchOperationResult,
-  NovelIdsResponse, NovelsByIdsResponse, MatchIdsResult,
+  NovelIdsResponse, NovelsByIdsResponse, MatchIdsResult, NovelCountResult,
 } from '../types'
 
 /** 同步批量操作上限（与后端 BATCH_MAX_NOVELS 一致）；超过走后台任务。 */
@@ -42,7 +42,7 @@ export const novelApi = {
       // (excluded_ids[]=...) would produce a differently-named key.
       paramsSerializer: { indexes: null },
     })
-    return response.data as { total: number }
+    return response.data as NovelCountResult
   },
 
   async batchDownload(params: {
@@ -100,6 +100,29 @@ export const novelApi = {
   async getNovelIds(params: GetNovelsParams) {
     const queryParams: Record<string, unknown> = { ...params }
     const response = await apiClient.get('/novels/ids', { params: queryParams })
+    return response.data as NovelIdsResponse
+  },
+
+  /** Blocked-tag novel IDs within the current scope — 「查看被排除」view. */
+  async getBlockedNovelIds(params: GetNovelsParams) {
+    const queryParams: Record<string, unknown> = { ...params }
+    const response = await apiClient.get('/novels/blocked-ids', {
+      params: queryParams,
+    })
+    return response.data as NovelIdsResponse
+  },
+
+  /** Order an explicit id list by a novel column — 「查看已选」排序. */
+  async sortNovelIds(
+    novelIds: number[],
+    orderBy: string,
+    orderDirection: string,
+  ) {
+    const response = await apiClient.post('/novels/sort-ids', {
+      novel_ids: novelIds,
+      order_by: orderBy,
+      order_direction: orderDirection,
+    })
     return response.data as NovelIdsResponse
   },
 

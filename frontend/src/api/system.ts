@@ -6,6 +6,11 @@ export const systemApi = {
     const response = await apiClient.get('/system/config')
     return response.data as SystemConfig
   },
+
+  async updateConfig(patch: Partial<SystemConfig>) {
+    const response = await apiClient.put('/system/config', patch)
+    return response.data as SystemConfig
+  },
 }
 
 export const searchHistoryApi = {

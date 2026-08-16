@@ -4,6 +4,7 @@ export interface SystemConfig {
   default_min_like: number
   default_min_text: number
   batch_download_naming: string
+  exclude_blocked_tag_novels: boolean
 }
 
 export interface SearchHistory {

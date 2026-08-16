@@ -23,6 +23,7 @@ from copixiv.web_api.schemas import (
     NovelListResponse,
     NovelsByIdsRequest,
     NovelsByIdsResponse,
+    SortIdsRequest,
 )
 from copixiv.infrastructure.database.uow import SqlUnitOfWork
 from copixiv.infrastructure.database import constants as C
@@ -63,6 +64,7 @@ async def get_novels(
     per_page: int = Query(20, ge=1, le=200),
     min_like: int | None = None,
     min_text: int | None = None,
+    exclude_blocked: bool | None = Query(None),
 ):
     conditions = parse_search_keyword(keyword) if keyword else None
     cursor_dict = parse_json_param(cursor, "cursor")
@@ -75,6 +77,7 @@ async def get_novels(
         per_page=per_page,
         min_like=min_like,
         min_text=min_text,
+        exclude_blocked_tags=exclude_blocked,
     )
 
     if conditions and background_tasks:
@@ -92,13 +95,22 @@ async def count_novels(
     min_like: int | None = Query(None),
     min_text: int | None = Query(None),
     excluded_ids: list[int] | None = Query(None),
+    exclude_blocked: bool | None = Query(None),
 ):
+    conditions = parse_search_keyword(keyword) if keyword else None
     total = await uow.novels.count_novels(
-        conditions=parse_search_keyword(keyword) if keyword else None,
-        min_like=min_like, min_text=min_text,
-        exclude_ids=excluded_ids,
+        conditions=conditions, min_like=min_like, min_text=min_text,
+        exclude_ids=excluded_ids, exclude_blocked_tags=exclude_blocked,
     )
-    return {"total": total}
+    # How many matching novels were hidden by blocked tags (0 when the
+    # exclusion is off / nothing blocked) — powers the ExclusionBar.
+    excluded = 0
+    if exclude_blocked is not False:
+        excluded = await uow.novels.count_excluded_novels(
+            conditions=conditions, min_like=min_like, min_text=min_text,
+            exclude_ids=excluded_ids, exclude_blocked_tags=exclude_blocked,
+        )
+    return {"total": total, "excluded": excluded}
 
 
 @router.get("/ids", response_model=NovelIdsResponse)
@@ -107,8 +119,9 @@ async def get_matching_novel_ids(
     keyword: str | None = Query(None),
     min_like: int | None = Query(None),
     min_text: int | None = Query(None),
+    exclude_blocked: bool | None = Query(None),
 ):
-    """All IDs matching the filters — powers the 「全选匹配」bulk-add action.
+    """All VISIBLE IDs matching the filters — powers the 「全选匹配」bulk-add action.
 
     No size cap: the selection itself may be any size (operations beyond
     the sync cap run as background tasks).  ``truncated`` is kept for wire
@@ -117,13 +130,80 @@ async def get_matching_novel_ids(
     conditions = parse_search_keyword(keyword) if keyword else None
     total = await uow.novels.count_novels(
         conditions=conditions, min_like=min_like, min_text=min_text,
+        exclude_blocked_tags=exclude_blocked,
     )
     ids = await uow.novels.list_matching_ids(
         conditions=conditions,
         min_like=min_like,
         min_text=min_text,
+        exclude_blocked_tags=exclude_blocked,
     )
     return NovelIdsResponse(ids=ids, total=total, truncated=False)
+
+
+@router.get("/blocked-ids", response_model=NovelIdsResponse)
+async def get_blocked_novel_ids(
+    uow: SqlUnitOfWork = Depends(get_uow),
+    keyword: str | None = Query(None),
+    min_like: int | None = Query(None),
+    min_text: int | None = Query(None),
+    order_by: str | None = Query(None),
+    order_direction: str = Query("DESC"),
+):
+    """IDs of novels carrying blocked tags WITHIN the current search scope.
+
+    Powers the 「查看被排除」view.  Follows the global exclusion setting:
+    empty when exclusion is off.  The blocked-id list is filtered through
+    the same scope logic as ``filter_ids_in_scope`` (chunked to stay under
+    SQLite's variable limit); exclusion itself is not re-applied (the ids
+    are already the excluded set).
+
+    ``order_by`` (id/like/text) orders the result set; ``random`` or
+    unsupported values return the scope order.
+    """
+    conditions = parse_search_keyword(keyword) if keyword else None
+    blocked_ids = await uow.novels.list_blocked_ids()
+    if not blocked_ids:
+        return NovelIdsResponse(ids=[], total=0, truncated=False)
+
+    matching: list[int] = []
+    for i in range(0, len(blocked_ids), BATCH_ID_CHUNK_SIZE):
+        chunk = blocked_ids[i:i + BATCH_ID_CHUNK_SIZE]
+        matching.extend(
+            await uow.novels.filter_ids_in_scope(
+                chunk,
+                conditions=conditions,
+                min_like=min_like,
+                min_text=min_text,
+                exclude_blocked_tags=False,
+            )
+        )
+
+    if order_by and order_by != "random":
+        matching = await uow.novels.sort_novel_ids(
+            matching, order_by, order_direction,
+        )
+    return NovelIdsResponse(
+        ids=matching, total=len(matching), truncated=False,
+    )
+
+
+@router.post("/sort-ids", response_model=NovelIdsResponse)
+async def sort_novel_ids(
+    body: SortIdsRequest = Body(...),
+    uow: SqlUnitOfWork = Depends(get_uow),
+):
+    """Order an explicit id list by a novel column — 「查看已选」排序.
+
+    Returns the same ids ordered by id/like/text (missing ids dropped).
+    """
+    ids = sorted({int(i) for i in body.novel_ids})
+    if not ids:
+        return NovelIdsResponse(ids=[], total=0, truncated=False)
+    ordered = await uow.novels.sort_novel_ids(
+        ids, body.order_by, body.order_direction,
+    )
+    return NovelIdsResponse(ids=ordered, total=len(ordered), truncated=False)
 
 
 @router.post("/by-ids", response_model=NovelsByIdsResponse)
@@ -147,6 +227,7 @@ async def get_novels_by_ids(
 async def match_novel_ids(
     body: MatchIdsRequest = Body(...),
     uow: SqlUnitOfWork = Depends(get_uow),
+    exclude_blocked: bool | None = Query(None),
 ):
     """Subset of *novel_ids* that match the filters — scoped 「清除选择」.
 
@@ -166,6 +247,7 @@ async def match_novel_ids(
                 conditions=conditions,
                 min_like=body.min_like,
                 min_text=body.min_text,
+                exclude_blocked_tags=exclude_blocked,
             )
         )
     return MatchIdsResponse(matching_ids=matching, truncated=False)

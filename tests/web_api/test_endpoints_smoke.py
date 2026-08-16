@@ -176,7 +176,7 @@ class TestNovelsList:
         _seed_novel(session_factory, 1, "标题", str(tmp_path / "1.txt"))
         r = client.get("/api/novels/count")
         assert r.status_code == 200
-        assert r.json() == {"total": 1}
+        assert r.json() == {"total": 1, "excluded": 0}
 
     def test_unknown_condition_type_is_400(self, client):
         """A typo in a condition type must be loud, not an empty result."""
@@ -468,7 +468,26 @@ class TestSystemConfigEndpoint:
         assert r.status_code == 200
         assert set(r.json()) == {
             "default_min_like", "default_min_text", "batch_download_naming",
+            "exclude_blocked_tag_novels",
         }
+        assert r.json()["exclude_blocked_tag_novels"] is True
+
+    def test_update_config_persists(self, client):
+        """PUT toggles the runtime setting (settings table, default-on)."""
+        r = client.put("/api/system/config", json={
+            "exclude_blocked_tag_novels": False,
+        })
+        assert r.status_code == 200
+        assert r.json()["exclude_blocked_tag_novels"] is False
+
+        r = client.get("/api/system/config")
+        assert r.json()["exclude_blocked_tag_novels"] is False
+
+        # Back to default-on
+        r = client.put("/api/system/config", json={
+            "exclude_blocked_tag_novels": True,
+        })
+        assert r.json()["exclude_blocked_tag_novels"] is True
 
 
 class TestTagPreferencesEndpoints:

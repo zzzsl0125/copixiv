@@ -15,9 +15,12 @@ BATCH_MAX_NOVELS = 5000
 BATCH_MAX_TAGS = 20
 
 # Internal chunk size for statements that address an explicit ID list
-# (match-ids intersection, task safety fallback).  Keeps every ``IN (...)``
-# well under SQLite's compiled MAX_VARIABLE_NUMBER (250000).
-BATCH_ID_CHUNK_SIZE = 200_000
+# (match-ids intersection, blocked-ids, sort-ids, task safety fallback).
+# 30k sits safely under the LOWEST mainstream SQLite variable limit
+# (32766 — SQLite 3.32~3.46 default), so chunked IN-lists work on any
+# environment instead of only on 250k-limit builds.  More chunks cost
+# a few extra index scans — negligible next to the row work itself.
+BATCH_ID_CHUNK_SIZE = 30_000
 
 
 async def resolve_batch_scope(
