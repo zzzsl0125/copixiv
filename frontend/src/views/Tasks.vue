@@ -39,10 +39,14 @@ const openModal = (task?: ScheduledTask) => {
   isModalOpen.value = true
 }
 
-const closeModal = () => {
-  if (savingTask.value) return
+const dismissModal = () => {
   isModalOpen.value = false
   editingTask.value = null
+}
+
+const closeModal = () => {
+  if (savingTask.value) return
+  dismissModal()
 }
 
 const saveTask = async (payload: Record<string, unknown>) => {
@@ -54,7 +58,8 @@ const saveTask = async (payload: Record<string, unknown>) => {
     } else {
       await taskApi.createScheduledTask(payload as unknown as Parameters<typeof taskApi.createScheduledTask>[0])
     }
-    closeModal()
+    // 保存成功后直接关闭（closeModal 在 savingTask=true 期间会被守卫拦截）
+    dismissModal()
     loadTasks()
   } catch (err: unknown) {
     toast.error(getApiErrorMessage(err, '保存失败，请检查网络或后端状态'))
