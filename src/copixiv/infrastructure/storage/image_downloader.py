@@ -12,7 +12,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from copixiv.app.config import config
+from copixiv.log import logger
 
 
 def _create_session() -> requests.Session:
@@ -38,9 +38,13 @@ class ImageDownloader:
         self,
         max_workers: int = 4,
         epub_builder: Any | None = None,
+        proxy_http: str = "",
+        proxy_https: str = "",
     ):
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
         self._epub_builder = epub_builder
+        self._proxy_http = proxy_http
+        self._proxy_https = proxy_https
         self._futures: list[tuple[int, Future]] = []
         self._in_flight: set[int] = set()
         self._in_flight_lock = threading.Lock()
@@ -67,8 +71,8 @@ class ImageDownloader:
         try:
             save_path.parent.mkdir(parents=True, exist_ok=True)
             proxies = {
-                "http": config.proxy.http,
-                "https": config.proxy.https,
+                "http": self._proxy_http,
+                "https": self._proxy_https,
             }
             response = local_session.get(url, stream=True, timeout=10, proxies=proxies)
             response.raise_for_status()
@@ -178,7 +182,7 @@ class ImageDownloader:
         Returns ``None`` on success, or a failure reason string so the
         caller (``await_all``) can persist it into ``failed_novel``.
         """
-        from copixiv.app.logger import logger
+        from copixiv.log import logger
 
         base_path = Path(data["path"]).parent
         novel_id = str(data["id"])

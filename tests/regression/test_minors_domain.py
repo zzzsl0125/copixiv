@@ -11,7 +11,10 @@ from copixiv.domain.services.tags import parse_tags
 
 def test_template_literal_illegal_chars_sanitized():
     """期望：模板字面量里的非法字符（如 ':'）也被清洗，产出 Windows 合法路径。"""
-    out = NovelNamingTemplate("{id}:{title}").resolve({"id": 123, "title": "abc"})
+    from types import SimpleNamespace
+    out = NovelNamingTemplate("{id}:{title}").resolve(
+        SimpleNamespace(id=123, title="abc")
+    )
     assert ":" not in out, f"路径含非法字符: {out!r}"
 
 
@@ -24,8 +27,9 @@ def test_dot_prefixed_reserved_names_detected():
 
 def test_duplicate_empty_token_removed_everywhere():
     """期望：重复出现且值为空的 token，所有出现都删除，不残留字面量占位符。"""
+    from types import SimpleNamespace
     out = NovelNamingTemplate("{title}_{id}_{title}").resolve(
-        {"id": 123, "title": ""}
+        SimpleNamespace(id=123, title="")
     )
     assert "{title}" not in out, f"残留占位符: {out!r}"
     assert out == "123"

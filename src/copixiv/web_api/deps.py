@@ -1,4 +1,10 @@
-"""FastAPI dependencies — session lifecycle, unit of work, query parsing."""
+"""FastAPI dependencies — session lifecycle, unit of work, query parsing,
+and typed access to the application services on ``app.state``.
+
+The ``app.state`` bag is populated by the container's lifespan; it is
+read ONLY here, so endpoints depend on typed functions instead of
+string-keyed state attributes (docs/MODULARITY.md §M9).
+"""
 
 import json
 from collections.abc import AsyncIterator, Generator
@@ -7,6 +13,26 @@ from fastapi import Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from copixiv.infrastructure.database.uow import SqlUnitOfWork
+
+
+def get_session_factory(request: Request):
+    """The process-wide SQLAlchemy session factory (app.state)."""
+    return request.app.state.session_factory
+
+
+def get_app_config(request: Request):
+    """The application config object (app.state)."""
+    return request.app.state.config
+
+
+def get_file_storage(request: Request):
+    """The file-storage service (app.state)."""
+    return request.app.state.file_storage
+
+
+def get_task_manager(request: Request):
+    """The task-manager facade (app.state)."""
+    return request.app.state.task_manager
 
 
 def get_db(request: Request) -> Generator[Session, None, None]:

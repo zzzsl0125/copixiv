@@ -30,7 +30,7 @@ from copixiv.infrastructure.storage.image_downloader import ImageDownloader
 from copixiv.infrastructure.epub.builder import EpubBuilder
 from copixiv.infrastructure.repositories.fts import FTSManager
 
-from copixiv.app.logger import logger
+from copixiv.log import logger
 from copixiv.infrastructure.notifier.telegram import TelegramNotifier
 from copixiv.tasks.manager import TaskManagerSystem
 
@@ -73,6 +73,10 @@ class Container:
     def build(self, backup: bool = False) -> None:
         """Create and wire all singletons.
 
+        Each domain is assembled in its own ``_build_*`` method (a per-domain
+        "module manifest" — see docs/MODULARITY.md §M10) so adding a new
+        capability extends one function instead of one long method.
+
         Args:
             backup: If True, create a weekly backup of the database before
                 running migrations.  Also performs an automatic weekly
@@ -82,19 +86,38 @@ class Container:
         logger.info("Pixiv patches applied.")
 
         # Resolve database path
-        db_path = Path(self.config.path.database)
-        if not db_path.is_absolute():
-            db_path = Path.cwd() / db_path
-        db_path_str = str(db_path)
+        db_path_str = self._resolve_database_path()
 
         # Auto-backup: first startup of each ISO week
+        db_path = Path(db_path_str)
         if backup:
             self._maybe_backup(db_path)
         elif self._should_auto_backup(db_path):
             logger.info("First startup this week — creating automatic backup.")
             self._maybe_backup(db_path)
 
-        # Database engine + migrations
+        # Per-domain assembly
+        self._build_database(db_path_str)
+        self._build_storage()
+        self._build_pixiv()
+        self._build_notifier()
+        self._build_task_manager()
+
+        logger.info("Container built successfully.")
+
+    # ------------------------------------------------------------------
+    # Per-domain assembly ("module manifests")
+    # ------------------------------------------------------------------
+
+    def _resolve_database_path(self) -> str:
+        """Resolve the configured database path against the working directory."""
+        db_path = Path(self.config.path.database)
+        if not db_path.is_absolute():
+            db_path = Path.cwd() / db_path
+        return str(db_path)
+
+    def _build_database(self, db_path_str: str) -> None:
+        """Engine + migrations + FTS warm-up + hot-cache warm-up."""
         self._engine = create_database_engine(db_path_str)
         self._session_factory = create_session_factory(self._engine)
         init_database(self._engine, db_path_str)
@@ -106,32 +129,41 @@ class Container:
         # Database cache warm-up — preload hot index pages into OS cache
         self._warmup_database_cache()
 
-        # Storage
+    def _build_storage(self) -> None:
+        """File storage + EPUB builder + image downloader.
+
+        All three receive their configuration explicitly (no global-config
+        imports — infrastructure must not depend on the app layer).
+        """
         self._file_storage = FileStorage(self.config.path.download or "download")
-
-        # EPUB
         self._epub_builder = EpubBuilder()
-
-        # Image downloader
         self._image_downloader = ImageDownloader(
-            max_workers=4, epub_builder=self._epub_builder
+            max_workers=4,
+            epub_builder=self._epub_builder,
+            proxy_http=self.config.proxy.http,
+            proxy_https=self.config.proxy.https,
         )
 
-        # Pixiv accounts
+    def _build_pixiv(self) -> None:
+        """Account pool (DB first, token file fallback) + shared client."""
         self._account_pool = AccountPool()
         self._load_accounts()
-
-        # Pixiv client
         self._client = PixivClient(
             account_pool=self._account_pool,
             max_concurrency=self.config.pixiv_client.max_concurrency,
             min_interval=self.config.pixiv_client.min_interval,
         )
 
-        # Telegram notifier
-        self._notifier = TelegramNotifier(self.config)
+    def _build_notifier(self) -> None:
+        """Notification backends (see docs/MODULARITY.md §M6)."""
+        self._notifier = TelegramNotifier(
+            token=self.config.telegram.token,
+            chat_id=self.config.telegram.chat_id,
+            proxy_http=self.config.proxy.http,
+        )
 
-        # Task manager (background scheduler)
+    def _build_task_manager(self) -> None:
+        """Background scheduler + task executor (see docs/MODULARITY.md §M8)."""
         self._task_manager = TaskManagerSystem(
             session_factory=self._session_factory,
             client=self._client,
@@ -141,8 +173,6 @@ class Container:
             config=self.config,
             notifier=self._notifier,
         )
-
-        logger.info("Container built successfully.")
 
     # ------------------------------------------------------------------
     # FastAPI factory
@@ -266,19 +296,16 @@ class Container:
             allow_headers=["*"],
         )
 
-        app.include_router(novels.router, prefix="/api/novels", tags=["novels"])
-        app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
-        app.include_router(system.router, prefix="/api/system", tags=["system"])
-        app.include_router(
-            tag_preferences.router, prefix="/api/tag-preferences", tags=["tag_preferences"]
-        )
-        app.include_router(
-            tag_aliases.router, prefix="/api/tag-aliases", tags=["tag_aliases"]
-        )
-        app.include_router(
-            search_history.router, prefix="/api/search-history", tags=["search_history"]
-        )
-        app.include_router(tokens.router, prefix="/api/tokens", tags=["tokens"])
+        # Routers mount themselves: each endpoint module declares its own
+        # ``ROUTE = (prefix, tags)`` manifest (docs/MODULARITY.md §M9), so
+        # adding an API area means registering its module here — nothing
+        # else in the composition root needs to change.
+        for module in (
+            novels, tasks, system, tag_preferences, tag_aliases,
+            search_history, tokens,
+        ):
+            prefix, tags = module.ROUTE
+            app.include_router(module.router, prefix=prefix, tags=tags)
 
         return app
 

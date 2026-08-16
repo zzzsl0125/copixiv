@@ -94,27 +94,20 @@ def test_write_endpoints_declare_write_uow():
 def test_application_layer_does_not_import_infrastructure():
     """期望：application 层不 import 具体基础设施（port 依赖倒置）。
 
-    唯一允许的例外（已在模块注释中说明的妥协）：
-    - record.py 在函数内延迟 import SqlUnitOfWork（BackgroundTasks
-      回调无法触达组合根）。
+    无例外：record.py 曾经延迟 import SqlUnitOfWork（BackgroundTasks
+    回调无法触达组合根的妥协），现已改为注入 UoW 工厂（组合边缘
+    由 web_api 端点构造具体类，见 docs/MODULARITY.md §3.1/§3.3）。
     """
     app_root = Path(__file__).resolve().parents[2] / "src" / "copixiv" / "application"
-    allowed = {
-        "record.py": {"copixiv.infrastructure.database.uow"},
-        "download_novel.py": set(),
-        "resolve_names.py": {"copixiv.app.logger"},
-    }
     violations = []
     for py_file in app_root.rglob("*.py"):
         tree = ast.parse(py_file.read_text())
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module:
                 if node.module.startswith("copixiv.infrastructure"):
-                    allowed_mods = allowed.get(py_file.name, set())
-                    if node.module not in allowed_mods:
-                        violations.append(
-                            f"{py_file.name}:{node.lineno} imports {node.module}"
-                        )
+                    violations.append(
+                        f"{py_file.name}:{node.lineno} imports {node.module}"
+                    )
     assert violations == [], (
         "application 层泄漏基础设施依赖:\n" + "\n".join(violations)
     )

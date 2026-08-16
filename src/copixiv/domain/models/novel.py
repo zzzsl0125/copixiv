@@ -38,6 +38,10 @@ class Novel(BaseModel):
     series_name: str | None = None
     series_index: int | None = None
     create_time: str | None = None
+    # Shuffle key for random browsing — persisted column.  The write path
+    # assigns a random value on insert (never overwritten on refresh);
+    # the read path uses it for keyset pagination in random order.
+    shuffle: int = 0
     # ``has_epub=None`` means "don't overwrite the stored value" on a
     # metadata-only refresh; the DB column itself is never NULL in practice.
     has_epub: EpubStatus | None = None

@@ -10,12 +10,15 @@ class _FakeNovelRepo:
     def __init__(self, novels):
         self._novels = novels
 
-    async def get_novels(self, **kwargs):
-        per_page = kwargs.get("per_page", 20)
-        return {"novels": self._novels[:per_page], "cursor": None}
+    async def get_novels(self, spec):
+        return {"novels": self._novels[:spec.per_page], "cursor": None}
+
+    async def get_novels_by_ids(self, novel_ids):
+        return [n for n in self._novels if n.id in novel_ids]
 
 
 def _novel(**overrides):
+    from types import SimpleNamespace
     base = {
         "id": 123,
         "title": "测试标题",
@@ -30,7 +33,7 @@ def _novel(**overrides):
         "has_epub": 0,
     }
     base.update(overrides)
-    return base
+    return SimpleNamespace(**base)
 
 
 async def test_preview_resolves_first_novel():

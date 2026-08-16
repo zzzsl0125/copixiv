@@ -11,13 +11,17 @@ from datetime import datetime
 from urllib.parse import parse_qs, urlparse
 
 from dateutil import parser as date_parser
-from pixivpy3 import PixivError
 from requests.exceptions import RequestException
 
-from .account import AccountStrategy, RateLimitError, AccountInvalidError
+from .account import (
+    AccountStrategy,
+    RateLimitError,
+    AccountInvalidError,
+    PixivApiError,
+)
 from .accounts import AccountPool
 
-from copixiv.app.logger import logger
+from copixiv.log import logger
 
 
 def _get_next_url(result):
@@ -191,10 +195,11 @@ class PixivClient:
                 last_error = RateLimitError(str(account))
                 if attempt < self._MAX_RETRIES:
                     await asyncio.sleep(self._backoff(attempt))
-            except (PixivError, RequestException, ConnectionError) as e:
-                # PixivError covers API-level errors; RequestException covers
-                # requests' own network errors; builtin ConnectionError is kept
-                # as a network-error stand-in used by the existing test suite.
+            except (PixivApiError, RequestException, ConnectionError) as e:
+                # PixivApiError covers API-level errors translated by
+                # account.execute(); RequestException covers requests' own
+                # network errors; builtin ConnectionError is kept as a
+                # network-error stand-in used by the existing test suite.
                 logger.warning(
                     f"API error on {account}: {e}, "
                     f"retry {attempt + 1}/{self._MAX_RETRIES + 1}"

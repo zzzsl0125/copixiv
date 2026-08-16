@@ -317,10 +317,13 @@ class TestFtsTagsIndexing:
         # have cached False for a DB without the virtual table.
         reset_fts_cache()
         repo = SQLAlchemyNovelRepository(session)
+        from copixiv.domain.services.query_spec import QuerySpec
         result = asyncio.run(repo.get_novels(
-            conditions=[("keyword", keyword)], order_by="id", per_page=50,
+            QuerySpec(
+                conditions=[("keyword", keyword)], order_by="id", per_page=50,
+            )
         ))
-        return [n["id"] for n in result["novels"]]
+        return [n.id for n in result["novels"]]
 
     def test_keyword_matches_tag_only_text(self, repo_session):
         """D1 regression: tags are searchable after an FTS rebuild."""

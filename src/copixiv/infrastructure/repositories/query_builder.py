@@ -98,10 +98,23 @@ class NovelQueryBuilder(BaseQueryBuilder):
     Count query uses the same filter structure, drops ORDER BY / LIMIT.
     """
 
-    def __init__(self, repo, **params):
+    def __init__(
+        self,
+        repo,
+        spec: QuerySpec,
+        *,
+        ids: list[int] | None = None,
+        restrict_ids: list[int] | None = None,
+        blocked_tag_names: frozenset[str] = frozenset(),
+    ):
         super().__init__(repo.session, models.Novel)
         self.repo = repo
-        self.params = params
+        self.spec = spec
+        # SQL-only inputs — supplied by the repository, not part of the
+        # user-facing QuerySpec (docs/MODULARITY.md §M3).
+        self.ids = ids
+        self.restrict_ids = restrict_ids
+        self.blocked_tag_names = blocked_tag_names
 
     # ------------------------------------------------------------------
     # Public entry points
@@ -109,7 +122,7 @@ class NovelQueryBuilder(BaseQueryBuilder):
 
     def build(self) -> tuple[Select, dict]:
         """Build the main list query."""
-        conditions = self.params.get("conditions") or []
+        conditions = self.spec.conditions
         tags, keywords, field_filters = self._categorize(conditions)
 
         # Skip display-flag JOINs when the query already filters by them
@@ -134,25 +147,25 @@ class NovelQueryBuilder(BaseQueryBuilder):
         main = self._where_thresholds(main)
 
         # Blocked-tag exclusion (NOT EXISTS; skipped entirely when empty)
-        blocked = self.params.get("blocked_tag_names")
+        blocked = self.blocked_tag_names
         if blocked:
             main = main.where(blocked_tags_not_exists(blocked))
 
-        exclude_ids = self.params.get("exclude_ids") or []
+        exclude_ids = self.spec.exclude_ids
         if exclude_ids:
             main = main.where(self.main_model.id.not_in(exclude_ids))
 
         # Pagination, ordering, limit — applied last so indexes can serve ORDER BY
         main = self._apply_cursor(
-            main, self.params.get("cursor"), self.params["order_by"],
-            self.params.get("order_direction", "DESC"),
+            main, self.spec.cursor, self.spec.order_by,
+            self.spec.order_direction,
         )
         main = self._apply_ordering(
-            main, self.params["order_by"], self.params["order_direction"],
+            main, self.spec.order_by, self.spec.order_direction,
         )
-        main = self._apply_limit(main, self.params["per_page"])
+        main = self._apply_limit(main, self.spec.per_page)
 
-        return main, self.params
+        return main, self.spec
 
     def build_ids(self) -> Select:
         """Build an ID-only query with the same filters, without limit.
@@ -160,7 +173,7 @@ class NovelQueryBuilder(BaseQueryBuilder):
         Used by batch operations to resolve the full matching ID set in a
         single lightweight scan (no display-flag JOINs, no column payload).
         """
-        conditions = self.params.get("conditions") or []
+        conditions = self.spec.conditions
         tags, keywords, field_filters = self._categorize(conditions)
 
         stmt = select(self.main_model.id).select_from(self.main_model)
@@ -174,11 +187,11 @@ class NovelQueryBuilder(BaseQueryBuilder):
 
         # Optional membership constraint: only return IDs from this set
         # (used by match-ids to intersect the selection with the scope).
-        id_set = self.params.get("ids")
+        id_set = self.ids
         if id_set:
             stmt = stmt.where(self.main_model.id.in_(id_set))
 
-        exclude_ids = self.params.get("exclude_ids") or []
+        exclude_ids = self.spec.exclude_ids
         if exclude_ids:
             stmt = stmt.where(self.main_model.id.not_in(exclude_ids))
         return stmt
@@ -189,16 +202,16 @@ class NovelQueryBuilder(BaseQueryBuilder):
         Returns None when there are no filters (caller can use a cheap
         ``SELECT COUNT(*) FROM novel``).
         """
-        conditions = self.params.get("conditions") or []
+        conditions = self.spec.conditions
         tags, keywords, field_filters = self._categorize(conditions)
 
         has_filters = bool(
             tags or keywords or field_filters
-            or self.params.get("min_like") is not None
-            or self.params.get("min_text") is not None
-            or self.params.get("exclude_ids")
-            or self.params.get("restrict_ids")
-            or self.params.get("blocked_tag_names")
+            or self.spec.min_like is not None
+            or self.spec.min_text is not None
+            or self.spec.exclude_ids
+            or self.restrict_ids
+            or self.blocked_tag_names
         )
         if not has_filters:
             return None
@@ -215,14 +228,14 @@ class NovelQueryBuilder(BaseQueryBuilder):
         stmt = self._where_thresholds(stmt)
 
         # Blocked-tag exclusion: restrict to / exclude from a set of ids.
-        restrict_ids = self.params.get("restrict_ids")
+        restrict_ids = self.restrict_ids
         if restrict_ids:
             stmt = stmt.where(self.main_model.id.in_(restrict_ids))
-        blocked = self.params.get("blocked_tag_names")
+        blocked = self.blocked_tag_names
         if blocked:
             stmt = stmt.where(blocked_tags_not_exists(blocked))
 
-        exclude_ids = self.params.get("exclude_ids") or []
+        exclude_ids = self.spec.exclude_ids
         if exclude_ids:
             stmt = stmt.where(self.main_model.id.not_in(exclude_ids))
         return stmt
@@ -577,8 +590,8 @@ class NovelQueryBuilder(BaseQueryBuilder):
         values in this dataset, and ``NULL >= 500`` evaluates to NULL
         (falsy) in any case, so COALESCE is unnecessary.
         """
-        min_like = self.params.get("min_like")
-        min_text = self.params.get("min_text")
+        min_like = self.spec.min_like
+        min_text = self.spec.min_text
         if min_like is not None and min_like > 0:
             stmt = stmt.where(
                 self.main_model.like >= min_like

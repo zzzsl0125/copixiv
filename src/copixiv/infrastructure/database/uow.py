@@ -158,7 +158,7 @@ class SqlUnitOfWork:
                 await self.rollback()
             except BaseException:
                 # Never let a rollback failure mask the original error.
-                from copixiv.app.logger import logger
+                from copixiv.log import logger
                 logger.exception("Rollback failed")
             raise
         finally:

@@ -3,6 +3,8 @@
 
 import pytest
 
+from copixiv.domain.models.novel import Novel
+
 from copixiv.domain.services.tags import parse_tags, normalize_tag
 from copixiv.domain.services.language import has_image_placeholders
 from copixiv.domain.services.filename import safe_filename, build_path, NovelNamingTemplate
@@ -205,21 +207,28 @@ class TestBuildBatchZip:
         assert len(missing) == 0
 
     def test_missing_path(self):
-        novels = [{"id": 1, "path": None, "title": "T", "author_name": "A"}]
+        novels = [Novel(id=1, title="T", author_id=0, path=None)]
         buf, titles, missing = build_batch_zip(novels)
         assert missing == ["1"]
 
     def test_file_not_on_disk(self):
-        novels = [{"id": 99999, "path": "/nonexistent/file.txt", "title": "T", "author_name": "A"}]
+        novels = [Novel(id=99999, title="T", author_id=0,
+                        path="/nonexistent/file.txt")]
         buf, titles, missing = build_batch_zip(novels)
         assert "99999" in missing
 
 
 # ---- naming template ----
 
-def _novel_dict(**overrides: object) -> dict:
-    """Minimal novel dict for template resolution tests."""
-    return {
+def _novel_dict(**overrides: object):
+    """Minimal novel-shaped object for template resolution tests.
+
+    A SimpleNamespace (not the strict :class:`Novel` model) so the
+    datetime-``create_time`` case stays testable — the template engine
+    deliberately works on any attribute-bearing object.
+    """
+    from types import SimpleNamespace
+    return SimpleNamespace(**{
         "id": 12345678,
         "title": "テスト小説",
         "author_name": "作者名",
@@ -232,7 +241,7 @@ def _novel_dict(**overrides: object) -> dict:
         "create_time": "2024-01-15T00:00:00",
         "path": "/some/path",
         "has_epub": 0,
-    } | overrides
+    } | overrides)
 
 
 class TestNovelNamingTemplate:
@@ -407,20 +416,20 @@ class TestBuildBatchZipWithTemplate:
         file_path = novel_dir / "test_title_42.txt"
         file_path.write_text("content", encoding="utf-8")
 
-        novels = [{
-            "id": 42,
-            "title": "Test Title",
-            "author_name": "Author",
-            "author_id": 1,
-            "like": 10,
-            "view": 100,
-            "text": 500,
-            "series_name": "My Series",
-            "series_index": 2,
-            "create_time": "2024-01-15T00:00:00",
-            "path": str(file_path.with_suffix("")),  # without extension
-            "has_epub": 0,
-        }]
+        novels = [Novel(
+            id=42,
+            title="Test Title",
+            author_name="Author",
+            author_id=1,
+            like=10,
+            view=100,
+            text=500,
+            series_name="My Series",
+            series_index=2,
+            create_time="2024-01-15T00:00:00",
+            path=str(file_path.with_suffix("")),  # without extension
+            has_epub=0,
+        )]
 
         custom = "{id}_{title}"
         buf, titles, missing = build_batch_zip(novels, "txt", custom)

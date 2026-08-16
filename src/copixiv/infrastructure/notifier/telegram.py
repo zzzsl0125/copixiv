@@ -16,9 +16,8 @@ from datetime import datetime
 
 import httpx
 
-from copixiv.app.config import AppConfig
 from copixiv.domain.models.task_result import TaskResult
-from copixiv.app.logger import logger
+from copixiv.log import logger
 
 
 def _escape(text: str) -> str:
@@ -36,10 +35,14 @@ class TelegramNotifier:
     across multiple notifications.  Call ``close()`` when done.
     """
 
-    def __init__(self, config: AppConfig) -> None:
-        tg = config.telegram
-        self._token: str = tg.token
-        self._chat_id: str = str(tg.chat_id) if tg.chat_id else ""
+    def __init__(
+        self,
+        token: str = "",
+        chat_id: str | int = "",
+        proxy_http: str = "",
+    ) -> None:
+        self._token: str = token
+        self._chat_id: str = str(chat_id) if chat_id else ""
         self._message_url = (
             f"https://api.telegram.org/bot{self._token}/sendMessage"
         )
@@ -47,7 +50,6 @@ class TelegramNotifier:
             f"https://api.telegram.org/bot{self._token}/sendDocument"
         )
 
-        proxy_http = config.proxy.http
         if proxy_http and "://" not in proxy_http:
             proxy_http = f"http://{proxy_http}"
         self._proxies: str | None = proxy_http if proxy_http else None

@@ -209,22 +209,26 @@ class NovelNamingTemplate:
 
         return _post_process(result)
 
-    def _iter_token_values(self, novel: dict[str, Any]):
-        """Yield ``(key, raw_string)`` for each token found in the template."""
+    def _iter_token_values(self, novel):
+        """Yield ``(key, raw_string)`` for each token found in the template.
+
+        *novel* is a domain :class:`~copixiv.domain.models.novel.Novel`
+        (or any object exposing the token attributes).
+        """
         # {id} — mandatory
-        yield "id", str(novel["id"])
+        yield "id", str(novel.id)
 
         # {date} — computed, formatted create_time
         if "{date}" in self._template:
-            yield "date", _format_date(novel.get("create_time"))
+            yield "date", _format_date(novel.create_time)
 
-        # All other tokens are novel-dict keys directly
+        # All other tokens are novel attributes directly
         for key in ("title", "author_name", "author_id", "like", "view",
                      "text", "series_name", "series_index"):
             placeholder = "{" + key + "}"
             if placeholder not in self._template:
                 continue
-            value = novel.get(key)
+            value = getattr(novel, key, None)
             if key == "author_name" and not value:
                 yield key, "未知作者"
             elif value is None:

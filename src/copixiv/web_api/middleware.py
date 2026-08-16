@@ -9,7 +9,7 @@ import time
 
 from starlette.types import Receive, Scope, Send
 
-from copixiv.app.logger import logger
+from copixiv.log import logger
 
 
 class AccessLogMiddleware:

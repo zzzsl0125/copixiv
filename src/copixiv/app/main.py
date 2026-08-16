@@ -1,19 +1,21 @@
-"""copixiv entry point — build container, create FastAPI app, run server.
+"""copixiv entry point — application factory + uvicorn launcher.
 
-Used by the ``copixiv`` console script (``pyproject.toml``), by
-``python -m copixiv.app.main``, and via the repo-root ``main.py`` shim
-(for ``python main.py`` / ``uvicorn main:app``).
+**Importing this module has no side effects** (see docs/MODULARITY.md
+§M10): the container is built only when :func:`create_app` is called.
+Entry paths:
+
+- ``copixiv`` console script → :func:`main` (runs uvicorn with the factory)
+- ``python -m copixiv.app.main`` → :func:`main`
+- repo-root ``main.py`` shim → builds ``app`` for ``python main.py`` /
+  ``uvicorn main:app``
+- tests / embedding → ``from copixiv.app.main import create_app``
 """
 
 import os
 import subprocess
 import sys
 
-from copixiv.app.logger import logger, setup_logging, InterceptHandler
-from copixiv.app.container import Container
-
-# Configure logging before anything else so all log output is captured.
-setup_logging()
+from copixiv.log import logger, setup_logging, InterceptHandler
 
 # uvicorn re-applies its own logging config on startup (dictConfig), which
 # would wipe the InterceptHandler that setup_logging() installed on the
@@ -33,13 +35,22 @@ UVICORN_LOG_CONFIG = {
     },
 }
 
-# Module-level app for uvicorn/gunicorn import.  Building the container at
-# import time (instead of inside a lifespan) keeps ``uvicorn
-# copixiv.app.main:app`` working without double-creation when the reloader
-# spawns a child process.
-container = Container()
-container.build()
-app = container.create_app()
+
+def create_app(config_path: str | None = None):
+    """Build the container and return a fully configured FastAPI app.
+
+    ``config_path`` selects an alternate config.yaml (defaults to the
+    shared application config).  Construction — logging setup, DB
+    migrations, account loading — happens here, never at import time.
+    """
+    from copixiv.app.container import Container
+
+    # Configure logging before anything else so all log output is captured.
+    setup_logging()
+
+    container = Container(config_path)
+    container.build()
+    return container.create_app()
 
 
 def ensure_port_free(port: int) -> None:
@@ -89,7 +100,8 @@ def main() -> None:
 
     try:
         uvicorn.run(
-            "copixiv.app.main:app",
+            "copixiv.app.main:create_app",
+            factory=True,
             host="0.0.0.0",
             port=port,
             reload=os.environ.get("COPIXIV_RELOAD") == "1",

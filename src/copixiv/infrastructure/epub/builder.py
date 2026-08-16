@@ -12,7 +12,7 @@ from ebooklib import epub
 from copixiv.domain.services.filename import safe_filename
 from copixiv.domain.services.language import has_image_placeholders
 
-from copixiv.app.logger import logger
+from copixiv.log import logger
 
 # Pattern for embedded image placeholders — keep in sync with domain.services.language
 _HAS_IMAGE_PATTERN = re.compile(

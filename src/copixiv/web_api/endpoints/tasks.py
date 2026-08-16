@@ -3,20 +3,26 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 
 from copixiv.domain.exceptions import NotFoundError, ValidationError
-from copixiv.web_api.deps import get_uow, get_write_uow
+from copixiv.web_api.deps import get_task_manager, get_uow, get_write_uow
 from copixiv.infrastructure.database.uow import SqlUnitOfWork
 from copixiv.web_api.schemas import (
     ScheduledTaskCreate, ScheduledTaskUpdate, ScheduledTaskResponse,
     TaskHistoryListResponse, TaskMethod, TaskArgument,
 )
-from copixiv.tasks.registry import describe_tasks, get_task
-import copixiv.tasks.novel_tasks  # noqa: F401 — ensure @register decorators fire
+from copixiv.tasks.registry import describe_tasks, discover_tasks, get_task
 
 router = APIRouter()
 
 
+# Route manifest — mounted automatically by the composition root
+# (docs/MODULARITY.md §M9): (prefix, tags) travels with the module.
+ROUTE = ("/api/tasks", ["tasks"])
+
+
+
 def _validate_task_function(task_name: str) -> None:
     """Reject schedules that reference an unregistered task function."""
+    discover_tasks()  # idempotent; also covers direct endpoint usage in tests
     if get_task(task_name) is None:
         raise ValidationError(f"Unknown task function: {task_name}")
 
@@ -44,9 +50,9 @@ async def get_scheduled_tasks(uow: SqlUnitOfWork = Depends(get_uow)):
 
 @router.post("/scheduled", response_model=ScheduledTaskResponse)
 async def create_scheduled_task(
-    request: Request,
     background_tasks: BackgroundTasks,
     task_in: ScheduledTaskCreate,
+    task_manager=Depends(get_task_manager),
     uow: SqlUnitOfWork = Depends(get_write_uow),
 ):
     _validate_task_function(task_in.task)
@@ -56,15 +62,15 @@ async def create_scheduled_task(
     # FastAPI/Starlette version runs them BEFORE the yield-dependency
     # teardown commit, so the reload would still read old data.)
     await uow.commit()
-    background_tasks.add_task(request.app.state.task_manager.reload_cron_jobs)
+    background_tasks.add_task(task_manager.reload_cron_jobs)
     return task
 
 
 @router.put("/scheduled/{task_id}", response_model=ScheduledTaskResponse)
 async def update_scheduled_task(
-    request: Request,
     background_tasks: BackgroundTasks,
     task_id: int, task_in: ScheduledTaskUpdate,
+    task_manager=Depends(get_task_manager),
     uow: SqlUnitOfWork = Depends(get_write_uow),
 ):
     if task_in.task is not None:
@@ -73,41 +79,46 @@ async def update_scheduled_task(
     if task is None:
         raise NotFoundError(f"Task {task_id} not found")
     await uow.commit()
-    background_tasks.add_task(request.app.state.task_manager.reload_cron_jobs)
+    background_tasks.add_task(task_manager.reload_cron_jobs)
     return task
 
 
 @router.delete("/scheduled/{task_id}")
 async def delete_scheduled_task(
-    request: Request,
     background_tasks: BackgroundTasks,
-    task_id: int, uow: SqlUnitOfWork = Depends(get_write_uow),
+    task_id: int,
+    task_manager=Depends(get_task_manager),
+    uow: SqlUnitOfWork = Depends(get_write_uow),
 ):
     if not await uow.tasks.delete_scheduled(task_id):
         raise NotFoundError(f"Task {task_id} not found")
     await uow.commit()
-    background_tasks.add_task(request.app.state.task_manager.reload_cron_jobs)
+    background_tasks.add_task(task_manager.reload_cron_jobs)
     return {"ok": True}
 
 
 @router.post("/scheduled/reorder")
 async def reorder_scheduled_tasks(
-    request: Request,
     background_tasks: BackgroundTasks,
-    task_ids: list[int], uow: SqlUnitOfWork = Depends(get_write_uow),
+    task_ids: list[int],
+    task_manager=Depends(get_task_manager),
+    uow: SqlUnitOfWork = Depends(get_write_uow),
 ):
     if not await uow.tasks.reorder_scheduled(task_ids):
         raise NotFoundError("Failed to reorder tasks")
     await uow.commit()
-    background_tasks.add_task(request.app.state.task_manager.reload_cron_jobs)
+    background_tasks.add_task(task_manager.reload_cron_jobs)
     return {"ok": True}
 
 
 @router.post("/scheduled/{task_id}/run")
-async def run_scheduled_task(task_id: int, request: Request):
+async def run_scheduled_task(
+    task_id: int,
+    task_manager=Depends(get_task_manager),
+):
     # DomainError 子类（NotFound/Validation/TaskAlreadyRunning → 404/400/409）
     # 由全局 DomainError handler 映射，无需在此捕获。
-    request.app.state.task_manager.run_task_now(task_id)
+    task_manager.run_task_now(task_id)
     return {"ok": True}
 
 

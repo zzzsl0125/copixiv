@@ -11,6 +11,7 @@ from copixiv.domain.models.novel import EpubStatus
 from copixiv.domain.services.archive import build_batch_zip
 from copixiv.domain.services.filename import NovelNamingTemplate
 from copixiv.domain.services.parsing import SearchConditions
+from copixiv.domain.services.query_spec import QuerySpec
 from copixiv.domain.ports.repositories import NovelRepository
 
 
@@ -64,19 +65,21 @@ class BatchDownloadUseCase:
             # id-descending order keeps the result deterministic.
             all_novels = await self._repo.get_novels_by_ids(novel_ids)
             novels = sorted(
-                all_novels, key=lambda n: n.get("id") or 0, reverse=True,
+                all_novels, key=lambda n: n.id or 0, reverse=True,
             )[:limit]
             if not novels:
                 raise NotFoundError("未找到匹配条件的小说")
         else:
             results = await self._repo.get_novels(
-                conditions=conditions,
-                order_by=order_by,
-                order_direction=order_direction,
-                per_page=limit,
-                min_like=min_like,
-                min_text=min_text,
-                exclude_ids=excluded_ids,
+                QuerySpec(
+                    conditions=conditions or [],
+                    order_by=order_by,
+                    order_direction=order_direction,
+                    per_page=limit,
+                    min_like=min_like,
+                    min_text=min_text,
+                    exclude_ids=excluded_ids or [],
+                )
             )
             novels = results.get("novels", [])
             if not novels:
@@ -129,17 +132,19 @@ class BatchDownloadUseCase:
         if novel_ids:
             all_novels = await self._repo.get_novels_by_ids(novel_ids)
             novels = sorted(
-                all_novels, key=lambda n: n.get("id") or 0, reverse=True,
+                all_novels, key=lambda n: n.id or 0, reverse=True,
             )[:1]
         else:
             results = await self._repo.get_novels(
-                conditions=conditions,
-                order_by=order_by,
-                order_direction=order_direction,
-                per_page=1,
-                min_like=min_like,
-                min_text=min_text,
-                exclude_ids=excluded_ids,
+                QuerySpec(
+                    conditions=conditions or [],
+                    order_by=order_by,
+                    order_direction=order_direction,
+                    per_page=1,
+                    min_like=min_like,
+                    min_text=min_text,
+                    exclude_ids=excluded_ids or [],
+                )
             )
             novels = results.get("novels", [])
         if not novels:
@@ -159,7 +164,7 @@ class BatchDownloadUseCase:
         actual_fmt = (
             "epub"
             if (format_mode == "prefer_epub"
-                and novel.get("has_epub") == EpubStatus.DONE)
+                and novel.has_epub == EpubStatus.DONE)
             else "txt"
         )
         return template.resolve(novel) + "." + actual_fmt

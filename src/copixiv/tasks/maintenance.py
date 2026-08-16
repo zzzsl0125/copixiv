@@ -1,7 +1,8 @@
 """Maintenance tasks — data repair, consistency checks, and index rebuilds.
 
-These are registered task functions that fix up stale or missing data.
-They only depend on the database and (optionally) the Pixiv API client.
+Registered task functions that fix up stale or missing data.  They only
+depend on the database and (optionally) the Pixiv API client, all reached
+through the :class:`TaskContext` (docs/MODULARITY.md §M8).
 
 All tasks return a :class:`TaskResult` with a human-readable summary.
 Since these are maintenance tasks (not novel discovery), the
@@ -12,21 +13,19 @@ plain summary instead of incorrectly labelling results as "new novels".
 from pathlib import Path
 import time
 
+from copixiv.application.author.resolve_names import resolve_author_names
 from copixiv.domain.models.novel import EpubStatus
 from copixiv.domain.models.task_result import TaskResult
 from copixiv.domain.services.language import has_image_placeholders
-from copixiv.application.author.resolve_names import resolve_author_names
 from copixiv.infrastructure.database.write_lock import db_write
-from copixiv.app.logger import logger
+from copixiv.log import logger
 
+from .context import TaskContext
 from .registry import register
 
 
 @register("check_epub")
-async def check_epub(
-    *,
-    uow,
-):
+async def check_epub(ctx: TaskContext) -> TaskResult:
     """Synchronise ``has_epub`` status with actual files on disk.
 
     * 1 (pending) + file exists        → 2 (completed)
@@ -40,6 +39,8 @@ async def check_epub(
     """
     from sqlalchemy import select as _select
     from copixiv.infrastructure.database import models
+
+    uow = ctx.uow
 
     async with uow.begin():
         stmt = _select(
@@ -151,12 +152,7 @@ def _no_images_ever_and_stale(txt_path: Path, novel_id: int) -> bool:
 
 
 @register("sync_empty_name")
-async def sync_empty_name(
-    *,
-    client,
-    uow,
-    write_lock,
-):
+async def sync_empty_name(ctx: TaskContext) -> TaskResult:
     """Fix novels whose ``author_name`` is NULL.
 
     Delegates to :func:`resolve_author_names` which checks the local
@@ -164,6 +160,8 @@ async def sync_empty_name(
     """
     from sqlalchemy import select as _select
     from copixiv.infrastructure.database import models
+
+    uow = ctx.uow
 
     async with uow.begin():
         stmt = _select(
@@ -176,7 +174,7 @@ async def sync_empty_name(
 
     author_ids = {row.author_id for row in rows}
     resolved = await resolve_author_names(
-        author_ids, client=client, uow=uow, write_lock=write_lock,
+        author_ids, client=ctx.client, uow=uow, write_lock=ctx.write_lock,
     )
 
     # 诚实统计：resolved 才是实际成功解析的作者数；novel 行由
@@ -188,16 +186,14 @@ async def sync_empty_name(
 
 
 @register("rebuild_fts")
-async def rebuild_fts(
-    *,
-    uow,
-):
+async def rebuild_fts(ctx: TaskContext) -> TaskResult:
     """Rebuild the FTS5 index from scratch.
 
     Use this after upgrading an existing v1 database whose ``novel_fts``
     rows predate the tags column — a rebuild is required before keyword
     search can hit tag-only text.
     """
+    uow = ctx.uow
     async with db_write():
         async with uow.begin():
             count = await uow.novels.rebuild_fts()
@@ -206,10 +202,7 @@ async def rebuild_fts(
 
 
 @register("check_fts")
-async def check_fts(
-    *,
-    uow,
-):
+async def check_fts(ctx: TaskContext) -> TaskResult:
     """FTS5 index health check — corruption, orphans, and missing entries.
 
     Read-only (no write lock).  Reports the index-entry/novel counts and
@@ -218,6 +211,8 @@ async def check_fts(
     is needed.
     """
     from copixiv.infrastructure.repositories.fts import FTSManager
+
+    uow = ctx.uow
 
     async with uow.begin():
         result = FTSManager(uow.session).check_fts_health()
@@ -238,11 +233,7 @@ async def check_fts(
 
 
 @register("fix_series_index")
-async def fix_series_index(
-    *,
-    client,
-    uow,
-):
+async def fix_series_index(ctx: TaskContext) -> TaskResult:
     """Fix novels whose ``series_index`` is NULL by assigning chapter
     numbers from series order (sorted by novel ID ≈ creation time).
 
@@ -258,6 +249,8 @@ async def fix_series_index(
     from copixiv.domain.services.parsing import safe_get, safe_set
     from .pipeline import _batch_upsert
 
+    uow = ctx.uow
+
     async with uow.begin():
         series_ids = await uow.series.series_with_empty_index()
 
@@ -272,7 +265,7 @@ async def fix_series_index(
     done = 0
     processed = 0
     for sid in series_ids:
-        resp = await client.novel_series(sid, fetch_all=True)
+        resp = await ctx.client.novel_series(sid, fetch_all=True)
         novels = safe_get(resp, "novels", [])
         if not novels:
             continue

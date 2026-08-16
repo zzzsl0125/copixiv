@@ -11,7 +11,7 @@ import json
 from functools import wraps
 from typing import Any, Callable
 
-from copixiv.app.logger import logger
+from copixiv.log import logger
 from pixivpy3 import AppPixivAPI
 from pixivpy3.aapi import ParsedJson, _MODE, _FILTER, DateOrStr
 from pixivpy3.utils import PixivError

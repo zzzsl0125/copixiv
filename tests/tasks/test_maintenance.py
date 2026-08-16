@@ -7,6 +7,7 @@ from sqlalchemy import text
 
 from copixiv.infrastructure.database.models import Author, Novel
 from copixiv.infrastructure.database.uow import SqlUnitOfWork
+from copixiv.tasks.context import TaskContext
 from copixiv.tasks.maintenance import check_epub, check_fts, rebuild_fts
 
 
@@ -47,7 +48,7 @@ class TestCheckEpubDowngrade:
         """PENDING + no epub file + body text has no image placeholders → NO."""
         await _seed_pending(session_factory, 1, "没有图片的正文", False, tmp_path)
 
-        result = await check_epub(uow=SqlUnitOfWork(session_factory))
+        result = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
 
         assert "降级" in result.summary
         assert _get_status(session_factory, 1) == 0
@@ -60,7 +61,7 @@ class TestCheckEpubDowngrade:
             session_factory, 2, "正文 [uploadedimage:12345]", False, tmp_path,
         )
 
-        result = await check_epub(uow=SqlUnitOfWork(session_factory))
+        result = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
 
         assert "仍待处理" in result.summary
         assert _get_status(session_factory, 2) == 1
@@ -73,7 +74,7 @@ class TestCheckEpubDowngrade:
             session_factory, 3, "有图 [uploadedimage:1]", True, tmp_path,
         )
 
-        result = await check_epub(uow=SqlUnitOfWork(session_factory))
+        result = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
 
         assert "已完成" in result.summary
         assert _get_status(session_factory, 3) == 2
@@ -95,7 +96,7 @@ class TestCheckEpubStalePlaceholders:
         old = _time.time() - 30 * 86400          # 30 天前 = 早已放弃重试
         os.utime(txt, (old, old))
 
-        result = await check_epub(uow=SqlUnitOfWork(session_factory))
+        result = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
 
         assert "降级" in result.summary
         assert _get_status(session_factory, 4) == 0
@@ -108,7 +109,7 @@ class TestCheckEpubStalePlaceholders:
             session_factory, 5, "正文 [uploadedimage:2]", False, tmp_path,
         )
 
-        result = await check_epub(uow=SqlUnitOfWork(session_factory))
+        result = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
 
         assert "仍待处理" in result.summary
         assert _get_status(session_factory, 5) == 1
@@ -133,7 +134,7 @@ class TestFtsMaintenanceTasks:
     async def test_rebuild_fts_task_indexes_and_reports_count(self, session_factory):
         self._seed(session_factory)
 
-        result = await rebuild_fts(uow=SqlUnitOfWork(session_factory))
+        result = await rebuild_fts(TaskContext(uow=SqlUnitOfWork(session_factory)))
 
         assert "重建完成" in result.summary
         assert "1 本" in result.summary
@@ -141,15 +142,15 @@ class TestFtsMaintenanceTasks:
 
     async def test_check_fts_task_reports_healthy(self, session_factory):
         self._seed(session_factory)
-        await rebuild_fts(uow=SqlUnitOfWork(session_factory))
+        await rebuild_fts(TaskContext(uow=SqlUnitOfWork(session_factory)))
 
-        result = await check_fts(uow=SqlUnitOfWork(session_factory))
+        result = await check_fts(TaskContext(uow=SqlUnitOfWork(session_factory)))
 
         assert "健康" in result.summary
         assert "条目 1/1" in result.summary
 
     async def test_check_fts_task_reports_missing_table(self, session_factory):
         # fixture DB has no novel_fts virtual table
-        result = await check_fts(uow=SqlUnitOfWork(session_factory))
+        result = await check_fts(TaskContext(uow=SqlUnitOfWork(session_factory)))
 
         assert "索引表不存在" in result.summary

@@ -38,6 +38,15 @@ dev = [
 [project.scripts]
 copixiv = "copixiv.app.main:main"
 
+# Task plugins (docs/MODULARITY.md §M8): third-party packages install a
+# task by declaring an entry point in this group.  Built-in tasks use the
+# same mechanism when the package is installed; source-tree runs fall
+# back to registry.DEFAULT_TASK_MODULES.
+[project.entry-points."copixiv.tasks"]
+novel_tasks = "copixiv.tasks.novel_tasks"
+batch_tasks = "copixiv.tasks.batch_tasks"
+maintenance = "copixiv.tasks.maintenance"
+
 [tool.hatch.metadata]
 allow-direct-references = true
 

@@ -11,13 +11,14 @@ class _FakeNovelRepo:
         self._novel = novel
 
     async def get_by_id(self, novel_id):
-        if novel_id != self._novel.get("id"):
+        if novel_id != self._novel.id:
             return None
         return self._novel
 
 
-def _novel(novel_id: int, path: str | None) -> dict:
-    return {"id": novel_id, "path": path}
+def _novel(novel_id: int, path: str | None):
+    from types import SimpleNamespace
+    return SimpleNamespace(id=novel_id, path=path)
 
 
 async def test_returns_resolved_path_and_txt_media_type(tmp_path):

@@ -13,7 +13,7 @@ from copixiv.domain.ports.pixiv import PixivNovelPort
 from copixiv.domain.ports.unit_of_work import UnitOfWork
 from copixiv.domain.ports.write_lock import WriteLockPort
 from copixiv.domain.services.parsing import safe_get
-from copixiv.app.logger import logger
+from copixiv.log import logger
 
 
 async def resolve_author_names(

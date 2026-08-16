@@ -11,7 +11,7 @@ from .account import (
     RateLimitError,
 )
 
-from copixiv.app.logger import logger
+from copixiv.log import logger
 
 
 class AccountPool:

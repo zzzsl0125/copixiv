@@ -92,17 +92,19 @@ if not TOKEN_PY.exists() and TOKEN_JSON.exists():
     print(f"[setup] Created {TOKEN_PY.name} from {TOKEN_JSON.name}")
 
 # ── Now safe to import copixiv ────────────────────────────────────────────
-from copixiv.app.logger import setup_logging
+from copixiv.log import setup_logging
 setup_logging()
 
 from copixiv.app.container import Container
 from copixiv.infrastructure.database import models
 from copixiv.infrastructure.database.engine import create_database_engine, create_session_factory
 from copixiv.infrastructure.database.uow import SqlUnitOfWork
-from copixiv.tasks.registry import get_task, list_tasks
+from copixiv.infrastructure.database.write_lock import DbWriteLock
+from copixiv.tasks.context import TaskContext
+from copixiv.tasks.registry import describe_tasks, discover_tasks, get_spec
 
-# Trigger @register decorators
-import copixiv.tasks.novel_tasks  # noqa: F401
+# Trigger task registration (entry points with built-in fallback)
+discover_tasks()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -126,30 +128,24 @@ def _coerce_value(value: str, target_type: type) -> Any:
 
 
 def _parse_params(task_name: str, raw_params: list[str]) -> dict[str, Any]:
-    """Parse ``key=value`` strings into a typed dict based on the task signature.
+    """Parse ``key=value`` strings into a typed dict based on the task spec.
 
-    Parameter types are inferred from the registered function's signature
-    defaults.  Unknown parameters are passed through as strings.
+    Parameter types come from the task's Pydantic args model (docs/
+    MODULARITY.md §M8).  Unknown parameters are passed through as strings.
     """
-    func = get_task(task_name)
-    if func is None:
+    spec = get_spec(task_name)
+    if spec is None:
         raise SystemExit(f"Unknown task: {task_name!r}")
 
-    sig = inspect.signature(func)
+    if spec.args_model is None:
+        if raw_params:
+            print("[warn] Task takes no parameters — ignoring provided params")
+        return {}
 
-    # Build a map of known parameter names → their default types
-    known_types: dict[str, type] = {}
-    for pname, p in sig.parameters.items():
-        # Stop at injected deps (keyword-only after *)
-        if pname in ("client", "uow", "file_storage", "image_downloader",
-                      "epub_builder", "config", "_"):
-            continue
-        if p.kind == p.VAR_KEYWORD:
-            continue
-        if p.default is not inspect.Parameter.empty:
-            known_types[pname] = type(p.default)
-        elif p.annotation is not inspect.Parameter.empty:
-            known_types[pname] = p.annotation
+    known_types: dict[str, type] = {
+        name: info.annotation
+        for name, info in spec.args_model.model_fields.items()
+    }
 
     params: dict[str, Any] = {}
     for raw in raw_params:
@@ -197,22 +193,17 @@ def _injected_deps(container: Container):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def cmd_list() -> None:
-    """Print all available registered tasks with their signatures."""
+    """Print all available registered tasks with their arguments."""
     print("Available tasks:\n")
-    for name, fn in sorted(list_tasks().items()):
-        sig = inspect.signature(fn)
+    for m in describe_tasks():
         params = []
-        for pname, p in sig.parameters.items():
-            if pname in ("client", "uow", "file_storage", "image_downloader",
-                          "epub_builder", "config", "_"):
-                break
-            if p.kind == p.VAR_KEYWORD:
-                break
-            if p.default is not inspect.Parameter.empty:
-                params.append(f"{pname}={p.default!r}")
+        for a in m["arguments"]:
+            if a["required"]:
+                params.append(a["name"])
             else:
-                params.append(pname)
-        print(f"  {name}({', '.join(params)})")
+                params.append(f"{a['name']}={a['default']!r}")
+        first_line = (m["description"] or "").splitlines()[0] if m["description"] else ""
+        print(f"  {m['name']}({', '.join(params)})  — {first_line}")
     print()
 
 
@@ -293,28 +284,24 @@ def cmd_summary() -> None:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def run_task(task_name: str, params: dict[str, Any], dry_run: bool = False) -> Any:
-    """Build the container, look up the task, inject deps, and execute.
+    """Build the container, look up the task spec, inject deps via
+    TaskContext, and execute.
 
     Returns the task's return value.
     """
-    func = get_task(task_name)
-    if func is None:
+    spec = get_spec(task_name)
+    if spec is None:
         raise SystemExit(f"Unknown task: {task_name!r}")
 
-    sig = inspect.signature(func)
-
     # Validate required params
-    for pname, p in sig.parameters.items():
-        if pname in ("client", "uow", "file_storage", "image_downloader",
-                      "epub_builder", "config", "_"):
-            break
-        if p.kind == p.VAR_KEYWORD:
-            break
-        if p.default is inspect.Parameter.empty and pname not in params:
-            raise SystemExit(
-                f"Missing required parameter: {pname}\n"
-                f"  Usage: {task_name} {' '.join(f'{n}=<value>' for n in sig.parameters if n not in ('client','uow','file_storage','image_downloader','epub_builder','config','_') and n != 'kwargs')}"  # noqa: E501
-            )
+    if spec.args_model is not None:
+        for name, info in spec.args_model.model_fields.items():
+            if info.is_required() and name not in params:
+                raise SystemExit(
+                    f"Missing required parameter: {name}\n"
+                    f"  Usage: {task_name} "
+                    f"{' '.join(f'{n}=<value>' for n, i in spec.args_model.model_fields.items() if i.is_required())}"  # noqa: E501
+                )
 
     if dry_run:
         print(f"[dry-run] Task:     {task_name}")
@@ -345,19 +332,31 @@ def run_task(task_name: str, params: dict[str, Any], dry_run: bool = False) -> A
     deps = _injected_deps(container)
     uow = SqlUnitOfWork(container._session_factory)
 
-    # Merge params + injected deps (only what the function accepts)
-    all_kwargs = dict(params)
-    for dep_name, dep_value in deps.items():
-        if dep_name in sig.parameters:
-            all_kwargs[dep_name] = dep_value
-    if "uow" in sig.parameters:
-        all_kwargs["uow"] = uow
+    ctx = TaskContext(
+        uow=uow,
+        session_factory=container._session_factory,
+        client=deps.get("client"),
+        file_storage=deps.get("file_storage"),
+        image_downloader=deps.get("image_downloader"),
+        epub_builder=deps.get("epub_builder"),
+        config=deps.get("config"),
+        write_lock=DbWriteLock(),
+    )
+
+    args_obj = (
+        spec.args_model.model_validate(params)
+        if spec.args_model is not None
+        else None
+    )
 
     print(f"[run] Executing {task_name}...")
-    print(f"[run] Effective kwargs: {json.dumps(_redact_kwargs(all_kwargs), ensure_ascii=False)}")
+    print(f"[run] Params: {json.dumps(params, ensure_ascii=False)}")
     print()
 
-    result = asyncio.run(func(**all_kwargs))
+    if args_obj is None:
+        result = asyncio.run(spec.func(ctx=ctx))
+    else:
+        result = asyncio.run(spec.func(args_obj, ctx=ctx))
 
     # -- Show result ---------------------------------------------------------
     print(f"\n[result] Return value: {_format_result(result)}")
@@ -369,16 +368,6 @@ def run_task(task_name: str, params: dict[str, Any], dry_run: bool = False) -> A
     return result
 
 
-def _redact_kwargs(kwargs: dict) -> dict:
-    """Return a copy with large/complex values simplified for display."""
-    redacted = {}
-    for k, v in kwargs.items():
-        if k in ("client", "file_storage", "image_downloader", "epub_builder",
-                  "uow", "config"):
-            redacted[k] = f"<{type(v).__name__}>"
-        else:
-            redacted[k] = v
-    return redacted
 
 
 def _format_result(result: Any) -> str:

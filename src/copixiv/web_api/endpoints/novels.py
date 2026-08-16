@@ -7,8 +7,12 @@ from urllib.parse import quote
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Body, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
-from copixiv.web_api.deps import get_uow, get_write_uow, parse_json_param
+from copixiv.web_api.deps import (
+    get_app_config, get_file_storage, get_session_factory,
+    get_task_manager, get_uow, get_write_uow, parse_json_param,
+)
 from copixiv.domain.services.parsing import parse_search_keyword
+from copixiv.domain.services.query_spec import QuerySpec
 from copixiv.domain.exceptions import NotFoundError, ValidationError
 from copixiv.web_api.schemas import (
     BatchDownloadRequest,
@@ -43,6 +47,12 @@ from copixiv.application.novel import (
 router = APIRouter()
 
 
+# Route manifest — mounted automatically by the composition root
+# (docs/MODULARITY.md §M9): (prefix, tags) travels with the module.
+ROUTE = ("/api/novels", ["novels"])
+
+
+
 def _iter_zip(buffer) -> Iterator[bytes]:
     """Stream a ZIP buffer in chunks, closing it when done."""
     try:
@@ -54,8 +64,8 @@ def _iter_zip(buffer) -> Iterator[bytes]:
 
 @router.get("/", response_model=NovelListResponse)
 async def get_novels(
-    request: Request,
     background_tasks: BackgroundTasks,
+    session_factory=Depends(get_session_factory),
     uow: SqlUnitOfWork = Depends(get_uow),
     keyword: str | None = Query(None),
     order_by: str = C.ORDER_BY_RANDOM,
@@ -69,8 +79,8 @@ async def get_novels(
     conditions = parse_search_keyword(keyword) if keyword else None
     cursor_dict = parse_json_param(cursor, "cursor")
 
-    results = await uow.novels.get_novels(
-        conditions=conditions,
+    spec = QuerySpec(
+        conditions=conditions or [],
         order_by=order_by,
         order_direction=order_direction,
         cursor=cursor_dict,
@@ -79,10 +89,12 @@ async def get_novels(
         min_text=min_text,
         exclude_blocked_tags=exclude_blocked,
     )
+    results = await uow.novels.get_novels(spec)
 
     if conditions and background_tasks:
         background_tasks.add_task(
-            record_search_history, conditions, request.app.state.session_factory,
+            record_search_history, conditions,
+            lambda: SqlUnitOfWork(session_factory),
         )
 
     return results
@@ -98,18 +110,19 @@ async def count_novels(
     exclude_blocked: bool | None = Query(None),
 ):
     conditions = parse_search_keyword(keyword) if keyword else None
-    total = await uow.novels.count_novels(
-        conditions=conditions, min_like=min_like, min_text=min_text,
-        exclude_ids=excluded_ids, exclude_blocked_tags=exclude_blocked,
+    spec = QuerySpec(
+        conditions=conditions or [],
+        min_like=min_like,
+        min_text=min_text,
+        exclude_ids=excluded_ids or [],
+        exclude_blocked_tags=exclude_blocked,
     )
+    total = await uow.novels.count_novels(spec)
     # How many matching novels were hidden by blocked tags (0 when the
     # exclusion is off / nothing blocked) — powers the ExclusionBar.
     excluded = 0
     if exclude_blocked is not False:
-        excluded = await uow.novels.count_excluded_novels(
-            conditions=conditions, min_like=min_like, min_text=min_text,
-            exclude_ids=excluded_ids, exclude_blocked_tags=exclude_blocked,
-        )
+        excluded = await uow.novels.count_excluded_novels(spec)
     return {"total": total, "excluded": excluded}
 
 
@@ -128,16 +141,14 @@ async def get_matching_novel_ids(
     compatibility and is always false here.
     """
     conditions = parse_search_keyword(keyword) if keyword else None
-    total = await uow.novels.count_novels(
-        conditions=conditions, min_like=min_like, min_text=min_text,
-        exclude_blocked_tags=exclude_blocked,
-    )
-    ids = await uow.novels.list_matching_ids(
-        conditions=conditions,
+    spec = QuerySpec(
+        conditions=conditions or [],
         min_like=min_like,
         min_text=min_text,
         exclude_blocked_tags=exclude_blocked,
     )
+    total = await uow.novels.count_novels(spec)
+    ids = await uow.novels.list_matching_ids(spec)
     return NovelIdsResponse(ids=ids, total=total, truncated=False)
 
 
@@ -169,14 +180,14 @@ async def get_blocked_novel_ids(
     matching: list[int] = []
     for i in range(0, len(blocked_ids), BATCH_ID_CHUNK_SIZE):
         chunk = blocked_ids[i:i + BATCH_ID_CHUNK_SIZE]
+        scope_spec = QuerySpec(
+            conditions=conditions or [],
+            min_like=min_like,
+            min_text=min_text,
+            exclude_blocked_tags=False,
+        )
         matching.extend(
-            await uow.novels.filter_ids_in_scope(
-                chunk,
-                conditions=conditions,
-                min_like=min_like,
-                min_text=min_text,
-                exclude_blocked_tags=False,
-            )
+            await uow.novels.filter_ids_in_scope(chunk, scope_spec)
         )
 
     if order_by and order_by != "random":
@@ -241,22 +252,22 @@ async def match_novel_ids(
     matching: list[int] = []
     for i in range(0, len(body.novel_ids), BATCH_ID_CHUNK_SIZE):
         chunk = body.novel_ids[i:i + BATCH_ID_CHUNK_SIZE]
+        scope_spec = QuerySpec(
+            conditions=conditions or [],
+            min_like=body.min_like,
+            min_text=body.min_text,
+            exclude_blocked_tags=exclude_blocked,
+        )
         matching.extend(
-            await uow.novels.filter_ids_in_scope(
-                chunk,
-                conditions=conditions,
-                min_like=body.min_like,
-                min_text=body.min_text,
-                exclude_blocked_tags=exclude_blocked,
-            )
+            await uow.novels.filter_ids_in_scope(chunk, scope_spec)
         )
     return MatchIdsResponse(matching_ids=matching, truncated=False)
 
 
 @router.post("/batch-task", response_model=BatchTaskResponse)
 async def batch_task_operation(
-    request: Request,
     body: BatchOperationRequest = Body(...),
+    task_manager=Depends(get_task_manager),
     uow: SqlUnitOfWork = Depends(get_uow),
 ):
     """Enqueue a batch operation into the background task system.
@@ -268,22 +279,19 @@ async def batch_task_operation(
     happens synchronously so mistakes surface immediately.
     """
     scope = body.scope
-    if scope.mode == "ids":
-        ids = sorted({int(i) for i in scope.novel_ids})
-        if not ids:
-            raise ValidationError("请先勾选要操作的小说")
-    else:
-        conditions = (
-            parse_search_keyword(scope.keyword) if scope.keyword else None
-        )
-        ids = await uow.novels.list_matching_ids(
-            conditions=conditions,
-            min_like=scope.min_like,
-            min_text=scope.min_text,
-            exclude_ids=scope.excluded_ids or [],
-        )
-        if not ids:
-            raise NotFoundError("当前范围内没有可操作的小说")
+    # Scope resolution lives in the application layer (single rule for the
+    # sync and background paths — docs/MODULARITY.md §M7): cap=None because
+    # the background task chunks selections of any size.
+    ids = await resolve_batch_scope(
+        uow.novels,
+        mode=scope.mode,
+        novel_ids=scope.novel_ids,
+        keyword=scope.keyword,
+        min_like=scope.min_like,
+        min_text=scope.min_text,
+        excluded_ids=scope.excluded_ids or [],
+        cap=None,
+    )
 
     if body.operation in ("add_tags", "remove_tags"):
         raw = {t.strip() for t in body.tags if t and t.strip()}
@@ -294,14 +302,9 @@ async def batch_task_operation(
                 f"一次最多操作 {BATCH_MAX_TAGS} 个标签（当前 {len(raw)} 个）"
             )
 
-    from copixiv.tasks.registry import get_task
-
-    task_manager = request.app.state.task_manager
-    func = get_task("batch_operation")
     task_id = task_manager.run_task(
         "batch_operation",
-        func,
-        {
+        params={
             "operation": body.operation,
             "novel_ids": ids,
             "tags": body.tags,
@@ -322,13 +325,13 @@ async def toggle_special_follow(author_id: int, uow: SqlUnitOfWork = Depends(get
 
 @router.get("/{novel_id}/download")
 async def download_novel(
-    request: Request,
     novel_id: int,
+    file_storage=Depends(get_file_storage),
     uow: SqlUnitOfWork = Depends(get_uow),
     format: Literal["txt", "epub"] = "txt",
 ):
     use_case = GetNovelFileUseCase(
-        uow.novels, request.app.state.file_storage.download_dir,
+        uow.novels, file_storage.download_dir,
     )
     file_path, media_type = await use_case.execute(novel_id, format)
     headers = {
@@ -339,12 +342,12 @@ async def download_novel(
 
 @router.post("/batch-download")
 async def batch_download_novels(
-    request: Request,
     body: BatchDownloadRequest = Body(...),
+    app_config=Depends(get_app_config),
     uow: SqlUnitOfWork = Depends(get_uow),
 ):
     conditions = parse_search_keyword(body.keyword) if body.keyword else None
-    naming = request.app.state.config.batch_download.naming
+    naming = app_config.batch_download.naming
     use_case = BatchDownloadUseCase(uow.novels, naming)
     result = await use_case.execute(
         conditions,
@@ -379,12 +382,12 @@ async def batch_download_novels(
 
 @router.post("/batch-download/preview")
 async def batch_download_preview(
-    request: Request,
     body: BatchDownloadRequest = Body(...),
+    app_config=Depends(get_app_config),
     uow: SqlUnitOfWork = Depends(get_uow),
 ):
     conditions = parse_search_keyword(body.keyword) if body.keyword else None
-    naming = request.app.state.config.batch_download.naming
+    naming = app_config.batch_download.naming
     use_case = BatchDownloadUseCase(uow.novels, naming)
     path = await use_case.preview(
         conditions,
@@ -402,8 +405,8 @@ async def batch_download_preview(
 
 @router.post("/batch", response_model=BatchOperationResponse)
 async def batch_operation(
-    request: Request,
     body: BatchOperationRequest = Body(...),
+    file_storage=Depends(get_file_storage),
     uow: SqlUnitOfWork = Depends(get_write_uow),
 ):
     ids = await resolve_batch_scope(
@@ -416,7 +419,7 @@ async def batch_operation(
         excluded_ids=body.scope.excluded_ids,
     )
     if body.operation == "delete":
-        use_case = BatchDeleteUseCase(uow.novels, request.app.state.file_storage)
+        use_case = BatchDeleteUseCase(uow.novels, file_storage)
         affected = await use_case.execute(ids)
     else:
         use_case = BatchTagUseCase(uow.novels, uow.tags)
@@ -426,20 +429,18 @@ async def batch_operation(
 
 @router.delete("/{novel_id}", status_code=204)
 async def delete_novel(
-    request: Request,
     novel_id: int,
+    file_storage=Depends(get_file_storage),
     uow: SqlUnitOfWork = Depends(get_write_uow),
 ):
-    use_case = DeleteNovelUseCase(
-        uow.novels, request.app.state.file_storage
-    )
+    use_case = DeleteNovelUseCase(uow.novels, file_storage)
     await use_case.execute(novel_id)
 
 
 @router.post("/batch-export", response_model=BatchExportResponse)
 async def batch_export_task(
-    request: Request,
     body: BatchExportRequest = Body(...),
+    task_manager=Depends(get_task_manager),
 ):
     """Enqueue a batch export into the background task system.
 
@@ -451,14 +452,9 @@ async def batch_export_task(
     if not ids:
         raise ValidationError("请先勾选要导出的小说")
 
-    from copixiv.tasks.registry import get_task
-
-    task_manager = request.app.state.task_manager
-    func = get_task("batch_export")
     task_id = task_manager.run_task(
         "batch_export",
-        func,
-        {
+        params={
             "novel_ids": ids,
             "format_mode": body.format_mode,
             "zip_name": body.zip_name,
@@ -470,8 +466,8 @@ async def batch_export_task(
 
 @router.get("/export/{task_id}/download")
 async def download_export_file(
-    request: Request,
     task_id: int,
+    file_storage=Depends(get_file_storage),
     uow: SqlUnitOfWork = Depends(get_uow),
 ):
     """Stream a completed background export ZIP to the browser."""
@@ -482,7 +478,7 @@ async def download_export_file(
     from copixiv.domain.services.filename import safe_filename
 
     file_path = (
-        Path(request.app.state.file_storage.download_dir)
+        Path(file_storage.download_dir)
         / f"batch_export_{task_id}.zip"
     )
     if not file_path.is_file():

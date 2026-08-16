@@ -51,14 +51,14 @@ def build_batch_zip(
     try:
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
             for index, novel in enumerate(novels, start=1):
-                novel_id = novel.get("id")
-                novel_path_str = novel.get("path")
-                title = novel.get("title", str(novel_id))
+                novel_id = novel.id
+                novel_path_str = novel.path
+                title = novel.title or str(novel_id)
 
                 actual_fmt = (
                     "epub"
                     if (format_mode == "prefer_epub"
-                        and novel.get("has_epub") == EpubStatus.DONE)
+                        and novel.has_epub == EpubStatus.DONE)
                     else "txt"
                 )
 

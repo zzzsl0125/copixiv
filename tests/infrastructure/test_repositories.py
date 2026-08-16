@@ -280,9 +280,9 @@ class TestConcurrentAccess:
             try:
                 with Session() as s:
                     repo = SQLAlchemyNovelRepository(s)
+                    from copixiv.domain.services.query_spec import QuerySpec
                     result = asyncio.run(repo.get_novels(
-                        order_by="id",
-                        per_page=10,
+                        QuerySpec(order_by="id", per_page=10)
                     ))
                     return len(result.get("novels", []))
             except Exception as e:
@@ -410,27 +410,32 @@ class TestSQLAlchemyTaskRepository:
 
 
 class TestTaskManagerHelpers:
-    """Unit tests for TaskManagerSystem helper methods (no scheduler needed)."""
+    """Unit tests for task-kernel helper methods (no scheduler needed).
+
+    ``parse_params`` now lives on TaskHistoryRecorder (kernel/history.py),
+    ``_normalize_result`` on TaskExecutor (kernel/executor.py), and the
+    dependency dict on the executor (docs/MODULARITY.md §M8).
+    """
 
     def test_parse_json_string(self):
-        from copixiv.tasks.manager import TaskManagerSystem as TMS
-        assert TMS._parse_json('{"a": 1}') == {"a": 1}
-        assert TMS._parse_json("not json") == {}
+        from copixiv.tasks.history import TaskHistoryRecorder
+        assert TaskHistoryRecorder.parse_params('{"a": 1}') == {"a": 1}
+        assert TaskHistoryRecorder.parse_params("not json") == {}
 
     def test_parse_json_dict_passthrough(self):
-        from copixiv.tasks.manager import TaskManagerSystem as TMS
-        assert TMS._parse_json({"a": 1}) == {"a": 1}
-        assert TMS._parse_json(None) == {}
+        from copixiv.tasks.history import TaskHistoryRecorder
+        assert TaskHistoryRecorder.parse_params({"a": 1}) == {"a": 1}
+        assert TaskHistoryRecorder.parse_params(None) == {}
 
     def test_normalize_result_taskresult_passthrough(self):
         from copixiv.domain.models.task_result import TaskResult
-        from copixiv.tasks.manager import TaskManagerSystem as TMS
+        from copixiv.tasks.executor import TaskExecutor
         tr = TaskResult(summary="done", new_novel_titles=["a"])
-        assert TMS._normalize_result(tr) is tr
+        assert TaskExecutor._normalize_result(tr) is tr
 
     def test_normalize_result_none(self):
-        from copixiv.tasks.manager import TaskManagerSystem as TMS
-        r = TMS._normalize_result(None)
+        from copixiv.tasks.executor import TaskExecutor
+        r = TaskExecutor._normalize_result(None)
         assert r.summary == "完成"
 
     def test_construction_strips_none_deps(self):
@@ -444,8 +449,10 @@ class TestTaskManagerHelpers:
             epub_builder=None,
             config=None,
         )
-        assert tms._deps["client"] == "cli"
-        assert "write_lock" in tms._deps
+        deps = tms._executor._deps
+        assert deps["client"] == "cli"
+        assert deps["file_storage"] is None
+        assert "write_lock" in deps
 
     def test_construction_keeps_all_deps(self):
         from copixiv.tasks.manager import TaskManagerSystem
@@ -455,8 +462,9 @@ class TestTaskManagerHelpers:
             client="a", file_storage="b", image_downloader="c",
             epub_builder="d", config="e",
         )
+        deps = tms._executor._deps
         assert {
-            k: tms._deps[k]
+            k: deps[k]
             for k in ("client", "file_storage", "image_downloader",
                       "epub_builder", "config")
         } == {
@@ -464,5 +472,5 @@ class TestTaskManagerHelpers:
             "image_downloader": "c", "epub_builder": "d", "config": "e",
         }
         # write_lock is always added by the manager itself
-        assert "write_lock" in tms._deps
+        assert "write_lock" in deps
 

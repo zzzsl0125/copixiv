@@ -19,7 +19,7 @@ from copixiv.infrastructure.database import constants as C
 if TYPE_CHECKING:
     pass
 
-from copixiv.app.logger import logger
+from copixiv.log import logger
 
 
 class FTSManager:

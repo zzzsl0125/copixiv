@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 from copixiv.domain.services.filename import build_path
-from copixiv.app.logger import logger
+from copixiv.log import logger
 
 
 class FileStorage:

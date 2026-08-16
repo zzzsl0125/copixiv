@@ -12,6 +12,12 @@ from copixiv.web_api.schemas import (
 router = APIRouter()
 
 
+# Route manifest — mounted automatically by the composition root
+# (docs/MODULARITY.md §M9): (prefix, tags) travels with the module.
+ROUTE = ("/api/tag-preferences", ["tag_preferences"])
+
+
+
 @router.get("/", response_model=list[TagPreferenceResponse])
 async def get_tag_preferences(uow: SqlUnitOfWork = Depends(get_uow)):
     return await uow.tags.get_preferences()

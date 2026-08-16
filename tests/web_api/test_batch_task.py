@@ -42,7 +42,7 @@ class _RecordingTaskManager:
         self.next_task_id = 1000
         self.busy = False
 
-    def run_task(self, name: str, func, params: dict | None = None) -> int:
+    def run_task(self, name: str, func=None, params: dict | None = None) -> int:
         if self.busy:
             raise TaskAlreadyRunningError(f"Task '{name}' is already pending or running.")
         self.enqueued.append((name, params or {}))
@@ -182,13 +182,17 @@ async def _run_task(session_factory, tmp_path, *, operation, novel_ids,
 
         uow = SqlUnitOfWork(session_factory)
         return await batch_operation(
-            operation=operation,
-            novel_ids=novel_ids,
-            tags=tags,
-            task_id=task_id,
-            uow=uow,
-            write_lock=DbWriteLock(),
-            file_storage=_FakeFileStorage(tmp_path),
+            batch_tasks.BatchOperationArgs(
+                operation=operation,
+                novel_ids=novel_ids,
+                tags=tags,
+            ),
+            batch_tasks.TaskContext(
+                uow=uow,
+                write_lock=DbWriteLock(),
+                file_storage=_FakeFileStorage(tmp_path),
+                task_id=task_id,
+            ),
         )
     finally:
         batch_tasks.BATCH_TASK_SAFETY_CHUNK = original
@@ -324,7 +328,8 @@ class TestBatchExportTask:
 
         from copixiv.infrastructure.database.uow import SqlUnitOfWork
         from copixiv.infrastructure.database.write_lock import DbWriteLock
-        from copixiv.tasks.batch_tasks import batch_export
+        from copixiv.tasks.batch_tasks import BatchExportArgs, batch_export
+        from copixiv.tasks.context import TaskContext
 
         for i in (1, 2):
             p = tmp_path / f"{i}.txt"
@@ -342,13 +347,17 @@ class TestBatchExportTask:
             task_id = row.id
 
         result = asyncio.run(batch_export(
-            novel_ids=[1, 2],
-            format_mode="txt",
-            zip_name="导出测试",
-            task_id=task_id,
-            uow=SqlUnitOfWork(session_factory),
-            write_lock=DbWriteLock(),
-            file_storage=_FakeFileStorage(tmp_path),
+            BatchExportArgs(
+                novel_ids=[1, 2],
+                format_mode="txt",
+                zip_name="导出测试",
+            ),
+            TaskContext(
+                uow=SqlUnitOfWork(session_factory),
+                write_lock=DbWriteLock(),
+                file_storage=_FakeFileStorage(tmp_path),
+                task_id=task_id,
+            ),
         ))
 
         assert "批量导出完成" in result.summary
@@ -373,13 +382,15 @@ class TestBatchExportTask:
 
         from copixiv.infrastructure.database.uow import SqlUnitOfWork
         from copixiv.infrastructure.database.write_lock import DbWriteLock
-        from copixiv.tasks.batch_tasks import batch_export
+        from copixiv.tasks.batch_tasks import BatchExportArgs, batch_export
+        from copixiv.tasks.context import TaskContext
 
         with pytest.raises(Exception, match="均不存在"):
             asyncio.run(batch_export(
-                novel_ids=[999999],
-                task_id=None,
-                uow=SqlUnitOfWork(session_factory),
-                write_lock=DbWriteLock(),
-                file_storage=_FakeFileStorage(tmp_path),
+                BatchExportArgs(novel_ids=[999999]),
+                TaskContext(
+                    uow=SqlUnitOfWork(session_factory),
+                    write_lock=DbWriteLock(),
+                    file_storage=_FakeFileStorage(tmp_path),
+                ),
             ))

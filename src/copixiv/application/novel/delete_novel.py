@@ -30,7 +30,7 @@ class DeleteNovelUseCase:
         if not novel:
             raise NotFoundError(f"Novel {novel_id} not found")
 
-        novel_path = novel.get("path")
+        novel_path = novel.path
         await self._repo.delete(novel_id)
 
         if novel_path:

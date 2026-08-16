@@ -6,7 +6,7 @@ log/access.log in sync with actual responses.
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from copixiv.app.logger import capture_logs
+from copixiv.log import capture_logs
 from copixiv.web_api.middleware import AccessLogMiddleware
 
 

@@ -6,6 +6,7 @@ from copixiv.domain.exceptions import NotFoundError, ValidationError
 from copixiv.domain.ports.repositories import NovelRepository, TagRepository
 from copixiv.domain.ports.storage import FileStoragePort
 from copixiv.domain.services.parsing import parse_search_keyword
+from copixiv.domain.services.query_spec import QuerySpec
 
 # Hard safety cap per SYNCHRONOUS batch operation — one HTTP request must
 # never walk the whole library.  The frontend prompts the user to narrow
@@ -23,6 +24,12 @@ BATCH_MAX_TAGS = 20
 BATCH_ID_CHUNK_SIZE = 30_000
 
 
+# Sentinel: "cap not given" → resolve the module-level BATCH_MAX_NOVELS at
+# call time (monkeypatch-friendly), while an explicit ``cap=None`` means
+# truly uncapped (background-task path).
+_DEFAULT_CAP = object()
+
+
 async def resolve_batch_scope(
     novel_repo: NovelRepository,
     *,
@@ -32,40 +39,57 @@ async def resolve_batch_scope(
     min_like: int | None,
     min_text: int | None,
     excluded_ids: list[int],
+    cap: int | None | object = _DEFAULT_CAP,
 ) -> list[int]:
     """Resolve the effective novel ID list for a batch operation.
 
+    The single scope-resolution rule, shared by the synchronous batch
+    endpoint (capped at :data:`BATCH_MAX_NOVELS`) and the background-task
+    enqueue path (``cap=None`` — any size, the task chunks the work).
+
+    Args:
+        cap: Maximum matched/selected size; ``None`` disables the check
+            (background tasks accept selections of any size).  Defaults to
+            the current :data:`BATCH_MAX_NOVELS`.
+
     Raises:
-        ValidationError: Empty scope, or scope larger than
-            :data:`BATCH_MAX_NOVELS`.
+        ValidationError: Empty scope, or scope larger than *cap*.
         NotFoundError: Filter-matched scope contains no novels.
     """
+    if cap is _DEFAULT_CAP:
+        cap = BATCH_MAX_NOVELS
     if mode == "ids":
         ids = sorted({int(i) for i in novel_ids})
         if not ids:
             raise ValidationError("请先勾选要操作的小说")
-        if len(ids) > BATCH_MAX_NOVELS:
+        if cap is not None and len(ids) > cap:
             raise ValidationError(
                 f"已勾选 {len(ids)} 篇，单次批量操作上限为 "
-                f"{BATCH_MAX_NOVELS} 篇，请减少勾选数量"
+                f"{cap} 篇，请减少勾选数量"
             )
         return ids
 
     conditions = parse_search_keyword(keyword) if keyword else None
     matched = await novel_repo.count_novels(
-        conditions=conditions, min_like=min_like, min_text=min_text,
+        QuerySpec(
+            conditions=conditions or [],
+            min_like=min_like,
+            min_text=min_text,
+        )
     )
-    if matched > BATCH_MAX_NOVELS:
+    if cap is not None and matched > cap:
         raise ValidationError(
             f"当前筛选匹配 {matched} 篇，超过单次批量操作上限 "
-            f"{BATCH_MAX_NOVELS} 篇，请先缩小筛选范围"
+            f"{cap} 篇，请先缩小筛选范围"
         )
 
     ids = await novel_repo.list_matching_ids(
-        conditions=conditions,
-        min_like=min_like,
-        min_text=min_text,
-        exclude_ids=excluded_ids or [],
+        QuerySpec(
+            conditions=conditions or [],
+            min_like=min_like,
+            min_text=min_text,
+            exclude_ids=excluded_ids or [],
+        )
     )
     if not ids:
         raise NotFoundError("当前范围内没有可操作的小说")

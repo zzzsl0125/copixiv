@@ -1,7 +1,8 @@
-"""Background task: batch operations (delete / add_tags / remove_tags).
+"""Background tasks: batch operations (delete / add_tags / remove_tags)
+and batch export (ZIP building).
 
-Registered under the name ``batch_operation``.  Runs inside the task system
-(the user can close the page — the operation continues).
+Registered under ``batch_operation`` / ``batch_export``.  Runs inside the
+task system (the user can close the page — the operation continues).
 
 Chunking policy — decided by benchmarking on the real 232k database
 (``scripts/bench_batch_chunks.py`` / ``scripts/bench_fts_cost.py``):
@@ -18,9 +19,9 @@ Chunking policy — decided by benchmarking on the real 232k database
   :data:`BATCH_TASK_SAFETY_CHUNK` (200k) — where a single ``IN (...)``
   would approach SQLite's variable limit.
 
-The task self-reports progress into its own ``task_history`` row
-(``task_id`` is injected by the task manager), so the 「任务管理」page
-shows live progress while it runs.
+Tasks self-report progress into their own ``task_history`` row (``task_id``
+travels through the TaskContext), so the 「任务管理」page shows live
+progress while they run.
 """
 
 from __future__ import annotations
@@ -30,7 +31,8 @@ import json
 import time
 from pathlib import Path
 
-from copixiv.app.logger import logger
+from pydantic import BaseModel
+
 from copixiv.application.novel.batch_operations import (
     BATCH_ID_CHUNK_SIZE,
     BATCH_MAX_TAGS,
@@ -38,7 +40,9 @@ from copixiv.application.novel.batch_operations import (
 from copixiv.domain.exceptions import ValidationError
 from copixiv.domain.models.task_result import TaskResult
 from copixiv.domain.services.archive import build_batch_zip
+from copixiv.log import logger
 
+from .context import TaskContext
 from .registry import register
 
 BATCH_TASK_NAME = "batch_operation"
@@ -56,16 +60,27 @@ _OP_LABELS = {
 }
 
 
-@register(BATCH_TASK_NAME)
+# ---------------------------------------------------------------------------
+# Argument models (JSON contract per task)
+# ---------------------------------------------------------------------------
+
+
+class BatchOperationArgs(BaseModel):
+    operation: str
+    novel_ids: list[int]
+    tags: list[str] | None = None
+
+
+class BatchExportArgs(BaseModel):
+    novel_ids: list[int]
+    format_mode: str = "txt"
+    zip_name: str | None = None
+    naming_template: str | None = None
+
+
+@register(BATCH_TASK_NAME, args=BatchOperationArgs)
 async def batch_operation(
-    *,
-    operation: str,
-    novel_ids: list,
-    tags: list | None = None,
-    task_id: int | None = None,
-    uow,
-    write_lock,
-    file_storage,
+    args: BatchOperationArgs, ctx: TaskContext,
 ) -> TaskResult:
     """Execute a batch operation over an explicit ID list.
 
@@ -73,27 +88,25 @@ async def batch_operation(
         operation: ``delete`` | ``add_tags`` | ``remove_tags``.
         novel_ids: The full selection (any size).
         tags: Tag names for the tag operations (aliases resolved here).
-        task_id: Injected by the task manager; when set, progress updates
-            are written to this history row.
     """
-    if operation not in _OP_LABELS:
-        raise ValidationError(f"未知的批量操作: {operation}")
+    if args.operation not in _OP_LABELS:
+        raise ValidationError(f"未知的批量操作: {args.operation}")
 
-    ids = sorted({int(i) for i in novel_ids})
+    ids = sorted({int(i) for i in args.novel_ids})
     if not ids:
         raise ValidationError("没有可处理的小说")
     total = len(ids)
 
     # ---- tags: normalize + resolve aliases (same rules as the sync path)
     tag_set: set[str] | None = None
-    if operation in ("add_tags", "remove_tags"):
-        raw = {t.strip() for t in (tags or []) if t and t.strip()}
+    if args.operation in ("add_tags", "remove_tags"):
+        raw = {t.strip() for t in (args.tags or []) if t and t.strip()}
         if not raw:
             raise ValidationError("请至少输入一个标签")
         if len(raw) > BATCH_MAX_TAGS:
             raise ValidationError(f"一次最多操作 {BATCH_MAX_TAGS} 个标签")
-        async with uow.begin():
-            alias_map = await uow.tags.get_alias_map()
+        async with ctx.uow.begin():
+            alias_map = await ctx.uow.tags.get_alias_map()
         tag_set = {alias_map.get(t, t) for t in raw}
 
     chunks = [
@@ -105,18 +118,19 @@ async def batch_operation(
 
     async def report_progress(stage: str) -> None:
         """Write live progress into the task-history row (best-effort)."""
-        if task_id is None:
+        if ctx.task_id is None:
             return
         try:
-            async with write_lock():
-                async with uow.begin():
-                    await uow.tasks.update_task(
-                        task_id,
+            async with ctx.write_lock():
+                async with ctx.uow.begin():
+                    await ctx.uow.tasks.update_task(
+                        ctx.task_id,
                         "running",
                         result=json.dumps(
                             {
                                 "summary": (
-                                    f"{_OP_LABELS[operation]}进行中：{stage}"
+                                    f"{_OP_LABELS[args.operation]}进行中："
+                                    f"{stage}"
                                 ),
                             },
                             ensure_ascii=False,
@@ -129,26 +143,28 @@ async def batch_operation(
 
     for idx, chunk in enumerate(chunks, start=1):
         try:
-            if operation == "delete":
-                async with write_lock():
-                    async with uow.begin():
-                        paths = await uow.novels.delete_many(chunk)
+            if args.operation == "delete":
+                async with ctx.write_lock():
+                    async with ctx.uow.begin():
+                        paths = await ctx.uow.novels.delete_many(chunk)
                 # File cleanup AFTER the transaction — unlink failures must
                 # not roll the chunk back (DB-first, same as the sync path).
                 for path in paths:
                     if path:
                         try:
-                            file_storage.delete_novel_files(path)
+                            ctx.file_storage.delete_novel_files(path)
                         except Exception:  # noqa: BLE001
                             logger.exception("删除小说文件失败: %s", path)
-            elif operation == "add_tags":
-                async with write_lock():
-                    async with uow.begin():
-                        await uow.novels.add_tags_to_novels(chunk, tag_set)
+            elif args.operation == "add_tags":
+                async with ctx.write_lock():
+                    async with ctx.uow.begin():
+                        await ctx.uow.novels.add_tags_to_novels(chunk, tag_set)
             else:  # remove_tags
-                async with write_lock():
-                    async with uow.begin():
-                        await uow.novels.remove_tags_from_novels(chunk, tag_set)
+                async with ctx.write_lock():
+                    async with ctx.uow.begin():
+                        await ctx.uow.novels.remove_tags_from_novels(
+                            chunk, tag_set,
+                        )
 
             done += len(chunk)
             await report_progress(
@@ -158,10 +174,10 @@ async def batch_operation(
             failed_chunks += 1
             logger.exception(
                 "批量任务 %s 第 %d/%d 批失败",
-                _OP_LABELS[operation], idx, len(chunks),
+                _OP_LABELS[args.operation], idx, len(chunks),
             )
 
-    summary = f"{_OP_LABELS[operation]}完成：共处理 {done}/{total} 篇"
+    summary = f"{_OP_LABELS[args.operation]}完成：共处理 {done}/{total} 篇"
     if failed_chunks:
         summary += f"，{failed_chunks} 批失败（详见任务日志，可重新提交）"
     return TaskResult(summary=summary)
@@ -175,41 +191,31 @@ EXPORT_FILE_PREFIX = "batch_export_"
 _EXPORT_MAX_AGE_SECONDS = 24 * 3600
 
 
-@register(EXPORT_TASK_NAME)
-async def batch_export(
-    *,
-    novel_ids: list,
-    format_mode: str = "txt",
-    zip_name: str | None = None,
-    naming_template: str | None = None,
-    task_id: int | None = None,
-    uow,
-    write_lock,
-    file_storage,
-) -> TaskResult:
+@register(EXPORT_TASK_NAME, args=BatchExportArgs)
+async def batch_export(args: BatchExportArgs, ctx: TaskContext) -> TaskResult:
     """Build the export ZIP as a background task.
 
     The finished file lands at ``<download_dir>/batch_export_<task_id>.zip``
     and is served by ``GET /api/novels/export/{task_id}/download``.  Old
     export files (>24h) are swept on each run.
     """
-    ids = sorted({int(i) for i in novel_ids})
+    ids = sorted({int(i) for i in args.novel_ids})
     if not ids:
         raise ValidationError("没有可导出的小说")
     total = len(ids)
 
-    export_dir = Path(file_storage.download_dir)
+    export_dir = Path(ctx.file_storage.download_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
     _sweep_old_exports(export_dir)
 
     async def report_progress(stage: str) -> None:
-        if task_id is None:
+        if ctx.task_id is None:
             return
         try:
-            async with write_lock():
-                async with uow.begin():
-                    await uow.tasks.update_task(
-                        task_id,
+            async with ctx.write_lock():
+                async with ctx.uow.begin():
+                    await ctx.uow.tasks.update_task(
+                        ctx.task_id,
                         "running",
                         result=json.dumps(
                             {"summary": f"批量导出进行中：{stage}"},
@@ -223,9 +229,9 @@ async def batch_export(
 
     novels: list[dict] = []
     for i in range(0, total, BATCH_ID_CHUNK_SIZE):
-        async with uow.begin():
+        async with ctx.uow.begin():
             chunk = ids[i:i + BATCH_ID_CHUNK_SIZE]
-            novels.extend(await uow.novels.get_novels_by_ids(chunk))
+            novels.extend(await ctx.uow.novels.get_novels_by_ids(chunk))
     if not novels:
         raise ValidationError("所选小说均不存在")
 
@@ -239,7 +245,7 @@ async def batch_export(
     def on_progress(processed: int, _total: int) -> None:
         nonlocal last_progress_at
         now = time.monotonic()
-        if now - last_progress_at < 3 or task_id is None:
+        if now - last_progress_at < 3 or ctx.task_id is None:
             return
         last_progress_at = now
         asyncio.run_coroutine_threadsafe(
@@ -248,12 +254,13 @@ async def batch_export(
 
     try:
         zip_buf, _titles, missing = await asyncio.to_thread(
-            build_batch_zip, novels, format_mode, naming_template, on_progress,
+            build_batch_zip,
+            novels, args.format_mode, args.naming_template, on_progress,
         )
     except ValueError as exc:
         raise ValidationError(str(exc)) from exc
 
-    out_path = export_dir / f"{EXPORT_FILE_PREFIX}{task_id or 0}.zip"
+    out_path = export_dir / f"{EXPORT_FILE_PREFIX}{ctx.task_id or 0}.zip"
     zip_buf.seek(0)
     with open(out_path, "wb") as f:
         while chunk := zip_buf.read(1 << 20):

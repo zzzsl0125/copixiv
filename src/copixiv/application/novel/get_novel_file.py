@@ -31,7 +31,7 @@ class GetNovelFileUseCase:
         novel = await self._repo.get_by_id(novel_id)
         if not novel:
             raise NotFoundError(f"Novel {novel_id} not found")
-        path = novel.get("path")
+        path = novel.path
         if not path:
             raise NotFoundError(f"Novel {novel_id} has no file path")
 

@@ -6,7 +6,6 @@ notification payloads themselves (success / failure / document mode).
 
 import httpx
 
-from copixiv.app.config import AppConfig
 from copixiv.domain.models.task_result import TaskResult
 from copixiv.infrastructure.notifier.telegram import TelegramNotifier
 
@@ -24,8 +23,9 @@ class _FakeClient:
 
 
 def _notifier(fake_client) -> TelegramNotifier:
-    config = AppConfig(telegram={"token": "123:TOKEN", "chat_id": "42"})
-    notifier = TelegramNotifier(config)
+    # 构造注入（docs/MODULARITY.md §M6）：token/chat_id/proxy 显式传入，
+    # 不再接收整个 AppConfig。
+    notifier = TelegramNotifier(token="123:TOKEN", chat_id="42")
     notifier._get_client = lambda: fake_client
     return notifier
 
@@ -81,8 +81,7 @@ async def test_more_than_ten_titles_sends_document():
 
 
 async def test_unconfigured_notifier_skips_without_network():
-    config = AppConfig(telegram={"token": "", "chat_id": ""})
-    notifier = TelegramNotifier(config)
+    notifier = TelegramNotifier(token="", chat_id="")
     fake = _FakeClient()
     notifier._get_client = lambda: fake
 

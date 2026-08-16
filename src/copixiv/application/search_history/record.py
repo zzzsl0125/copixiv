@@ -1,10 +1,10 @@
 """Service for recording search history in background tasks.
 
 Runs inside a FastAPI ``BackgroundTasks`` callback (worker thread) and
-drives the repositories through a ``SqlUnitOfWork`` built from the
-injected session factory — one documented infrastructure compromise
-(the composition root can't reach into BackgroundTasks callbacks), but
-no per-repository concrete imports.
+drives the repositories through a :class:`~copixiv.domain.ports.unit_of_work.UnitOfWork`
+built from an injected UoW factory — the endpoint (composition edge)
+constructs the concrete ``SqlUnitOfWork``, so this module has zero
+infrastructure imports (docs/MODULARITY.md §3.1).
 """
 
 from __future__ import annotations
@@ -12,14 +12,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 
-from sqlalchemy.orm import Session
-
+from copixiv.domain.ports.unit_of_work import UnitOfWork
 from copixiv.domain.services.parsing import SearchConditions
+from copixiv.log import logger
 
 
 def record_search_history(
     conditions: SearchConditions,
-    session_factory: Callable[[], Session],
+    uow_factory: Callable[[], UnitOfWork],
 ) -> None:
     """Record search history entries for a list of search conditions.
 
@@ -32,13 +32,10 @@ def record_search_history(
         conditions: Ordered ``(type, value)`` pairs from
             :func:`parse_search_keyword` (e.g.
             ``[("author_id", "12345"), ("keyword", "R-18")]``).
-        session_factory: A callable that returns a new SQLAlchemy
-            ``Session`` (typically ``app.state.session_factory``).
+        uow_factory: Zero-argument callable returning a new UnitOfWork
+            (the endpoint passes ``lambda: SqlUnitOfWork(session_factory)``).
     """
-    from copixiv.app.logger import logger
-    from copixiv.infrastructure.database.uow import SqlUnitOfWork
-
-    uow = SqlUnitOfWork(session_factory)
+    uow = uow_factory()
 
     async def _run() -> None:
         # A single asyncio.run() around the whole batch drives the async

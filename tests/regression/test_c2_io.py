@@ -16,8 +16,7 @@ import time
 import httpx
 import pytest
 
-from copixiv.app.config import AppConfig
-from copixiv.app.logger import capture_logs
+from copixiv.log import capture_logs
 from copixiv.infrastructure.pixiv.account import PixivAccount, TokenInfo
 from copixiv.infrastructure.pixiv.accounts import AccountPool
 from copixiv.infrastructure.pixiv.client import PixivClient
@@ -175,8 +174,7 @@ def test_telegram_error_log_redacts_token():
 
     async def scenario():
         token = "123456:ABC"
-        config = AppConfig(telegram={"token": token, "chat_id": "123"})
-        notifier = TelegramNotifier(config)
+        notifier = TelegramNotifier(token=token, chat_id="123")
 
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         request = httpx.Request("POST", url)

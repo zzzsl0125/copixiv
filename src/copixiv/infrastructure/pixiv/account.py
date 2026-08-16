@@ -9,7 +9,7 @@ from pixivpy3 import AppPixivAPI, PixivError
 
 from copixiv.domain.services.parsing import safe_get
 
-from copixiv.app.logger import logger
+from copixiv.log import logger
 
 
 @dataclass
@@ -46,6 +46,16 @@ class RateLimitError(PixivError):
 
 class AccountInvalidError(PixivError):
     """Account token is permanently invalid."""
+
+
+class PixivApiError(PixivError):
+    """Generic Pixiv API error (neither auth-failure nor rate-limit).
+
+    ``account.execute()`` translates raw pixivpy3 ``PixivError`` instances
+    into this type so that modules outside the pixivpy3 ACL (see
+    docs/MODULARITY.md §3.2) — e.g. ``client.py`` — never import
+    pixivpy3 exception types directly.
+    """
 
 
 class PixivAccount:
@@ -167,7 +177,7 @@ class PixivAccount:
                 if "auth() failed" in str(e).lower():
                     self.status = AccountStatus.INVALID
                     raise AccountInvalidError(str(self)) from e
-                raise
+                raise PixivApiError(str(e)) from e
 
     async def execute(self, method: str, *args, **kwargs):
         """Call an API method on this account, handling auth and rate limits."""
@@ -229,4 +239,4 @@ class PixivAccount:
                 if "rate limit" in error_msg or "currently restricted" in error_msg:
                     self.start_cooldown()
                     raise RateLimitError(str(self)) from e
-                raise
+                raise PixivApiError(str(e)) from e

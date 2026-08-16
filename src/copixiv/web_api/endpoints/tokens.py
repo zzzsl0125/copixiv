@@ -10,6 +10,12 @@ from copixiv.web_api.schemas import TokenBase, TokenUpdate
 router = APIRouter()
 
 
+# Route manifest — mounted automatically by the composition root
+# (docs/MODULARITY.md §M9): (prefix, tags) travels with the module.
+ROUTE = ("/api/tokens", ["tokens"])
+
+
+
 def _mask_token(token: str) -> str:
     """Mask a refresh token so only its last 4 characters are visible."""
     if len(token) <= 4:

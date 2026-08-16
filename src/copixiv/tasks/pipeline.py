@@ -22,7 +22,7 @@ from copixiv.domain.services.novel_factory import (
 )
 from copixiv.domain.services.parsing import safe_get
 
-from copixiv.app.logger import logger
+from copixiv.log import logger
 
 
 # ---------------------------------------------------------------------------
