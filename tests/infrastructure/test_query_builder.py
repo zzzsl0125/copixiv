@@ -15,7 +15,7 @@ import sqlite3
 
 import pytest
 
-from copixiv.infrastructure.repositories.query_builder import BaseQueryBuilder
+from copixiv.infrastructure.repositories.query_builder_base import BaseQueryBuilder
 
 build = BaseQueryBuilder._build_fts_query_string
 

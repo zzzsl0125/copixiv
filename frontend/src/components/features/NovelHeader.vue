@@ -35,7 +35,17 @@ const history = ref<SearchHistory[]>([])
 const showHistory = ref(false)
 const searchContainer = ref<HTMLElement | null>(null)
 
-const fetchHistory = async () => {
+// Focus-refetch throttle: repeated focus/unfocus cycles must not hit the
+// API every time.  Deletes/clears pass force=true to refresh immediately.
+let lastHistoryFetch = 0
+const HISTORY_CACHE_MS = 30_000
+
+const fetchHistory = async (force = false) => {
+  const now = Date.now()
+  if (!force && history.value.length > 0 && now - lastHistoryFetch < HISTORY_CACHE_MS) {
+    return
+  }
+  lastHistoryFetch = now
   try {
     history.value = await searchHistoryApi.getSearchHistory()
   } catch (err: unknown) {
@@ -62,7 +72,7 @@ const handleSelectItem = (item: SearchHistory) => {
 const handleDeleteItem = async (id: number) => {
   try {
     await searchHistoryApi.deleteSearchHistoryItem(id)
-    fetchHistory()
+    fetchHistory(true)
   } catch (err: unknown) {
     toast.error(getApiErrorMessage(err, '删除搜索历史失败'))
   }

@@ -18,6 +18,7 @@ from .base import BaseRepository, model_to_dict
 from .fts import FTSManager
 from .tag import SQLAlchemyTagRepository
 from .query_builder import NovelQueryBuilder
+from .query_builder_base import reset_fts_cache
 
 
 class SQLAlchemyNovelRepository(BaseRepository):
@@ -414,8 +415,16 @@ class SQLAlchemyNovelRepository(BaseRepository):
         Returns the number of novels indexed.  Uses the batched rebuild
         path (``FTSManager.batch_rebuild_fts``) — the canonical full
         rebuild for production (maintenance task ``rebuild_fts``).
+
+        Resets the FTS-availability cache: a rebuild that runs while the
+        process is alive (e.g. after the table was missing at startup)
+        must re-enable keyword filtering immediately, not after restart.
         """
-        return await asyncio.to_thread(FTSManager(self.session).batch_rebuild_fts)
+        count = await asyncio.to_thread(
+            FTSManager(self.session).batch_rebuild_fts
+        )
+        reset_fts_cache()
+        return count
 
     # ---- tags ----------------------------------------------------------------
 
@@ -567,7 +576,9 @@ class SQLAlchemyNovelRepository(BaseRepository):
         """Return a mapping of novel_id → tag name list for the given IDs.
 
         Replaces the per-row correlated scalar subquery with a single batch
-        query — one round-trip instead of N.
+        query — one round-trip instead of N.  Uses ``|`` as the concat
+        separator — safe in practice because Pixiv tag names cannot
+        contain it; replace with JSON grouping if that ever changes.
         """
         if not novel_ids:
             return {}

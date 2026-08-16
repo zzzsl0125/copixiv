@@ -38,9 +38,15 @@ const previewLoading = ref(false)
 const previewError = ref('')
 let previewTimer: ReturnType<typeof setTimeout> | undefined
 let previewSeq = 0
+let previewAbort: AbortController | null = null
 
 async function fetchPreview() {
   const seq = ++previewSeq
+  // Cancel the previous in-flight preview — debounce alone still lets a
+  // superseded request consume backend resources to completion.
+  previewAbort?.abort()
+  const controller = new AbortController()
+  previewAbort = controller
   previewLoading.value = true
   previewError.value = ''
   try {
@@ -52,11 +58,13 @@ async function fetchPreview() {
       min_text: props.min_text,
       format_mode: formatMode.value,
       naming_template: namingTemplate.value || undefined,
-    })
+    }, controller.signal)
     if (seq !== previewSeq) return
     previewPath.value = result.path
   } catch (err: unknown) {
     if (seq !== previewSeq) return
+    const code = (err as { code?: string } | null)?.code
+    if (code === 'ERR_CANCELED') return // superseded by a newer preview
     previewPath.value = null
     previewError.value = getApiErrorMessage(err, '预览失败')
   } finally {
@@ -86,6 +94,7 @@ watch(
 
 onUnmounted(() => {
   if (previewTimer) clearTimeout(previewTimer)
+  previewAbort?.abort()
 })
 
 const keywordDisplay = computed(() => {

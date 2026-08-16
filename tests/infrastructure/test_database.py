@@ -271,6 +271,25 @@ class TestFtsTagsIndexing:
         yield s
         s.close()
 
+    def test_rebuild_fts_resets_availability_cache(self, repo_session):
+        """A runtime rebuild must re-enable keyword filtering even when the
+        process started while the FTS table was missing (the availability
+        cache was probed False and would otherwise stay False until restart)."""
+        import asyncio
+        from copixiv.infrastructure.repositories import query_builder_base as qbb
+        from copixiv.infrastructure.repositories.novel import SQLAlchemyNovelRepository
+
+        try:
+            qbb._fts_available = False  # simulate a start without the table
+            assert qbb._check_fts_available(repo_session) is False
+
+            asyncio.run(SQLAlchemyNovelRepository(repo_session).rebuild_fts())
+
+            assert qbb._fts_available is None, "cache must be invalidated"
+            assert qbb._check_fts_available(repo_session) is True
+        finally:
+            qbb.reset_fts_cache()
+
     @staticmethod
     def _seed_tagged_novel(session, novel_id: int, title: str, tag_names: list[str]):
         """Insert a novel whose ONLY text containing the keyword is in tags."""
@@ -292,7 +311,7 @@ class TestFtsTagsIndexing:
     def _keyword_ids(session, keyword: str) -> list[int]:
         import asyncio
         from copixiv.infrastructure.repositories.novel import SQLAlchemyNovelRepository
-        from copixiv.infrastructure.repositories.query_builder import reset_fts_cache
+        from copixiv.infrastructure.repositories.query_builder_base import reset_fts_cache
         # The FTS availability cache is process-wide — a previous test may
         # have cached False for a DB without the virtual table.
         reset_fts_cache()

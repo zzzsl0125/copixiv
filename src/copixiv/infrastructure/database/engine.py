@@ -27,6 +27,11 @@ def create_database_engine(
     plus up to 12 overflow connections for bursts.  Concurrency is kept
     in check by the page-handler semaphore in ``tasks/pipeline.py``, so
     the pool only needs to cover that cap plus API traffic.
+
+    Memory budget: each connection's ``cache_size=-50000`` holds up to
+    ~50 MB of pager cache, so the worst case is 18 connections × 50 MB ≈
+    900 MB plus the 512 MB ``mmap_size``.  Small-VPS deployments should
+    lower ``pool_size`` / ``cache_size`` accordingly.
     """
     db_path = Path(database_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)

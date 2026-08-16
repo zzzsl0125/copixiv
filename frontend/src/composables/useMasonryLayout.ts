@@ -41,6 +41,11 @@ export function useMasonryLayout<T>(
       startIndex = totalRendered
     }
 
+    // Re-measure after each placement: item heights vary (title/text
+    // length), so only a per-item pass keeps columns balanced.  A batched
+    // estimate was tried and reverted — mixing pixel heights with item
+    // counts is dimensionally wrong on load-more (the whole new page
+    // stacked into the single shortest column, leaving the others blank).
     for (let index = startIndex; index < items.value.length; index++) {
       const item = items.value[index]
       let minHeightColIndex = 0

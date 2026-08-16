@@ -9,7 +9,7 @@ export interface CursorPaginationResult<T> {
   noMoreData: Ref<boolean>
   loadData: (isLoadMore?: boolean) => Promise<void>
   reset: () => void
-  handleLoadMore: () => void
+  handleLoadMore: () => Promise<void>
 }
 
 export function useCursorPagination<T>(
@@ -81,9 +81,7 @@ export function useCursorPagination<T>(
     items.value = []
   }
 
-  const handleLoadMore = () => {
-    loadData(true)
-  }
+  const handleLoadMore = (): Promise<void> => loadData(true)
 
   return { items, loading, error, cursor, noMoreData, loadData, reset, handleLoadMore }
 }
