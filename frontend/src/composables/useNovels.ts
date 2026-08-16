@@ -130,20 +130,36 @@ export function useNovels() {
       if (filters.min_text !== undefined) url.searchParams.set('min_text', filters.min_text.toString())
       else url.searchParams.delete('min_text')
 
-      window.history.replaceState({}, '', url)
+      // Skip identical URLs so re-submitting the same search does not stack
+      // duplicate history entries (Back would appear to do nothing).
+      if (url.href !== window.location.href) {
+        if (document.visibilityState === 'hidden') {
+          // While the tab is hidden, stay on the replace path: main.ts guards
+          // replaceState against waking a minimized browser, and a raw
+          // pushState here would bypass that guard.
+          window.history.replaceState({}, '', url)
+        } else {
+          // One history entry per search state, so Back/Forward step through
+          // previous queries instead of leaving the app.
+          window.history.pushState({}, '', url)
+        }
+      }
     }
 
     loadNovels()
   }
 
   const onPopState = () => {
-    if (document.visibilityState === 'hidden') return
     const params = new URLSearchParams(window.location.search)
     filters.keyword = params.get('keyword') || ''
     filters.order_by = params.get('order_by') || 'random'
     filters.order_direction = params.get('order_direction') || 'DESC'
     filters.min_like = params.get('min_like') ? Number(params.get('min_like')) : undefined
     filters.min_text = params.get('min_text') ? Number(params.get('min_text')) : undefined
+
+    // Always sync the filters above (Back/Forward may fire while hidden);
+    // only the refetch is deferred until the tab is visible again.
+    if (document.visibilityState === 'hidden') return
 
     handleSearch(undefined, { updateUrl: false })
   }

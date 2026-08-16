@@ -162,4 +162,52 @@ describe('useNovels', () => {
     expect(state.filters.order_by).toBe('like')
     expect(novelApiMock.getNovels).toHaveBeenCalled()
   })
+
+  it('pushes one history entry per distinct search URL', async () => {
+    const state = mountUseNovels('/')
+    const entriesBefore = window.history.length
+
+    state.handleSearch('第一词')
+    await flushPromises()
+    expect(window.location.search).toContain('keyword=')
+    expect(window.history.length).toBe(entriesBefore + 1)
+
+    state.handleSearch('第二词')
+    await flushPromises()
+    expect(window.history.length).toBe(entriesBefore + 2)
+  })
+
+  it('does not push a duplicate entry when the search URL is unchanged', async () => {
+    const state = mountUseNovels('/')
+    const entriesBefore = window.history.length
+
+    state.handleSearch('重复词')
+    await flushPromises()
+    state.handleSearch('重复词')
+    await flushPromises()
+
+    expect(window.history.length).toBe(entriesBefore + 1)
+  })
+
+  it('restores the previous search when navigating back', async () => {
+    const state = mountUseNovels('/')
+    state.handleSearch('第一词')
+    await flushPromises()
+    const firstUrl = window.location.href
+
+    state.handleSearch('第二词')
+    await flushPromises()
+    novelApiMock.getNovels.mockClear()
+
+    // Browser Back: the session history returns to the first search URL.
+    window.history.replaceState({}, '', firstUrl)
+    window.dispatchEvent(new Event('popstate'))
+    await nextTick()
+    await flushPromises()
+
+    expect(state.filters.keyword).toBe('第一词')
+    expect(novelApiMock.getNovels).toHaveBeenCalledWith(
+      expect.objectContaining({ keyword: '第一词' }),
+    )
+  })
 })
