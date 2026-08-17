@@ -24,7 +24,7 @@ Wants=network-online.target
 Type=simple
 User=invocation
 Group=invocation
-WorkingDirectory=/home/invocation/copixiv-v2/frontend/
+WorkingDirectory=/home/invocation/copixiv/frontend/
 # Rebuild the bundle on every start so dist/ always matches the tree.
 # Remove this line if you build manually.
 ExecStartPre=/usr/bin/npm run build

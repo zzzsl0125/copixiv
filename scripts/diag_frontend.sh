@@ -3,7 +3,7 @@
 # 用法：bash scripts/diag_frontend.sh   （输出贴回给 agent）
 set -uo pipefail
 
-cd /home/invocation/copixiv-v2/frontend
+cd /home/invocation/copixiv/frontend
 
 echo "== node / npm 版本 =="
 node --version || echo "node missing"
