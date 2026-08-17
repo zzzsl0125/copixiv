@@ -2,7 +2,7 @@
 
 > 灵感来源：DSH「一切皆模块」。本文档是模块化改造的**唯一依据**：模块契约、边界规则、执行路线图。
 > 配套：`PROJECT_OVERVIEW.md`（现状总览）、`tests/architecture/`（边界规则的代码化执行）。
-> 状态：**设计定稿，待实施**。每个阶段的完成状态见文末「状态跟踪」。
+> 状态：**全部实施完毕（阶段 0~3，测试 401 passed）**。历史见文末「状态跟踪」与 git log（分支 refactor/modularity）。
 
 ---
 
@@ -190,7 +190,7 @@ class TaskContext:                  # 注入通道显式化——与业务参数
 ### 3.4 现状与目标的差距
 
 - ✅ 已达标：domain 零泄漏、infra→application 零、application→infra 零（原 record.py 延迟 import 豁免已消灭——改为注入 UoW 工厂）、infra/web_api/tasks→app 零（logger 平台化 + config 构造注入后）
-- ⏳ 待收窄（阶段 2）：web_api 端点对具体类 `SqlUnitOfWork` 的 import（§3.3 完全生效）
+- ✅ 已达标（阶段 2）：`app.state` 黑盒收拢到 `deps.py`（端点只依赖类型化 `get_*` 依赖）；端点对 `SqlUnitOfWork` 仅保留**纯类型注解**（实例一律来自 `Depends(get_uow/get_write_uow)`，构造只发生在 deps.py/container/自家包——矩阵允许 web_api→infrastructure）
 
 ---
 
@@ -236,10 +236,14 @@ class TaskContext:                  # 注入通道显式化——与业务参数
 | 2 | 2.2 QuerySpec 值对象（`domain/services/query_spec.py` 取代 9 参数汤；端口/仓储/查询构建器/端点/用例全部 spec 化；SQL 专属输入作为构建器显式参数） | ✅ 完成 |
 | 2 | 2.3 读写仓储分离（novel.py 1189 行 → facade 17 行 + novel_read.py + novel_write.py） | ✅ 完成 |
 | 2 | 2.3b 屏蔽标签策略上移（domain/services/exclusion.py：resolve_active + 唯一设置键，消除 system.py/repo 双份常量） | ✅ 完成 |
-| 2 | 2.4 编排回收 | ⬜ 待实施 |
-| 2 | 2.5 web_api 薄化 + 类型化 DI + schema 归位 | ⬜ 待实施 |
-| 2 | 2.6 自述式路由 | ⬜ 待实施 |
-| 2 | 2.7 storage/epub 边界化 | ⬜ 待实施 |
-| 3 | 全部 | ⬜ 待实施 |
+| 2 | 2.4 编排回收（批量范围解析收进应用层 `resolve_batch_scope` 单规则 + `cap` 参数，端点复用） | ✅ 完成 |
+| 2 | 2.5 web_api 薄化 + 类型化 DI（`app.state` 黑盒收拢到 deps.py 的 `get_session_factory/get_app_config/get_file_storage/get_task_manager`，端点全量替换） | ✅ 完成 |
+| 2 | 2.6 自述式路由（每端点模块 `ROUTE=(prefix, tags)` 清单，容器循环挂载） | ✅ 完成 |
+| 2 | 2.7 storage/epub 边界化（`EpubBuilder.create_epub(novel: Novel)`、`ImageDownloader.process_novel_assets(novel: Novel)` 类型化输入，端口同步） | ✅ 完成 |
+| 2 | 2.8 前端 OpenAPI 类型生成（可选，验收不含） | ⏭ 未实施（可选） |
+| 3 | 3.1 NotifierBackend 契约（`domain/ports/notifier.py`：NotifierPort + name + close） | ✅ 完成 |
+| 3 | 3.2 注册表 + config 装配（`infrastructure/notifier/registry.py` + `CompositeNotifier` 故障隔离；`notifiers.enabled` 驱动，默认 [telegram] 兼容旧配置） | ✅ 完成 |
+| 3 | 3.3 webhook 第二个后端示范（`webhook.py` + `config.example.yaml` 配置节 + 6 个注册表测试） | ✅ 完成 |
+| 3 | 验收：加渠道 = 新模块 + 一行 config（test_notifier_registry.py 钉死） | ✅ 完成（401 passed） |
 
 > 每完成一条：勾选 + 一行变更说明 + 关联测试。每阶段完成：全测试绿 + 更新本表。

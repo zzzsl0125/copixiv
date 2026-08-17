@@ -9,6 +9,11 @@ pixiv_client:
 telegram:
   token: "YOUR_TELEGRAM_BOT_TOKEN"
   chat_id: "YOUR_TELEGRAM_CHAT_ID"
+# 通知后端（docs/MODULARITY.md §M6）：按名字装配，加渠道 = 新模块 + 一行配置
+notifiers:
+  enabled: [telegram]   # 可用: telegram, webhook；留空 [] 关闭所有通知
+webhook:
+  url: ""               # webhook 后端的 JSON 投递地址（空 = 该后端跳过）
 frontend:
   default_min_like: 500
   default_min_text: 3000

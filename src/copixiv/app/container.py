@@ -31,7 +31,8 @@ from copixiv.infrastructure.epub.builder import EpubBuilder
 from copixiv.infrastructure.repositories.fts import FTSManager
 
 from copixiv.log import logger
-from copixiv.infrastructure.notifier.telegram import TelegramNotifier
+from copixiv.domain.ports.notifier import NotifierPort
+from copixiv.infrastructure.notifier.composite import CompositeNotifier
 from copixiv.tasks.manager import TaskManagerSystem
 
 
@@ -63,7 +64,7 @@ class Container:
         self._image_downloader: ImageDownloader | None = None
         self._account_pool: AccountPool | None = None
         self._client: PixivClient | None = None
-        self._notifier: TelegramNotifier | None = None
+        self._notifier: NotifierPort | None = None
         self._task_manager: TaskManagerSystem | None = None
 
     # ------------------------------------------------------------------
@@ -155,12 +156,29 @@ class Container:
         )
 
     def _build_notifier(self) -> None:
-        """Notification backends (see docs/MODULARITY.md §M6)."""
-        self._notifier = TelegramNotifier(
-            token=self.config.telegram.token,
-            chat_id=self.config.telegram.chat_id,
-            proxy_http=self.config.proxy.http,
+        """Notification backends — registry + config driven (§M6).
+
+        ``notifiers.enabled`` lists backend names (default ``["telegram"]``;
+        empty = notifications off).  Each backend module is self-describing:
+        a name plus a ``build(config)`` factory, so adding a channel means
+        a new module and one config line — nothing in this method.
+        """
+        from copixiv.infrastructure.notifier.registry import (
+            discover_backends,
+            get_backend_builder,
         )
+
+        discover_backends()
+
+        backends: list[NotifierPort] = []
+        for name in self.config.notifiers.enabled:
+            builder = get_backend_builder(name)
+            if builder is None:
+                logger.warning("Unknown notifier backend '%s' — skipped.", name)
+                continue
+            backends.append(builder(self.config))
+
+        self._notifier = CompositeNotifier(backends) if backends else None
 
     def _build_task_manager(self) -> None:
         """Background scheduler + task executor (see docs/MODULARITY.md §M8)."""
@@ -187,8 +205,7 @@ class Container:
             self._engine is None or self._session_factory is None
             or self._file_storage is None or self._epub_builder is None
             or self._image_downloader is None or self._account_pool is None
-            or self._client is None or self._notifier is None
-            or self._task_manager is None
+            or self._client is None or self._task_manager is None
         ):
             raise RuntimeError("Container.build() must be called before create_app()")
 
@@ -243,7 +260,8 @@ class Container:
             logger.info("Shutting down copixiv v2...")
             self._task_manager.stop()
             self._image_downloader.shutdown()
-            await self._notifier.close()
+            if self._notifier is not None:
+                await self._notifier.close()
 
         app = FastAPI(title="Novel Database API", lifespan=lifespan)
 

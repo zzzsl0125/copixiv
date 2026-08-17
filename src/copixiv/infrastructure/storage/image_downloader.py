@@ -12,6 +12,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from copixiv.domain.models.novel import Novel
 from copixiv.log import logger
 
 
@@ -102,18 +103,16 @@ class ImageDownloader:
             if should_close:
                 local_session.close()
 
-    async def process_novel_assets(self, data: dict, force: bool = False) -> None:
+    async def process_novel_assets(
+        self, novel: Novel, force: bool = False,
+    ) -> None:
         """Download all assets for a novel and attempt EPUB creation.
 
-        Runs in the thread pool; returns immediately (fire-and-forget).
+        Takes the domain :class:`Novel` (typed contract, docs/MODULARITY.md
+        §M5); runs in the thread pool and returns immediately
+        (fire-and-forget).
         """
-        # Normalise the input: callers may pass a Pydantic Novel model or a
-        # plain dict.  The rest of this method (and _download_assets) uses
-        # dict access, so convert the model to a dict first.
-        if hasattr(data, "model_dump"):
-            data = data.model_dump()
-
-        path_str = data.get("path")
+        path_str = novel.path
         if not path_str:
             return
 
@@ -121,19 +120,19 @@ class ImageDownloader:
         if epub_path.exists() and not force:
             return
 
-        images = data.get("images")
-        illusts = data.get("illusts")
-        if not images and not illusts:
+        if not novel.images and not novel.illusts:
             return
 
-        novel_id = data["id"]
+        novel_id = novel.id
         with self._in_flight_lock:
             if novel_id in self._in_flight:
                 return
             self._in_flight.add(novel_id)
 
         try:
-            future = self._executor.submit(self._download_assets, data.copy())
+            future = self._executor.submit(
+                self._download_assets, novel.model_copy(),
+            )
         except Exception:
             with self._in_flight_lock:
                 self._in_flight.discard(novel_id)
@@ -176,7 +175,7 @@ class ImageDownloader:
                 failures.append((novel_id, str(exc)))
         return failures
 
-    def _download_assets(self, data: dict) -> str | None:
+    def _download_assets(self, novel: Novel) -> str | None:
         """Synchronous asset download + EPUB creation (runs in thread pool).
 
         Returns ``None`` on success, or a failure reason string so the
@@ -184,11 +183,11 @@ class ImageDownloader:
         """
         from copixiv.log import logger
 
-        base_path = Path(data["path"]).parent
-        novel_id = str(data["id"])
-        images = data.get("images", {})
-        illusts = data.get("illusts", {})
-        cover_url = data.get("cover_url")
+        base_path = Path(novel.path).parent
+        novel_id = str(novel.id)
+        images = novel.images or {}
+        illusts = novel.illusts or {}
+        cover_url = novel.cover_url
 
         downloaded_files: list[Path] = []
         session = _create_session()
@@ -248,7 +247,7 @@ class ImageDownloader:
 
             # EPUB —— 只有成功才清理临时图片
             if self._epub_builder is not None:
-                if not self._epub_builder.create_epub(data):
+                if not self._epub_builder.create_epub(novel):
                     return f"EPUB 生成失败: novel {novel_id}"
                 logger.info(
                     f"下载: #{novel_id} EPUB 完成 "

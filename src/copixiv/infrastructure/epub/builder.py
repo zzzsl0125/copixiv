@@ -9,6 +9,7 @@ from pathlib import Path
 from PIL import Image
 from ebooklib import epub
 
+from copixiv.domain.models.novel import Novel
 from copixiv.domain.services.filename import safe_filename
 from copixiv.domain.services.language import has_image_placeholders
 
@@ -33,14 +34,17 @@ h1 { text-align: center; }
 class EpubBuilder:
     """Creates EPUB files from downloaded novel text and images."""
 
-    def create_epub(self, data: dict, compress_quality: int = 75) -> bool:
-        """Build an EPUB from the novel *data* dict.
+    def create_epub(self, novel: Novel, compress_quality: int = 75) -> bool:
+        """Build an EPUB from the domain *novel* model.
+
+        Typed input (docs/MODULARITY.md §M5): the builder consumes the
+        domain :class:`Novel`, never a raw dict.
 
         Returns True if the EPUB was written successfully.
         """
-        path_str = data.get("path")
+        path_str = novel.path
         if not path_str:
-            logger.error("No path provided in data for EPUB creation")
+            logger.error("No path provided in novel for EPUB creation")
             return False
 
         novel_path = Path(path_str)
@@ -48,11 +52,11 @@ class EpubBuilder:
             logger.error(f"Source text file not found: {novel_path}")
             return False
 
-        title = data.get("title", "Untitled")
-        author_name = data.get("author_name") or str(
-            data.get("author_id", "Unknown Author")
+        title = novel.title or "Untitled"
+        author_name = novel.author_name or str(
+            novel.author_id or "Unknown Author"
         )
-        novel_id = str(data.get("id"))
+        novel_id = str(novel.id)
         parent_dir = novel_path.parent
 
         # Read text
@@ -78,7 +82,7 @@ class EpubBuilder:
         self._set_cover(book, cover_path)
 
         # Images
-        image_map = self._build_image_map(parent_dir, novel_id, data)
+        image_map = self._build_image_map(parent_dir, novel_id, novel)
         processed_content = self._replace_image_placeholders(
             content, image_map, book, compress_quality
         )
@@ -119,7 +123,7 @@ class EpubBuilder:
         try:
             epub.write_epub(tmp_path, book, {})
             os.replace(tmp_path, output_path)
-            logger.info(f"Made Epub: ({data['id']}){data['title']}")
+            logger.info(f"Made Epub: ({novel.id}){novel.title}")
             return True
         except Exception:
             try:
@@ -212,15 +216,15 @@ class EpubBuilder:
 
     @staticmethod
     def _build_image_map(
-        parent_dir: Path, novel_id: str, data: dict
+        parent_dir: Path, novel_id: str, novel: Novel
     ) -> dict[str, Path]:
         image_map: dict[str, Path] = {}
         known: list[tuple[str, str]] = []
 
-        if isinstance(data.get("images"), dict):
-            known.extend((k, "u") for k in data["images"].keys())
-        if isinstance(data.get("illusts"), dict):
-            known.extend((k, "p") for k in data["illusts"].keys())
+        if isinstance(novel.images, dict):
+            known.extend((k, "u") for k in novel.images.keys())
+        if isinstance(novel.illusts, dict):
+            known.extend((k, "p") for k in novel.illusts.keys())
 
         for img_id, img_type in known:
             for ext in (".jpg", ".png", ".jpeg", ".gif"):

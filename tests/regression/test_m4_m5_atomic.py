@@ -23,6 +23,7 @@ import pytest
 
 from copixiv.infrastructure.epub.builder import EpubBuilder
 from copixiv.infrastructure.storage.file_storage import FileStorage
+from copixiv.domain.models.novel import Novel
 from copixiv.infrastructure.storage.image_downloader import ImageDownloader
 
 
@@ -158,12 +159,14 @@ def test_process_novel_assets_dedups_inflight_id(tmp_path, monkeypatch):
 
     monkeypatch.setattr(dl, "_download_assets", slow_work)
 
-    data = {
-        "id": 1,
-        "path": str(tmp_path / "1" / "novel1.txt"),
-        "images": {"1": {}},
-        "illusts": {},
-    }
+    data = Novel(
+        id=1,
+        title="novel1",
+        author_id=0,
+        path=str(tmp_path / "1" / "novel1.txt"),
+        images={"1": {}},
+        illusts={},
+    )
 
     async def submit_twice():
         await dl.process_novel_assets(data)
@@ -189,12 +192,13 @@ def _epub_data(tmp_path):
     novel_dir.mkdir()
     text_path = novel_dir / "novel1.txt"
     text_path.write_text("Hello world", encoding="utf-8")
-    return {
-        "id": 1,
-        "title": "Test Novel",
-        "author_name": "Author",
-        "path": str(text_path),
-    }, novel_dir
+    return Novel(
+        id=1,
+        title="Test Novel",
+        author_name="Author",
+        author_id=0,
+        path=str(text_path),
+    ), novel_dir
 
 
 def test_create_epub_success_is_atomic(tmp_path):

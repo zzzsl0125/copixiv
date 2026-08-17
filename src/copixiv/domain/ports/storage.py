@@ -3,6 +3,8 @@
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from copixiv.domain.models.novel import Novel
+
 
 @runtime_checkable
 class FileStoragePort(Protocol):
@@ -20,11 +22,15 @@ class FileStoragePort(Protocol):
 
 @runtime_checkable
 class ImageDownloaderPort(Protocol):
-    """Port for downloading images (covers, illustrations)."""
+    """Port for downloading images (covers, illustrations).
+
+    Asset processing takes the domain :class:`Novel` — typed contract, no
+    raw dicts (docs/MODULARITY.md §M5).
+    """
 
     async def download_image(self, url: str, save_path: Path) -> bool: ...
     async def process_novel_assets(
-        self, data, force: bool = False
+        self, novel: Novel, force: bool = False
     ) -> None: ...
     async def await_all(self) -> list[tuple[int, str]]: ...
     def shutdown(self) -> None: ...

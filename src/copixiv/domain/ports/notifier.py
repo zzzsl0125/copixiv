@@ -25,3 +25,17 @@ class NotifierPort(Protocol):
         error: str | None = None,
         result: TaskResult | None = None,
     ) -> None: ...
+
+
+@runtime_checkable
+class NotifierBackendPort(NotifierPort, Protocol):
+    """A pluggable notification channel (docs/MODULARITY.md §M6).
+
+    Backends are self-describing modules — a name, a build factory, and a
+    lifecycle hook — so adding a channel means a new module plus one line
+    of config (``notifiers.enabled``).
+    """
+
+    name: str
+
+    async def close(self) -> None: ...

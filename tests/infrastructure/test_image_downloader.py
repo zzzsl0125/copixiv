@@ -3,17 +3,20 @@
 import asyncio
 import time
 
+from copixiv.domain.models.novel import Novel
 from copixiv.infrastructure.storage.image_downloader import ImageDownloader
 
 
-def _asset_data(tmp_path, nid: int) -> dict:
-    """A data dict that passes process_novel_assets' early-return checks."""
-    return {
-        "id": nid,
-        "path": str(tmp_path / f"{nid}" / f"novel{nid}.txt"),
-        "images": {"1": {}},
-        "illusts": {},
-    }
+def _asset_data(tmp_path, nid: int) -> Novel:
+    """A novel model that passes process_novel_assets' early-return checks."""
+    return Novel(
+        id=nid,
+        title=f"novel{nid}",
+        author_id=0,
+        path=str(tmp_path / f"{nid}" / f"novel{nid}.txt"),
+        images={"1": {}},
+        illusts={},
+    )
 
 
 class TestAwaitAll:
@@ -23,7 +26,7 @@ class TestAwaitAll:
 
         def slow_work(data):
             time.sleep(0.2)
-            finished.append(data["id"])
+            finished.append(data.id)
 
         monkeypatch.setattr(dl, "_download_assets", slow_work)
         await dl.process_novel_assets(_asset_data(tmp_path, 1))
@@ -54,7 +57,7 @@ class TestAwaitAll:
         dl = ImageDownloader(max_workers=2)
 
         def failing_work(data):
-            return f"boom for {data['id']}"
+            return f"boom for {data.id}"
 
         monkeypatch.setattr(dl, "_download_assets", failing_work)
         await dl.process_novel_assets(_asset_data(tmp_path, 1))
