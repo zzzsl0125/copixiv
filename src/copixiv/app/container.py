@@ -156,28 +156,16 @@ class Container:
         )
 
     def _build_notifier(self) -> None:
-        """Notification backends — registry + config driven (§M6).
+        """Notification backends — plain config-driven assembly (§M6).
 
         ``notifiers.enabled`` lists backend names (default ``["telegram"]``;
-        empty = notifications off).  Each backend module is self-describing:
-        a name plus a ``build(config)`` factory, so adding a channel means
-        a new module and one config line — nothing in this method.
+        empty = notifications off).  ``build_notifiers`` is a plain mapping
+        over the two built-in backends — there are no third-party channels,
+        so there is no registry (MODULARITY.md §6).
         """
-        from copixiv.infrastructure.notifier.registry import (
-            discover_backends,
-            get_backend_builder,
-        )
+        from copixiv.infrastructure.notifier.factory import build_notifiers
 
-        discover_backends()
-
-        backends: list[NotifierPort] = []
-        for name in self.config.notifiers.enabled:
-            builder = get_backend_builder(name)
-            if builder is None:
-                logger.warning("Unknown notifier backend '%s' — skipped.", name)
-                continue
-            backends.append(builder(self.config))
-
+        backends = build_notifiers(self.config)
         self._notifier = CompositeNotifier(backends) if backends else None
 
     def _build_task_manager(self) -> None:

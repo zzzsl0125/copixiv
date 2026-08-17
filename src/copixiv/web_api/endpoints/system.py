@@ -21,7 +21,7 @@ async def _config_response(uow: SqlUnitOfWork, app_config) -> dict:
 
     *app_config* is the application config object (injected via ``get_app_config``, docs/MODULARITY.md §M9)
     injected by the endpoint — the module imports nothing from the ``app``
-    layer itself (see docs/MODULARITY.md §3.1).
+    layer itself (see docs/MODULARITY.md §2.1).
 
     ``exclude_blocked_tag_novels`` is a runtime setting (default on when
     the settings row is missing), so it can be toggled from the UI.

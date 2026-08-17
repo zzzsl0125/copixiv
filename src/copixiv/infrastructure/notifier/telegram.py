@@ -19,8 +19,6 @@ import httpx
 from copixiv.domain.models.task_result import TaskResult
 from copixiv.log import logger
 
-from .registry import register_backend
-
 
 def _escape(text: str) -> str:
     """Escape user-provided text for Telegram HTML parse mode."""
@@ -30,8 +28,8 @@ def _escape(text: str) -> str:
 class TelegramNotifier:
     """Sends task-completion notifications to a Telegram chat.
 
-    The first notifier backend (docs/MODULARITY.md §M6): self-describing
-    name + lifecycle hook, assembled by the composition root.
+    The Telegram notification backend (docs/MODULARITY.md §M6), assembled
+    by ``notifier.factory.build_notifiers`` from config.
 
     Requires ``telegram.token`` and ``telegram.chat_id`` in the app config.
     If either is missing, notifications are silently skipped.
@@ -199,12 +197,3 @@ class TelegramNotifier:
                 "Failed to send Telegram document: {}",
                 str(exc).replace(self._token, "***"),
             )
-
-@register_backend(TelegramNotifier.name)
-def build(config) -> TelegramNotifier:
-    """Backend factory — called by the composition root with the AppConfig."""
-    return TelegramNotifier(
-        token=config.telegram.token,
-        chat_id=config.telegram.chat_id,
-        proxy_http=config.proxy.http,
-    )

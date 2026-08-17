@@ -1,10 +1,9 @@
 """Pixiv client ports — abstract interfaces for the Pixiv API."""
 
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 from collections.abc import AsyncIterator
 
 
-@runtime_checkable
 class PixivNovelPort(Protocol):
     """Port for fetching novel data from Pixiv."""
 
@@ -31,7 +30,6 @@ class PixivNovelPort(Protocol):
     ) -> dict: ...
 
 
-@runtime_checkable
 class PixivAccountPort(Protocol):
     """Port for managing Pixiv account operations."""
 

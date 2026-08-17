@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 
 from copixiv.domain.models.task_result import TaskResult
 
 
-@runtime_checkable
 class NotifierPort(Protocol):
     """Port for sending notifications (Telegram, etc.).
 
@@ -27,13 +26,13 @@ class NotifierPort(Protocol):
     ) -> None: ...
 
 
-@runtime_checkable
 class NotifierBackendPort(NotifierPort, Protocol):
-    """A pluggable notification channel (docs/MODULARITY.md §M6).
+    """A notification channel (docs/MODULARITY.md §M6).
 
-    Backends are self-describing modules — a name, a build factory, and a
-    lifecycle hook — so adding a channel means a new module plus one line
-    of config (``notifiers.enabled``).
+    A name plus a lifecycle hook.  The two built-in backends
+    (``telegram`` / ``webhook``) are selected from config by
+    ``notifier.factory.build_notifiers`` — a plain mapping, not a
+    plugin registry.
     """
 
     name: str

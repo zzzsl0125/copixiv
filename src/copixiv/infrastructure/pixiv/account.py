@@ -53,7 +53,7 @@ class PixivApiError(PixivError):
 
     ``account.execute()`` translates raw pixivpy3 ``PixivError`` instances
     into this type so that modules outside the pixivpy3 ACL (see
-    docs/MODULARITY.md §3.2) — e.g. ``client.py`` — never import
+    docs/MODULARITY.md §2.2) — e.g. ``client.py`` — never import
     pixivpy3 exception types directly.
     """
 

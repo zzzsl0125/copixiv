@@ -12,7 +12,7 @@ implementation detail; other modules must not import it:
 - Exceptions: ``RateLimitError``, ``AccountInvalidError``, ``PixivApiError``
   (``account.py``).
 
-Vendor boundary (docs/MODULARITY.md §3.2): ``import pixivpy3`` is only
+Vendor boundary (docs/MODULARITY.md §2.2): ``import pixivpy3`` is only
 allowed in ``patch.py`` (monkey patches) and ``account.py`` (the single
 adapter that owns an ``AppPixivAPI`` instance).  Everything else in this
 package — and the rest of the project — sees only the port protocols in

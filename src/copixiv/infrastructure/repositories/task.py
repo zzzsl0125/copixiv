@@ -83,6 +83,15 @@ class SQLAlchemyTaskRepository(BaseRepository):
     async def count_history(self) -> int:
         return self.count(models.TaskHistory)
 
+    async def get_task_arguments(self, task_id: int) -> str | None:
+        """Return the raw JSON ``arguments`` of a history row (or None).
+
+        Lets endpoints read task arguments without touching the ORM
+        model or ``uow.session`` directly.
+        """
+        row = self.session.get(models.TaskHistory, task_id)
+        return row.arguments if row is not None else None
+
     # -- scheduled tasks ----------------------------------------------------
 
     async def get_scheduled_tasks(self) -> Sequence[models.ScheduledTask]:

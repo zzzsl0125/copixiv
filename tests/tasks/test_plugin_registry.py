@@ -1,4 +1,4 @@
-"""Task-plugin discovery tests (docs/MODULARITY.md §M8 验收).
+"""Task-plugin discovery tests (docs/MODULARITY.md §M8 发现链路).
 
 Pin the two discovery paths and the declarative manifest contract:
 

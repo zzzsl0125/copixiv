@@ -96,7 +96,8 @@ def test_application_layer_does_not_import_infrastructure():
 
     无例外：record.py 曾经延迟 import SqlUnitOfWork（BackgroundTasks
     回调无法触达组合根的妥协），现已改为注入 UoW 工厂（组合边缘
-    由 web_api 端点构造具体类，见 docs/MODULARITY.md §3.1/§3.3）。
+    由 web_api 端点构造具体类，见 docs/MODULARITY.md §2.1；
+    具体类的 import 位置属约定，见 §3）。
     """
     app_root = Path(__file__).resolve().parents[2] / "src" / "copixiv" / "application"
     violations = []

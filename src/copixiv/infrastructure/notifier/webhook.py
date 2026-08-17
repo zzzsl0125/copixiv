@@ -1,9 +1,8 @@
-"""Webhook notifier — the second backend, demonstrating the plugin contract.
+"""Webhook notifier — the second notification backend (docs/MODULARITY.md §M6).
 
 A plain-HTTP-POST channel: task results are delivered as a JSON body to a
-user-configured URL (docs/MODULARITY.md §M6 示范).  Enabled by adding
-``"webhook"`` to ``notifiers.enabled`` and setting ``webhook.url`` in
-config.yaml — the "add a channel = one module + one config line" contract.
+user-configured URL.  Enabled by adding ``"webhook"`` to ``notifiers.enabled``
+and setting ``webhook.url`` in config.yaml.
 """
 
 from __future__ import annotations
@@ -15,10 +14,6 @@ import httpx
 from copixiv.domain.models.task_result import TaskResult
 from copixiv.log import logger
 
-from .registry import register_backend
-
-BACKEND_NAME = "webhook"
-
 
 class WebhookNotifier:
     """POSTs task results as JSON to a configured webhook URL.
@@ -27,7 +22,7 @@ class WebhookNotifier:
     unconfigured Telegram token).
     """
 
-    name = BACKEND_NAME
+    name = "webhook"
 
     def __init__(self, url: str = "", timeout: float = 10.0):
         self._url = (url or "").strip()
@@ -72,9 +67,3 @@ class WebhookNotifier:
         if self._client is not None:
             await self._client.aclose()
             self._client = None
-
-
-@register_backend(BACKEND_NAME)
-def build(config) -> WebhookNotifier:
-    """Backend factory — called by the composition root with the AppConfig."""
-    return WebhookNotifier(url=config.webhook.url)

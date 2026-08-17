@@ -1,12 +1,11 @@
 """Storage ports — file and image download abstractions."""
 
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 
 from copixiv.domain.models.novel import Novel
 
 
-@runtime_checkable
 class FileStoragePort(Protocol):
     """Port for reading and writing downloaded novel files."""
 
@@ -20,7 +19,6 @@ class FileStoragePort(Protocol):
     def delete_novel_files(self, novel_path: str) -> None: ...
 
 
-@runtime_checkable
 class ImageDownloaderPort(Protocol):
     """Port for downloading images (covers, illustrations).
 

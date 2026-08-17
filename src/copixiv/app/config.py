@@ -106,16 +106,16 @@ class SecurityConfig(BaseModel):
 class NotifiersConfig(BaseModel):
     """Enabled notifier backends, in order (docs/MODULARITY.md §M6).
 
-    Each name maps to a registered backend module (``telegram`` /
-    ``webhook`` built-in).  Defaults to ``["telegram"]`` — empty list
-    disables notifications entirely.
+    Recognized names: ``telegram`` / ``webhook`` (mapped in
+    ``infrastructure/notifier/factory.py``).  Defaults to ``["telegram"]``
+    — empty list disables notifications entirely.
     """
 
     enabled: list[str] = Field(default_factory=lambda: ["telegram"])
 
 
 class WebhookConfig(BaseModel):
-    """Webhook notifier backend settings (§M6 示范后端)."""
+    """Webhook notifier backend settings (§M6 第二后端)."""
 
     url: str = ""  # 空=该后端跳过发送
 

@@ -1,6 +1,6 @@
 """Repository protocols — abstract interfaces for data access."""
 
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 from collections.abc import Sequence
 
 from copixiv.domain.models.tag import Tag, TagPreference, TagAlias
@@ -11,7 +11,6 @@ from copixiv.domain.models.novel import EpubStatus
 from copixiv.domain.services.query_spec import QuerySpec
 
 
-@runtime_checkable
 class NovelRepository(Protocol):
     """Data access for novels."""
 
@@ -31,7 +30,6 @@ class NovelRepository(Protocol):
     async def update_field(self, novel_id: int, field: str, value: object) -> None: ...
 
 
-@runtime_checkable
 class AuthorRepository(Protocol):
     """Data access for authors."""
 
@@ -47,7 +45,6 @@ class AuthorRepository(Protocol):
     async def get_special_follow_author_ids(self) -> list[int]: ...
 
 
-@runtime_checkable
 class SeriesRepository(Protocol):
     """Data access for series."""
 
@@ -58,7 +55,6 @@ class SeriesRepository(Protocol):
     async def series_with_empty_index(self) -> list[int]: ...
 
 
-@runtime_checkable
 class TagRepository(Protocol):
     """Data access for tags, preferences, and aliases."""
 
@@ -83,7 +79,6 @@ class TagRepository(Protocol):
     async def apply_alias_retroactively(self, source: str, target: str) -> int: ...
 
 
-@runtime_checkable
 class TokenRepository(Protocol):
     """Data access for Pixiv refresh tokens."""
 
@@ -95,7 +90,6 @@ class TokenRepository(Protocol):
     async def reorder(self, ids: list[int]) -> bool: ...
 
 
-@runtime_checkable
 class TaskRepository(Protocol):
     """Data access for task history and scheduling."""
 
@@ -116,7 +110,6 @@ class TaskRepository(Protocol):
     async def reorder_scheduled(self, ids: list[int]) -> bool: ...
 
 
-@runtime_checkable
 class SearchHistoryRepository(Protocol):
     """Data access for search history."""
 
@@ -130,7 +123,6 @@ class SearchHistoryRepository(Protocol):
     async def clear_all(self) -> int: ...
 
 
-@runtime_checkable
 class FailedNovelRepositoryPort(Protocol):
     """Port for the download-failure ledger."""
 

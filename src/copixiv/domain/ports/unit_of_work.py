@@ -1,7 +1,7 @@
 """Unit of Work port — transaction boundary."""
 
 from collections.abc import AsyncIterator
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 
 from .repositories import (
     NovelRepository,
@@ -15,7 +15,6 @@ from .repositories import (
 )
 
 
-@runtime_checkable
 class UnitOfWork(Protocol):
     """Manages a transactional boundary around repository operations.
 

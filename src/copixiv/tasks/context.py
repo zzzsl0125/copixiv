@@ -29,7 +29,7 @@ class TaskContext:
     file_storage: FileStoragePort | None = None
     image_downloader: ImageDownloaderPort | None = None
     epub_builder: EpubBuilderPort | None = None
-    config: Any = None  # AppConfig——由组合根装配，类型不跨层引用（§3.1）
+    config: Any = None  # AppConfig——由组合根装配，类型不跨层引用（§2.1）
     write_lock: WriteLockPort | None = None
     notifier: NotifierPort | None = None
     task_id: int | None = None

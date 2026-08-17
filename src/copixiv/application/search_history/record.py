@@ -4,7 +4,7 @@ Runs inside a FastAPI ``BackgroundTasks`` callback (worker thread) and
 drives the repositories through a :class:`~copixiv.domain.ports.unit_of_work.UnitOfWork`
 built from an injected UoW factory — the endpoint (composition edge)
 constructs the concrete ``SqlUnitOfWork``, so this module has zero
-infrastructure imports (docs/MODULARITY.md §3.1).
+infrastructure imports (docs/MODULARITY.md §2.1).
 """
 
 from __future__ import annotations

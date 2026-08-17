@@ -1,13 +1,14 @@
-"""架构边界测试 —— 执行 docs/MODULARITY.md §3 的边界规则。
+"""架构边界测试 —— 执行 docs/MODULARITY.md §2 的硬规则。
 
-三组规则，全部基于 AST 扫描 ``src/copixiv``：
+两组规则，全部基于 AST 扫描 ``src/copixiv``：
 
-1. **分层 import 矩阵**（§3.1）：每层只能 import 矩阵允许的
+1. **分层 import 矩阵**（§2.1）：每层只能 import 矩阵允许的
    copixiv 顶层包。
-2. **厂商白名单**（§3.2）：``pixivpy3`` 只准出现在
+2. **厂商白名单**（§2.2）：``pixivpy3`` 只准出现在
    ``infrastructure/pixiv/patch.py`` 与 ``account.py``。
-3. **具体类规则**（§3.3，阶段 2 完全生效后启用）：具体实现类只准
-   出现在自家包 / 组合根 / 依赖装配边缘。
+
+写锁与 application 纯度由 tests/regression/ 钉死（§2.3 / §2.4）；
+具体实现类的 import 位置是**约定**而非规则（§3，无执法测试）。
 
 任何新模块违规都会在这里立刻失败——边界靠测试钉死，不靠自觉。
 """
@@ -21,7 +22,7 @@ SRC = Path(__file__).resolve().parents[2] / "src" / "copixiv"
 SHARED = {"log"}
 LAYERS = {"domain", "application", "infrastructure", "tasks", "web_api", "app"}
 
-# docs/MODULARITY.md §3.1 的分层矩阵
+# docs/MODULARITY.md §2.1 的分层矩阵
 ALLOWED: dict[str, set[str]] = {
     "domain": {"domain"} | SHARED,
     "application": {"domain", "application"} | SHARED,
@@ -34,7 +35,7 @@ ALLOWED: dict[str, set[str]] = {
     "app": LAYERS | SHARED,
 }
 
-# docs/MODULARITY.md §3.2 厂商白名单（相对 src/copixiv 的路径）
+# docs/MODULARITY.md §2.2 厂商白名单（相对 src/copixiv 的路径）
 PIXIVPY3_WHITELIST = {
     "infrastructure/pixiv/patch.py",
     "infrastructure/pixiv/account.py",
@@ -94,7 +95,7 @@ def _pixivpy3_imports(py_file: Path):
 
 
 # ---------------------------------------------------------------------------
-# §3.1 分层 import 矩阵
+# §2.1 分层 import 矩阵
 # ---------------------------------------------------------------------------
 
 
@@ -119,7 +120,7 @@ def test_layer_import_matrix():
 
 
 # ---------------------------------------------------------------------------
-# §3.2 pixivpy3 厂商白名单
+# §2.2 pixivpy3 厂商白名单
 # ---------------------------------------------------------------------------
 
 

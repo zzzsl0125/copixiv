@@ -474,7 +474,6 @@ async def download_export_file(
     import json
     from pathlib import Path
 
-    from copixiv.infrastructure.database.models import TaskHistory
     from copixiv.domain.services.filename import safe_filename
 
     file_path = (
@@ -486,10 +485,10 @@ async def download_export_file(
 
     # Prefer the user's zip_name (stored in the task arguments).
     filename = f"batch_export_{task_id}.zip"
-    row = uow.session.get(TaskHistory, task_id)
-    if row is not None and row.arguments:
+    arguments = await uow.tasks.get_task_arguments(task_id)
+    if arguments:
         try:
-            args = json.loads(row.arguments)
+            args = json.loads(arguments)
             zip_name = (args.get("zip_name") or "").strip()
             if zip_name:
                 filename = safe_filename(zip_name.rstrip(".zip").rstrip(".ZIP")) + ".zip"

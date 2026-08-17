@@ -1,11 +1,10 @@
 """EPUB builder port."""
 
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 
 from copixiv.domain.models.novel import Novel
 
 
-@runtime_checkable
 class EpubBuilderPort(Protocol):
     """Port for creating EPUB files from downloaded novel text and images.
 

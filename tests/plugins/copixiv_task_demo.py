@@ -1,4 +1,4 @@
-"""Demo third-party task plugin (docs/MODULARITY.md §M8 验收件).
+"""Demo third-party task plugin (docs/MODULARITY.md §M8 发现链路).
 
 Simulates a package installed by the user that contributes one task via
 the ``copixiv.tasks`` entry-point group.  The registry never imports this

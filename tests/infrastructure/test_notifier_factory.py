@@ -1,32 +1,51 @@
-"""Notifier-backend registry tests (docs/MODULARITY.md §M6 验收).
+"""Notifier assembly tests (docs/MODULARITY.md §M6).
 
-Pin the plugin contract for notification channels:
-
-1. built-in discovery — backend modules self-register on import;
-2. composite fan-out — every enabled backend receives the result, one
-   failing backend never affects the others, close() releases all;
-3. webhook backend — JSON delivery + skip-when-unconfigured semantics
-   (the "second backend" demonstration);
-4. config-driven assembly — ``notifiers.enabled`` maps names to
-   factories via the registry.
+Covers the config-driven factory (``notifiers.enabled`` → backends) and
+the backend behaviors it selects: webhook delivery semantics and
+composite fault isolation.
 """
 
-import httpx
-import pytest
+import json
 
+import httpx
+
+from copixiv.app.config import AppConfig
 from copixiv.domain.models.task_result import TaskResult
 from copixiv.infrastructure.notifier.composite import CompositeNotifier
-from copixiv.infrastructure.notifier.registry import (
-    discover_backends,
-    get_backend_builder,
-    list_backends,
-)
+from copixiv.infrastructure.notifier.factory import build_notifiers
+from copixiv.infrastructure.notifier.telegram import TelegramNotifier
 from copixiv.infrastructure.notifier.webhook import WebhookNotifier
 
 
-@pytest.fixture(autouse=True)
-def _discover():
-    discover_backends()
+def _config(enabled: list[str]) -> AppConfig:
+    return AppConfig(
+        telegram={"token": "1:TOK", "chat_id": "42"},
+        webhook={"url": "http://x.test/h"},
+        notifiers={"enabled": enabled},
+    )
+
+
+def test_enabled_maps_to_backends():
+    backends = build_notifiers(_config(["telegram", "webhook"]))
+    assert [type(b) for b in backends] == [TelegramNotifier, WebhookNotifier]
+    assert backends[0]._token == "1:TOK"
+    assert backends[1]._url == "http://x.test/h"
+
+
+def test_empty_disables_notifications():
+    assert build_notifiers(_config([])) == []
+
+
+def test_unknown_name_is_skipped_with_warning():
+    from copixiv.log import capture_logs
+
+    with capture_logs() as get_logs:
+        backends = build_notifiers(_config(["telegram", "nope"]))
+        logs = get_logs()  # buffer closes when the context exits
+
+    assert len(backends) == 1
+    assert isinstance(backends[0], TelegramNotifier)
+    assert "Unknown notifier backend 'nope'" in logs
 
 
 class _RecordingBackend:
@@ -44,11 +63,6 @@ class _RecordingBackend:
 
     async def close(self):
         self.closed = True
-
-
-def test_builtin_backends_discovered():
-    builders = list_backends()
-    assert set(builders) >= {"telegram", "webhook"}
 
 
 def test_webhook_backend_skips_without_url():
@@ -93,7 +107,6 @@ def test_webhook_backend_posts_json():
     asyncio.run(run())
 
     assert len(fake.calls) == 1
-    import json
     payload = json.loads(fake.calls[0]["content"])
     assert payload["task_name"] == "novel_fetch"
     assert payload["status"] == "success"
@@ -117,27 +130,3 @@ def test_composite_fans_out_and_isolates_failures():
     assert len(a.sent) == 1
     assert len(b.sent) == 1  # boom 抛异常不影响 b
     assert a.closed and b.closed and boom.closed
-
-
-def test_backend_factory_reads_notifier_config():
-    """telegram/webhook 工厂从 AppConfig 的各自配置节取参数。"""
-    from copixiv.app.config import AppConfig
-
-    cfg = AppConfig(
-        telegram={"token": "1:TOK", "chat_id": "42"},
-        webhook={"url": "http://x.test/h"},
-    )
-    tg_builder = get_backend_builder("telegram")
-    hook_builder = get_backend_builder("webhook")
-    assert tg_builder is not None and hook_builder is not None
-
-    tg = tg_builder(cfg)
-    hook = hook_builder(cfg)
-    assert tg.name == "telegram"
-    assert tg._token == "1:TOK"
-    assert hook.name == "webhook"
-    assert hook._url == "http://x.test/h"
-
-
-def test_unknown_backend_has_no_builder():
-    assert get_backend_builder("nonexistent-channel") is None

@@ -7,10 +7,9 @@ dependency direction ``application → domain ← infrastructure`` intact.
 """
 
 from collections.abc import AsyncIterator
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 
 
-@runtime_checkable
 class WriteLockPort(Protocol):
     """A callable returning an async context manager that serializes writes."""
 
