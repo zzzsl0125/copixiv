@@ -67,6 +67,28 @@ export function usePagedNovelIdView() {
     }
   }
 
+  /**
+   * 就地从分页视图里摘掉一个 id —— 供「查看已选」视图在取消勾选时让
+   * 卡片立即从列表消失（所见即所得），而不是留下一张无蓝框的卡片、
+   * 直到退出视图才生效。
+   *
+   * 保持分页游标自洽：已分页进 ``novels`` 的 id（index < offset）从两
+   * 个数组里同时摘除并把游标回退一格；尚未分页的 id（index >= offset）
+   * 仅离开 ``ids``，下一次 ``slice(offset, …)`` 取页不受影响。
+   *
+   * 返回该 id 是否原本存在并已被移除。
+   */
+  function removeId(id: number): boolean {
+    const idx = ids.value.indexOf(id)
+    if (idx === -1) return false
+    ids.value.splice(idx, 1)
+    if (idx < offset.value) {
+      offset.value -= 1
+      novels.value = novels.value.filter(n => n.id !== id)
+    }
+    return true
+  }
+
   return {
     ids,
     novels,
@@ -77,5 +99,6 @@ export function usePagedNovelIdView() {
     reset,
     start,
     loadMore,
+    removeId,
   }
 }

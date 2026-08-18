@@ -223,6 +223,23 @@ function handleViewLoadMore() {
   else if (viewingExcluded.value) void excludedView.loadMore()
 }
 
+// 「查看已选」视图是选择集的实时投影：在此视图内取消勾选必须让卡片
+// 立即从列表消失（所见即所得），而不是留下一张无蓝框的卡片、直到退
+// 出视图才真正移除。浏览列表视图不作此处理——那里仅由 App 维护选择
+// 集，卡片本就不一定属于当前筛选范围。
+function handleBatchToggleCard(id: number) {
+  if (viewingSelected.value && props.isBatchSelected(id)) {
+    selectedView.removeId(id)
+    // 当前页被摘空但仍有未加载的已选时自动补一页，否则 LoadMore 会因
+    // hasData=false 整体消失，把用户卡在空白网格里。
+    if (selectedView.novels.value.length === 0 && selectedView.hasMore.value) {
+      void selectedView.loadMore()
+    }
+    void nextTick().then(relayout)
+  }
+  emit('batch-toggle-card', id)
+}
+
 // Leaving batch mode (or an emptied selection) closes the selected view;
 // entering batch mode closes the excluded view (批量模式优先互斥).
 watch(() => props.batchMode, (on) => {
@@ -368,7 +385,7 @@ const handleToggleActive = (id: number | string) => {
         <template v-if="viewLoading">正在加载已选小说…</template>
         <template v-else>
           正在查看已选的小说（已展示 {{ viewShownCount }} / 共 {{ viewTotalCount }} 篇）。
-          取消勾选只会去掉蓝框，退出视图后生效；点「返回搜索列表」回到筛选列表。
+          点击卡片即可取消勾选并立即从该列表移除；点「返回搜索列表」回到筛选列表。
         </template>
       </div>
 
@@ -392,7 +409,7 @@ const handleToggleActive = (id: number | string) => {
             :batch-mode="props.batchMode"
             :batch-selected="props.isBatchSelected(novel.id)"
             @toggle-active="handleToggleActive"
-            @toggle-batch-select="(id: number) => emit('batch-toggle-card', id)"
+            @toggle-batch-select="handleBatchToggleCard"
             @search="(type, value) => emit('card-search', type, value)"
             @state-changed="emit('novel-state-changed', $event)"
           />
