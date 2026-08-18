@@ -7,8 +7,8 @@ Thin composition of the task kernel (docs/MODULARITY.md §M8):
 - :mod:`copixiv.tasks.scheduler` — APScheduler ownership + cron jobs
 - :mod:`copixiv.tasks.registry` — task manifests + discovery
 
-Business tasks are discovered via :func:`discover_tasks` (entry points
-with a built-in fallback), receive a validated Pydantic args object plus
+Business tasks are discovered via :func:`discover_tasks` (the built-in
+task module list), receive a validated Pydantic args object plus
 a :class:`TaskContext`, and return a :class:`TaskResult` so the notifier
 knows whether a task discovered novels or performed maintenance — no more
 guessing based on ``isinstance(result, list)``.

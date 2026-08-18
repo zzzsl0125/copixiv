@@ -1,47 +1,28 @@
-"""Task-plugin discovery tests (docs/MODULARITY.md §M8 发现链路).
+"""Task discovery + declarative manifest tests (docs/MODULARITY.md §M8).
 
-Pin the two discovery paths and the declarative manifest contract:
+Pin the built-in discovery path and the declarative manifest contract:
 
-1. built-in fallback — the kernel discovers the in-tree task modules;
-2. entry-point discovery — a third-party package (simulated by a fake
-   entry point) installs its task with zero core edits;
-3. manifests — ``describe_tasks`` derives argument metadata purely from
-   the Pydantic args model.
+1. built-in discovery — the kernel imports the in-tree task modules;
+2. manifests — ``describe_tasks`` derives argument metadata purely from
+   the Pydantic args model;
+3. runtime validation — params are validated against the args model at
+   execution time.
+
+There is deliberately no third-party plugin path (no entry-point group):
+docs/MODULARITY.md §6.
 """
-
-import importlib.metadata
 
 import pytest
 
 from copixiv.tasks.registry import (
     DEFAULT_TASK_MODULES,
-    ENTRY_POINT_GROUP,
     describe_tasks,
     discover_tasks,
     get_spec,
-    unregister,
 )
 
-DEMO_MODULE = "tests.plugins.copixiv_task_demo"
 
-
-class _FakeEntryPoint:
-    """Minimal stand-in for importlib.metadata.EntryPoint."""
-
-    def __init__(self, name: str, value: str):
-        self.name = name
-        self.value = value
-
-
-@pytest.fixture(autouse=True)
-def _clean_demo_task():
-    """Remove the demo task after each test so it cannot leak into other
-    modules (the registry is process-global)."""
-    yield
-    unregister("demo_task")
-
-
-def test_builtin_fallback_discovers_in_tree_tasks():
+def test_builtin_discovery_registers_in_tree_tasks():
     discover_tasks()
 
     for name in ("novel_fetch", "batch_operation", "rebuild_fts"):
@@ -53,24 +34,6 @@ def test_builtin_fallback_discovers_in_tree_tasks():
         "copixiv.tasks.batch_tasks",
         "copixiv.tasks.maintenance",
     }
-
-
-def test_entry_point_discovers_third_party_task(monkeypatch):
-    """A third-party package declares an entry point → task registers
-    itself; no core edit needed."""
-    monkeypatch.setattr(
-        importlib.metadata,
-        "entry_points",
-        lambda **kwargs: [_FakeEntryPoint("demo", DEMO_MODULE)]
-        if kwargs.get("group") == ENTRY_POINT_GROUP
-        else [],
-    )
-
-    discover_tasks()
-
-    spec = get_spec("demo_task")
-    assert spec is not None
-    assert spec.args_model is not None
 
 
 def test_describe_tasks_derives_arguments_from_args_model():

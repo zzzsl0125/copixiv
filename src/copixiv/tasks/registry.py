@@ -7,17 +7,14 @@ registry stores :class:`TaskSpec` records, and argument descriptions come
 from the Pydantic ``args`` model instead of ``inspect.signature``
 reflection (docs/MODULARITY.md §M8).
 
-Discovery (:func:`discover_tasks`) imports task modules from the
-``copixiv.tasks`` entry-point group — third-party packages install a task
-by declaring the entry point, no core edit needed.  When the package is
-not installed (source-tree / test runs), discovery falls back to the
-built-in module list.
+Discovery (:func:`discover_tasks`) imports the built-in task modules
+(:data:`DEFAULT_TASK_MODULES`).  There is no third-party plugin
+ecosystem — docs/MODULARITY.md §6.
 """
 
 from __future__ import annotations
 
 import importlib
-import importlib.metadata
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -26,16 +23,12 @@ from pydantic import BaseModel
 
 from copixiv.log import logger
 
-# Built-in task modules — the fallback used when entry points are
-# unavailable (the copixiv package itself is not installed).  Third-party
-# task packages register through the ``copixiv.tasks`` entry-point group.
+# Built-in task modules — the single source of truth for the task set.
 DEFAULT_TASK_MODULES: tuple[str, ...] = (
     "copixiv.tasks.novel_tasks",
     "copixiv.tasks.batch_tasks",
     "copixiv.tasks.maintenance",
 )
-
-ENTRY_POINT_GROUP = "copixiv.tasks"
 
 
 @dataclass(frozen=True)
@@ -166,14 +159,13 @@ def _annotation_type_name(annotation: Any) -> str:
 
 
 def discover_tasks() -> None:
-    """Import every task module: entry points first, built-ins as fallback.
+    """Import every built-in task module (:data:`DEFAULT_TASK_MODULES`).
 
     Idempotent — imports are cheap no-ops on repeat calls.  A module that
-    fails to import is logged loudly (never silent) and skipped so one bad
-    third-party task package cannot take down the whole scheduler.
+    fails to import is logged loudly (never silent) so the failure is
+    visible instead of silently dropping its tasks.
     """
-    modules = _entry_point_modules() or DEFAULT_TASK_MODULES
-    for module_name in modules:
+    for module_name in DEFAULT_TASK_MODULES:
         try:
             importlib.import_module(module_name)
         except Exception:
@@ -181,9 +173,3 @@ def discover_tasks() -> None:
                 "Failed to import task module '%s' — task(s) not registered.",
                 module_name,
             )
-
-
-def _entry_point_modules() -> list[str]:
-    """Module names registered under the ``copixiv.tasks`` entry-point group."""
-    eps = importlib.metadata.entry_points(group=ENTRY_POINT_GROUP)
-    return [ep.value for ep in eps]

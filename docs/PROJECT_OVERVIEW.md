@@ -41,7 +41,7 @@ web_api → application → domain ← infrastructure
 ```
 copixiv/
 ├── main.py                # uvicorn 入口 shim（真实入口 copixiv.app.main）
-├── pyproject.toml         # 元数据 + 依赖 + 任务 entry points
+├── pyproject.toml         # 元数据 + 依赖
 ├── config.yaml            # 运行时配置（见 config.example.yaml 模板）
 ├── pixiv_token.py         # 账号 token（DB tokens 表的兜底来源）
 ├── alembic/               # 数据库迁移（versions/ 下为全部版本）
@@ -87,7 +87,7 @@ copixiv/
 ## 6. 后台任务
 
 - 声明式注册：`@register(name, description, args=Pydantic模型)`（`tasks/registry.py`）
-- 发现：entry point 组 `copixiv.tasks`（pyproject 声明内置三模块），源码树运行回退 `DEFAULT_TASK_MODULES`
+- 发现：内置 `DEFAULT_TASK_MODULES`（novel_tasks / batch_tasks / maintenance），无第三方插件机制
 - 依赖注入：`TaskContext`（uow / client / storage / epub / notifier / config / write_lock）
 - 任务清单以运行时 `/api/tasks/methods` 为准（`describe_tasks()` 从 Pydantic args 模型推导，无反射）
 - 内置任务模块：`novel_tasks.py`（单本/关注/作者/排行/搜索）、`batch_tasks.py`（批量操作/导出）、`maintenance.py`（FTS/EPUB/系列索引等）

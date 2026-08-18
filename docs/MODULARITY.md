@@ -78,7 +78,7 @@ web_api → application → domain ← infrastructure
 | M5 | `storage` / `epub` | 固定 | 本地文件目录是产品形态 |
 | M6 | `notifier` | 配置驱动 | `notifiers.enabled` 选后端；`CompositeNotifier` 故障隔离 |
 | M7 | `application` | 用例 | 只保留有真实编排的用例；CRUD 由端点直连仓库 |
-| M8 | `tasks` | 注册表 | `@register(name, args=Pydantic模型)` + `TaskContext` 注入；entry point 组 `copixiv.tasks` |
+| M8 | `tasks` | 注册表 | `@register(name, args=Pydantic模型)` + `TaskContext` 注入；`DEFAULT_TASK_MODULES` 内置发现 |
 | M9 | `web_api` | 薄适配 | `deps.py` 是唯一碰 `app.state` 的地方；ROUTE 自述清单 |
 | M10 | `app/container` | 组合根 | 按域 `_build_*` 装配；`create_app()` import 零副作用 |
 
@@ -97,7 +97,7 @@ web_api → application → domain ← infrastructure
 - 存储后端多态（S3 等）
 - Pixiv 源替换 / 多源
 - web 路由热插拔
-- 任务 / 通知的第三方插件生态（entry point 机制仅为统一内置注册的副产物，无第三方使用者）
+- 任务 / 通知的第三方插件生态（任务发现只走内置 `DEFAULT_TASK_MODULES`，无 entry point 机制）
 
 ## 7. 配套文档
 
