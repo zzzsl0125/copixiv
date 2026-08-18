@@ -8,7 +8,7 @@ Write operations live in ``novel_write.py``; the facade class
 
 import asyncio
 
-from sqlalchemy import select, func, text, table, column
+from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
 from copixiv.infrastructure.database import models
@@ -48,7 +48,6 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
             C.FIELD_IS_SPECIAL_FOLLOW, C.ORDER_BY_NONE, C.ORDER_BY_RANDOM,
         }
 
-    # ---- read ----------------------------------------------------------------
 
 
     async def get_by_id(self, novel_id: int) -> Novel | None:
@@ -342,8 +341,6 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
             spec, blocked_tag_names=blocked_names,
         )
         return base_total - visible
-
-    # ---- write ---------------------------------------------------------------
 
 
     async def list_matching_ids(self, spec: QuerySpec) -> list[int]:

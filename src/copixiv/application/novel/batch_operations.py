@@ -70,18 +70,22 @@ async def resolve_batch_scope(
         return ids
 
     conditions = parse_search_keyword(keyword) if keyword else None
-    matched = await novel_repo.count_novels(
-        QuerySpec(
-            conditions=conditions or [],
-            min_like=min_like,
-            min_text=min_text,
+    # Only the capped path (sync endpoint) needs the COUNT — the
+    # background-task path (cap=None) skips it and goes straight to the
+    # ID list.
+    if cap is not None:
+        matched = await novel_repo.count_novels(
+            QuerySpec(
+                conditions=conditions or [],
+                min_like=min_like,
+                min_text=min_text,
+            )
         )
-    )
-    if cap is not None and matched > cap:
-        raise ValidationError(
-            f"当前筛选匹配 {matched} 篇，超过单次批量操作上限 "
-            f"{cap} 篇，请先缩小筛选范围"
-        )
+        if matched > cap:
+            raise ValidationError(
+                f"当前筛选匹配 {matched} 篇，超过单次批量操作上限 "
+                f"{cap} 篇，请先缩小筛选范围"
+            )
 
     ids = await novel_repo.list_matching_ids(
         QuerySpec(

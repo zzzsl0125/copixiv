@@ -37,7 +37,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             C.FIELD_IS_SPECIAL_FOLLOW, C.ORDER_BY_NONE, C.ORDER_BY_RANDOM,
         }
 
-    # ---- read ----------------------------------------------------------------
 
 
     async def upsert_novels(

@@ -6,8 +6,9 @@ once at startup (the entry point does) and then use
 ``from copixiv.log import logger`` everywhere.
 
 Moved out of ``copixiv.app.logger`` so that ``infrastructure`` /
-``application`` no longer depend on the ``app`` layer.  The old location
-is kept as a deprecated re-export shim for external scripts.
+``application`` no longer depend on the ``app`` layer.  (The old
+``copixiv.app.logger`` shim was removed — internal code imports from
+here directly.)
 """
 
 import sys
