@@ -23,6 +23,7 @@ from .base import BaseRepository
 from .fts import FTSManager
 from .tag import SQLAlchemyTagRepository
 from .query_builder_base import reset_fts_cache
+from .novel_read import invalidate_count_cache
 
 
 class SQLAlchemyNovelWriteRepository(BaseRepository):
@@ -91,6 +92,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         fts = FTSManager(self.session)
         fts.update_novel_fts_index(list(set(new_ids + fts_dirty_ids)))
 
+        invalidate_count_cache()
         return len(new_ids)
 
     # ---- upsert helpers -----------------------------------------------------
@@ -229,6 +231,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         self.rewrite_tags(novel_id, set())
         FTSManager(self.session).delete_novel_fts(novel_id)
         self.session.delete(novel)
+        invalidate_count_cache()
 
 
     async def toggle_favourite(self, novel_id: int) -> None:
@@ -246,6 +249,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             self.session.delete(fav)
         else:
             self.session.add(models.Favourite(novel_id=novel_id))
+        invalidate_count_cache()
 
 
     async def toggle_special_follow(self, author_id: int) -> None:
@@ -263,6 +267,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             self.session.delete(follow)
         else:
             self.session.add(models.SpecialFollow(author_id=author_id))
+        invalidate_count_cache()
 
 
     async def update_has_epub_status(
@@ -345,6 +350,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         self.session.execute(
             _delete(models.Novel).where(models.Novel.id.in_(novel_ids))
         )
+        invalidate_count_cache()
         return [p for p in paths if p]
 
 
@@ -406,6 +412,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
 
         changed_ids = sorted({nid for nid, _tid in new_pairs})
         FTSManager(self.session).update_novel_fts_index(changed_ids)
+        invalidate_count_cache()
         return len(changed_ids)
 
 
@@ -458,6 +465,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
 
         changed_ids = sorted({nid for nid, _tid in doomed_pairs})
         FTSManager(self.session).update_novel_fts_index(changed_ids)
+        invalidate_count_cache()
         return len(changed_ids)
 
 

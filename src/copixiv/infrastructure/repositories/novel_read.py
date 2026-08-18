@@ -7,9 +7,34 @@ Write operations live in ``novel_write.py``; the facade class
 """
 
 import asyncio
+import time as _time
 
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
+
+
+# ---------------------------------------------------------------------------
+# Count-result TTL cache (process-wide)
+#
+# Count queries are expensive on popular tags (186-222 ms for R-18) but
+# change only when the novel set is mutated (ingest / delete / tag edit /
+# blocked-tag change / favourite toggle).  Writes are sparse relative to
+# reads, and the count is already consumed fire-and-forget by the frontend
+# (ExclusionBar / BatchBar), so a short TTL gives near-exact freshness at
+# a fraction of the cost.
+#
+# The cache is keyed on a normalized signature of everything that affects
+# the count: conditions, thresholds, and the effective blocked-tag set.
+# Entries with a non-empty ``exclude_ids`` are not cached (that path is
+# batch-scoped and rarely repeated with the same id list).
+# ---------------------------------------------------------------------------
+_COUNT_CACHE_TTL = 60.0          # seconds
+_count_cache: dict[tuple, tuple[float, int]] = {}
+
+
+def invalidate_count_cache() -> None:
+    """Drop every cached count (call after any novel-set mutation)."""
+    _count_cache.clear()
 
 from copixiv.infrastructure.database import models
 from copixiv.infrastructure.database import constants as C
@@ -265,6 +290,35 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
             else frozenset()
         )
 
+        # TTL cache — skip when exclude_ids is set (batch-scoped, rarely
+        # repeated).  blocked_names is part of the key so toggling the
+        # exclusion setting or editing blocked tags produces a fresh entry.
+        cache_key = None
+        if not spec.exclude_ids:
+            cache_key = (
+                tuple(sorted(spec.conditions)),
+                spec.min_like or 0,
+                spec.min_text or 0,
+                spec.exclude_blocked_tags,
+                frozenset(blocked_names),
+            )
+            hit = _count_cache.get(cache_key)
+            if hit is not None:
+                ts, val = hit
+                if _time.monotonic() - ts < _COUNT_CACHE_TTL:
+                    return val
+
+        result = self._compute_count(spec, blocked_names)
+
+        if cache_key is not None:
+            _count_cache[cache_key] = (_time.monotonic(), result)
+        return result
+
+
+    def _compute_count(
+        self, spec: QuerySpec, blocked_names: frozenset[str],
+    ) -> int:
+        """The actual count logic, extracted from ``_count_novels_sync``."""
         # No blocked tags — the existing cheap paths unchanged.
         if not blocked_names:
             return self._count_with_spec(spec)

@@ -218,11 +218,22 @@ class NovelQueryBuilder(BaseQueryBuilder):
 
         stmt = select(func.count()).select_from(self.main_model)
         # COUNT queries: special_follow uses IN instead of EXISTS (avoids
-        # a full novel scan), and tags use JOINs instead of a large IN list.
+        # a full novel scan).  Tags: JOIN when there are no thresholds
+        # (faster for popular tags — 171ms vs 249ms), but EXISTS when
+        # thresholds are active so SQLite drives from the small
+        # threshold-filtered index instead of the large tag membership set
+        # (measured: R-18 + 500/3000 = 202ms → 77ms).
+        has_thresholds = (
+            (self.spec.min_like is not None and self.spec.min_like > 0)
+            or (self.spec.min_text is not None and self.spec.min_text > 0)
+        )
         stmt = self._join_field_filter_tables(
             stmt, field_filters, use_exists_for_special_follow=False,
         )
-        stmt = self._join_tag_filter(stmt, tags)
+        if tags and has_thresholds:
+            stmt = self._where_tag_filter(stmt, tags, use_exists=True)
+        else:
+            stmt = self._join_tag_filter(stmt, tags)
         stmt = self._where_fts_filter(stmt, keywords, use_exists=False)
         stmt = self._where_field_filters(stmt, field_filters)
         stmt = self._where_thresholds(stmt)

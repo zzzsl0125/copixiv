@@ -353,13 +353,38 @@ class Container:
     # ------------------------------------------------------------------
 
     def _warmup_database_cache(self) -> None:
-        """Run representative queries to preload hot index pages into OS cache.
+        """Preload database pages into the OS page cache.
 
-        After a server restart the SQLite page cache and OS buffer cache are
-        cold — the first few requests pay the full cost of random disk I/O
-        (~20-30 ms per page on HDD).  Touching the key indexes AND the main
-        table pages they reference shifts that cost to startup instead of
-        the first user request.
+        After a server restart — or once memory pressure evicts the ~270 MB
+        hot working set (novel like-index + novel_tag index + FTS5 data
+        segment) while the server sits idle — the first query that touches
+        cold pages pays seconds of *random* disk I/O.  This is I/O wait, not
+        CPU: measured ~7000 ms wall vs ~830 ms CPU for a cold first keyword
+        search on this 532 MB / 232k-novel DB.  The pain is most acute on
+        the first keyword search, which walks several large indexes.
+
+        The old shallow warmup (two small queries touching ~100 rows) did
+        almost nothing for this: it left the 94 MB FTS5 index and the bulk
+        of the novel indexes cold, and a representative query for one token
+        warms only that token's pages (R-18 does not help 「恋」).
+
+        The fix that actually works: a daemon thread **sequentially reads
+        the whole DB file once**.  Sequential I/O is 10-50× faster than the
+        random reads the queries will later issue, so once the file is
+        resident every query is an OS-cache hit.  Verified end-to-end: cold
+        first-search 7000 ms → 63 ms after a sequential full-file read.
+
+        It is non-blocking — the server is ready immediately and the read
+        races ahead of the user's first query (opening the page and typing a
+        search typically takes 3-8 s, by which point the read is done).  If
+        a query lands before the read finishes it just pays one cold pass
+        — no worse than today — and everything after is warm.  A tiny
+        synchronous representative query is kept so the very first request
+        still finds a few hot pages; the background read is the real fix.
+
+        ``fadvise(WILLNEED)`` was tried and rejected: the kernel's
+        readahead is sequential and does not match B-tree random access, so
+        it provided no measurable benefit.
         """
         logger.info("Warming database cache...")
         if self._session_factory is None:
@@ -368,11 +393,6 @@ class Container:
             from sqlalchemy import func as _func, select as _select
             from copixiv.infrastructure.database import models as _models
             with self._session_factory() as session:
-                # Touch the shuffle composite index by scanning through a
-                # range of shuffle values.  This also pulls the main-table
-                # pages for the rows the index points to (full entity
-                # SELECT forces main-table access for columns not in the
-                # index).  Built from the ORM so schema renames propagate.
                 session.execute(
                     _select(_models.Novel)
                     .where(
@@ -383,8 +403,6 @@ class Container:
                     .order_by(_models.Novel.shuffle.asc())
                     .limit(100)
                 )
-                # Touch novel_tag covering index so the first batch tag
-                # lookup doesn't stall.
                 session.execute(
                     _select(_func.count()).select_from(_models.NovelTag)
                     .where(
@@ -393,9 +411,54 @@ class Container:
                         )
                     )
                 )
-            logger.info("Database cache warmup complete.")
         except Exception:
-            logger.warning("Database cache warmup failed — continuing.")
+            logger.warning("Database cache warmup (shallow) failed — continuing.")
+
+        # Background sequential full-file read — the real cold-start fix.
+        # Pulls every page into the OS page cache without blocking startup.
+        import os
+        import threading
+        import time as _time
+
+        db_path_str = self._resolve_database_path()
+
+        def _seqread(path: str) -> None:
+            try:
+                t0 = _time.perf_counter()
+                size = 0
+                with open(path, "rb") as f:
+                    while True:
+                        chunk = f.read(1 << 20)  # 1 MB chunks
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                logger.info(
+                    f"Database cache warmup (sequential read) complete — "
+                    f"{size // (1 << 20)} MB in "
+                    f"{_time.perf_counter() - t0:.1f}s."
+                )
+            except Exception:
+                logger.warning(
+                    f"Database sequential-read warmup failed for {path} "
+                    f"— continuing."
+                )
+
+        def _run() -> None:
+            # Warm the main DB file first (it holds the indexes that drive
+            # query latency); the WAL is small but read it too so committed
+            # pages not yet checkpointed are also resident.
+            for ext in ("", "-wal"):
+                p = db_path_str + ext
+                try:
+                    if os.path.exists(p) and os.path.getsize(p) > 0:
+                        _seqread(p)
+                except Exception:
+                    logger.warning(f"Sequential-read warmup skipped {p}.")
+
+        threading.Thread(
+            target=_run, name="db-cache-warmup", daemon=True,
+        ).start()
+        logger.info("Database cache warmup scheduled (background sequential read).")
 
     def _load_accounts(self) -> None:
         """Load Pixiv accounts from the tokens table, falling back to the token file."""

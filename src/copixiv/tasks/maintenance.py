@@ -286,3 +286,49 @@ async def fix_series_index(ctx: TaskContext) -> TaskResult:
     return TaskResult(
         summary=f"系列章节号修复: {done}/{total} 个系列, 处理 {processed} 本小说"
     )
+
+
+@register("rebuild_tag_counts")
+async def rebuild_tag_counts(ctx: TaskContext) -> TaskResult:
+    """Recompute every tag's ``reference_count`` from the novel_tag table.
+
+    The denormalized counter drifts over time: v1 legacy data, deletes
+    that predated the decrement-on-delete fix, and alias retroactive
+    moves all leave stale values.  Measured on the production 232k DB,
+    ~10 % of tags (7500/73037) had a count that didn't match the actual
+    distinct-novel count, with errors up to ±14000.
+
+    This task recalculates ``reference_count = COUNT(DISTINCT novel_id)``
+    for every tag in a single correlated UPDATE — fast and exact.
+    """
+    from sqlalchemy import text, func, select
+    from copixiv.infrastructure.database import models
+
+    uow = ctx.uow
+    async with db_write():
+        async with uow.begin():
+            result = uow.session.execute(text(
+                "UPDATE tag SET reference_count = ("
+                "  SELECT COUNT(DISTINCT nt.novel_id) "
+                "  FROM novel_tag nt WHERE nt.tag_id = tag.id"
+                ")"
+            ))
+            # SQLite doesn't report rowcount reliably for correlated
+            # UPDATEs, so count tags explicitly.
+            total = uow.session.execute(
+                select(func.count()).select_from(models.Tag)
+            ).scalar() or 0
+            drifted = uow.session.execute(text(
+                "SELECT COUNT(*) FROM tag WHERE reference_count != ("
+                "  SELECT COUNT(DISTINCT nt.novel_id) "
+                "  FROM novel_tag nt WHERE nt.tag_id = tag.id)"
+            )).scalar() or 0
+
+    from copixiv.infrastructure.repositories.novel_read import (
+        invalidate_count_cache,
+    )
+    invalidate_count_cache()
+
+    return TaskResult(
+        summary=f"标签引用计数重建: {total} 个标签, 修正 {drifted} 个偏差"
+    )

@@ -32,6 +32,11 @@ export function useMasonryLayout<T>(
       !force && items.value.length > totalRendered && totalRendered !== 0
 
     let startIndex = 0
+    // Tracked column heights — avoids re-reading every column's
+    // offsetHeight on each placement (DOM reads force reflow).  The
+    // shortest column is found from the JS array (zero DOM reads);
+    // only the column that just received an item is re-measured.
+    let colHeights: number[]
 
     if (!isLoadMore) {
       const newColumns: T[][] = Array.from({ length: count }, () => [])
@@ -41,22 +46,23 @@ export function useMasonryLayout<T>(
       startIndex = totalRendered
     }
 
-    // Re-measure after each placement: item heights vary (title/text
-    // length), so only a per-item pass keeps columns balanced.  A batched
-    // estimate was tried and reverted — mixing pixel heights with item
-    // counts is dimensionally wrong on load-more (the whole new page
-    // stacked into the single shortest column, leaving the others blank).
+    // Seed heights from the actual DOM once (count reads, not count×N).
+    // For a fresh layout the columns are empty (height ≈ 0 or padding);
+    // for load-more they hold the already-rendered items' heights.
+    colHeights = Array.from({ length: count }, (_, i) => {
+      const el = columnRefs?.value?.[i]
+      return el ? el.offsetHeight : 0
+    })
+
     for (let index = startIndex; index < items.value.length; index++) {
       const item = items.value[index]
+
+      // Find the shortest column from tracked heights — no DOM read.
       let minHeightColIndex = 0
-      let minHeight = Infinity
-
-      for (let i = 0; i < count; i++) {
-        const colElement = columnRefs?.value?.[i]
-        const height = colElement ? colElement.offsetHeight : 0
-
-        if (height < minHeight) {
-          minHeight = height
+      let minHeight = colHeights[0]
+      for (let i = 1; i < count; i++) {
+        if (colHeights[i] < minHeight) {
+          minHeight = colHeights[i]
           minHeightColIndex = i
         }
       }
@@ -67,6 +73,13 @@ export function useMasonryLayout<T>(
       }
 
       await nextTick()
+
+      // Re-measure only the column that changed — 1 DOM read instead
+      // of reading all columns (count reads) per item.
+      const colEl = columnRefs?.value?.[minHeightColIndex]
+      if (colEl) {
+        colHeights[minHeightColIndex] = colEl.offsetHeight
+      }
     }
   }
 
