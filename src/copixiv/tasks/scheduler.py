@@ -57,8 +57,8 @@ class CronScheduler:
     def reload_cron_jobs(self, enqueue) -> None:
         """Remove all cron jobs and reload from the database.
 
-        *enqueue* is ``manager.run_task`` — the single execution entry
-        point shared with manual runs.
+        *enqueue* is ``manager.run_scheduled`` — the single execution
+        entry point shared with manual runs.
         """
         for job in self.scheduler.get_jobs():
             if job.id.startswith("cron_"):
@@ -103,10 +103,13 @@ class CronScheduler:
                         self._trigger_cron_job,
                         trigger=CronTrigger.from_crontab(task.cron),
                         id=f"cron_{task.id}",
-                        # First arg is the *function* name (task.task) —
-                        # the registry is resolved by it at fire time, so a
-                        # custom display name (task.name) can never break
-                        # the lookup.  The display name is only for logs.
+                        # Args are (function_name, display_name, enqueue,
+                        # params).  At fire time the manager records the
+                        # history row under *display_name* (the user's UI
+                        # label) and resolves the task function by
+                        # *function_name* (the ``task`` column) — so a custom
+                        # display name can never break the lookup, yet the
+                        # task-history list still shows the user's label.
                         args=(task.task, task.name, enqueue, params),
                         replace_existing=True,
                         max_instances=1,
@@ -131,9 +134,11 @@ class CronScheduler:
         """Fires when a cron trigger is hit.  Enqueues via the manager.
 
         *task_name* is the registered task *function* name (``task.task``
-        column) — resolved by the registry at enqueue time.  *display_name*
-        (the ``task.name`` column, free-form UI label) is used only for
-        logging, matching the semantics of ``run_task_now``.
+        column); *display_name* is the ``task.name`` free-form UI label.
+        *enqueue* is :meth:`TaskManagerSystem.run_scheduled`, which records
+        the history row under *display_name* and resolves the task function
+        (and its args model) by *task_name* — matching
+        :meth:`TaskManagerSystem.run_task_now` exactly.
 
         A cron firing while a manual run of the same task is still active
         is skipped (the duplicate-run guard raises) instead of stacking a
@@ -141,7 +146,7 @@ class CronScheduler:
         """
         logger.info("Cron triggered: {}", display_name)
         try:
-            enqueue(task_name, params=params)
+            enqueue(display_name, task_name, params=params)
         except TaskAlreadyRunningError:
             logger.warning(
                 "Cron for '{}' skipped — a run is already pending/running.",

@@ -95,7 +95,7 @@ class TaskManagerSystem:
         """Start the scheduler, recover stale tasks, load cron jobs."""
         self._scheduler.start()
         self._recorder.recover_stale()
-        self._scheduler.load_cron_jobs(self.run_task)
+        self._scheduler.load_cron_jobs(self.run_scheduled)
         logger.info("TaskManagerSystem started — cron jobs loaded.")
 
     def stop(self) -> None:
@@ -104,7 +104,7 @@ class TaskManagerSystem:
 
     def reload_cron_jobs(self) -> None:
         """Remove all cron jobs and reload from the database."""
-        self._scheduler.reload_cron_jobs(self.run_task)
+        self._scheduler.reload_cron_jobs(self.run_scheduled)
 
     # ------------------------------------------------------------------
     # Task execution (enqueue)
@@ -118,10 +118,14 @@ class TaskManagerSystem:
     ) -> int:
         """Enqueue a task for immediate background execution.
 
-        This is the entry point for both cron-triggered and
-        manually-triggered runs.  The task is scheduled as a one-shot
-        APScheduler job so that history recording and error handling
-        happen in the executor's lifecycle wrapper.
+        Entry point for manually-triggered runs — batch endpoints, tests,
+        and ad-hoc callers that enqueue an explicit function.  Cron-
+        triggered runs and the scheduled "run now" endpoint go through
+        :meth:`run_scheduled` (which records history under the scheduled
+        row's display name and resolves the function by its task column).
+        The task is scheduled as a one-shot APScheduler job so that
+        history recording and error handling happen in the executor's
+        lifecycle wrapper.
 
         Args:
             name: Task name — the duplicate-run guard keys on it.  When
@@ -177,6 +181,33 @@ class TaskManagerSystem:
         )
         return task_id
 
+    def run_scheduled(
+        self,
+        display_name: str,
+        func_name: str,
+        params: dict | None = None,
+    ) -> int:
+        """Enqueue a scheduled-task run by display name + function name.
+
+        The single execution path shared by the cron trigger and
+        :meth:`run_task_now`.  The history row is recorded under
+        *display_name* (the ``scheduled_tasks.name`` free-form UI label),
+        while the task function — and its Pydantic args model — is resolved
+        by *func_name* (the ``scheduled_tasks.task`` column).  This keeps a
+        custom display name from ever breaking the registry lookup *and*
+        makes the task-history list show the user's label instead of the
+        function name.  The duplicate-run guard keys on *display_name*,
+        matching the pre-kernel-split semantics of the 'run now' endpoint.
+
+        Raises:
+            ValidationError: *func_name* is not a registered task function.
+            TaskAlreadyRunningError: *display_name* already pending/running.
+        """
+        spec = get_spec(func_name)
+        if spec is None:
+            raise ValidationError(f"Unknown task function: {func_name}")
+        return self._enqueue(display_name, spec, params)
+
     def run_task_now(self, task_id: int) -> None:
         """Look up a scheduled task by DB id and run it immediately.
 
@@ -197,21 +228,14 @@ class TaskManagerSystem:
             task = next((t for t in tasks if t.id == task_id), None)
             if task is None:
                 raise NotFoundError(f"Scheduled task id={task_id} not found.")
-
-            # The scheduled row's *name* is a display label; the function
-            # to run comes from its ``task`` column.  Resolve here and pass
-            # the function explicitly so the duplicate-run guard keys on
-            # the row name (same semantics as before the kernel split).
-            spec = get_spec(task.task)
-            if spec is None:
-                raise ValidationError(f"Unknown task function: {task.task}")
-
             params = self._recorder.parse_params(task.params)
 
-        # The scheduled row's *name* is a display label — pass it to the
-        # enqueue path directly together with the resolved spec (keeps the
-        # args model + duplicate-guard semantics identical to pre-split).
-        self._enqueue(task.name, spec, params)
+        # The scheduled row's *name* is a display label; the function to run
+        # comes from its ``task`` column.  Delegate to run_scheduled so the
+        # cron path and this endpoint share one enqueue path (history records
+        # the display name, the function is resolved by the task column, the
+        # args model + duplicate-guard semantics stay identical).
+        self.run_scheduled(task.name, task.task, params)
 
     # ------------------------------------------------------------------
     # Internal: the one-shot job wrapper
