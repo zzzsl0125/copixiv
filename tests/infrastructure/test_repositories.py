@@ -565,6 +565,25 @@ class TestFailedNovelRepository:
         items = repo.list()
         assert [i.novel_id for i in items] == [2, 1]
 
+    def test_list_sorts_not_found_family_last(self, session, repo):
+        """Page-not-found 家族（删除/不可获取）排在可处理失败之后。"""
+        repo.record(1, "download", "EPUB 生成失败: novel 1", title="可修复")
+        repo.record(2, "download", "Page not found", title="删除A")
+        repo.record(3, "download", "webview_novel 返回空", title="删除B")
+        session.commit()
+        # 手动固定时间：可修复的在 20:55，删除家族更新更晚
+        row = session.get(FailedNovel, 1)
+        row.last_failed_at = "2026-08-19 20:55:00"
+        row2 = session.get(FailedNovel, 2)
+        row2.last_failed_at = "2026-08-19 20:57:00"
+        row3 = session.get(FailedNovel, 3)
+        row3.last_failed_at = "2026-08-19 20:56:00"
+        session.commit()
+
+        items = repo.list()
+        # 可处理的在前；not-found 家族在后，且其内部按时间倒序
+        assert [i.novel_id for i in items] == [1, 2, 3]
+
     def test_count_and_clear_all(self, session, repo):
         repo.record(1, "download", "e1")
         repo.record(2, "download", "e2")

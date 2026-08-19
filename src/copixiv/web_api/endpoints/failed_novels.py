@@ -3,7 +3,9 @@
 Exposes the ``failed_novel`` table (the download-failure ledger) so the
 frontend can show what failed, when, and why — and act on it:
 
-- ``GET /api/failed-novels``        — paginated list, newest failure first
+- ``GET /api/failed-novels``        — paginated list; actionable failures
+  first (newest first), "Page not found" family (deleted/unfetchable
+  works) last
 - ``GET /api/failed-novels/count``  — sidebar badge number
 - ``POST /api/failed-novels/{novel_id}/reset-count`` — reset one record's
   failure count to 0 (record stays; unblocks automatic retry)

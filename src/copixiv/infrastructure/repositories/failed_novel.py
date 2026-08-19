@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from ..database import models
@@ -124,19 +124,38 @@ class FailedNovelRepository:
         rows = self._session.execute(stmt).fetchall()
         return {row[0] for row in rows}
 
+    # "Page not found" 家族——作品已删除/不可获取，重试无意义。
+    # 单路径记录为 "webview_novel 返回空"，历史批量异常体含 "Page not found"。
+    _NOT_FOUND_PATTERNS = (
+        "%webview_novel 返回空%",
+        "%Page not found%",
+        "%not found%",
+    )
+
     def list(
         self,
         offset: int = 0,
         limit: int = 100,
     ) -> list[models.FailedNovel]:
-        """Return failure records, most recently failed first.
+        """Return failure records — actionable first, not-found family last.
 
-        Legacy rows without ``last_failed_at`` sort to the end (NULLs
-        last in DESC), so new records never get buried by old ones.
+        Sort order:
+        1. "Page not found" 家族（已删除/不可获取，重试无意义）排在最后；
+        2. 其余记录按最近失败时间倒序（newest first）；
+        3. 同时间按 novel_id 倒序。
+        Legacy rows without ``last_failed_at`` sort to the end of their
+        group (NULLs last in DESC).
         """
+        not_found = or_(
+            *[
+                models.FailedNovel.error_message.like(p)
+                for p in self._NOT_FOUND_PATTERNS
+            ]
+        )
         stmt = (
             select(models.FailedNovel)
             .order_by(
+                case((not_found, 1), else_=0).asc(),
                 models.FailedNovel.last_failed_at.desc().nulls_last(),
                 models.FailedNovel.novel_id.desc(),
             )

@@ -102,6 +102,29 @@ class TestFailedNovelList:
         assert r.status_code == 200
         assert r.json() == {"count": 2}
 
+    def test_not_found_family_sorted_last(self, client, session_factory):
+        """Page-not-found 家族排最后，其余按时间倒序（用户排序要求）。"""
+        with session_factory() as s:
+            s.add(FailedNovel(
+                novel_id=1, failure_type="download",
+                error_message="EPUB 生成失败: novel 1", failed_times=1,
+                title="可修复", last_failed_at="2026-08-19 20:55:00",
+            ))
+            s.add(FailedNovel(
+                novel_id=2, failure_type="download",
+                error_message="webview_novel 返回空", failed_times=1,
+                title=None, last_failed_at="2026-08-19 20:56:00",
+            ))
+            s.add(FailedNovel(
+                novel_id=3, failure_type="download",
+                error_message="Page not found", failed_times=1,
+                title=None, last_failed_at="2026-08-19 20:57:00",
+            ))
+            s.commit()
+
+        body = client.get("/api/failed-novels/").json()
+        assert [i["novel_id"] for i in body["items"]] == [1, 3, 2]
+
 
 class TestFailedNovelDelete:
     def test_delete_one(self, client, session_factory):
