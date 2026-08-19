@@ -17,14 +17,14 @@ export const failedNovelApi = {
     return response.data.count
   },
 
-  /** 清除单条失败记录（解封，下次批量任务自动重试）。 */
-  async remove(novelId: number) {
-    await apiClient.delete(`/failed-novels/${novelId}`)
+  /** 重置单条失败记录计数（记录保留，解封后下次批量任务自动重试）。 */
+  async resetCount(novelId: number) {
+    await apiClient.post(`/failed-novels/${novelId}/reset-count`)
   },
 
-  /** 清空整个失败台账。 */
-  async clearAll() {
-    await apiClient.delete('/failed-novels/')
+  /** 重置全部失败计数（记录保留）。 */
+  async resetAll() {
+    await apiClient.post('/failed-novels/reset-count')
   },
 
   /** 入队后台重试任务（任务管理页可见进度）。 */

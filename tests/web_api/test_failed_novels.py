@@ -120,6 +120,30 @@ class TestFailedNovelDelete:
             assert s.query(FailedNovel).count() == 0
 
 
+class TestFailedNovelResetCount:
+    """重置计数：记录保留、计数归零、解封自动重试。"""
+
+    def test_reset_one_keeps_record(self, client, session_factory):
+        _seed(session_factory, 1, "标题A", failed_times=4)
+        r = client.post("/api/failed-novels/1/reset-count")
+        assert r.status_code == 204
+        with session_factory() as s:
+            row = s.get(FailedNovel, 1)
+            assert row is not None
+            assert row.failed_times == 0
+            assert row.title == "标题A"
+
+    def test_reset_all_keeps_records(self, client, session_factory):
+        _seed(session_factory, 1, "a", failed_times=3)
+        _seed(session_factory, 2, "b", failed_times=25)
+        r = client.post("/api/failed-novels/reset-count")
+        assert r.status_code == 204
+        with session_factory() as s:
+            assert s.query(FailedNovel).count() == 2
+            for row in s.query(FailedNovel):
+                assert row.failed_times == 0
+
+
 class TestFailedNovelRetry:
     def test_retry_enqueues_task(self, client, session_factory):
         _seed(session_factory, 1, "a")

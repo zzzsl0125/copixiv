@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from ..database import models
@@ -84,6 +84,26 @@ class FailedNovelRepository:
             models.FailedNovel.novel_id.in_(novel_ids)
         )
         self._session.execute(stmt)
+
+    def reset_count(self, novel_id: int) -> None:
+        """Reset one record's failure count to 0 — the record stays.
+
+        Unblocks automatic retry (skip threshold is ``>= max_retries``)
+        while keeping the history row (title / error / first-seen info)
+        visible in the 「失败记录」 view.
+        """
+        self._session.execute(
+            update(models.FailedNovel)
+            .where(models.FailedNovel.novel_id == novel_id)
+            .values(failed_times=0)
+        )
+
+    def reset_all(self) -> int:
+        """Reset every failure count to 0; returns the number of rows touched."""
+        result = self._session.execute(
+            update(models.FailedNovel).values(failed_times=0)
+        )
+        return result.rowcount or 0
 
     def clear_all(self) -> int:
         """Remove every failure record; returns the number deleted."""

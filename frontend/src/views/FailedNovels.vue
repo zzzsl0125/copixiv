@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { RefreshCw, Trash2, ExternalLink, AlertTriangle } from '@lucide/vue'
+import { RefreshCw, RotateCcw, ExternalLink, AlertTriangle } from '@lucide/vue'
 import type { FailedNovel } from '../types'
 import { failedNovelApi } from '../api/failedNovels'
 import { getApiErrorMessage } from '../api/errors'
@@ -19,7 +19,7 @@ const loading = ref(false)
 const loadingMore = ref(false)
 const retryingIds = ref<Set<number>>(new Set())
 const retryingAll = ref(false)
-const clearingAll = ref(false)
+const resettingAll = ref(false)
 const loadSeq = ref(0)
 
 const hasMore = computed(() => items.value.length < total.value)
@@ -61,15 +61,14 @@ async function load() {
   }
 }
 
-async function removeOne(novel: FailedNovel) {
-  if (!window.confirm(`清除 #${novel.novel_id} 的失败记录？清除后下次批量任务会自动重试。`)) return
+async function resetOne(novel: FailedNovel) {
+  if (!window.confirm(`重置 #${novel.novel_id} 的失败计数？记录会保留，下次批量任务会自动重试。`)) return
   try {
-    await failedNovelApi.remove(novel.novel_id)
-    toast.success(`已清除 #${novel.novel_id} 的失败记录`)
-    items.value = items.value.filter((i) => i.novel_id !== novel.novel_id)
-    total.value = Math.max(0, total.value - 1)
+    await failedNovelApi.resetCount(novel.novel_id)
+    toast.success(`已重置 #${novel.novel_id} 的失败计数`)
+    novel.failed_times = 0
   } catch (err) {
-    toast.error(getApiErrorMessage(err, '清除失败'))
+    toast.error(getApiErrorMessage(err, '重置失败'))
   }
 }
 
@@ -101,19 +100,18 @@ async function retryAll() {
   }
 }
 
-async function clearAll() {
-  if (clearingAll.value) return
-  if (!window.confirm(`清空全部 ${total.value} 条失败记录？（不可恢复）`)) return
-  clearingAll.value = true
+async function resetAll() {
+  if (resettingAll.value) return
+  if (!window.confirm(`重置全部 ${total.value} 条失败记录的计数？（记录保留，全部解封，下次批量任务自动重试）`)) return
+  resettingAll.value = true
   try {
-    await failedNovelApi.clearAll()
-    toast.success('已清空失败记录')
-    items.value = []
-    total.value = 0
+    await failedNovelApi.resetAll()
+    toast.success('已重置全部失败计数')
+    items.value.forEach((i) => { i.failed_times = 0 })
   } catch (err) {
-    toast.error(getApiErrorMessage(err, '清空失败'))
+    toast.error(getApiErrorMessage(err, '重置失败'))
   } finally {
-    clearingAll.value = false
+    resettingAll.value = false
   }
 }
 
@@ -122,13 +120,13 @@ onMounted(load)
 
 <template>
   <div class="min-h-screen bg-gray-50">
-    <PageHeader title="下载失败" @toggle-sidebar="$emit('toggle-sidebar')" />
+    <PageHeader title="失败记录" @toggle-sidebar="$emit('toggle-sidebar')" />
 
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
       <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
         <p class="text-sm text-gray-600">
           共 <span class="font-medium">{{ total }}</span> 条失败记录 ·
-          失败 <span class="font-medium">{{ failedTimesCutoff }}</span> 次以上的记录会被自动跳过，清除后即解封
+          失败 <span class="font-medium">{{ failedTimesCutoff }}</span> 次以上的记录会被自动跳过，重置计数后解封（记录保留）
         </p>
         <div class="flex gap-2">
           <button
@@ -140,12 +138,12 @@ onMounted(load)
             {{ retryingAll ? '入队中…' : '全部重试' }}
           </button>
           <button
-            class="inline-flex items-center px-3 py-1.5 text-sm font-medium rounded-md border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
-            :disabled="clearingAll || total === 0"
-            @click="clearAll"
+            class="inline-flex items-center px-3 py-1.5 text-sm font-medium rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+            :disabled="resettingAll || total === 0"
+            @click="resetAll"
           >
-            <Trash2 class="mr-1.5 h-4 w-4" />
-            {{ clearingAll ? '清空中…' : '清空全部' }}
+            <RotateCcw class="mr-1.5 h-4 w-4" />
+            {{ resettingAll ? '重置中…' : '全部重置计数' }}
           </button>
         </div>
       </div>
@@ -207,11 +205,11 @@ onMounted(load)
                       重试
                     </button>
                     <button
-                      class="inline-flex items-center px-2.5 py-1 text-xs font-medium rounded-md border border-red-200 text-red-600 hover:bg-red-50"
-                      @click="removeOne(item)"
+                      class="inline-flex items-center px-2.5 py-1 text-xs font-medium rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50"
+                      @click="resetOne(item)"
                     >
-                      <Trash2 class="mr-1 h-3.5 w-3.5" />
-                      清除
+                      <RotateCcw class="mr-1 h-3.5 w-3.5" />
+                      重置计数
                     </button>
                   </div>
                 </td>

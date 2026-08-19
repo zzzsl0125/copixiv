@@ -1,9 +1,7 @@
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Search, Settings, ListChecks, AlertTriangle } from '@lucide/vue'
 import type { NovelFilters } from '../types'
-import { failedNovelApi } from '../api/failedNovels'
 
 const route = useRoute()
 const router = useRouter()
@@ -26,21 +24,6 @@ const emit = defineEmits<{
   (e: 'reset-to-defaults'): void
   (e: 'toggle-batch-mode'): void
 }>()
-
-/** 「下载失败」徽标计数——每次进入该页时刷新。 */
-const failedCount = ref<number | null>(null)
-const loadFailedCount = async () => {
-  try {
-    failedCount.value = await failedNovelApi.count()
-  } catch {
-    // 徽标失败静默：侧边栏导航不应因计数请求失败而报错
-    failedCount.value = null
-  }
-}
-watch(() => route.path, (path) => {
-  if (path === '/failed-novels') void loadFailedCount()
-})
-onMounted(() => { void loadFailedCount() })
 
 const updateFilter = (key: keyof typeof props.filters, value: unknown) => {
   const newFilters = { ...props.filters, [key]: value }
@@ -107,14 +90,7 @@ const navIconClass = 'mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500'
             @click="$emit('close')"
           >
             <AlertTriangle class="mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500" />
-            <span class="flex-1">下载失败</span>
-            <span
-              v-if="failedCount !== null && failedCount > 0"
-              class="inline-flex items-center justify-center min-w-5 h-5 px-1.5 rounded-full text-xs font-medium"
-              :class="failedCount > 0 ? 'bg-red-100 text-red-600' : 'bg-gray-100 text-gray-500'"
-            >
-              {{ failedCount > 99 ? '99+' : failedCount }}
-            </span>
+            失败记录
           </router-link>
           <button
             @click="() => { if(route.path !== '/') router.push('/'); $emit('toggle-batch-mode'); $emit('close'); }"

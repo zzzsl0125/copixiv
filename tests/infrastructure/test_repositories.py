@@ -574,6 +574,34 @@ class TestFailedNovelRepository:
         session.commit()
         assert repo.count() == 0
 
+    def test_reset_count_keeps_record(self, session, repo):
+        repo.record(1, "download", "e1", title="标题")
+        repo.record(1, "download", "e2")
+        repo.record(1, "download", "e3")
+        session.commit()
+        row = session.get(FailedNovel, 1)
+        assert row.failed_times == 3
+
+        repo.reset_count(1)
+        session.commit()
+
+        # 记录保留（标题、错误、时间），只有计数归零
+        row = session.get(FailedNovel, 1)
+        assert row is not None
+        assert row.failed_times == 0
+        assert row.title == "标题"
+        assert row.error_message == "e3"
+
+    def test_reset_all_keeps_records(self, session, repo):
+        repo.record(1, "download", "e1")
+        repo.record(2, "download", "e2")
+        session.commit()
+        assert repo.reset_all() == 2
+        session.commit()
+        assert repo.count() == 2
+        assert repo.list()[0].failed_times == 0
+        assert repo.list()[1].failed_times == 0
+
     def test_forget_removes_single_record(self, session, repo):
         repo.record(1, "download", "e1")
         session.commit()

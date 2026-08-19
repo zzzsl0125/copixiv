@@ -1,12 +1,14 @@
-"""Failed-novel ledger API — the 「下载失败」 management view.
+"""Failed-novel ledger API — the 「失败记录」 management view.
 
 Exposes the ``failed_novel`` table (the download-failure ledger) so the
 frontend can show what failed, when, and why — and act on it:
 
 - ``GET /api/failed-novels``        — paginated list, newest failure first
 - ``GET /api/failed-novels/count``  — sidebar badge number
-- ``DELETE /api/failed-novels/{novel_id}`` — clear one record (unblocks
-  retry for records that reached the failed-too-many-times threshold)
+- ``POST /api/failed-novels/{novel_id}/reset-count`` — reset one record's
+  failure count to 0 (record stays; unblocks automatic retry)
+- ``POST /api/failed-novels/reset-count`` — reset every count
+- ``DELETE /api/failed-novels/{novel_id}`` — clear one record entirely
 - ``DELETE /api/failed-novels``     — clear the whole ledger
 - ``POST /api/failed-novels/retry`` — enqueue a ``failed_retry`` task for
   the given ids (runs through the task system, so the global execution
@@ -69,6 +71,28 @@ async def delete_failed_novel(
 ):
     """Clear one failure record (unblocks automatic retry)."""
     uow.failed_novels.forget(novel_id)
+
+
+@router.post("/{novel_id}/reset-count", status_code=204)
+async def reset_failed_novel_count(
+    novel_id: int,
+    uow: SqlUnitOfWork = Depends(get_write_uow),
+):
+    """Reset one record's failure count to 0 — the record stays.
+
+    Preferred over deletion: the history row (title / error / first-seen
+    info) remains visible in the 「失败记录」 view while the novel is
+    unblocked for automatic retry.
+    """
+    uow.failed_novels.reset_count(novel_id)
+
+
+@router.post("/reset-count", status_code=204)
+async def reset_all_failed_novel_counts(
+    uow: SqlUnitOfWork = Depends(get_write_uow),
+):
+    """Reset every failure count to 0 — records stay, all unblocked."""
+    uow.failed_novels.reset_all()
 
 
 @router.delete("", status_code=204)
