@@ -203,7 +203,7 @@ class Container:
 
         from copixiv.web_api.endpoints import (
             novels, tasks, system, tag_preferences, search_history,
-            tokens, tag_aliases,
+            tokens, tag_aliases, failed_novels,
         )
         from copixiv.web_api.middleware import AccessLogMiddleware
         from copixiv.web_api.host_middleware import HostValidationMiddleware
@@ -307,7 +307,7 @@ class Container:
         # else in the composition root needs to change.
         for module in (
             novels, tasks, system, tag_preferences, tag_aliases,
-            search_history, tokens,
+            search_history, tokens, failed_novels,
         ):
             prefix, tags = module.ROUTE
             app.include_router(module.router, prefix=prefix, tags=tags)

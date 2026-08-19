@@ -205,6 +205,28 @@ class TestDownloadNovelUseCase:
         await use_case.execute(100, redownload=True)
         assert storage.saved == [(100, "新小说", True)]
 
+    async def test_success_forgets_failure_record(self, session_factory, tmp_path):
+        """成功下载必须清除失败台账——否则手动重试成功后记录永远残留。"""
+        with session_factory() as s:
+            s.add(FailedNovel(
+                novel_id=100, failure_type="download",
+                error_message="旧失败", failed_times=3,
+                title="新小说", last_failed_at="2026-08-19 19:00:00",
+            ))
+            s.commit()
+
+        client = FakeClient(_webview(100))
+        use_case = _make_use_case(
+            session_factory, tmp_path, client, FakeImageDownloader(),
+        )
+
+        result = await use_case.execute(100)
+
+        assert result.new_novel_count == 1
+        with session_factory() as s:
+            assert s.get(FailedNovel, 100) is None
+            assert s.get(Novel, 100) is not None
+
 
 class TestPersistNovels:
     async def test_creates_fk_placeholders_and_refreshes_summaries(

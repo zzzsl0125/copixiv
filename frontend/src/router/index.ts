@@ -23,6 +23,11 @@ export const routes = [
     name: 'tokens',
     component: () => import('../views/Tokens.vue'),
   },
+  {
+    path: '/failed-novels',
+    name: 'failed-novels',
+    component: () => import('../views/FailedNovels.vue'),
+  },
 ]
 
 const router = createRouter({

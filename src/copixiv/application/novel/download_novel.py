@@ -120,8 +120,17 @@ class DownloadNovelUseCase:
         async with self._write_lock():
             async with self._uow.begin():
                 for nid, reason in asset_failures:
-                    self._uow.failed_novels.record(nid, "download", reason)
+                    self._uow.failed_novels.record(
+                        nid, "download", reason, title=data.title,
+                    )
                 count = await persist_novels(self._uow, [data])
+                # A successful download clears the failure ledger entry —
+                # otherwise a manual retry (or failed_retry) that succeeds
+                # leaves a stale "failed" record forever, and the 「下载失败」
+                # view would keep showing books that are actually fine.
+                asset_failed_ids = {nid for nid, _ in asset_failures}
+                if novel_id not in asset_failed_ids:
+                    self._uow.failed_novels.forget(novel_id)
 
         # Resolve author name — webview API doesn't return it.
         if count:

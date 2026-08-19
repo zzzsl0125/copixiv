@@ -208,3 +208,94 @@ class TestNovelFetchFailureRecorded:
             assert row is not None
             assert row.failure_type == "download"
             assert "webview_novel 返回空" in row.error_message
+
+
+class _RetryWebviewClient:
+    """webview_novel returns a valid novel; user_detail resolves the author."""
+
+    async def webview_novel(self, novel_id):
+        return SimpleNamespace(
+            id=novel_id, title="重试小说", user_id=1,
+            rating=SimpleNamespace(bookmark=5, view=10),
+            text="正文内容", caption="中文标题", series_id=None,
+            series_title=None, series_navigation=None,
+            cdate="2026-01-01T00:00:00", tags=["中文"],
+            images=None, illusts=None, cover_url=None,
+        )
+
+    async def user_detail(self, user_id):
+        return {"user": {"name": "测试作者"}}
+
+
+class _RetryStorage:
+    download_dir = "/tmp/retry-download"
+
+    def save_novel_text(self, novel_id, title, content, force=False):
+        pass
+
+
+class _RetryImageDownloader:
+    async def process_novel_assets(self, data, force=False):
+        pass
+
+    async def await_all(self):
+        return []
+
+
+@pytest.mark.slow
+class TestFailedRetryTask:
+    """failed_retry: successful retries clear the failure ledger entry."""
+
+    async def test_retry_success_clears_record(self, file_engine):
+        session_factory = create_session_factory(file_engine)
+        with session_factory() as s:
+            s.add(models.FailedNovel(
+                novel_id=100, failure_type="download",
+                error_message="File name too long", failed_times=3,
+            ))
+            s.commit()
+
+        ctx = novel_tasks.TaskContext(
+            client=_RetryWebviewClient(),
+            uow=SqlUnitOfWork(session_factory),
+            session_factory=session_factory,
+            file_storage=_RetryStorage(),
+            image_downloader=_RetryImageDownloader(),
+            write_lock=DbWriteLock(),
+        )
+        result = await novel_tasks.failed_retry(
+            novel_tasks.FailedRetryArgs(novel_ids=[100]), ctx,
+        )
+
+        assert "成功 1/1" in result.summary
+        with session_factory() as s:
+            assert s.get(models.FailedNovel, 100) is None
+            assert s.get(models.Novel, 100) is not None
+
+    async def test_retry_missing_novel_re_records(self, file_engine):
+        """webview 返回空 → 重试失败 → 记录保留并计数 +1。"""
+        session_factory = create_session_factory(file_engine)
+        with session_factory() as s:
+            s.add(models.FailedNovel(
+                novel_id=999, failure_type="download",
+                error_message="旧错误", failed_times=1,
+            ))
+            s.commit()
+
+        ctx = novel_tasks.TaskContext(
+            client=_NullWebviewClient(),
+            uow=SqlUnitOfWork(session_factory),
+            session_factory=session_factory,
+            file_storage=None,
+            image_downloader=None,
+            write_lock=DbWriteLock(),
+        )
+        result = await novel_tasks.failed_retry(
+            novel_tasks.FailedRetryArgs(novel_ids=[999]), ctx,
+        )
+
+        assert "成功 0/1" in result.summary
+        with session_factory() as s:
+            row = s.get(models.FailedNovel, 999)
+            assert row is not None
+            assert row.failed_times == 2

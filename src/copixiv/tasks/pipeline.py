@@ -200,6 +200,7 @@ async def _persist_batch(
     uow,
     failed_records: list[tuple[int, str]] | None = None,
     failed_repo=None,
+    titles: dict[int, str] | None = None,
 ) -> tuple[list[str], set[int]]:
     """Persist phase (write-only): run inside ``db_write()`` + ``uow.begin()``.
 
@@ -207,13 +208,16 @@ async def _persist_batch(
     novels, and forgets success markers — all in the caller's write
     transaction.  Returns ``(titles, new_author_ids)``.
     """
+    title_map = titles or {}
     titles: list[str] = []
     new_author_ids: set[int] = set()
 
     # Failed downloads — recorded in the same write transaction.
     if failed_records and failed_repo is not None:
         for nid, reason in failed_records:
-            failed_repo.record(nid, "download", reason)
+            failed_repo.record(
+                nid, "download", reason, title=title_map.get(nid),
+            )
 
     # Metadata-only upsert for existing
     if existing_meta:
@@ -298,12 +302,18 @@ async def _batch_handle(
             )
 
     # 3. Persist — one write transaction inside the global write lock.
+    # Titles accompany the failure records so the "下载失败" view can show
+    # a human-readable label without querying Pixiv again.
+    titles_by_id = {
+        n.id: n.title for n in novels if getattr(n, "title", None)
+    }
     async with db_write():
         async with uow.begin():
             titles, new_author_ids = await _persist_batch(
                 existing_meta, downloaded, uow,
                 failed_records=failed_records + asset_failures,
                 failed_repo=uow.failed_novels,
+                titles=titles_by_id,
             )
 
     return titles, new_author_ids

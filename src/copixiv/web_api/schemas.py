@@ -375,3 +375,39 @@ class TokenUpdate(BaseModel):
 class TokenResponse(TokenBase):
     id: int
     model_config = ConfigDict(from_attributes=True)
+
+
+# ---------------------------------------------------------------------------
+# Failed-novel ledger (下载失败)
+# ---------------------------------------------------------------------------
+
+class FailedNovelItem(BaseModel):
+    """One download-failure record.
+
+    ``title`` may be null for legacy rows recorded before title capture
+    existed; ``last_failed_at`` may be null for pre-migration rows (they
+    sort to the end of the list).
+    """
+
+    novel_id: int
+    title: str | None = None
+    failure_type: str | None = None
+    error_message: str | None = None
+    failed_times: int = 1
+    last_failed_at: str | None = None
+    model_config = ConfigDict(from_attributes=True)
+
+
+class FailedNovelListResponse(BaseModel):
+    items: list[FailedNovelItem]
+    total: int
+    offset: int = 0
+    limit: int = 100
+
+
+class FailedNovelCountResponse(BaseModel):
+    count: int
+
+
+class FailedNovelRetryRequest(BaseModel):
+    novel_ids: list[int]

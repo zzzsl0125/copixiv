@@ -169,6 +169,11 @@ class FailedNovel(Base):
     failure_type = Column(String)
     error_message = Column(Text)
     failed_times = Column(Integer, default=1)
+    # Enrichment for the "下载失败" management view: title is captured at
+    # failure time when available (batch pipeline knows it; the single
+    # fetch path may not), last_failed_at is the most recent failure time.
+    title = Column(Text, nullable=True)
+    last_failed_at = Column(String, nullable=True, index=True)
 
 
 class SearchHistory(Base):

@@ -7,3 +7,4 @@ export type { TaskArgument, TaskMethod, ScheduledTask, ScheduledTaskCreate, Sche
 export type { TagPreference, TagAlias, TagCandidate, TagAliasSuggest, TagAliasSuggestList } from './tags'
 export type { Token, TokenCreate, TokenUpdate } from './tokens'
 export type { SystemConfig, SearchHistory } from './system'
+export type { FailedNovel, FailedNovelListResponse, FailedNovelCountResponse } from './failedNovels'

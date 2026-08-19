@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 
 from copixiv.infrastructure.database.models import (
     Novel, Author, Tag, TagAlias, Favourite,
-    TaskHistory, ScheduledTask,
+    TaskHistory, ScheduledTask, FailedNovel,
 )
 from copixiv.infrastructure.database.engine import create_session_factory
 from copixiv.infrastructure.repositories.novel import SQLAlchemyNovelRepository
@@ -524,3 +524,59 @@ class TestTaskManagerHelpers:
         # write_lock is always added by the manager itself
         assert "write_lock" in deps
 
+
+
+class TestFailedNovelRepository:
+    """FailedNovel ledger: record enrichment, list ordering, count, clear."""
+
+    @pytest.fixture
+    def repo(self, session):
+        from copixiv.infrastructure.repositories.failed_novel import (
+            FailedNovelRepository,
+        )
+        return FailedNovelRepository(session)
+
+    def test_record_sets_title_and_timestamp(self, session, repo):
+        repo.record(1001, "download", "boom", title="标题A")
+        session.commit()
+        row = session.get(FailedNovel, 1001)
+        assert row.title == "标题A"
+        assert row.last_failed_at is not None
+        assert row.failed_times == 1
+
+    def test_record_increments_and_keeps_old_title(self, session, repo):
+        repo.record(1002, "download", "boom1", title="标题B")
+        session.commit()
+        repo.record(1002, "download", "boom2")  # 无 title → 保留旧 title
+        session.commit()
+        row = session.get(FailedNovel, 1002)
+        assert row.failed_times == 2
+        assert row.title == "标题B"
+        assert row.error_message == "boom2"
+
+    def test_list_orders_by_last_failed_at_desc_nulls_last(self, session, repo):
+        repo.record(1, "download", "e1", title="旧记录")
+        # 手动把 last_failed_at 置空模拟迁移前存量
+        row = session.get(FailedNovel, 1)
+        row.last_failed_at = None
+        session.commit()
+        repo.record(2, "download", "e2", title="新记录")
+        session.commit()
+        items = repo.list()
+        assert [i.novel_id for i in items] == [2, 1]
+
+    def test_count_and_clear_all(self, session, repo):
+        repo.record(1, "download", "e1")
+        repo.record(2, "download", "e2")
+        session.commit()
+        assert repo.count() == 2
+        assert repo.clear_all() == 2
+        session.commit()
+        assert repo.count() == 0
+
+    def test_forget_removes_single_record(self, session, repo):
+        repo.record(1, "download", "e1")
+        session.commit()
+        repo.forget(1)
+        session.commit()
+        assert session.get(FailedNovel, 1) is None

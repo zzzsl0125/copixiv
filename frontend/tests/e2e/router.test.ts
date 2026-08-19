@@ -17,10 +17,11 @@ const EXPECTED: Array<{ path: string; name: string; view: string }> = [
   { path: '/tasks', name: 'tasks', view: 'Tasks.vue' },
   { path: '/tag-management', name: 'tag-management', view: 'TagManagement.vue' },
   { path: '/tokens', name: 'tokens', view: 'Tokens.vue' },
+  { path: '/failed-novels', name: 'failed-novels', view: 'FailedNovels.vue' },
 ]
 
 describe('Router configuration (real route table)', () => {
-  it('registers exactly the four app routes', () => {
+  it('registers exactly the five app routes', () => {
     const actual = router
       .getRoutes()
       .filter((r) => r.path !== '/:pathMatch(.*)*')

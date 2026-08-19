@@ -352,3 +352,47 @@ async def novel_search(args: NovelSearchArgs, ctx: TaskContext) -> TaskResult:
         summary=f"搜索 ({args.keyword}): 新增 {len(all_titles)} 本小说",
         new_novel_titles=all_titles,
     )
+
+
+class FailedRetryArgs(BaseModel):
+    novel_ids: list[int]
+
+
+@register("failed_retry", args=FailedRetryArgs)
+async def failed_retry(args: FailedRetryArgs, ctx: TaskContext) -> TaskResult:
+    """Manually retry failed downloads from the 「下载失败」 ledger.
+
+    Fans out :func:`novel_fetch` (force re-download) for every id, each
+    with its own child UoW — same pattern as :func:`_fan_out_author_fetch`.
+    Successful retries clear their failure records (novel_fetch → persist
+    forgets them); failures re-record with an incremented counter.
+    """
+    ids = list(dict.fromkeys(args.novel_ids))
+    if not ids:
+        return TaskResult(summary="重试列表为空", new_novel_titles=[])
+
+    results = await asyncio.gather(
+        *[
+            novel_fetch(
+                NovelFetchArgs(id=nid, redownload=True),
+                ctx.with_uow(ctx.child_uow()),
+            )
+            for nid in ids
+        ],
+        return_exceptions=True,
+    )
+
+    titles: list[str] = []
+    failed = 0
+    for nid, result in zip(ids, results):
+        if isinstance(result, TaskResult) and "获取失败" not in result.summary:
+            titles.extend(result.new_novel_titles)
+        else:
+            failed += 1
+            logger.error(f"failed_retry: #{nid} 重试失败: {result!r}")
+
+    ok = len(ids) - failed
+    return TaskResult(
+        summary=f"重试失败小说: 成功 {ok}/{len(ids)}",
+        new_novel_titles=titles,
+    )

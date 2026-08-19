@@ -1,12 +1,18 @@
 """FailedNovel repository — track novel download failures for later retry."""
 
-from sqlalchemy import delete, select
+from datetime import datetime
+
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from ..database import models
 
 
 _MAX_RETRIES = 3
+
+
+def _now() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 class FailedNovelRepository:
@@ -24,12 +30,22 @@ class FailedNovelRepository:
 
     # -- write ------------------------------------------------------------
 
-    def record(self, novel_id: int, failure_type: str, error_message: str) -> None:
+    def record(
+        self,
+        novel_id: int,
+        failure_type: str,
+        error_message: str,
+        title: str | None = None,
+    ) -> None:
         """Record (or increment) a failure for *novel_id*.
 
         Uses SQLite ``ON CONFLICT DO UPDATE`` so the whole operation is
-        a single atomic statement — no read-then-write race.
+        a single atomic statement — no read-then-write race.  *title* is
+        only overwritten when a non-empty value is provided (the batch
+        pipeline knows the title; other callers may not), and
+        ``last_failed_at`` is always bumped to now.
         """
+        now = _now()
         stmt = (
             sqlite_insert(models.FailedNovel)
             .values(
@@ -37,6 +53,8 @@ class FailedNovelRepository:
                 failure_type=failure_type,
                 error_message=str(error_message)[:1000],
                 failed_times=1,
+                title=title or None,
+                last_failed_at=now,
             )
             .on_conflict_do_update(
                 index_elements=["novel_id"],
@@ -44,6 +62,8 @@ class FailedNovelRepository:
                     "failure_type": failure_type,
                     "error_message": str(error_message)[:1000],
                     "failed_times": models.FailedNovel.failed_times + 1,
+                    "last_failed_at": now,
+                    **({"title": title} if title else {}),
                 },
             )
         )
@@ -65,6 +85,12 @@ class FailedNovelRepository:
         )
         self._session.execute(stmt)
 
+    def clear_all(self) -> int:
+        """Remove every failure record; returns the number deleted."""
+        stmt = delete(models.FailedNovel)
+        result = self._session.execute(stmt)
+        return result.rowcount or 0
+
     # -- read -------------------------------------------------------------
 
     def get_skip_ids(self, novel_ids: set[int]) -> set[int]:
@@ -77,3 +103,29 @@ class FailedNovelRepository:
         )
         rows = self._session.execute(stmt).fetchall()
         return {row[0] for row in rows}
+
+    def list(
+        self,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> list[models.FailedNovel]:
+        """Return failure records, most recently failed first.
+
+        Legacy rows without ``last_failed_at`` sort to the end (NULLs
+        last in DESC), so new records never get buried by old ones.
+        """
+        stmt = (
+            select(models.FailedNovel)
+            .order_by(
+                models.FailedNovel.last_failed_at.desc().nulls_last(),
+                models.FailedNovel.novel_id.desc(),
+            )
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self._session.execute(stmt).scalars())
+
+    def count(self) -> int:
+        """Total number of failure records."""
+        stmt = select(func.count()).select_from(models.FailedNovel)
+        return self._session.execute(stmt).scalar_one()
