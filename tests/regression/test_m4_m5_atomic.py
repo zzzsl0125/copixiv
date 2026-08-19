@@ -202,13 +202,18 @@ def _epub_data(tmp_path):
 
 
 def test_create_epub_success_is_atomic(tmp_path):
-    """成功路径：最终文件存在且无 .tmp 残留。"""
+    """成功路径：最终文件存在且无 .tmp 残留。
+
+    EPUB 输出路径 = 正文路径的兄弟（同 basename、.epub 后缀）——
+    build_path 已为 .tmp 后缀预留截断预算，旧实现（builder 内部用
+    默认 240 字节截断重新拼名）会在超长标题上产出超限的 .epub.tmp。
+    """
     data, novel_dir = _epub_data(tmp_path)
     builder = EpubBuilder()
 
     assert builder.create_epub(data) is True
 
-    output = novel_dir / "Test Novel_1.epub"
+    output = novel_dir / "novel1.epub"
     assert output.exists()
     assert output.stat().st_size > 0
     assert list(novel_dir.glob("*.tmp")) == []
@@ -229,6 +234,33 @@ def test_create_epub_failure_leaves_no_partial(tmp_path, monkeypatch):
 
     assert builder.create_epub(data) is False
 
-    output = novel_dir / "Test Novel_1.epub"
+    output = novel_dir / "novel1.epub"
     assert not output.exists()
     assert list(novel_dir.glob("*.tmp")) == []
+
+
+def test_create_epub_long_title_fits_name_max(tmp_path):
+    """回归（2026-08-19）：超长标题的 EPUB 及 .epub.tmp 必须 ≤ 254 字节。
+
+    旧实现用 safe_filename 默认 240 字节预算重新拼 EPUB 文件名，
+    txt（build_path 预算后）能存、epub.tmp 却超 NAME_MAX → Errno 36。
+    """
+    title = "长" * 300
+    novel_dir = tmp_path / "novel"
+    novel_dir.mkdir()
+    text_path = novel_dir / "novel1.txt"
+    text_path.write_text("Hello world", encoding="utf-8")
+    data = Novel(
+        id=12345678,
+        title=title,
+        author_name="Author",
+        author_id=0,
+        path=str(text_path),
+    )
+    builder = EpubBuilder()
+
+    assert builder.create_epub(data) is True
+
+    output = novel_dir / "novel1.epub"
+    assert output.exists()
+    assert len(output.name.encode("utf-8")) <= 254

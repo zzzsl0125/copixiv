@@ -10,7 +10,6 @@ from PIL import Image
 from ebooklib import epub
 
 from copixiv.domain.models.novel import Novel
-from copixiv.domain.services.filename import safe_filename
 from copixiv.domain.services.language import has_image_placeholders
 
 from copixiv.log import logger
@@ -117,8 +116,13 @@ class EpubBuilder:
 
         # Write — atomic: build into a sibling temp file, then os.replace so
         # a crash never leaves a truncated EPUB at the final path.
-        safe_title = safe_filename(title)
-        output_path = parent_dir / f"{safe_title}_{novel_id}.epub"
+        # The output path is the text path's sibling (same basename,
+        # ".epub" suffix): ``build_path`` already budgets the title against
+        # the worst-case ".tmp" suffix, so the temp write can never exceed
+        # NAME_MAX.  The old code re-truncated the title here with the
+        # default 240-byte budget, silently diverging from the ".txt" path
+        # and overflowing on long titles (Errno 36 regression).
+        output_path = novel_path.with_suffix(".epub")
         tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
         try:
             epub.write_epub(tmp_path, book, {})
