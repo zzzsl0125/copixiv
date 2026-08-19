@@ -1,32 +1,26 @@
-"""Image downloader — fetches cover/illustration images in a thread pool."""
+"""Image downloader — fetches cover/illustration images in a thread pool.
+
+Images are fetched anonymously (Referer-only, no OAuth token — see
+``infrastructure/pixiv/http.py``), so this pool is independent of the
+account pool.  A global start-to-start interval throttles the CDN side
+(IP-level protection) while the thread pool keeps multiple transfers
+in flight.
+"""
 
 import asyncio
 import atexit
 import os
 import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 from copixiv.domain.models.novel import Novel
+from copixiv.infrastructure.pixiv.http import create_image_session, pick_image_url
 from copixiv.log import logger
-
-
-def _create_session() -> requests.Session:
-    """Create a requests session with retries and Pixiv-appropriate headers."""
-    session = requests.Session()
-    retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
-    session.mount("http://", HTTPAdapter(max_retries=retries))
-    session.mount("https://", HTTPAdapter(max_retries=retries))
-    session.headers.update({
-        "Referer": "https://www.pixiv.net/",
-        "User-Agent": "PixivIOSApp/7.13.3 (iOS 14.6; iPhone13,2)",
-    })
-    return session
 
 
 class ImageDownloader:
@@ -38,6 +32,7 @@ class ImageDownloader:
     def __init__(
         self,
         max_workers: int = 4,
+        min_interval: float = 0.25,
         epub_builder: Any | None = None,
         proxy_http: str = "",
         proxy_https: str = "",
@@ -49,6 +44,10 @@ class ImageDownloader:
         self._futures: list[tuple[int, Future]] = []
         self._in_flight: set[int] = set()
         self._in_flight_lock = threading.Lock()
+        # IP-level throttle: minimum start-to-start gap between downloads.
+        self._min_interval = min_interval
+        self._throttle_lock = threading.Lock()
+        self._last_start: float = 0.0
         atexit.register(self.shutdown)
 
     def __del__(self) -> None:
@@ -58,6 +57,21 @@ class ImageDownloader:
         except Exception:
             pass
 
+    def _throttle(self) -> None:
+        """Space out download *starts* across the whole pool.
+
+        Runs in the worker thread; holding the lock while sleeping is
+        intentional — threads queue at the gate and are admitted at most
+        ``min_interval`` apart, while the actual transfers still overlap.
+        """
+        if self._min_interval <= 0:
+            return
+        with self._throttle_lock:
+            wait = self._min_interval - (time.monotonic() - self._last_start)
+            if wait > 0:
+                time.sleep(wait)
+            self._last_start = time.monotonic()
+
     def download_image(
         self, url: str, save_path: Path, session: requests.Session | None = None
     ) -> bool:
@@ -65,17 +79,16 @@ class ImageDownloader:
         if save_path.exists() and save_path.stat().st_size > 0:
             return True
 
-        local_session = session or _create_session()
+        local_session = session or create_image_session(
+            self._proxy_http, self._proxy_https,
+        )
         should_close = session is None
         tmp_path = save_path.with_suffix(save_path.suffix + ".tmp")
 
         try:
             save_path.parent.mkdir(parents=True, exist_ok=True)
-            proxies = {
-                "http": self._proxy_http,
-                "https": self._proxy_https,
-            }
-            response = local_session.get(url, stream=True, timeout=10, proxies=proxies)
+            self._throttle()
+            response = local_session.get(url, stream=True, timeout=10)
             response.raise_for_status()
 
             expected_size = int(response.headers.get("content-length", 0))
@@ -190,7 +203,7 @@ class ImageDownloader:
         cover_url = novel.cover_url
 
         downloaded_files: list[Path] = []
-        session = _create_session()
+        session = create_image_session(self._proxy_http, self._proxy_https)
 
         try:
             # Cover
@@ -208,13 +221,7 @@ class ImageDownloader:
                     f"下载: #{novel_id} 内嵌图片 {len(images)} 张",
                 )
                 for img_id, img_info in images.items():
-                    urls = img_info.get("urls", {})
-                    url = (
-                        urls.get("original")
-                        or urls.get("large")
-                        or urls.get("medium")
-                        or urls.get("small")
-                    )
+                    url = pick_image_url(img_info.get("urls"))
                     if url:
                         ext = Path(url).suffix or ".jpg"
                         path = base_path / f"{novel_id}_u_{img_id}{ext}"
@@ -233,11 +240,9 @@ class ImageDownloader:
                         else wrapper
                     )
                     if isinstance(illust_data, dict):
-                        imgs = illust_data.get("images", {})
-                        url = (
-                            imgs.get("original")
-                            or imgs.get("medium")
-                            or imgs.get("small")
+                        url = pick_image_url(
+                            illust_data.get("images"),
+                            order=("original", "medium", "small"),
                         )
                         if url:
                             ext = Path(url).suffix or ".jpg"

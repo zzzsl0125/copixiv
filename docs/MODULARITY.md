@@ -45,7 +45,8 @@ web_api → application → domain ← infrastructure
 
 执法：`tests/architecture/test_layering.py::test_pixivpy3_vendor_whitelist`
 
-`import pixivpy3` 只允许出现在 `infrastructure/pixiv/patch.py` 与 `account.py`。
+`import pixivpy3` 只允许出现在 `infrastructure/pixiv/patch.py`、`account.py` 与
+`errors.py`（异常层次必须继承 `pixivpy3.PixivError` 才能被既有 `except` 链捕获）。
 其余代码一律通过 `domain/ports/pixiv.py` 的 Protocol 和 `account.py` 导出的异常族。
 
 ### 2.3 写路径必须走全局写锁

@@ -127,8 +127,8 @@ class TestDownloadImageRealPath:
         save_path = tmp_path / "img.jpg"
         session = self.FakeSession(self.FakeResponse([b"hello", b" world"]))
         monkeypatch.setattr(
-            "copixiv.infrastructure.storage.image_downloader._create_session",
-            lambda: session,
+            "copixiv.infrastructure.storage.image_downloader.create_image_session",
+            lambda *a, **k: session,
         )
 
         dl = ImageDownloader(max_workers=1)
@@ -158,8 +158,8 @@ class TestDownloadImageRealPath:
             self.FakeResponse([b"short"], content_length="100"),
         )
         monkeypatch.setattr(
-            "copixiv.infrastructure.storage.image_downloader._create_session",
-            lambda: session,
+            "copixiv.infrastructure.storage.image_downloader.create_image_session",
+            lambda *a, **k: session,
         )
 
         dl = ImageDownloader(max_workers=1)

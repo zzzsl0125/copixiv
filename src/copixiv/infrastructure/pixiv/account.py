@@ -11,6 +11,21 @@ from copixiv.domain.services.parsing import safe_get
 
 from copixiv.log import logger
 
+from .errors import (
+    AccountInvalidError,
+    PixivApiError,
+    PixivHttpError,
+    RateLimitError,
+)
+
+# Re-exported for callers that historically imported them from here.
+__all__ = [
+    "AccountInvalidError",
+    "PixivApiError",
+    "PixivHttpError",
+    "RateLimitError",
+]
+
 
 @dataclass
 class TokenInfo:
@@ -38,24 +53,6 @@ def _fmt_args(args: tuple, kwargs: dict) -> str:
     parts.extend(f"{k}={v!r}" for k, v in kwargs.items())
     joined = ", ".join(parts)
     return joined if len(joined) <= 120 else joined[:117] + "..."
-
-
-class RateLimitError(PixivError):
-    """Account is rate-limited."""
-
-
-class AccountInvalidError(PixivError):
-    """Account token is permanently invalid."""
-
-
-class PixivApiError(PixivError):
-    """Generic Pixiv API error (neither auth-failure nor rate-limit).
-
-    ``account.execute()`` translates raw pixivpy3 ``PixivError`` instances
-    into this type so that modules outside the pixivpy3 ACL (see
-    docs/MODULARITY.md §2.2) — e.g. ``client.py`` — never import
-    pixivpy3 exception types directly.
-    """
 
 
 class PixivAccount:
@@ -123,17 +120,6 @@ class PixivAccount:
     def valid(self) -> bool:
         return self.status != AccountStatus.INVALID
 
-    @property
-    def available(self) -> bool:
-        if not self.valid or self.in_cooldown:
-            return False
-        if (
-            self.status == AccountStatus.ACTIVE
-            and time.monotonic() - self.last_req_time > self._IDLE_TIMEOUT
-        ):
-            self.status = AccountStatus.INACTIVE
-        return self.status == AccountStatus.ACTIVE
-
     # -- actions -------------------------------------------------------------
 
     def start_cooldown(self, duration: float | None = None) -> None:
@@ -173,11 +159,58 @@ class PixivAccount:
                 self.status = AccountStatus.ACTIVE
                 self._last_auth_time = time.monotonic()
                 logger.info(f"{self} 认证成功")
+            except PixivHttpError as e:
+                # Status-based: 400/401 = the refresh token itself is bad.
+                # Anything else (429, 403, 5xx) is transient — retryable.
+                if e.status_code in (400, 401):
+                    self.status = AccountStatus.INVALID
+                    raise AccountInvalidError(str(self)) from e
+                raise PixivApiError(str(e)) from e
             except PixivError as e:
                 if "auth() failed" in str(e).lower():
                     self.status = AccountStatus.INVALID
                     raise AccountInvalidError(str(self)) from e
                 raise PixivApiError(str(e)) from e
+
+    # -- error-body classification helpers ------------------------------------
+
+    @staticmethod
+    def _error_body_message(result) -> str:
+        """Extract the lower-cased ``error.message`` from an error body dict."""
+        error_data = result["error"]
+        return (
+            error_data.get("message", "")
+            if isinstance(error_data, dict)
+            else str(error_data)
+        ).lower()
+
+    @staticmethod
+    def _is_rate_limit_message(msg: str) -> bool:
+        return any(
+            kw in msg for kw in ("rate limit", "currently restricted")
+        )
+
+    @staticmethod
+    def _is_auth_message(msg: str) -> bool:
+        return any(
+            kw in msg for kw in ("oauth", "invalid_grant", "access token")
+        )
+
+    def _raise_for_error_body(self, result) -> None:
+        """Classify an ``{"error": {...}}`` response body and raise.
+
+        Used both for the first response and for the post-re-auth retry.
+        """
+        msg = self._error_body_message(result)
+        if self._is_rate_limit_message(msg):
+            self.start_cooldown()
+            raise RateLimitError(str(self)) from None
+        if self._is_auth_message(msg):
+            # A fresh auth did not help (or no re-auth was attempted) —
+            # the refresh token itself is bad.
+            self.status = AccountStatus.INVALID
+            raise AccountInvalidError(str(self)) from None
+        raise PixivApiError(f"{self} API error in body: {msg}") from None
 
     async def execute(self, method: str, *args, **kwargs):
         """Call an API method on this account, handling auth and rate limits."""
@@ -204,33 +237,44 @@ class PixivAccount:
                 result = await asyncio.to_thread(func, *args, **kwargs)
                 self._last_call_end = time.monotonic()
 
-                # -- Safety net: detect auth errors returned in the response
-                # body rather than raised as exceptions.  The pixivpy3
-                # monkey-patches in ``patch.py`` may return an error dict
-                # (``{"error": {...}}``) instead of letting pixivpy3 raise.
+                # -- Error body fallback: pixivpy3's requests_call does not
+                # raise on non-200, and ``patch.py``'s tolerant
+                # parse_result/model fallbacks may hand us an error dict
+                # (``{"error": {...}}``) instead of an exception.  Classify
+                # by message so rate limits never masquerade as success.
                 if isinstance(result, dict) and "error" in result:
-                    error_data = result["error"]
-                    error_msg = (
-                        error_data.get("message", "")
-                        if isinstance(error_data, dict)
-                        else str(error_data)
-                    )
-                    if any(
-                        kw in error_msg.lower()
-                        for kw in ("oauth", "invalid_grant", "access token")
-                    ):
+                    if self._is_auth_message(self._error_body_message(result)):
                         logger.warning(
                             f"{self} API returned auth error in body, "
-                            f"re-authenticating: {error_msg}",
+                            f"re-authenticating: {self._error_body_message(result)}",
                         )
                         # Force re-auth and retry once with a fresh token.
                         self.status = AccountStatus.INACTIVE
                         await self.authenticate()
                         result = await asyncio.to_thread(func, *args, **kwargs)
                         self._last_call_end = time.monotonic()
+                        if isinstance(result, dict) and "error" in result:
+                            self._raise_for_error_body(result)
+                        logger.debug(f"{self} {method} completed (after re-auth).")
+                        return result
+                    self._raise_for_error_body(result)
 
                 logger.debug(f"{self} {method} completed.")
                 return result
+            except PixivHttpError as e:
+                if e.status_code == 429:
+                    self.start_cooldown()
+                    raise RateLimitError(str(self)) from e
+                if e.status_code == 401:
+                    # Access token died early — force a fresh auth on the
+                    # next attempt instead of retrying with the dead token.
+                    self.status = AccountStatus.INACTIVE
+                    self._last_auth_time = 0.0
+                raise PixivApiError(str(e)) from e
+            except (RateLimitError, AccountInvalidError, PixivApiError) as e:
+                # Already classified (raised by the error-body fallback
+                # inside the try) — never re-classify.
+                raise
             except PixivError as e:
                 error_msg = str(e).lower()
                 if "invalid_grant" in error_msg:

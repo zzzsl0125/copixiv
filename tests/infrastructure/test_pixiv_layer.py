@@ -3,7 +3,7 @@
 Covers the three pieces with no existing coverage:
 - AccountPool: LRU selection, premium filter, forced account, cooldown
 - PixivClient: retry / exponential backoff / account switching
-- pixivpy3 monkey patches: fault-tolerant fallbacks
+- pixivpy3 monkey patches: fault-tolerant fallbacks + status-code errors
 """
 
 from types import SimpleNamespace
@@ -11,14 +11,21 @@ from types import SimpleNamespace
 import pytest
 from pydantic import BaseModel
 from pixivpy3 import AppPixivAPI, PixivError
+from pixivpy3.api import BasePixivAPI
+from requests.structures import CaseInsensitiveDict
 
+from copixiv.domain.exceptions import NovelNotFoundError
 from copixiv.infrastructure.pixiv.account import (
     PixivAccount, TokenInfo, AccountStrategy, AccountStatus,
     AccountInvalidError, RateLimitError,
 )
 from copixiv.infrastructure.pixiv.accounts import AccountPool
 from copixiv.infrastructure.pixiv.client import PixivClient
+from copixiv.infrastructure.pixiv.errors import PixivApiError, PixivHttpError
 from copixiv.infrastructure.pixiv import patch as pixiv_patch
+
+# The true, unpatched requests_call — captured before any apply() runs.
+_REAL_REQUESTS_CALL = BasePixivAPI.requests_call
 
 
 def _account(username: str, premium: bool = False) -> PixivAccount:
@@ -238,7 +245,8 @@ class TestPixivPatches:
         m2 = _permissive_model_construct({"count": "nope"}, _M)
         assert m2 is not None
 
-    def test_webview_patch_returns_none_on_content_error(self, monkeypatch):
+    def test_webview_patch_raises_not_found_on_content_error(self, monkeypatch):
+        """Deterministic content failures are NovelNotFoundError, not None."""
         def _raise_content_error(self, novel_id):
             raise PixivError("failed to extract novel content from response")
 
@@ -247,7 +255,68 @@ class TestPixivPatches:
         pixiv_patch.apply()
 
         obj = object.__new__(AppPixivAPI)
-        assert AppPixivAPI.webview_novel(obj, 12345) is None
+        with pytest.raises(NovelNotFoundError):
+            AppPixivAPI.webview_novel(obj, 12345)
+
+    def test_webview_patch_404_raises_not_found(self, monkeypatch):
+        """HTTP 404 on webview is a deterministic NovelNotFoundError."""
+
+        def _raise_404(self, novel_id):
+            raise PixivHttpError("HTTP 404 for GET", status_code=404)
+
+        monkeypatch.setattr(AppPixivAPI, "webview_novel", _raise_404)
+        monkeypatch.setattr(pixiv_patch, "_patches_applied", False)
+        pixiv_patch.apply()
+
+        obj = object.__new__(AppPixivAPI)
+        with pytest.raises(NovelNotFoundError):
+            AppPixivAPI.webview_novel(obj, 12345)
+
+    def test_webview_patch_reraises_http_429(self, monkeypatch):
+        """429 must NOT be converted — it stays retryable."""
+
+        def _raise_429(self, novel_id):
+            raise PixivHttpError("HTTP 429 for GET", status_code=429)
+
+        monkeypatch.setattr(AppPixivAPI, "webview_novel", _raise_429)
+        monkeypatch.setattr(pixiv_patch, "_patches_applied", False)
+        pixiv_patch.apply()
+
+        obj = object.__new__(AppPixivAPI)
+        with pytest.raises(PixivHttpError, match="429"):
+            AppPixivAPI.webview_novel(obj, 12345)
+
+    def test_requests_call_patch_raises_http_error_with_status(self, monkeypatch):
+        """requests_call raises PixivHttpError carrying the status code."""
+        monkeypatch.setattr(BasePixivAPI, "requests_call", _REAL_REQUESTS_CALL)
+        monkeypatch.setattr(pixiv_patch, "_patches_applied", False)
+        pixiv_patch.apply()
+
+        obj = object.__new__(AppPixivAPI)
+        obj.additional_headers = CaseInsensitiveDict()
+        obj.requests_kwargs = {}
+        obj.requests = SimpleNamespace(
+            get=lambda *a, **k: SimpleNamespace(
+                status_code=429, headers={}, text='{"error": {}}',
+            ),
+        )
+
+        with pytest.raises(PixivHttpError) as excinfo:
+            AppPixivAPI.requests_call(obj, "GET", "https://x/")
+        assert excinfo.value.status_code == 429
+
+    def test_requests_call_patch_passes_through_200(self, monkeypatch):
+        monkeypatch.setattr(BasePixivAPI, "requests_call", _REAL_REQUESTS_CALL)
+        monkeypatch.setattr(pixiv_patch, "_patches_applied", False)
+        pixiv_patch.apply()
+
+        resp = SimpleNamespace(status_code=200, headers={}, text="ok")
+        obj = object.__new__(AppPixivAPI)
+        obj.additional_headers = CaseInsensitiveDict()
+        obj.requests_kwargs = {}
+        obj.requests = SimpleNamespace(get=lambda *a, **k: resp)
+
+        assert AppPixivAPI.requests_call(obj, "GET", "https://x/") is resp
 
     def test_webview_patch_reraises_other_errors(self, monkeypatch):
         def _raise_other(self, novel_id):
@@ -260,3 +329,82 @@ class TestPixivPatches:
         obj = object.__new__(AppPixivAPI)
         with pytest.raises(PixivError, match="unrelated"):
             AppPixivAPI.webview_novel(obj, 12345)
+
+
+class TestAccountExecute:
+    """PixivAccount.execute() error classification — no network."""
+
+    def _ready_account(self, username: str = "acc") -> PixivAccount:
+        acc = _account(username)
+        acc.status = AccountStatus.ACTIVE
+        acc._last_auth_time = 1e18  # fresh auth → authenticate() is a no-op
+        acc.min_interval = 0.01
+        return acc
+
+    async def test_error_body_rate_limit_raises_and_starts_cooldown(self):
+        acc = self._ready_account()
+        acc.api = SimpleNamespace(
+            auth=lambda **kw: None,
+            novel_ranking=lambda **kw: {"error": {"message": "Rate Limit"}},
+        )
+
+        with pytest.raises(RateLimitError):
+            await acc.execute("novel_ranking")
+        assert acc.in_cooldown
+
+    async def test_http_429_raises_and_starts_cooldown(self):
+        acc = self._ready_account()
+
+        def _boom(**kw):
+            raise PixivHttpError("HTTP 429 for GET x", status_code=429)
+
+        acc.api = SimpleNamespace(auth=lambda **kw: None, novel_ranking=_boom)
+
+        with pytest.raises(RateLimitError):
+            await acc.execute("novel_ranking")
+        assert acc.in_cooldown
+
+    async def test_http_401_forces_reauth_and_stays_retryable(self):
+        acc = self._ready_account()
+
+        def _boom(**kw):
+            raise PixivHttpError("HTTP 401 for GET x", status_code=401)
+
+        acc.api = SimpleNamespace(auth=lambda **kw: None, novel_ranking=_boom)
+
+        with pytest.raises(PixivApiError):
+            await acc.execute("novel_ranking")
+        # Not invalidated; next attempt will re-auth with a fresh token.
+        assert acc.status == AccountStatus.INACTIVE
+        assert acc._last_auth_time == 0.0
+        assert not acc.in_cooldown
+
+    async def test_generic_error_body_raises_api_error(self):
+        acc = self._ready_account()
+        acc.api = SimpleNamespace(
+            auth=lambda **kw: None,
+            novel_ranking=lambda **kw: {
+                "error": {"message": "something else"},
+            },
+        )
+
+        with pytest.raises(PixivApiError):
+            await acc.execute("novel_ranking")
+        assert not acc.in_cooldown
+
+    async def test_auth_body_error_retries_once_then_returns(self):
+        """OAuth-flavoured error bodies trigger re-auth + one retry."""
+        acc = self._ready_account()
+        calls = {"n": 0}
+
+        def _novel_ranking(**kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"error": {"message": "invalid_grant"}}
+            return {"novels": []}
+
+        acc.api = SimpleNamespace(auth=lambda **kw: None, novel_ranking=_novel_ranking)
+
+        result = await acc.execute("novel_ranking")
+        assert calls["n"] == 2
+        assert result == {"novels": []}

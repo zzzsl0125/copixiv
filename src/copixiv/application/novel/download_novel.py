@@ -7,6 +7,7 @@ background task.  The batch pipeline (``tasks/pipeline.py``) reuses
 so the two paths never drift apart.
 """
 
+from copixiv.domain.exceptions import NovelNotFoundError
 from copixiv.domain.models.novel import Novel
 from copixiv.domain.models.task_result import TaskResult
 from copixiv.domain.services.novel_factory import build_from_webview
@@ -18,6 +19,7 @@ from copixiv.domain.ports.write_lock import WriteLockPort
 
 from copixiv.application.author.resolve_names import resolve_author_names
 from copixiv.application.novel.persist import persist_novels
+from copixiv.log import logger
 
 
 async def fetch_novel_and_assets(
@@ -36,9 +38,15 @@ async def fetch_novel_and_assets(
 
     Returns the canonical :class:`Novel` model (transient ``content`` still
     attached — the repository's column whitelist excludes it from the DB)
-    or ``None`` when the API returned nothing.
+    or ``None`` when the novel does not exist / is not fetchable.
+    Network errors and rate limits are NOT swallowed here — they bubble up
+    to the client's retry loop and eventually fail the task loudly.
     """
-    resp = await client.webview_novel(novel_id)
+    try:
+        resp = await client.webview_novel(novel_id)
+    except NovelNotFoundError:
+        logger.warning(f"小说 #{novel_id} 不存在或无法获取，跳过")
+        return None
     if resp is None:
         return None
 

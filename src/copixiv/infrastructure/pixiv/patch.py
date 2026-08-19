@@ -11,10 +11,14 @@ import json
 from functools import wraps
 from typing import Any, Callable
 
+from copixiv.domain.exceptions import NovelNotFoundError
 from copixiv.log import logger
 from pixivpy3 import AppPixivAPI
 from pixivpy3.aapi import ParsedJson, _MODE, _FILTER, DateOrStr
+from pixivpy3.api import BasePixivAPI
 from pixivpy3.utils import PixivError
+
+from .errors import PixivHttpError
 
 _patches_applied: bool = False
 
@@ -41,12 +45,37 @@ def apply() -> None:
     global _patches_applied
     if _patches_applied:
         return
+    _patch_requests_call()
     _patch_parse_result()
     _patch_load_result_and_model()
     _patch_webview_novel()
     _patch_novel_ranking()
     _patches_applied = True
     logger.info("All pixivpy3 monkey patches applied.")
+
+
+# -----------------------------------------------------------------------
+# Patch: requests_call — raise on non-2xx so status codes survive
+# -----------------------------------------------------------------------
+
+@safe_patch("requests_call")
+def _patch_requests_call() -> None:
+    _original = BasePixivAPI.requests_call
+
+    def _status_checked(self, method, url, headers=None, params=None, data=None, stream=False):
+        response = _original(
+            self, method, url, headers=headers, params=params, data=data, stream=stream
+        )
+        if response.status_code not in (200, 301, 302):
+            raise PixivHttpError(
+                f"HTTP {response.status_code} for {method} {url}",
+                status_code=response.status_code,
+                header=response.headers,
+                body=response.text,
+            )
+        return response
+
+    BasePixivAPI.requests_call = _status_checked
 
 
 # -----------------------------------------------------------------------
@@ -85,11 +114,24 @@ def _patch_webview_novel() -> None:
     def _patched(self, *args, **kwargs):
         try:
             return _original(self, *args, **kwargs)
+        except PixivHttpError as e:
+            # 404 = the novel is gone.  Other HTTP errors (429, 5xx, ...)
+            # stay retryable — they bubble up to the client's retry loop.
+            if e.status_code == 404:
+                novel_id = args[0] if args else kwargs.get("novel_id")
+                raise NovelNotFoundError(
+                    f"novel #{novel_id} not found (HTTP 404)"
+                ) from e
+            raise
         except PixivError as e:
+            # Extraction failure (missing/deleted content in the page) is
+            # deterministic — the novel is not fetchable, don't retry.
             if "extract novel content" in str(e).lower():
                 novel_id = args[0] if args else kwargs.get("novel_id")
                 logger.error(f"Failed to fetch novel#{novel_id}: {e}")
-                return None
+                raise NovelNotFoundError(
+                    f"novel #{novel_id} content extraction failed"
+                ) from e
             raise
 
     AppPixivAPI.webview_novel = _patched

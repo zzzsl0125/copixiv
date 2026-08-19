@@ -152,7 +152,6 @@ class Container:
         self._client = PixivClient(
             account_pool=self._account_pool,
             max_concurrency=self.config.pixiv_client.max_concurrency,
-            min_interval=self.config.pixiv_client.min_interval,
         )
 
     def _build_notifier(self) -> None:

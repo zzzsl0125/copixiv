@@ -13,6 +13,8 @@ from urllib.parse import parse_qs, urlparse
 from dateutil import parser as date_parser
 from requests.exceptions import RequestException
 
+from copixiv.domain.services.parsing import safe_get, safe_set
+
 from .account import (
     AccountStrategy,
     RateLimitError,
@@ -24,18 +26,14 @@ from .accounts import AccountPool
 from copixiv.log import logger
 
 
-def _get_next_url(result):
+def _get_next_url(result) -> str | None:
     """Return ``next_url`` from a Pydantic model or plain dict result."""
-    if isinstance(result, dict):
-        return result.get("next_url")
-    return getattr(result, "next_url", None)
+    return safe_get(result, "next_url")
 
 
-def _get_novels(result):
+def _get_novels(result) -> list:
     """Return the ``novels`` list from a Pydantic model or plain dict result."""
-    if isinstance(result, dict):
-        return result.get("novels", []) or []
-    return getattr(result, "novels", []) or []
+    return safe_get(result, "novels") or []
 
 
 class PixivClient:
@@ -55,11 +53,9 @@ class PixivClient:
         self,
         account_pool: AccountPool,
         max_concurrency: int = 5,
-        min_interval: float = 2.0,
     ):
         self.pool = account_pool
         self.max_concurrency = max_concurrency
-        self.min_interval = min_interval
         self._semaphore = asyncio.Semaphore(max_concurrency)
 
     @asynccontextmanager
@@ -83,7 +79,11 @@ class PixivClient:
         """Fetch a single novel with full text content."""
         return await self._call("webview_novel", novel_id)
 
-    async def user_novels(self, author_id: int, fetch_all: bool = False) -> dict:
+    async def user_novels(
+        self,
+        author_id: int,
+        fetch_all: bool = False,
+    ) -> dict:
         """Fetch all novels by an author."""
         return await self._call(
             "user_novels", author_id, fetch_all=fetch_all,
@@ -101,7 +101,10 @@ class PixivClient:
         """Unfollow a user."""
         return await self._call("user_follow_delete", user_id)
 
-    async def novel_follow(self, fetch_til=None) -> dict:
+    async def novel_follow(
+        self,
+        fetch_til=None,
+    ) -> dict:
         """Fetch novels from followed users."""
         return await self._call(
             "novel_follow", fetch_til=fetch_til,
@@ -139,7 +142,9 @@ class PixivClient:
         )
 
     async def novel_series(
-        self, series_id: int, fetch_all: bool = False
+        self,
+        series_id: int,
+        fetch_all: bool = False,
     ) -> dict:
         """Fetch all novels in a series."""
         return await self._call(
@@ -210,12 +215,16 @@ class PixivClient:
 
         raise last_error  # type: ignore[misc]
 
-    async def _call(self, method: str, *args, **kwargs):
+    async def _call(
+        self,
+        method: str,
+        *args,
+        fetch_all: bool = False,
+        fetch_til=None,
+        fetch_minlike: int | None = None,
+        **kwargs,
+    ):
         """Execute an API call with optional pagination."""
-        fetch_all = kwargs.pop("fetch_all", None)
-        fetch_til = kwargs.pop("fetch_til", None)
-        fetch_minlike = kwargs.pop("fetch_minlike", None)
-
         async with self._semaphore:
             result = await self._execute_with_retry(method, *args, **kwargs)
 
@@ -225,12 +234,20 @@ class PixivClient:
         if not (fetch_all or fetch_til or fetch_minlike):
             return result
 
-        return await self._paginate(method, result, fetch_til, fetch_minlike)
+        return await self._paginate(
+            method, result, fetch_til, fetch_minlike
+        )
 
     async def _paginate(
         self, method, result, fetch_til, fetch_minlike
     ):
-        """Follow ``next_url`` across pages, collecting results."""
+        """Follow ``next_url`` across pages, collecting results.
+
+        Each page goes back through ``pool.select()`` — normal tasks
+        rotate accounts by LRU, while tasks running under
+        ``account_rule(force_account=...)`` (e.g. the daily ``novel_follow``
+        update, which pins the "follow" account) stay on that account.
+        """
         page = 1
 
         novels_count = len(_get_novels(result))
@@ -247,7 +264,7 @@ class PixivClient:
                 break
 
             # pixivpy3's parse_qs flattens single-value params; replicate it
-            # here without touching the account pool (which would disturb LRU).
+            # here so pagination works for dict- and model-shaped results.
             next_qs = {
                 k: v[0] for k, v in parse_qs(urlparse(next_url).query).items()
             }
@@ -260,12 +277,9 @@ class PixivClient:
             next_novels = _get_novels(next_result)
             new_next_url = _get_next_url(next_result)
 
-            if isinstance(result, dict):
-                result.setdefault("novels", []).extend(next_novels)
-                result["next_url"] = new_next_url
-            else:
-                result.novels += next_novels
-                result.next_url = new_next_url
+            # Accumulate into the result, whatever its shape.
+            safe_set(result, "novels", _get_novels(result) + next_novels)
+            safe_set(result, "next_url", new_next_url)
 
             novels_count += len(next_novels)
             logger.info(
@@ -292,22 +306,25 @@ class PixivClient:
     @staticmethod
     def _should_stop(last_item, fetch_til, fetch_minlike) -> bool:
         """Determine if pagination should stop based on date or bookmark thresholds."""
-        if fetch_til and "create_date" in last_item:
-            try:
-                create_dt = date_parser.parse(last_item["create_date"])
-                # Pixiv create_date is naive while fetch_til comes from
-                # datetime.now().astimezone(); comparing naive vs aware raises
-                # TypeError, so strip the tzinfo whenever they disagree.
-                if create_dt.tzinfo is not None and fetch_til.tzinfo is None:
-                    create_dt = create_dt.replace(tzinfo=None)
-                elif create_dt.tzinfo is None and fetch_til.tzinfo is not None:
-                    fetch_til = fetch_til.replace(tzinfo=None)
-                if create_dt < fetch_til:
-                    return True
-            except Exception:
-                # Unparseable/ambiguous dates must never interrupt pagination.
-                return False
-        if fetch_minlike and "total_bookmarks" in last_item:
-            if last_item["total_bookmarks"] < fetch_minlike:
+        if fetch_til:
+            create_dt = safe_get(last_item, "create_date")
+            if create_dt is not None:
+                try:
+                    create_dt = date_parser.parse(create_dt)
+                    # Pixiv create_date is naive while fetch_til comes from
+                    # datetime.now().astimezone(); comparing naive vs aware raises
+                    # TypeError, so strip the tzinfo whenever they disagree.
+                    if create_dt.tzinfo is not None and fetch_til.tzinfo is None:
+                        create_dt = create_dt.replace(tzinfo=None)
+                    elif create_dt.tzinfo is None and fetch_til.tzinfo is not None:
+                        fetch_til = fetch_til.replace(tzinfo=None)
+                    if create_dt < fetch_til:
+                        return True
+                except Exception:
+                    # Unparseable/ambiguous dates must never interrupt pagination.
+                    return False
+        if fetch_minlike:
+            bookmarks = safe_get(last_item, "total_bookmarks")
+            if bookmarks is not None and bookmarks < fetch_minlike:
                 return True
         return False

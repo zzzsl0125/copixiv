@@ -83,8 +83,8 @@ def test_download_image_failure_keeps_existing_file(tmp_path, monkeypatch):
             pass
 
     monkeypatch.setattr(
-        "copixiv.infrastructure.storage.image_downloader._create_session",
-        BoomSession,
+        "copixiv.infrastructure.storage.image_downloader.create_image_session",
+        lambda *a, **k: BoomSession(),
     )
 
     dl = ImageDownloader(max_workers=1)
@@ -127,8 +127,8 @@ def test_download_image_atomic_on_partial_write(tmp_path, monkeypatch):
             pass
 
     monkeypatch.setattr(
-        "copixiv.infrastructure.storage.image_downloader._create_session",
-        FakeSession,
+        "copixiv.infrastructure.storage.image_downloader.create_image_session",
+        lambda *a, **k: FakeSession(),
     )
 
     dl = ImageDownloader(max_workers=1)

@@ -22,6 +22,15 @@ class NotFoundError(DomainError):
     status_code = 404
 
 
+class NovelNotFoundError(NotFoundError):
+    """A novel does not exist / is not fetchable via the webview API.
+
+    Raised by the pixivpy3 ``webview_novel`` patch for *deterministic*
+    failures (HTTP 404, empty/deleted content).  Network errors and rate
+    limits are NOT this error — they stay retryable upstream.
+    """
+
+
 class ValidationError(DomainError):
     """Input validation failed."""
     status_code = 400

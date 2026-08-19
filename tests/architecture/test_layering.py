@@ -39,6 +39,8 @@ ALLOWED: dict[str, set[str]] = {
 PIXIVPY3_WHITELIST = {
     "infrastructure/pixiv/patch.py",
     "infrastructure/pixiv/account.py",
+    # 异常层次：必须继承 pixivpy3.PixivError 才能被既有 except 链捕获
+    "infrastructure/pixiv/errors.py",
 }
 
 
