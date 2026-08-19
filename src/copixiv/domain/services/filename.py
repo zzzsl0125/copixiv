@@ -43,10 +43,24 @@ def build_path(
     """Generate the filesystem path where a novel's text should be stored.
 
     Format: ``{download_dir}/{subdir}/{safe_title}_{novel_id}.txt``
+
+    The title is truncated so the *complete* basename always fits within
+    ``NAME_MAX`` (255 bytes) — including the ``_{novel_id}.txt`` suffix
+    and the ``.tmp`` suffix that atomic writes (``save_novel_text`` /
+    the EPUB builder) append transiently.  Without that reservation a
+    long title can still overflow the limit on the ``.tmp`` write and
+    fail the whole download with ``OSError: [Errno 36] File name too
+    long``.
     """
     id_int = int(novel_id)
     subdir = "0000" if id_int < 10_000_000 else str(id_int).zfill(8)[:4]
-    filename = f"{safe_filename(title)}_{id_int}.txt"
+    # Worst-case basename suffix is "_<id>.epub.tmp" (one byte longer
+    # than "_<id>.txt.tmp"); reserve it so both text and EPUB temp
+    # writes stay within 255 bytes.
+    reserved = len(f"_{id_int}.epub.tmp")
+    filename = (
+        f"{safe_filename(title, max_length=255 - reserved)}_{id_int}.txt"
+    )
     return str(Path(download_dir) / subdir / filename)
 
 

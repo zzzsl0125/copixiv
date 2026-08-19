@@ -2,6 +2,7 @@
 
 
 import pytest
+from pathlib import Path
 
 from copixiv.domain.models.novel import Novel
 
@@ -117,6 +118,25 @@ class TestBuildPath:
         p = build_path(1, 'bad:name*', "d")
         assert ":" not in p
         assert "*" not in p
+
+    def test_basename_fits_name_max_with_suffixes(self):
+        """Long titles must leave room for _<id>.txt/.epub plus .tmp."""
+        long_title = "长" * 300
+        p = build_path(28904936, long_title, "download")
+        base = Path(p).name
+        assert len(base.encode("utf-8")) <= 255
+        # Atomic-write temp variants must fit too (Errno 36 regression).
+        for suffix in (".txt.tmp", ".epub.tmp"):
+            tmp = base.rsplit(".", 1)[0] + suffix
+            assert len(tmp.encode("utf-8")) <= 255
+
+    def test_basename_fits_for_max_id_digits(self):
+        long_title = "あ" * 300
+        p = build_path(123456789012, long_title, "download")
+        base = Path(p).name
+        assert len(base.encode("utf-8")) <= 255
+        tmp = base.rsplit(".", 1)[0] + ".epub.tmp"
+        assert len(tmp.encode("utf-8")) <= 255
 
 
 # ---- parsing ----
