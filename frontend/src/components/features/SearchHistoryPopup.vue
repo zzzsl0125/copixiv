@@ -40,7 +40,7 @@ const emit = defineEmits<{
             {{ item.type }}
           </span>
         </div>
-        <button type="button" @click.stop="emit('delete-item', item.id)" class="text-gray-400 hover:text-gray-600 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity" :aria-label="`删除搜索历史：${item.display_value || item.value}`">
+        <button type="button" @click.stop="emit('delete-item', item.id)" class="text-gray-400 hover:text-gray-600 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100 transition-opacity" :aria-label="`删除搜索历史：${item.display_value || item.value}`">
           <X class="w-4 h-4" />
         </button>
       </li>

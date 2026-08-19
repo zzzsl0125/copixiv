@@ -109,7 +109,7 @@ const toggleFullscreen = () => { isFullscreen.value = !isFullscreen.value }
 
     <div v-if="showSearch" class="flex items-center px-4 py-2 bg-[#2d2d2d] border-b border-[#333]">
       <div class="relative flex-grow">
-        <input v-model="searchTerm" type="text" placeholder="搜索日志内容…" aria-label="搜索日志内容" class="w-full bg-[#1e1e1e] text-white text-xs rounded px-3 py-1.5 border border-[#3e3e42] focus:outline-none focus:border-blue-500" @keydown.enter="nextMatch">
+        <input v-model="searchTerm" type="text" placeholder="搜索日志内容…" aria-label="搜索日志内容" class="w-full bg-[#1e1e1e] text-white text-base sm:text-xs rounded px-3 py-1.5 border border-[#3e3e42] focus:outline-none focus:border-blue-500" @keydown.enter="nextMatch">
         <span v-if="matches.length > 0" class="absolute right-2 top-1.5 text-xs text-gray-500">{{ currentMatchIndex + 1 }}/{{ matches.length }}</span>
       </div>
       <div class="flex ml-2 space-x-1">

@@ -137,7 +137,7 @@ const statusIs = (status: string, ...names: string[]) =>
                 <div v-else-if="statusIs(item.status, 'pending')" class="text-yellow-500"><Clock class="w-8 h-8" /></div>
                 <div v-else class="text-gray-400"><Clock class="w-8 h-8" /></div>
               </div>
-              <div class="min-w-0 flex-1 ml-4 grid grid-cols-3 gap-4 items-center">
+              <div class="min-w-0 flex-1 ml-4 grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-4 items-center">
                 <div class="col-span-1">
                   <p class="text-sm font-medium text-gray-900 truncate">{{ item.name }}</p>
                   <template v-if="isBatchTask(item)">
@@ -156,8 +156,8 @@ const statusIs = (status: string, ...names: string[]) =>
                   </span>
                   <span v-if="typeof item.duration === 'number'" class="mt-0.5">耗时: {{ item.duration.toFixed(2) }}s</span>
                 </div>
-                <div class="col-span-1 flex items-center justify-end">
-                  <div class="w-48 flex justify-end space-x-2">
+                <div class="col-span-1 flex items-center justify-start sm:justify-end">
+                  <div class="w-auto sm:w-48 flex flex-wrap gap-2 sm:flex-nowrap justify-start sm:justify-end">
                     <button
                       v-if="item.name === 'batch_export' && statusIs(item.status, 'success')"
                       :disabled="downloadingTaskId === item.id"
