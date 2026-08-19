@@ -32,7 +32,11 @@ const downloading = ref(false)
 const showMobileActions = computed(() => props.isActive)
 const hasEpubReady = computed(() => props.novel.has_epub === 2)
 
-const handleCardClick = () => {
+const handleCardClick = (e: Event) => {
+  // 必须阻止冒泡：父容器用 @click="activeCardId = null" 实现「点外部收起」，
+  // 若不拦截，本次点击会在设置 active 后立刻把它复位 → 移动端抽屉永远打不开
+  // （桌面端被 hover 路径掩盖，所以此前一直没暴露）。
+  e.stopPropagation()
   if (props.batchMode) {
     emit('toggle-batch-select', props.novel.id)
     return

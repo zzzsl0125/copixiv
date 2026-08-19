@@ -1,5 +1,18 @@
 @import "tailwindcss";
 
+/*
+ * 让 group-hover 与 v4 内置的 hover 变体一致，仅在支持悬停的设备上生效
+ * （@media (hover: hover)）。触屏设备没有稳定的 hover 状态，小说卡抽屉等
+ * 交互应完全由 JS 的点击切换驱动，避免粘滞 hover 造成抽屉时显时隐。
+ */
+@custom-variant group-hover {
+  @media (hover: hover) {
+    &:is(:where(.group):hover *) {
+      @slot;
+    }
+  }
+}
+
 body {
   margin: 0;
   background-color: #f3f4f6;
