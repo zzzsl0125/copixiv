@@ -30,6 +30,22 @@ const updateFilter = (key: keyof typeof props.filters, value: unknown) => {
   emit('update:filters', newFilters)
 }
 
+/**
+ * 批量操作：与「阅览」一栏按钮一致——不在小说页时先跳回 '/'。
+ * 区别在于离页点击只进不退：若批量模式已开启（带着已选切到别的页面），
+ * 点回来只是跳回小说页继续挑选，绝不退出批量模式/清空已选。
+ * 留在小说页时维持原有开/关切换语义。
+ */
+const handleBatchClick = () => {
+  if (route.path !== '/') {
+    router.push('/')
+    if (!props.isBatchMode) emit('toggle-batch-mode')
+  } else {
+    emit('toggle-batch-mode')
+  }
+  emit('close')
+}
+
 const btnClass = (isActive: boolean, pxClass = 'px-3') => [
   `py-2 ${pxClass} text-sm font-medium rounded-md transition-colors`,
   isActive ? 'bg-blue-500 text-white' : 'bg-gray-50 text-gray-700 hover:bg-gray-100',
@@ -81,26 +97,25 @@ const navIconClass = 'mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500'
           <Settings :class="navIconClass" /> 账号管理
         </router-link>
 
-        <!-- 其他：批量操作 — 小说页常驻，位于与筛选区之间的横线上方 -->
-        <template v-if="showFilters !== false">
-          <h3 class="pt-4 text-sm font-semibold text-gray-500 uppercase tracking-wider mb-1">其他</h3>
-          <router-link
-            to="/failed-novels"
-            :class="navItemClass(route.path === '/failed-novels')"
-            @click="$emit('close')"
-          >
-            <AlertTriangle class="mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500" />
-            失败记录
-          </router-link>
-          <button
-            @click="() => { if(route.path !== '/') router.push('/'); $emit('toggle-batch-mode'); $emit('close'); }"
-            class="group w-full flex items-center justify-center px-3 py-2 text-sm font-medium rounded-md transition-colors"
-            :class="isBatchMode ? 'bg-blue-500 text-white' : 'text-gray-700 hover:text-gray-900 hover:bg-gray-50'"
-          >
-            <ListChecks class="mr-3 h-5 w-5" :class="isBatchMode ? 'text-white' : 'text-gray-400 group-hover:text-gray-500'" />
-            批量操作
-          </button>
-        </template>
+        <!-- 其他：常驻渲染。「失败记录」是全局台账页入口；「批量操作」
+             在小说页直接开关，在其他页面点击则先跳回小说页再进入批量模式 -->
+        <h3 class="pt-4 text-sm font-semibold text-gray-500 uppercase tracking-wider mb-1">其他</h3>
+        <router-link
+          to="/failed-novels"
+          :class="navItemClass(route.path === '/failed-novels')"
+          @click="$emit('close')"
+        >
+          <AlertTriangle class="mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500" />
+          失败记录
+        </router-link>
+        <button
+          @click="handleBatchClick"
+          class="group w-full flex items-center justify-center px-3 py-2 text-sm font-medium rounded-md transition-colors"
+          :class="isBatchMode ? 'bg-blue-500 text-white' : 'text-gray-700 hover:text-gray-900 hover:bg-gray-50'"
+        >
+          <ListChecks class="mr-3 h-5 w-5" :class="isBatchMode ? 'text-white' : 'text-gray-400 group-hover:text-gray-500'" />
+          批量操作
+        </button>
       </nav>
 
       <!-- Filters -->
