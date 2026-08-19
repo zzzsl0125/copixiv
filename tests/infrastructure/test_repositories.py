@@ -42,6 +42,56 @@ class TestSQLAlchemyNovelRepository:
         assert novel is not None
         assert novel.title == "Test Novel"
 
+    def test_upsert_novel_model_with_serializer_nulled(self, session):
+        """Regression (2026-08-19 cron failures): upsert must not depend on
+        ``Novel.__pydantic_serializer__``.
+
+        pydantic v2's ``model_rebuild`` *deletes and recreates*
+        ``__pydantic_serializer__`` and is explicitly not thread-safe.  In a
+        worker thread (``asyncio.to_thread``) it can transiently leave the
+        serializer as ``None``, and ``model_dump()`` then raises
+        ``TypeError: 'None' is not an instance of 'SchemaSerializer'`` — the
+        exact failure that took down the 每日更新 / 每日排行 cron runs.
+        ``upsert_novels`` reads field values from ``__dict__``
+        (serializer-free), so a ``None`` serializer must NOT break the upsert
+        (where the old ``model_dump()`` path would have raised).
+        """
+        from pydantic_core import SchemaSerializer
+        from copixiv.domain.models.novel import Novel as NovelModel, EpubStatus
+
+        session.add(Author(author_id=10, author_name="Test Author"))
+        session.commit()
+
+        novel = NovelModel(
+            id=1, title="带图的小说", author_id=10, path="/tmp/n1.txt",
+            has_epub=EpubStatus.PENDING, tags=["R-18", "NTR"],
+            content="正文" * 100,
+        )
+
+        # Simulate the pydantic thread-rebuild race: serializer transiently
+        # None.  Construction already happened (uses the validator, not the
+        # serializer), so nulling the serializer afterward is safe.
+        try:
+            NovelModel.__pydantic_serializer__ = None
+            repo = SQLAlchemyNovelRepository(session)
+            count = asyncio.run(repo.upsert_novels([novel]))
+            session.commit()
+        finally:
+            # Restore the real serializer.  force=True is required because
+            # __pydantic_complete__ is still True (we only nulled the
+            # serializer), so a non-forced rebuild would no-op.
+            NovelModel.model_rebuild(force=True)
+
+        # Sanity: the class is whole again for the rest of the session.
+        assert NovelModel.__pydantic_complete__ is True
+        assert isinstance(NovelModel.__pydantic_serializer__, SchemaSerializer)
+
+        assert count == 1
+        row = session.get(Novel, 1)
+        assert row is not None
+        assert row.title == "带图的小说"
+        assert int(row.has_epub) == int(EpubStatus.PENDING)  # PENDING == 1
+
     def test_get_existing_ids(self, session):
         session.add(Author(author_id=1, author_name="Test Author"))
         session.add(Novel(id=1, title="A", author_id=1, path="/tmp/a.txt"))

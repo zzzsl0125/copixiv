@@ -65,9 +65,24 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             return 0
 
         # Normalize: accept both Novel models and legacy dicts at the edge.
+        #
+        # Serializer-free conversion: read field values straight from the
+        # instance __dict__ instead of model_dump().  pydantic v2's
+        # model_dump() routes through __pydantic_serializer__, which
+        # pydantic may transiently rebuild — model_rebuild() *deletes and
+        # recreates* it and is explicitly "not thread-safe" (see pydantic
+        # main.py model_rebuild).  This method runs in a worker thread
+        # (asyncio.to_thread), so the rebuild race can leave the serializer
+        # as None and model_dump() raises
+        # "TypeError: 'None' is not an instance of 'SchemaSerializer'" —
+        # the exact failure that took down the 08-19 每日更新/每日排行 cron
+        # runs.  Field values are populated at construction (event loop)
+        # and never mutated afterwards, so reading __dict__ here is
+        # thread-safe and byte-identical to model_dump() for Novel (no
+        # private attrs, no computed fields, extra!='allow').
         from pydantic import BaseModel
         novels = [
-            n.model_dump() if isinstance(n, BaseModel) else dict(n)
+            dict(n.__dict__) if isinstance(n, BaseModel) else dict(n)
             for n in novels
         ]
 
