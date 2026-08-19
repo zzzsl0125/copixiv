@@ -101,3 +101,55 @@ async def test_duplicate_guard_releases_after_completion(factory):
         assert status == "success"
     finally:
         tm.stop()
+
+
+async def test_different_tasks_run_serially_not_concurrently(factory):
+    """Global task lock: two differently-named tasks must never overlap.
+
+    Without serialization, AsyncIOScheduler runs each enqueued job as an
+    independent coroutine, so different-named tasks execute concurrently
+    (the ``pending`` phase is too transient to see and the shorter task
+    can finish before the longer one).  The process-wide ``_task_lock``
+    makes execution strictly serial: while one task holds the lock the
+    other waits with its history row still ``pending``.
+    """
+    state = {"in_flight": 0, "max_concurrent": 0}
+    state_lock = asyncio.Lock()
+
+    async def _probe(**kwargs):
+        async with state_lock:
+            state["in_flight"] += 1
+            state["max_concurrent"] = max(
+                state["max_concurrent"], state["in_flight"]
+            )
+        # Force an overlap window: if both ran concurrently the peak
+        # in_flight would reach 2 during this sleep.
+        await asyncio.sleep(0.15)
+        async with state_lock:
+            state["in_flight"] -= 1
+        return TaskResult(summary="ok")
+
+    tm = TaskManagerSystem(session_factory=factory, client=None)
+    tm.start()
+    try:
+        tm.run_task("probe_a", _probe, {})
+        tm.run_task("probe_b", _probe, {})
+
+        for _ in range(100):
+            with factory() as s:
+                rows = s.execute(
+                    select(TaskHistory).where(
+                        TaskHistory.name.in_(("probe_a", "probe_b"))
+                    )
+                ).scalars().all()
+            if len(rows) == 2 and all(
+                r.status not in ("pending", "running") for r in rows
+            ):
+                break
+            await asyncio.sleep(0.05)
+        else:
+            raise AssertionError("probe tasks never reached terminal status")
+
+        assert state["max_concurrent"] == 1
+    finally:
+        tm.stop()

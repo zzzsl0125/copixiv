@@ -16,6 +16,7 @@ guessing based on ``isinstance(result, list)``.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 
 from copixiv.domain.exceptions import (
@@ -81,6 +82,18 @@ class TaskManagerSystem:
         # Checked-and-set inside the sync run_task(), so it is atomic on
         # the event loop; cleared by the executor's wrapper ``finally``.
         self._running_names: set[str] = set()
+
+        # Process-wide execution serialization: only one task body runs at
+        # a time.  Jobs that fire while another task is executing wait on
+        # this lock, keeping their history row in "pending" until the
+        # previous task finishes — which is what makes the UI's queued
+        # (yellow clock) vs running (blue spinner) distinction actually
+        # visible, and makes tasks complete in enqueue order.  Intra-task
+        # concurrency (fan-out downloads via asyncio.gather inside a single
+        # task) is unaffected: those are direct calls, not separate
+        # run_and_record invocations.  Same coroutine always acquires
+        # task-lock → db_write-lock in that order, so no deadlock.
+        self._task_lock = asyncio.Lock()
 
     @property
     def scheduler(self):
@@ -244,10 +257,16 @@ class TaskManagerSystem:
     async def _run_task_wrapper(
         self, task_id: int, spec: TaskSpec, params: dict
     ) -> None:
-        """One-shot APScheduler job body → executor lifecycle."""
-        await self._executor.run_and_record(
-            spec, params, task_id,
-            recorder=self._recorder,
-            notifier=self._notifier,
-            running_names=self._running_names,
-        )
+        """One-shot APScheduler job body → executor lifecycle.
+
+        Serialized by ``self._task_lock``: while one task runs, every other
+        enqueued job waits here with its history row still ``pending``.
+        See ``__init__`` for the full rationale.
+        """
+        async with self._task_lock:
+            await self._executor.run_and_record(
+                spec, params, task_id,
+                recorder=self._recorder,
+                notifier=self._notifier,
+                running_names=self._running_names,
+            )
