@@ -1,5 +1,7 @@
 """FailedNovel repository — track novel download failures for later retry."""
 
+from __future__ import annotations
+
 from datetime import datetime
 
 from sqlalchemy import case, delete, func, or_, select, update
@@ -168,3 +170,12 @@ class FailedNovelRepository:
         """Total number of failure records."""
         stmt = select(func.count()).select_from(models.FailedNovel)
         return self._session.execute(stmt).scalar_one()
+
+    def all_ids(self) -> list[int]:
+        """Every novel id in the ledger, in ledger order.
+
+        Used by ``POST /failed-novels/retry-all`` — the whole ledger is
+        the payload, so pagination state on the client never matters.
+        """
+        stmt = select(models.FailedNovel.novel_id)
+        return list(self._session.execute(stmt).scalars())

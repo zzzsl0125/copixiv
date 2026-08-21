@@ -86,13 +86,14 @@ async function retryOne(novel: FailedNovel) {
 }
 
 async function retryAll() {
-  if (anyRetrying.value || items.value.length === 0) return
-  const ids = items.value.map((i) => i.novel_id)
-  if (!window.confirm(`入队重试当前全部 ${ids.length} 条失败记录？（所有失败项，不只当前页）`)) return
+  if (anyRetrying.value || total.value === 0) return
+  // 全部重试 = 整本台账（服务端取全量），不是已加载的当前页。
+  // 确认数用 total（真实总数），与「所有失败项，不只当前页」的表述一致。
+  if (!window.confirm(`入队重试全部 ${total.value} 条失败记录？（所有失败项，不只当前页）`)) return
   retryingAll.value = true
   try {
-    const { task_id } = await failedNovelApi.retry(ids)
-    toast.success(`已入队重试 ${ids.length} 条记录（任务 #${task_id}，可在任务管理查看进度）`)
+    const { task_id, matched } = await failedNovelApi.retryAll()
+    toast.success(`已入队重试 ${matched} 条记录（任务 #${task_id}，可在任务管理查看进度）`)
   } catch (err) {
     toast.error(getApiErrorMessage(err, '入队重试失败'))
   } finally {
@@ -131,7 +132,7 @@ onMounted(load)
         <div class="flex gap-2">
           <button
             class="inline-flex items-center px-3 py-1.5 text-sm font-medium rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-            :disabled="anyRetrying || items.length === 0"
+            :disabled="anyRetrying || total === 0"
             @click="retryAll"
           >
             <RefreshCw class="mr-1.5 h-4 w-4" />

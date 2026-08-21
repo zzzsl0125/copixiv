@@ -15,6 +15,9 @@ frontend can show what failed, when, and why — and act on it:
 - ``POST /api/failed-novels/retry`` — enqueue a ``failed_retry`` task for
   the given ids (runs through the task system, so the global execution
   lock and history recording apply)
+- ``POST /api/failed-novels/retry-all`` — enqueue one ``failed_retry``
+  task for the WHOLE ledger (server-side "全部重试" — independent of the
+  frontend's pagination state)
 """
 
 from fastapi import APIRouter, Body, Depends, Query
@@ -118,5 +121,25 @@ async def retry_failed_novels(
         raise ValidationError(
             f"一次最多重试 {MAX_RETRY_IDS} 本（当前 {len(ids)} 本）"
         )
+    task_id = task_manager.run_task("failed_retry", params={"novel_ids": ids})
+    return BatchTaskResponse(task_id=task_id, matched=len(ids))
+
+
+@router.post("/retry-all", response_model=BatchTaskResponse)
+async def retry_all_failed_novels(
+    uow: SqlUnitOfWork = Depends(get_uow),
+    task_manager=Depends(get_task_manager),
+):
+    """Enqueue a background ``failed_retry`` task for EVERY failure record.
+
+    This is the server-side 「全部重试」: the ledger itself is the payload,
+    so the whole ledger gets retried regardless of which page the client
+    currently has loaded. Unlike ``POST /retry`` there is no id-payload
+    cap — the confirmation dialog on the client is the consent guard, and
+    the task fans out with the same one-client-per-id pattern.
+    """
+    ids = uow.failed_novels.all_ids()
+    if not ids:
+        raise ValidationError("当前没有失败记录")
     task_id = task_manager.run_task("failed_retry", params={"novel_ids": ids})
     return BatchTaskResponse(task_id=task_id, matched=len(ids))

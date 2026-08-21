@@ -35,4 +35,12 @@ export const failedNovelApi = {
     )
     return response.data
   },
+
+  /** 入队后台重试任务：重试全部失败记录（服务端取全量台账，与当前加载页无关）。 */
+  async retryAll() {
+    const response = await apiClient.post<{ task_id: number; matched: number }>(
+      '/failed-novels/retry-all',
+    )
+    return response.data
+  },
 }

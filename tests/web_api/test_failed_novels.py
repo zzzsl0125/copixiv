@@ -192,3 +192,20 @@ class TestFailedNovelRetry:
         )
         assert r.status_code == 400
         assert "500" in r.json()["detail"]
+
+    def test_retry_all_enqueues_whole_ledger(self, client, session_factory):
+        """retry-all 以整本台账为载荷——不依赖客户端分页状态。"""
+        _seed(session_factory, 1, "a")
+        _seed(session_factory, 2, "b")
+        _seed(session_factory, 3, "c")
+        r = client.post("/api/failed-novels/retry-all")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["matched"] == 3
+        manager = client.app.state.task_manager
+        assert manager.calls == [("failed_retry", {"novel_ids": [1, 2, 3]})]
+
+    def test_retry_all_empty_rejected(self, client):
+        r = client.post("/api/failed-novels/retry-all")
+        assert r.status_code == 400
+        assert "没有失败记录" in r.json()["detail"]
