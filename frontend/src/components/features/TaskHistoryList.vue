@@ -4,9 +4,7 @@ import { RefreshCw, Clock, FileText, CheckCircle, XCircle, Download } from '@luc
 import LoadMore from './LoadMore.vue'
 import LogViewer from './LogViewer.vue'
 import { novelApi } from '../../api'
-import { getApiErrorMessage } from '../../api/errors'
-import { downloadBlob, filenameFromContentDisposition } from '../../lib/utils'
-import { useToast } from '../../composables'
+import { downloadUrl } from '../../lib/utils'
 import type { TaskHistory } from '../../types'
 
 defineProps<{
@@ -17,12 +15,10 @@ defineProps<{
 
 const emit = defineEmits<{ (e: 'loadMore'): void }>()
 
-const toast = useToast()
 const logModalOpen = ref(false)
 const currentLog = ref('')
 const titlesModalOpen = ref(false)
 const currentTitles = ref('')
-const downloadingTaskId = ref<number | null>(null)
 
 const parseResult = (resultStr?: string | Record<string, any> | null) => {
   if (!resultStr) return { log: '', summary: '', new_novels_count: null, new_novel_titles: [] as string[] }
@@ -79,22 +75,10 @@ const batchArgsLabel = (item: TaskHistory) => {
 const isBatchTask = (item: TaskHistory) =>
   item.name === 'batch_operation' || item.name === 'batch_export'
 
-const handleDownloadExport = async (item: TaskHistory) => {
-  if (downloadingTaskId.value !== null) return
-  downloadingTaskId.value = item.id
-  try {
-    const response = await novelApi.downloadExportFile(item.id)
-    const blob = response.data as Blob
-    const filename = filenameFromContentDisposition(
-      response.headers['content-disposition'] as string | undefined,
-      `batch_export_${item.id}.zip`,
-    )
-    downloadBlob(blob, filename)
-  } catch (err: unknown) {
-    toast.error(getApiErrorMessage(err, '导出文件下载失败'))
-  } finally {
-    downloadingTaskId.value = null
-  }
+const handleDownloadExport = (item: TaskHistory) => {
+  // Navigate straight to the attachment URL (works in in-app browsers /
+  // WebViews that don't support blob: downloads).
+  downloadUrl(novelApi.exportDownloadUrl(item.id))
 }
 
 const showLog = (result: string | Record<string, any> | null | undefined) => {
@@ -160,12 +144,11 @@ const statusIs = (status: string, ...names: string[]) =>
                   <div class="w-auto sm:w-48 flex flex-wrap gap-2 sm:flex-nowrap justify-start sm:justify-end">
                     <button
                       v-if="item.name === 'batch_export' && statusIs(item.status, 'success')"
-                      :disabled="downloadingTaskId === item.id"
                       @click="handleDownloadExport(item)"
-                      class="inline-flex items-center px-2.5 py-1.5 border border-blue-300 shadow-sm text-xs font-medium rounded text-blue-700 bg-blue-50 hover:bg-blue-100 focus:outline-none transition-colors disabled:opacity-50"
+                      class="inline-flex items-center px-2.5 py-1.5 border border-blue-300 shadow-sm text-xs font-medium rounded text-blue-700 bg-blue-50 hover:bg-blue-100 focus:outline-none transition-colors"
                     >
                       <Download class="w-3.5 h-3.5 mr-1" />
-                      {{ downloadingTaskId === item.id ? '下载中…' : '下载' }}
+                      下载
                     </button>
                     <button
                       v-if="parseResult(item.result).new_novel_titles && parseResult(item.result).new_novel_titles.length > 0"

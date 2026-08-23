@@ -1,4 +1,4 @@
-import { apiClient } from './client'
+import { apiClient, buildApiUrl } from './client'
 import type {
   Novel, GetNovelsParams, BatchScope, BatchOperation, BatchOperationResult,
   NovelIdsResponse, NovelsByIdsResponse, MatchIdsResult, NovelCountResult,
@@ -25,12 +25,14 @@ export const novelApi = {
     await apiClient.post(`/novels/author/${authorId}/follow`)
   },
 
-  /** Blob download through the shared client so X-API-Key can be attached. */
-  async downloadNovel(novelId: number, format: 'txt' | 'epub' = 'txt') {
-    return apiClient.get(`/novels/${novelId}/download`, {
-      params: { format },
-      responseType: 'blob',
-    })
+  /**
+   * Browser-navigable download URL for a single novel. The endpoint serves
+   * the file with `Content-Disposition: attachment`, so a plain navigation
+   * triggers the browser/WebView's native download (works where blob: object
+   * URLs are unsupported) and the suggested filename is the novel title.
+   */
+  downloadUrl(novelId: number, format: 'txt' | 'epub' = 'txt') {
+    return buildApiUrl(`/novels/${novelId}/download?format=${format}`)
   },
 
   async countNovels(params: GetNovelsParams) {
@@ -166,11 +168,8 @@ export const novelApi = {
     return response.data as { task_id: number; matched: number }
   },
 
-  /** Download a completed background export ZIP. */
-  async downloadExportFile(taskId: number) {
-    return apiClient.get(`/novels/export/${taskId}/download`, {
-      responseType: 'blob',
-      timeout: 0,
-    })
+  /** Browser-navigable download URL for a completed background export ZIP. */
+  exportDownloadUrl(taskId: number) {
+    return buildApiUrl(`/novels/export/${taskId}/download`)
   },
 }

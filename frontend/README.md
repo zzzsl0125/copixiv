@@ -43,7 +43,12 @@ ss -tlnp | grep 5173                      # 检查端口占用
 VITE_API_KEY=你的key npm run build
 ```
 
-所有 Axios 请求会通过 `src/api/client.ts` 统一附加 `X-API-Key` 头；单篇下载也已走同一客户端（Blob 下载），不会绕过鉴权。
+所有 Axios 请求会通过 `src/api/client.ts` 统一附加 `X-API-Key` 头。
+
+单篇下载与导出文件使用浏览器直连的附件 URL（`Content-Disposition: attachment`），
+不依赖 `blob:` 对象 URL —— 在部分内置浏览器 / WebView（不支持 blob 下载）中也能正常触发下载，
+且弹窗显示的是服务器返回的真实文件名（如小说名）。开启 API Key 时，这些下载 URL 会附带
+`?api_key=` 参数（后端中间件在缺失 `X-API-Key` 头时也会读取该参数），从而不绕过鉴权。
 
 ## 排障
 

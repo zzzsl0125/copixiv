@@ -48,3 +48,34 @@ describe('apiClient X-API-Key interceptor', () => {
     vi.resetModules()
   })
 })
+
+describe('buildApiUrl (navigation-based downloads)', () => {
+  it('appends api_key as a query param when a key is configured', async () => {
+    vi.stubEnv('VITE_API_KEY', 'my-secret')
+    vi.resetModules()
+
+    const { buildApiUrl } = await import('../../src/api/client')
+    expect(buildApiUrl('/novels/42/download?format=txt')).toBe(
+      '/api/novels/42/download?format=txt&api_key=my-secret',
+    )
+    expect(buildApiUrl('/novels/export/7/download')).toBe(
+      '/api/novels/export/7/download?api_key=my-secret',
+    )
+
+    vi.unstubAllEnvs()
+    vi.resetModules()
+  })
+
+  it('leaves the URL untouched when no key is configured', async () => {
+    vi.stubEnv('VITE_API_KEY', '')
+    vi.resetModules()
+
+    const { buildApiUrl } = await import('../../src/api/client')
+    expect(buildApiUrl('/novels/42/download?format=txt')).toBe(
+      '/api/novels/42/download?format=txt',
+    )
+
+    vi.unstubAllEnvs()
+    vi.resetModules()
+  })
+})

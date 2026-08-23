@@ -46,3 +46,20 @@ export function downloadBlob(blob: Blob, filename: string): void {
   // Delay revocation slightly for Safari; the object URL is cheap.
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
+
+/**
+ * Trigger a browser download by navigating to a URL that is served with
+ * `Content-Disposition: attachment`. Unlike blob: object URLs, a real
+ * server URL works in in-app browsers / WebViews that lack blob-download
+ * support, and the suggested filename comes from the server's header
+ * (e.g. the novel title) instead of a random object-URL id.
+ */
+export function downloadUrl(url: string): void {
+  const a = document.createElement('a')
+  a.href = url
+  a.target = '_blank'
+  a.rel = 'noopener'
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+}

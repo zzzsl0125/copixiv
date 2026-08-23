@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, ref, type PropType } from 'vue'
+import { computed, type PropType } from 'vue'
 import { novelApi } from '../../api'
 import { getApiErrorMessage } from '../../api/errors'
-import { downloadBlob, filenameFromContentDisposition, formatNumber } from '../../lib/utils'
+import { downloadUrl, formatNumber } from '../../lib/utils'
 import { useToast } from '../../composables'
 import type { Novel, TagPreference } from '../../types'
 
@@ -28,7 +28,6 @@ const emit = defineEmits<{
 }>()
 
 const toast = useToast()
-const downloading = ref(false)
 const showMobileActions = computed(() => props.isActive)
 const hasEpubReady = computed(() => props.novel.has_epub === 2)
 
@@ -97,26 +96,12 @@ const handleToggleFollow = async (e: Event) => {
   }
 }
 
-const handleDownload = async (e: Event) => {
+const handleDownload = (e: Event) => {
   e.stopPropagation()
-  if (downloading.value) return
-  downloading.value = true
-  try {
-    const response = await novelApi.downloadNovel(
-      props.novel.id,
-      hasEpubReady.value ? 'epub' : 'txt',
-    )
-    const blob = response.data as Blob
-    const filename = filenameFromContentDisposition(
-      response.headers['content-disposition'] as string | undefined,
-      `${props.novel.id}.txt`,
-    )
-    downloadBlob(blob, filename)
-  } catch (err: unknown) {
-    toast.error(getApiErrorMessage(err, '下载失败'))
-  } finally {
-    downloading.value = false
-  }
+  // Navigate straight to the attachment URL: the server's
+  // Content-Disposition drives the download and suggested filename, so it
+  // works in in-app browsers / WebViews that don't support blob: downloads.
+  downloadUrl(novelApi.downloadUrl(props.novel.id, hasEpubReady.value ? 'epub' : 'txt'))
 }
 
 const likeBorderClass = computed(() => {
@@ -216,11 +201,10 @@ const getTagClass = (tag: string) => {
       >
         <div class="flex-1 flex gap-2 h-full">
           <button
-            class="flex-1 flex items-center justify-center text-xs font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-wait"
-            :disabled="downloading"
+            class="flex-1 flex items-center justify-center text-xs font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors cursor-pointer"
             @click="handleDownload"
           >
-            {{ downloading ? '下载中…' : '下载' }}
+            下载
           </button>
           <button
             class="flex-1 flex items-center justify-center text-xs font-medium rounded-lg transition-colors cursor-pointer"

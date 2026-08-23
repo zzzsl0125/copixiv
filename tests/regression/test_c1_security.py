@@ -249,6 +249,17 @@ class TestApiKey:
         r = keyed_client.get("/api/tokens/", headers={"X-API-Key": "sekret"})
         assert r.status_code == 200
 
+    def test_key_via_query_param_accepts(self, keyed_client):
+        # Navigation-based downloads can't set an X-API-Key header; the
+        # frontend appends ?api_key= instead. The key is already bundled in
+        # the client, so this is not an additional leak.
+        r = keyed_client.get("/api/tokens/?api_key=sekret")
+        assert r.status_code == 200
+
+    def test_wrong_key_query_param_401(self, keyed_client):
+        r = keyed_client.get("/api/tokens/?api_key=wrong")
+        assert r.status_code == 401
+
     def test_options_bypasses_api_key(self, keyed_client):
         # Plain OPTIONS has no route handler → 405 from routing, not 401
         # from the API-key middleware: the bypass is proven by the status.

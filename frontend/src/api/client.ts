@@ -1,7 +1,9 @@
 import axios from 'axios'
 
+export const apiBaseUrl = '/api'
+
 export const apiClient = axios.create({
-  baseURL: '/api',
+  baseURL: apiBaseUrl,
   timeout: 30_000,
 })
 
@@ -14,4 +16,17 @@ if (apiKey) {
     config.headers.set('X-API-Key', apiKey)
     return config
   })
+}
+
+/**
+ * Build a browser-navigable API URL for a download. When an API key is
+ * configured it is appended as `?api_key=` because a plain anchor/window
+ * navigation cannot carry the X-API-Key header — this lets us download by
+ * navigating directly to the endpoint (blob: object URLs are unsupported in
+ * some in-app browsers / WebViews, so the frontend must not rely on them).
+ */
+export function buildApiUrl(path: string): string {
+  if (!apiKey) return `${apiBaseUrl}${path}`
+  const sep = path.includes('?') ? '&' : '?'
+  return `${apiBaseUrl}${path}${sep}api_key=${encodeURIComponent(apiKey)}`
 }

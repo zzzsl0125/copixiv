@@ -7,7 +7,7 @@ vi.mock('../../src/api', () => ({
   novelApi: {
     toggleFavourite: vi.fn(),
     toggleSpecialFollow: vi.fn(),
-    downloadNovel: vi.fn(),
+    downloadUrl: vi.fn(() => '/api/novels/42/download?format=txt'),
   },
 }))
 

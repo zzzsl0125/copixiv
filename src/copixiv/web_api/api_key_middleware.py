@@ -41,6 +41,20 @@ class APIAuthMiddleware:
         for name, value in scope.get("headers", []):
             if name.lower() == b"x-api-key":
                 return value.decode("latin-1")
+
+        # Fallback: accept the key via ?api_key= so the frontend can drive a
+        # normal browser navigation to a download URL (some in-app browsers /
+        # WebViews can't handle blob: object-URL downloads, so the client
+        # navigates straight to the endpoint instead of fetching a Blob).
+        # The key is already shipped in the client bundle, so a query-param
+        # form is not an additional leak vs. the X-API-Key header.
+        query = scope.get("query_string", b"")
+        if query:
+            from urllib.parse import parse_qs
+            params = parse_qs(query.decode("latin-1"))
+            values = params.get("api_key")
+            if values:
+                return values[0]
         return None
 
     @staticmethod

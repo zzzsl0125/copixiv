@@ -3,6 +3,7 @@ import {
   formatNumber,
   filenameFromContentDisposition,
   downloadBlob,
+  downloadUrl,
 } from '../../src/lib/utils'
 
 // Search-condition parsing moved to the backend (parse_search_keyword) —
@@ -66,5 +67,25 @@ describe('downloadBlob', () => {
 
     expect(createObjectURL).toHaveBeenCalledWith(blob)
     expect(HTMLAnchorElement.prototype.click).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('downloadUrl', () => {
+  it('navigates to the attachment URL without a blob object URL', () => {
+    let clicked: HTMLAnchorElement | undefined
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(function (this: HTMLAnchorElement) {
+        clicked = this
+      })
+
+    downloadUrl('/api/novels/42/download?format=txt')
+
+    expect(clicked).toBeDefined()
+    expect(clicked!.getAttribute('href')).toBe('/api/novels/42/download?format=txt')
+    expect(clicked!.getAttribute('target')).toBe('_blank')
+    expect(click).toHaveBeenCalledTimes(1)
+
+    vi.restoreAllMocks()
   })
 })
