@@ -31,7 +31,6 @@ def container(tmp_path_factory):
             "telegram: {token: '', chat_id: ''}",
             "frontend: {default_min_like: 500, default_min_text: 3000}",
             "batch_download: {naming: '{id}_{title}'}",
-            "pixiv_accounts: {follow: ''}",
             "security:",
             "  api_key: sekret",
             "  allowed_hosts: [good.example]",

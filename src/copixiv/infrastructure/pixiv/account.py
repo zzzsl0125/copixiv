@@ -33,12 +33,18 @@ class TokenInfo:
     username: str
     premium: bool = False
     valid: bool = True
+    # Designated「追更账号」—— the account that owns the Pixiv following
+    # feed (see is_follow on the tokens table).
+    follow: bool = False
 
 
 @dataclass
 class AccountStrategy:
     need_premium: bool = False
     force_account: str | None = None
+    # Prefer the single account flagged ``follow`` over the generic LRU /
+    # force_account string selection.
+    force_follow: bool = False
 
 
 class AccountStatus(Enum):

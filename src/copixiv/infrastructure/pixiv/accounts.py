@@ -56,7 +56,18 @@ class AccountPool:
             if premium:
                 candidates = premium
 
-        # Force a specific account
+        # Force the designated「追更账号」(is_follow on the tokens table).
+        # Single source of truth — the flagged account owns the Pixiv
+        # following-list feed.  If no account is flagged (or the flagged
+        # one is invalid / in cooldown), fall through to the generic
+        # selectors so the call never hard-fails.
+        if strat.force_follow:
+            flagged = [a for a in candidates if a.token_info.follow]
+            if flagged:
+                return flagged[0]
+
+        # Force a specific account (deprecated legacy string selector,
+        # kept for callers that still pass an explicit account label)
         if strat.force_account:
             forced = [
                 a

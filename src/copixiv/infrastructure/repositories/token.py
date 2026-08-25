@@ -2,7 +2,7 @@
 
 from collections.abc import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from copixiv.infrastructure.database import models
@@ -37,3 +37,23 @@ class SQLAlchemyTokenRepository(BaseRepository):
 
     async def reorder(self, ids: list[int]) -> bool:
         return self._reorder(models.Token, "sort_index", ids)
+
+    async def set_follow(self, token_id: int, is_follow: bool) -> bool:
+        """Designate one token as the「追更账号」, clearing the flag on all others.
+
+        Returns ``False`` when *token_id* doesn't exist.  Runs as a single
+        transaction — the write UoW commits on clean exit — and is
+        serialized by the global write lock, so the clear-then-set never
+        races.  At most one account can be flagged at a time.
+        """
+        if is_follow:
+            self.session.execute(
+                update(models.Token)
+                .where(models.Token.id != token_id)
+                .values(is_follow=False)
+            )
+        token = self.session.get(models.Token, token_id)
+        if token is None:
+            return False
+        token.is_follow = is_follow
+        return True

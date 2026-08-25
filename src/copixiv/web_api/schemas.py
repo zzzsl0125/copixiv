@@ -363,6 +363,8 @@ class TokenBase(BaseModel):
     token: str
     premium: bool = False
     valid: bool = True
+    # Designated「追更账号」—— the account that owns the Pixiv following feed.
+    is_follow: bool = False
 
 
 class TokenUpdate(BaseModel):
@@ -370,6 +372,7 @@ class TokenUpdate(BaseModel):
     token: str | None = None
     premium: bool | None = None
     valid: bool | None = None
+    is_follow: bool | None = None
 
 
 class TokenResponse(TokenBase):

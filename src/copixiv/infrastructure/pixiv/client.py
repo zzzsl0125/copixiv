@@ -63,10 +63,15 @@ class PixivClient:
         self,
         need_premium: bool = False,
         force_account: str | None = None,
+        force_follow: bool = False,
     ):
         """Temporarily override account selection strategy."""
         token = self.pool.set_strategy(
-            AccountStrategy(need_premium=need_premium, force_account=force_account)
+            AccountStrategy(
+                need_premium=need_premium,
+                force_account=force_account,
+                force_follow=force_follow,
+            )
         )
         try:
             yield self
@@ -245,8 +250,8 @@ class PixivClient:
 
         Each page goes back through ``pool.select()`` — normal tasks
         rotate accounts by LRU, while tasks running under
-        ``account_rule(force_account=...)`` (e.g. the daily ``novel_follow``
-        update, which pins the "follow" account) stay on that account.
+        ``account_rule(force_follow=True)`` (e.g. the daily ``novel_follow``
+        update, which pins the designated「追更账号」) stay on that account.
         """
         page = 1
 

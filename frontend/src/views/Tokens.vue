@@ -35,7 +35,7 @@ const openModal = (token?: Token) => {
 
 const closeModal = () => { showModal.value = false }
 
-const handleToggle = async (token: Token, field: 'premium' | 'valid') => {
+const handleToggle = async (token: Token, field: 'premium' | 'valid' | 'is_follow') => {
   try { await toggleField(token, field) }
   catch (err: unknown) {
     toast.error(getApiErrorMessage(err, '更新状态失败'))
@@ -78,6 +78,7 @@ const handleDelete = async (id: number) => {
 const columns: TableColumn[] = [
   { key: 'name', label: '名称' },
   { key: 'token', label: 'Token', tdClass: 'text-sm text-gray-500 max-w-xs truncate' },
+  { key: 'is_follow', label: '追更账号' },
   { key: 'premium', label: '高级会员' },
   { key: 'valid', label: '状态' },
   { key: 'actions', label: '操作', align: 'right' },
@@ -102,6 +103,11 @@ const columns: TableColumn[] = [
         </template>
         <template #token="{ item: token }">
           <span :title="(token as Token).token" class="font-mono">{{ (token as Token).token }}</span>
+        </template>
+        <template #is_follow="{ item: token }">
+          <StatusBadgeButton :active="(token as Token).is_follow" activeTheme="purple" inactiveTheme="gray" @click="handleToggle(token as Token, 'is_follow')">
+            {{ (token as Token).is_follow ? '是' : '否' }}
+          </StatusBadgeButton>
         </template>
         <template #premium="{ item: token }">
           <StatusBadgeButton :active="(token as Token).premium" activeTheme="yellow" inactiveTheme="gray" @click="handleToggle(token as Token, 'premium')">

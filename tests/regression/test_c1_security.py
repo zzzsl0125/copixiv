@@ -163,6 +163,43 @@ class TestTokenMasking:
         assert r.status_code == 404
 
 
+class TestTokenFollowDesignation:
+    def test_designating_follow_clears_others(self, client, session_factory):
+        """At most one account is designated「追更账号」at a time."""
+        _seed_token(session_factory, name="a1")
+        _seed_token(session_factory, name="a2")
+        tokens = client.get("/api/tokens/").json()
+        id_a1 = next(t["id"] for t in tokens if t["name"] == "a1")
+        id_a2 = next(t["id"] for t in tokens if t["name"] == "a2")
+        assert all(not t["is_follow"] for t in tokens)
+
+        r = client.put(f"/api/tokens/{id_a1}", json={"is_follow": True})
+        assert r.status_code == 200
+        assert r.json()["is_follow"] is True
+        after = {t["name"]: t["is_follow"] for t in client.get("/api/tokens/").json()}
+        assert after == {"a1": True, "a2": False}
+
+        # designating a2 flips a1 off (singleton)
+        r = client.put(f"/api/tokens/{id_a2}", json={"is_follow": True})
+        assert r.status_code == 200
+        after = {t["name"]: t["is_follow"] for t in client.get("/api/tokens/").json()}
+        assert after == {"a1": False, "a2": True}
+
+        # un-designating clears the flag entirely
+        r = client.put(f"/api/tokens/{id_a2}", json={"is_follow": False})
+        assert r.status_code == 200
+        after = {t["name"]: t["is_follow"] for t in client.get("/api/tokens/").json()}
+        assert after == {"a1": False, "a2": False}
+
+    def test_follow_flag_persists_after_name_update(self, client, session_factory):
+        _seed_token(session_factory, name="a1")
+        token_id = client.get("/api/tokens/").json()[0]["id"]
+        client.put(f"/api/tokens/{token_id}", json={"is_follow": True})
+        r = client.put(f"/api/tokens/{token_id}", json={"name": "renamed"})
+        assert r.status_code == 200
+        assert r.json()["is_follow"] is True
+
+
 class TestHostValidation:
     def test_evil_host_rejected(self, session_factory):
         config = AppConfig()

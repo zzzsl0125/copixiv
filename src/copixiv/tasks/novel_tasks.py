@@ -26,7 +26,6 @@ from copixiv.log import logger
 
 from .context import TaskContext
 from .pipeline import (
-    _account,
     _batch_handle,
     _filter_chinese_novels,
     _month_ranges,
@@ -145,7 +144,7 @@ async def novel_fetch(args: NovelFetchArgs, ctx: TaskContext) -> TaskResult:
 async def novel_follow(args: NovelFollowArgs, ctx: TaskContext) -> TaskResult:
     """Fetch new novels from followed users.
 
-    Forces the designated "follow" account (config.pixiv_accounts.follow)
+    Runs on the designated「追更账号」(``is_follow`` on the tokens table)
     because the Pixiv novel_follow endpoint returns results scoped to the
     authenticated account's own following list.
 
@@ -154,7 +153,7 @@ async def novel_follow(args: NovelFollowArgs, ctx: TaskContext) -> TaskResult:
     """
     fetch_til = datetime.now().astimezone() - timedelta(days=args.days)
     async with ctx.client.account_rule(
-        force_account=_account("follow", ctx.config),
+        force_follow=True,
     ):
         resp = await ctx.client.novel_follow(fetch_til=fetch_til)
 
@@ -205,7 +204,7 @@ async def author_fetch(args: AuthorFetchArgs, ctx: TaskContext) -> TaskResult:
 
     if not author:
         async with ctx.client.account_rule(
-            force_account=_account("follow", ctx.config),
+            force_follow=True,
         ):
             await ctx.client.user_follow_add(args.author_id)
 
@@ -247,7 +246,7 @@ async def author_delete(args: AuthorDeleteArgs, ctx: TaskContext) -> TaskResult:
             await ctx.uow.authors.delete_author_and_data(args.author_id)
 
     async with ctx.client.account_rule(
-        force_account=_account("follow", ctx.config)
+        force_follow=True
     ):
         await ctx.client.user_follow_delete(args.author_id)
 

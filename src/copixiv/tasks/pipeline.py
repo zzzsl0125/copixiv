@@ -30,12 +30,6 @@ from copixiv.log import logger
 # ---------------------------------------------------------------------------
 
 
-def _account(key: str, config=None) -> str:
-    if config is None:
-        return ""
-    return getattr(config.pixiv_accounts, key, "")
-
-
 def _month_ranges(end_date: datetime, months: int):
     for offset in range(months):
         if offset == 0:

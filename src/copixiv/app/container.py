@@ -476,7 +476,9 @@ class Container:
 
                 if tokens:
                     for t in tokens:
-                        self._add_account(t.token, t.name, t.premium, t.valid)
+                        self._add_account(
+                            t.token, t.name, t.premium, t.valid, t.is_follow
+                        )
                     logger.info(f"Loaded {len(tokens)} Pixiv accounts from database.")
                     return
         except Exception:
@@ -511,7 +513,7 @@ class Container:
         logger.warning("No Pixiv accounts loaded — API calls will fail.")
 
     def _add_account(
-        self, token: str, username: str, premium: bool, valid: bool
+        self, token: str, username: str, premium: bool, valid: bool, follow: bool = False
     ) -> None:
         """Add a single account to the pool with the shared client settings."""
         self._account_pool.add_account(
@@ -521,6 +523,7 @@ class Container:
                     username=username,
                     premium=premium,
                     valid=valid,
+                    follow=follow,
                 ),
                 proxy_http=self.config.proxy.http,
                 proxy_https=self.config.proxy.https,

@@ -20,8 +20,7 @@ frontend:
 proxy:
   http: "127.0.0.1:20172"
   https: "127.0.0.1:20172"
-pixiv_accounts:
-  follow: "YOUR_PIXIV_EMAIL"
+pixiv_accounts: {}   # 已废弃：追更账号由「账号管理」内的 is_follow 标志指定
 batch_download:
   naming: "{author_name}/{series_name}/#{series_index}_{title}_{id}"
 security:

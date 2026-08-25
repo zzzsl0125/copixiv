@@ -28,10 +28,10 @@ from copixiv.infrastructure.pixiv import patch as pixiv_patch
 _REAL_REQUESTS_CALL = BasePixivAPI.requests_call
 
 
-def _account(username: str, premium: bool = False) -> PixivAccount:
+def _account(username: str, premium: bool = False, follow: bool = False) -> PixivAccount:
     """Real PixivAccount — construction never touches the network."""
     return PixivAccount(
-        token_info=TokenInfo(token="t", username=username, premium=premium),
+        token_info=TokenInfo(token="t", username=username, premium=premium, follow=follow),
     )
 
 
@@ -68,6 +68,35 @@ class TestAccountPool:
         pool.add_account(b)
 
         assert pool.select(AccountStrategy(force_account="beta")) is b
+
+    def test_force_follow_prefers_flagged_account(self):
+        pool = AccountPool()
+        a, b = _account("alpha"), _account("beta", follow=True)
+        pool.add_account(a)
+        pool.add_account(b)
+
+        assert pool.select(AccountStrategy(force_follow=True)) is b
+
+    def test_force_follow_skips_invalid_flagged_account(self):
+        """A flagged account that is invalid must not be selected by force_follow."""
+        pool = AccountPool()
+        flagged = _account("flagged", follow=True)
+        flagged.status = AccountStatus.INVALID
+        good = _account("good")
+        pool.add_account(flagged)
+        pool.add_account(good)
+
+        assert pool.select(AccountStrategy(force_follow=True)) is good
+
+    def test_force_follow_no_flag_falls_back_to_lru(self):
+        """No account flagged → force_follow degrades to normal LRU selection."""
+        pool = AccountPool()
+        a, b = _account("aaa"), _account("bbb")
+        pool.add_account(a)
+        pool.add_account(b)
+
+        # LRU: idle-longest wins (both idle → first added, then a used).
+        assert pool.select(AccountStrategy(force_follow=True)) is a
 
     def test_skips_invalid_accounts(self):
         pool = AccountPool()

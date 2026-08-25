@@ -274,3 +274,7 @@ class Token(Base):
     premium = Column(Boolean, default=False)
     valid = Column(Boolean, default=True)
     sort_index = Column(Integer, default=0)
+    # Designated「追更账号」—— single source of truth for the account that
+    # owns the Pixiv following-list feed (novel_follow / user_follow_add /
+    # user_follow_delete).  Mirrors premium/valid; set from the UI.
+    is_follow = Column(Boolean, default=False)

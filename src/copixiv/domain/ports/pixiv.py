@@ -37,5 +37,8 @@ class PixivAccountPort(Protocol):
     async def user_follow_delete(self, user_id: int) -> dict: ...
 
     def account_rule(
-        self, need_premium: bool = False, force_account: str | None = None
+        self,
+        need_premium: bool = False,
+        force_account: str | None = None,
+        force_follow: bool = False,
     ) -> AsyncIterator[None]: ...

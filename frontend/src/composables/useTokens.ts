@@ -24,7 +24,7 @@ export function useTokens() {
     }
   }
 
-  const toggleField = async (token: Token, field: 'premium' | 'valid') => {
+  const toggleField = async (token: Token, field: 'premium' | 'valid' | 'is_follow') => {
     await tokenApi.updateToken(token.id, { [field]: !token[field] })
     await loadTokens()
   }

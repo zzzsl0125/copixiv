@@ -54,12 +54,6 @@ class FrontendConfig(BaseModel):
     default_min_text: int = 3000
 
 
-class PixivAccountsConfig(BaseModel):
-    """Designated Pixiv accounts for specific operations (follow, etc.)."""
-
-    follow: str = ""
-
-
 class BatchDownloadConfig(BaseModel):
     """Naming template for batch-download ZIP internal paths.
 
@@ -128,9 +122,6 @@ class AppConfig(BaseModel):
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     proxy: ProxyConfig = Field(default_factory=ProxyConfig)
     frontend: FrontendConfig = Field(default_factory=FrontendConfig)
-    pixiv_accounts: PixivAccountsConfig = Field(
-        default_factory=PixivAccountsConfig
-    )
     batch_download: BatchDownloadConfig = Field(
         default_factory=BatchDownloadConfig
     )

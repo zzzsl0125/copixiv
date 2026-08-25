@@ -6,6 +6,7 @@ export interface Token {
   token: string
   premium: boolean
   valid: boolean
+  is_follow: boolean
 }
 
 export interface TokenCreate {
@@ -20,4 +21,5 @@ export interface TokenUpdate {
   token?: string
   premium?: boolean
   valid?: boolean
+  is_follow?: boolean
 }
