@@ -13,6 +13,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
+from copixiv.app import _domain_error_http_status
 from copixiv.config import AppConfig
 from copixiv.core.exceptions import DomainError, TaskAlreadyRunningError
 from copixiv.db.models import (
@@ -57,7 +58,8 @@ def client(session_factory, tmp_path):
     @app.exception_handler(DomainError)
     async def _domain_error_handler(request, exc: DomainError):
         return JSONResponse(
-            status_code=exc.status_code, content={"detail": exc.detail},
+            status_code=_domain_error_http_status(exc),
+            content={"detail": exc.detail},
         )
 
     app.state.session_factory = session_factory
@@ -246,9 +248,12 @@ class TestBatchOperationTask:
         with session_factory() as s:
             row = s.query(TaskHistory).one()
             # The wrapper would overwrite result at the end; the task itself
-            # leaves "running" + a progress summary in the row.
+            # leaves "running" + live progress in the `progress` column (not
+            # `result` — progress must be visible without polluting result).
             assert row.status == "running"
-            assert "进行中" in row.result or "完成" in row.result
+            assert row.progress
+            assert "进行中" in row.progress
+            assert "进行中" not in (row.result or "")
 
     def test_add_tags_across_chunks(self, session_factory, tmp_path):
         for i in (1, 2, 3):

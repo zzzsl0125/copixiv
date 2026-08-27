@@ -7,8 +7,8 @@ graph is built only when :func:`create_app` (or the private :func:`_build`)
 is called.  Entry paths:
 
 - ``copixiv`` console script → :func:`main` (runs uvicorn with the factory)
-- repo-root ``main.py`` shim → builds ``app`` for ``python main.py`` /
-  ``uvicorn main:app``
+- repo-root ``main.py`` shim → ``python main.py`` (the app is built by the
+  uvicorn factory exactly once; ``uvicorn main:app`` is no longer supported)
 - tests / embedding → ``from copixiv.app import create_app``
 
 Public surface: :func:`create_app`, :func:`main`, :func:`ensure_port_free`,
@@ -31,6 +31,12 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from copixiv.config import config, load_config
+from copixiv.core.exceptions import (
+    DomainError,
+    NotFoundError,
+    TaskAlreadyRunningError,
+    ValidationError,
+)
 from copixiv.db.backup import backup_database, cleanup_old_backups
 from copixiv.db.engine import (
     create_database_engine,
@@ -67,6 +73,29 @@ UVICORN_LOG_CONFIG = {
         "uvicorn.access": {"handlers": ["loguru"], "level": "INFO", "propagate": False},
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# Domain exception → HTTP status mapping
+# ---------------------------------------------------------------------------
+#
+# Domain exceptions are pure (see ``copixiv.core.exceptions``) and carry no
+# HTTP status; the composition root owns the mapping from exception type to
+# status.  ``isinstance`` order matters: subclasses are checked first, so
+# ``NovelNotFoundError`` (a ``NotFoundError``) naturally maps to 404.
+_DOMAIN_HTTP_STATUS = (
+    (NotFoundError, 404),
+    (ValidationError, 400),
+    (TaskAlreadyRunningError, 409),
+)
+
+
+def _domain_error_http_status(exc: DomainError) -> int:
+    """Map a domain exception to its HTTP status (default 500)."""
+    for exc_type, status in _DOMAIN_HTTP_STATUS:
+        if isinstance(exc, exc_type):
+            return status
+    return 500
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +303,8 @@ class _AppSingletons:
     client: PixivClient
     notifier: CompositeNotifier | None
     task_manager: TaskManagerSystem
+    # Open file object from _acquire_instance_lock (None on non-POSIX).
+    instance_lock: Any = None
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +335,46 @@ def _maybe_backup(db_path: Path, cfg) -> None:
         cleanup_old_backups(str(db_path), keep_count=cfg.backup.keep_count)
     except Exception:
         logger.exception("Backup failed — continuing without backup.")
+
+
+def _acquire_instance_lock(db_path: str):
+    """Acquire an exclusive ``flock`` on ``<resolved db path>.lock``.
+
+    The lock file is a sibling of the database file.  A second copixiv
+    process pointed at the same database fails fast with ``SystemExit``
+    ("另一个 copixiv 实例正在使用此数据库") instead of silently sharing a
+    SQLite file it would corrupt (R1 / F12).
+
+    Returns the open lock *file object* — kept open for the process
+    lifetime and released on process exit or by the lifespan shutdown —
+    or ``None`` when ``fcntl`` is unavailable (non-POSIX), where locking
+    is best-effort and never blocks startup.
+    """
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover — non-POSIX fallback
+        logger.warning(
+            "fcntl unavailable (non-POSIX) — skipping instance lock for {}",
+            db_path,
+        )
+        return None
+
+    lock_path = Path(str(Path(db_path).resolve()) + ".lock")
+    # The engine usually creates the database directory; create it too if it
+    # does not exist yet (e.g. a totally fresh path).
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fd = open(lock_path, "a+")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        # LOCK_NB raises BlockingIOError (an OSError) when another open file
+        # description already holds the exclusive lock — even for a second
+        # open() on the same path in *this* process (flock is per-OFD).
+        fd.close()
+        logger.error("另一个 copixiv 实例正在使用此数据库：{}", db_path)
+        raise SystemExit("另一个 copixiv 实例正在使用此数据库")
+    return fd
 
 
 def _warmup_database_cache(session_factory: sessionmaker[Session], db_path_str: str) -> None:
@@ -501,6 +572,11 @@ def _build(config_path: str | None = None) -> _AppSingletons:
     # Resolve database path
     db_path_str = _resolve_database_path(cfg)
 
+    # Instance-exclusive lock — acquire *before* any DB access (engine
+    # creation, migrations, backup).  A second copixiv process using the
+    # same database exits fast instead of corrupting it (R1 / F12).
+    instance_lock = _acquire_instance_lock(db_path_str)
+
     # Auto-backup: first startup of each ISO week
     db_path = Path(db_path_str)
     if _should_auto_backup(db_path):
@@ -565,6 +641,7 @@ def _build(config_path: str | None = None) -> _AppSingletons:
         client=client,
         notifier=notifier,
         task_manager=task_manager,
+        instance_lock=instance_lock,
     )
 
 
@@ -600,13 +677,15 @@ def create_app(config_path: str | None = None):
     from copixiv.features.failures import api as failed_novels
     from copixiv.features.system import api as system
     from copixiv.pixiv.account import AccountStatus
-    from copixiv.core.exceptions import DomainError
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # Startup
         logger.info("Starting copixiv v2...")
-        # Store key dependencies on app.state for access by endpoints/tasks
+        # Store key dependencies on app.state for access by endpoints/tasks.
+        # The instance-lock fd is kept here so the shutdown branch can
+        # release it even if a startup step raises before yield.
+        app.state.instance_lock = s.instance_lock
         app.state.session_factory = s.session_factory
         app.state.config = s.config
         app.state.client = s.client
@@ -616,31 +695,43 @@ def create_app(config_path: str | None = None):
         app.state.account_pool = s.account_pool
         app.state.task_manager = s.task_manager
 
-        # Pre-authenticate all accounts in parallel so the first API
-        # call on each doesn't pay the ~2s auth cost individually.
-        total = len(s.account_pool.accounts)
-        logger.info(f"Authenticating {total} accounts in parallel...")
-        await s.account_pool.authenticate_all()
-        active = sum(
-            1 for a in s.account_pool.accounts
-            if a.status == AccountStatus.ACTIVE
-        )
-        if active == total:
-            logger.info("All {} accounts authenticated.", total)
-        else:
-            logger.warning(
-                "Account authentication finished: {}/{} active",
-                active, total,
+        try:
+            # Pre-authenticate all accounts in parallel so the first API
+            # call on each doesn't pay the ~2s auth cost individually.
+            total = len(s.account_pool.accounts)
+            logger.info(f"Authenticating {total} accounts in parallel...")
+            await s.account_pool.authenticate_all()
+            active = sum(
+                1 for a in s.account_pool.accounts
+                if a.status == AccountStatus.ACTIVE
             )
+            if active == total:
+                logger.info("All {} accounts authenticated.", total)
+            else:
+                logger.warning(
+                    "Account authentication finished: {}/{} active",
+                    active, total,
+                )
 
-        s.task_manager.start()
-        yield
-        # Shutdown
-        logger.info("Shutting down copixiv v2...")
-        s.task_manager.stop()
-        s.image_downloader.shutdown()
-        if s.notifier is not None:
-            await s.notifier.close()
+            s.task_manager.start()
+            yield
+        finally:
+            # Shutdown
+            logger.info("Shutting down copixiv v2...")
+            s.task_manager.stop()
+            s.image_downloader.shutdown()
+            if s.notifier is not None:
+                await s.notifier.close()
+            # Release the instance lock (closing the fd releases the flock).
+            # Guarded against a re-entrant lifespan — a module-scoped app
+            # reused across several TestClient runs enters/leaves this twice.
+            lock = getattr(app.state, "instance_lock", None)
+            if lock is not None:
+                try:
+                    if not lock.closed:
+                        lock.close()
+                finally:
+                    app.state.instance_lock = None
 
     app = FastAPI(title="Novel Database API", lifespan=lifespan)
 
@@ -648,7 +739,8 @@ def create_app(config_path: str | None = None):
     @app.exception_handler(DomainError)
     async def _domain_error_handler(request, exc: DomainError):
         return JSONResponse(
-            status_code=exc.status_code, content={"detail": exc.detail},
+            status_code=_domain_error_http_status(exc),
+            content={"detail": exc.detail},
         )
 
     # ------------------------------------------------------------------

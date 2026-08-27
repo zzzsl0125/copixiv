@@ -153,12 +153,17 @@ class TaskHistory(BaseModel):
 
     id: int = 0
     name: str
+    # Registered function name — the dedup key (separate from ``name``,
+    # which is the display name).  See ``task_history.task_func``.
+    task_func: str | None = None
     arguments: dict | None = None
     status: str = TaskStatus.PENDING
     start_time: datetime
     end_time: datetime | None = None
     duration: float | None = None
     result: dict | None = None
+    # Live progress (S2 d) — column only here; wire-up lands later.
+    progress: str | None = None
 
 
 class ScheduledTask(BaseModel):

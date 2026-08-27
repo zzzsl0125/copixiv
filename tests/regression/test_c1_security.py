@@ -21,7 +21,7 @@ from copixiv.db.engine import create_session_factory
 from copixiv.db.models import Base, Token
 from copixiv.features.accounts import api as tokens
 from copixiv.app import (
-    HostValidationMiddleware, _normalize_host,
+    HostValidationMiddleware, _domain_error_http_status, _normalize_host,
 )
 from copixiv.app import APIAuthMiddleware
 
@@ -34,7 +34,8 @@ def _build_app(session_factory, config: AppConfig) -> FastAPI:
     @app.exception_handler(DomainError)
     async def _domain_error_handler(request, exc: DomainError):
         return JSONResponse(
-            status_code=exc.status_code, content={"detail": exc.detail},
+            status_code=_domain_error_http_status(exc),
+            content={"detail": exc.detail},
         )
 
     app.state.session_factory = session_factory

@@ -27,7 +27,6 @@ progress while they run.
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from pathlib import Path
 
@@ -129,15 +128,7 @@ async def batch_operation(
                     await SQLAlchemyTaskRepository(ctx.uow.session).update_task(
                         ctx.task_id,
                         "running",
-                        result=json.dumps(
-                            {
-                                "summary": (
-                                    f"{_OP_LABELS[args.operation]}进行中："
-                                    f"{stage}"
-                                ),
-                            },
-                            ensure_ascii=False,
-                        ),
+                        progress=f"{_OP_LABELS[args.operation]}进行中：{stage}",
                     )
         except Exception:  # noqa: BLE001 — progress must never kill the task
             logger.exception("批量任务进度更新失败（不影响执行）")
@@ -220,10 +211,7 @@ async def batch_export(args: BatchExportArgs, ctx: TaskContext) -> TaskResult:
                     await SQLAlchemyTaskRepository(ctx.uow.session).update_task(
                         ctx.task_id,
                         "running",
-                        result=json.dumps(
-                            {"summary": f"批量导出进行中：{stage}"},
-                            ensure_ascii=False,
-                        ),
+                        progress=f"批量导出进行中：{stage}",
                     )
         except Exception:  # noqa: BLE001
             logger.exception("导出任务进度更新失败（不影响执行）")

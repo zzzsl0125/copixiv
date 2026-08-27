@@ -43,6 +43,7 @@ from apscheduler.events import (
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 
 from copixiv.core.exceptions import (
     NotFoundError,
@@ -273,24 +274,21 @@ class TaskContext:
 # they serialize with every other write path.
 
 class TaskHistoryRecorder:
-    """Records task lifecycle rows; owns the pending/running guard queries."""
+    """Records task lifecycle rows (enqueue + status/result updates)."""
 
     def __init__(self, session_factory):
         self._session_factory = session_factory
 
-    # -- enqueue + duplicate-run guard -------------------------------------
+    # -- enqueue ------------------------------------------------------------
 
-    def has_pending_or_running(self, name: str) -> bool:
-        """True when a history row for *name* is still pending/running."""
-        from copixiv.tasks.history_repo import (
-            SQLAlchemyTaskRepository,
-        )
-
-        with self._session_factory() as session:
-            return SQLAlchemyTaskRepository(session).has_pending_or_running(name)
-
-    def enqueue(self, name: str, params: dict) -> int:
+    def enqueue(self, name: str, params: dict, task_func: str) -> int:
         """Insert the pending row; returns the new task id.
+
+        Inserts under *name* (display name) and *task_func* (the registered
+        function name — the dedup key).  The DB partial unique index
+        ``ux_task_history_running`` rejects a second pending/running row for
+        the same ``task_func``, surfacing as ``sqlalchemy.exc.IntegrityError``
+        (caught by the manager and mapped to ``TaskAlreadyRunningError``).
 
         Short INSERT outside ``db_write()`` — task enqueue happens in sync
         API paths; the 60s busy_timeout covers the rare collision.
@@ -301,7 +299,7 @@ class TaskHistoryRecorder:
 
         with self._session_factory() as session:
             repo = SQLAlchemyTaskRepository(session)
-            task_id = repo.add_task_sync(name, params)
+            task_id = repo.add_task_sync(name, params, task_func)
             session.commit()
         logger.info("Task '{}' (id={}) enqueued.", name, task_id)
         return task_id
@@ -314,6 +312,7 @@ class TaskHistoryRecorder:
         status: str,
         result: str | None = None,
         duration: float | None = None,
+        progress: str | None = None,
     ) -> None:
         """Update a TaskHistory row inside the global write lock."""
         from copixiv.db.write_lock import db_write
@@ -326,6 +325,7 @@ class TaskHistoryRecorder:
                 repo = SQLAlchemyTaskRepository(session)
                 repo.update_task_sync(
                     task_id, status, result=result, duration=duration,
+                    progress=progress,
                 )
                 session.commit()
 
@@ -428,25 +428,19 @@ class TaskExecutor:
         *,
         recorder,
         notifier,
-        running_names: set[str],
     ) -> None:
         """Execute a task, record history, and send notifications.
 
-        The duplicate-run guard lives in the caller (enqueue path); this
-        method owns everything from the first "running" row to the final
-        notification, releasing the in-process guard in every exit path.
+        The duplicate-run guard lives at the DB layer (the partial unique
+        index on ``task_func``); this method owns everything from the first
+        "running" row to the final notification.
         """
         name = spec.name
         logger.info("Starting task '{}' (id={})...", name, task_id)
-        try:
-            await self._run_inner(
-                spec, params, task_id,
-                recorder=recorder, notifier=notifier,
-            )
-        finally:
-            # Release the in-process duplicate-run guard in every exit
-            # path (success / failure / cancellation).
-            running_names.discard(name)
+        await self._run_inner(
+            spec, params, task_id,
+            recorder=recorder, notifier=notifier,
+        )
 
     # ------------------------------------------------------------------
     # Internals
@@ -831,11 +825,6 @@ class TaskManagerSystem:
         )
         self._scheduler = CronScheduler(session_factory)
 
-        # In-process duplicate-run guard (task name → in-flight).
-        # Checked-and-set inside the sync run_task(), so it is atomic on
-        # the event loop; cleared by the executor's wrapper ``finally``.
-        self._running_names: set[str] = set()
-
         # Process-wide execution serialization: only one task body runs at
         # a time.  Jobs that fire while another task is executing wait on
         # this lock, keeping their history row in "pending" until the
@@ -894,9 +883,10 @@ class TaskManagerSystem:
         lifecycle wrapper.
 
         Args:
-            name: Task name — the duplicate-run guard keys on it.  When
-                *func* is None the registry manifest is resolved by this
-                name (unknown names raise ``ValidationError``).
+            name: Task function name (``TaskSpec.name``) — also the dedup
+                key stored in ``task_history.task_func``.  When *func* is
+                None the registry manifest is resolved by this name
+                (unknown names raise ``ValidationError``).
             func: Explicit task function — used by tests and legacy
                 callers that enqueue ad-hoc functions.  Explicit functions
                 run without an args model (params are ignored by the
@@ -908,8 +898,9 @@ class TaskManagerSystem:
             The new task-history row id (the task id).
 
         Raises:
-            TaskAlreadyRunningError: If the same task name already has a
-                pending/running history row (or is in-flight in-process).
+            TaskAlreadyRunningError: If the same task *function* already has
+                a pending/running history row (the DB partial unique index
+                ``ux_task_history_running``).
         """
         if func is not None:
             spec = TaskSpec(name=name, description="", func=func)
@@ -920,25 +911,28 @@ class TaskManagerSystem:
         return self._enqueue(name, spec, params)
 
     def _enqueue(self, name: str, spec: TaskSpec, params: dict | None) -> int:
-        """Shared enqueue path: duplicate guard + history row + one-shot job."""
+        """Shared enqueue path: history row (DB dedup) + one-shot job.
+
+        ``name`` is the display name recorded on the history row; ``spec.name``
+        (the registered function name) is recorded as ``task_func`` and is the
+        dedup key.  The manual path uses the same value for both (spec.name ==
+        name); the scheduled path passes display_name as *name* and resolves
+        spec by the function name.
+        """
         params = self._recorder.parse_params(params or {})
+        task_func = spec.name
 
-        # Duplicate-run guard: in-process set (atomic on the event loop —
-        # run_task is sync) + DB check (covers rows from previous process
-        # lifetimes).  Without this, "manual run + cron" or double clicks
-        # execute the same task concurrently.
-        if name in self._running_names:
+        # Duplicate-run guard is a single DB constraint: the partial unique
+        # index ``ux_task_history_running`` rejects a second pending/running
+        # row for the same ``task_func``.  This covers both in-process
+        # re-entry and rows left over from a previous process lifetime.
+        try:
+            task_id = self._recorder.enqueue(name, params, task_func)
+        except IntegrityError as exc:
             raise TaskAlreadyRunningError(
-                f"Task '{name}' is already running in this process."
-            )
-        if self._recorder.has_pending_or_running(name):
-            raise TaskAlreadyRunningError(
-                f"Task '{name}' is already pending or running."
-            )
+                f"任务 '{task_func}' 已存在 pending/running 记录"
+            ) from exc
 
-        task_id = self._recorder.enqueue(name, params)
-
-        self._running_names.add(name)
         self._scheduler.scheduler.add_job(
             self._run_task_wrapper,
             args=(task_id, spec, params),
@@ -962,12 +956,13 @@ class TaskManagerSystem:
         by *func_name* (the ``scheduled_tasks.task`` column).  This keeps a
         custom display name from ever breaking the registry lookup *and*
         makes the task-history list show the user's label instead of the
-        function name.  The duplicate-run guard keys on *display_name*,
-        matching the pre-kernel-split semantics of the 'run now' endpoint.
+        function name.  The duplicate-run guard keys on *func_name* (the
+        ``task_history.task_func`` column), so two scheduled rows sharing a
+        function but differing in display name are deduplicated.
 
         Raises:
             ValidationError: *func_name* is not a registered task function.
-            TaskAlreadyRunningError: *display_name* already pending/running.
+            TaskAlreadyRunningError: *func_name* already pending/running.
         """
         spec = get_spec(func_name)
         if spec is None:
@@ -977,7 +972,10 @@ class TaskManagerSystem:
     def run_task_now(self, task_id: int) -> None:
         """Look up a scheduled task by DB id and run it immediately.
 
-        Used by the ``POST /api/tasks/scheduled/{id}/run`` endpoint.
+        Used by the ``POST /api/tasks/scheduled/{id}/run`` endpoint.  The
+        dedup key is the scheduled row's ``task`` (the registered function
+        name), so two scheduled rows sharing a function but differing in
+        display name are deduplicated.
 
         Raises:
             NotFoundError: unknown scheduled-task id.
@@ -999,8 +997,9 @@ class TaskManagerSystem:
         # The scheduled row's *name* is a display label; the function to run
         # comes from its ``task`` column.  Delegate to run_scheduled so the
         # cron path and this endpoint share one enqueue path (history records
-        # the display name, the function is resolved by the task column, the
-        # args model + duplicate-guard semantics stay identical).
+        # the display name, the function — the dedup key — is resolved by the
+        # task column, the args model + duplicate-guard semantics stay
+        # identical).
         self.run_scheduled(task.name, task.task, params)
 
     # ------------------------------------------------------------------
@@ -1021,6 +1020,5 @@ class TaskManagerSystem:
                 spec, params, task_id,
                 recorder=self._recorder,
                 notifier=self._notifier,
-                running_names=self._running_names,
             )
 

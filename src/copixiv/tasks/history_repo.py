@@ -19,27 +19,19 @@ class SQLAlchemyTaskRepository(BaseRepository):
 
     # -- task history ------------------------------------------------------
 
-    async def add_task(self, name: str, arguments: dict) -> int:
-        return self.add_task_sync(name, arguments)
+    async def add_task(self, name: str, arguments: dict, task_func: str) -> int:
+        return self.add_task_sync(name, arguments, task_func)
 
-    def has_pending_or_running(self, name: str) -> bool:
-        """True when *name* already has a pending/running history row.
+    def add_task_sync(self, name: str, arguments: dict, task_func: str) -> int:
+        """Insert a pending history row under *name* (display) + *task_func*.
 
-        Used by the duplicate-run guard in ``TaskManagerSystem.run_task``.
+        *task_func* is the registered function name — the DB dedup key.  The
+        partial unique index ``ux_task_history_running`` rejects a second
+        pending/running row for the same ``task_func`` at the DB layer.
         """
-        row = self.session.execute(
-            select(models.TaskHistory.id)
-            .where(
-                models.TaskHistory.name == name,
-                models.TaskHistory.status.in_(("pending", "running")),
-            )
-            .limit(1)
-        ).first()
-        return row is not None
-
-    def add_task_sync(self, name: str, arguments: dict) -> int:
         task = models.TaskHistory(
             name=name,
+            task_func=task_func,
             arguments=json.dumps(arguments, ensure_ascii=False),
             status="pending",
             start_time=datetime.now().astimezone().isoformat(),
@@ -49,13 +41,16 @@ class SQLAlchemyTaskRepository(BaseRepository):
         return task.id
 
     async def update_task(
-        self, task_id: int, status: str, result: str | None = None
+        self, task_id: int, status: str, result: str | None = None,
+        duration: float | None = None, progress: str | None = None,
     ) -> None:
-        self.update_task_sync(task_id, status, result=result)
+        self.update_task_sync(
+            task_id, status, result=result, duration=duration, progress=progress,
+        )
 
     def update_task_sync(
         self, task_id: int, status: str, result: str | None = None,
-        duration: float | None = None,
+        duration: float | None = None, progress: str | None = None,
     ) -> None:
         task = self.session.get(models.TaskHistory, task_id)
         if task is not None:
@@ -66,6 +61,13 @@ class SQLAlchemyTaskRepository(BaseRepository):
                 task.end_time = datetime.now().astimezone().isoformat()
             if result is not None:
                 task.result = result
+            # Live progress lives in its own column.  We only ever write
+            # (never clear) progress here — callers that want to stop showing
+            # it pass Nothing, and the front-end gates on status.  This keeps
+            # old "running" rows and terminal rows with a stale progress
+            # harmless instead of destructively wiping data.
+            if progress is not None:
+                task.progress = progress
             if duration is not None:
                 task.duration = duration
 

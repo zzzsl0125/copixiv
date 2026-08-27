@@ -4,7 +4,7 @@ import enum
 
 from sqlalchemy import (
     Column, Integer, String, Text, Float, ForeignKey, Index,
-    UniqueConstraint, Boolean, JSON, Enum,
+    UniqueConstraint, Boolean, JSON, Enum, text,
 )
 from sqlalchemy.orm import declarative_base, relationship
 
@@ -196,12 +196,29 @@ class TaskHistory(Base):
     __tablename__ = C.TABLE_TASK_HISTORY
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String, nullable=False)
+    # Registered *function* name (``scheduled_tasks.task`` / ``TaskSpec.name``)
+    # — the dedup key.  ``name`` keeps the display name (UI label).
+    task_func = Column(String, nullable=True)
     arguments = Column(Text)
     status = Column(String, nullable=False)
     start_time = Column(String, nullable=False)
     end_time = Column(String)
     duration = Column(Float)
     result = Column(Text)
+    # Live progress (S2 d) — column only here; wire-up lands later.
+    progress = Column(Text, nullable=True)
+
+    __table_args__ = (
+        # Partial unique index: only pending/running rows constrain re-enqueue.
+        # NULL ``task_func`` (legacy rows) are not constrained (SQLite treats
+        # NULLs as distinct in a unique index).
+        Index(
+            "ux_task_history_running",
+            "task_func",
+            unique=True,
+            sqlite_where=text("status IN ('pending', 'running')"),
+        ),
+    )
 
 
 class ScheduledTask(Base):

@@ -328,8 +328,8 @@ async def rebuild_tag_counts(ctx: TaskContext) -> TaskResult:
                 "  FROM novel_tag nt WHERE nt.tag_id = tag.id)"
             )).scalar() or 0
 
-    from copixiv.features.novels.repo import invalidate_count_cache
-    invalidate_count_cache()
+    # The commit above (uow.begin() exit) bumps the data epoch, so the
+    # count cache invalidates itself — no manual invalidate needed.
 
     return TaskResult(
         summary=f"标签引用计数重建: {total} 个标签, 修正 {drifted} 个偏差"

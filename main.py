@@ -1,15 +1,9 @@
-"""Thin shim for ``python main.py`` / ``uvicorn main:app``.
+"""Thin shim for ``python main.py`` — the app is built exactly once by
+the uvicorn factory (see :func:`copixiv.app.main`).  ``uvicorn main:app``
+is no longer supported (it would build at import time); use ``python main.py``
+or the ``copixiv`` console script."""
 
-The real entry point lives in ``copixiv.app.main`` (also exposed as the
-``copixiv`` console script in ``pyproject.toml``).  This shim is the only
-place where the app is built at import time — importing
-``copixiv.app.main`` itself has no side effects (see
-docs/MODULARITY.md §M10).
-"""
-
-from copixiv.app import create_app, main
-
-app = create_app()  # noqa: F401 — re-exported for uvicorn main:app
+from copixiv.app import create_app, main  # noqa: F401（保留 re-export 兼容）
 
 if __name__ == "__main__":
     main()

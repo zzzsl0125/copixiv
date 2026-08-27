@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from copixiv.app import _domain_error_http_status
 from copixiv.core.exceptions import DomainError, TaskAlreadyRunningError
 from copixiv.db.models import TaskHistory
 from copixiv.tasks.kernel import TaskManagerSystem
@@ -32,12 +33,16 @@ def _mk_tm(factory):
 
 
 async def test_duplicate_run_task_rejected_when_pending(factory):
-    """期望：同任务名已有 pending 行时，第二次入队被拒绝。"""
+    """期望：同任务已有 pending 行时，第二次入队被拒绝。
+
+    依赖 DB 的唯一索引（``task_func`` 部分唯一索引），而非进程内守卫。
+    不 start()：入队的 one-shot 任务永不执行，pending 行保持存在，第二次
+    入队才能确定性地命中重复运行约束。
+    """
     tm = _mk_tm(factory)
-    tm.start()
     try:
         tm.run_task("novel_fetch", _noop_task, {"id": 1})
-        with pytest.raises(TaskAlreadyRunningError, match="pending|running|进行中|重复"):
+        with pytest.raises(TaskAlreadyRunningError, match="pending|running|进行中|重复|已存在"):
             tm.run_task("novel_fetch", _noop_task, {"id": 1})
     finally:
         tm.stop()
@@ -46,19 +51,35 @@ async def test_duplicate_run_task_rejected_when_pending(factory):
 async def test_duplicate_run_task_rejected_when_running(factory):
     """期望：running 状态同样阻止重复入队。
 
-    注意：running 行在 tm.start() **之后**插入——启动时的僵尸恢复会把
-    启动前遗留的 pending/running 行标记为 interrupted（这是期望行为）。
+    依赖 DB 的唯一索引（``task_func`` 部分唯一索引）。必须先带
+    ``task_func`` 插入 running 行——否则 NULL 不受索引约束。
+    不 start()：start 时的僵尸恢复会把 pending/running 行标为 interrupted。
     """
     tm = _mk_tm(factory)
-    tm.start()
     try:
         with factory() as s:
-            s.add(TaskHistory(name="author_fetch", status="running",
+            s.add(TaskHistory(name="author_fetch", task_func="author_fetch",
+                              status="running",
                               start_time="2026-01-01T00:00:00"))
             s.commit()
 
-        with pytest.raises(TaskAlreadyRunningError, match="running|pending|进行中|重复"):
+        with pytest.raises(TaskAlreadyRunningError, match="running|pending|进行中|重复|已存在"):
             tm.run_task("author_fetch", _noop_task, {"author_id": 1})
+    finally:
+        tm.stop()
+
+
+async def test_duplicate_run_scheduled_same_func_different_display_name(factory):
+    """同一函数、两个不同显示名的 scheduled 条目：第二个 run_scheduled 拒绝。
+
+    去重键是函数名（``task_func`` 列）而非显示名（``name`` 列）——第一个
+    pending 悬着，第二个入队应命中唯一索引约束。
+    """
+    tm = _mk_tm(factory)
+    try:
+        tm.run_scheduled("显示名A", "check_epub", {"a": 1})
+        with pytest.raises(TaskAlreadyRunningError, match="pending|running|进行中|重复|已存在"):
+            tm.run_scheduled("显示名B", "check_epub", {"a": 2})
     finally:
         tm.stop()
 
@@ -106,7 +127,7 @@ def client(factory):
 
     @app.exception_handler(DomainError)
     async def _domain_error_handler(request, exc: DomainError):
-        return JSONResponse(status_code=exc.status_code,
+        return JSONResponse(status_code=_domain_error_http_status(exc),
                             content={"detail": exc.detail})
 
     app.include_router(tasks_endpoint.router, prefix="/api/tasks", tags=["tasks"])

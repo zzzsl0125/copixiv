@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 import pytest
 
+from copixiv.app import _domain_error_http_status
 from copixiv.core.exceptions import DomainError
 from copixiv.db.models import FailedNovel
 from copixiv.features.failures import api as failed_novels
@@ -32,7 +33,8 @@ def client(session_factory):
     @app.exception_handler(DomainError)
     async def _domain_error_handler(request, exc: DomainError):
         return JSONResponse(
-            status_code=exc.status_code, content={"detail": exc.detail},
+            status_code=_domain_error_http_status(exc),
+            content={"detail": exc.detail},
         )
 
     app.state.session_factory = session_factory

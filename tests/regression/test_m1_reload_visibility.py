@@ -14,6 +14,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
+from copixiv.app import _domain_error_http_status
 from copixiv.core.exceptions import DomainError
 from copixiv.tasks.history_repo import SQLAlchemyTaskRepository
 from copixiv.tasks.kernel import TaskManagerSystem
@@ -87,7 +88,7 @@ def client(file_session_factory):
 
     @app.exception_handler(DomainError)
     async def _domain_error_handler(request, exc: DomainError):
-        return JSONResponse(status_code=exc.status_code,
+        return JSONResponse(status_code=_domain_error_http_status(exc),
                             content={"detail": exc.detail})
 
     app.include_router(tasks_endpoint.router, prefix="/api/tasks", tags=["tasks"])

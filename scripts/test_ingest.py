@@ -324,6 +324,8 @@ def run_task(task_name: str, params: dict[str, Any], dry_run: bool = False) -> A
 
     # -- Build composition root ---------------------------------------------
     print("[build] Building container (DB + migrations + accounts)...")
+    # _build() acquires the instance flock on <test.db>.lock; there is no
+    # lifespan here, so the fd is simply released when this process exits.
     singletons = _build()
     print("[build] Container ready.\n")
 

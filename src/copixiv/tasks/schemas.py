@@ -79,6 +79,7 @@ class TaskHistoryResponse(BaseModel):
     end_time: str | None = None
     duration: float | None = None
     result: dict | None = None
+    progress: str | None = None
     model_config = ConfigDict(from_attributes=True)
 
     _parse_arguments = field_validator("arguments", mode="before")(_parse_json_str)

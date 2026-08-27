@@ -51,4 +51,5 @@ export interface TaskHistory {
   end_time?: string | null
   duration?: number | null
   result?: Record<string, unknown> | null
+  progress?: string | null
 }

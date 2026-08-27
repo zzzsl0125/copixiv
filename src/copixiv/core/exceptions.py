@@ -2,15 +2,18 @@
 
 Use cases raise these instead of returning ``None`` or importing
 ``HTTPException``, keeping the application layer decoupled from the
-web framework.
+web framework.  The web layer owns the HTTP status mapping (see
+``copixiv.app``); these exceptions are pure domain errors and carry no
+HTTP status field.
 """
 
 
 class DomainError(Exception):
-    """Base for all domain-layer errors.  Carries an HTTP status code
-    so the web layer can map it without inspecting the exception type."""
+    """Base for all domain-layer errors.
 
-    status_code: int = 500
+    A pure domain exception: it carries no HTTP status.  The web layer
+    maps each concrete type to an HTTP status via ``copixiv.app``.
+    """
 
     def __init__(self, detail: str = ""):
         self.detail = detail
@@ -19,7 +22,6 @@ class DomainError(Exception):
 
 class NotFoundError(DomainError):
     """A requested resource was not found."""
-    status_code = 404
 
 
 class NovelNotFoundError(NotFoundError):
@@ -33,9 +35,7 @@ class NovelNotFoundError(NotFoundError):
 
 class ValidationError(DomainError):
     """Input validation failed."""
-    status_code = 400
 
 
 class TaskAlreadyRunningError(DomainError):
     """A task with the same name is already pending or running."""
-    status_code = 409

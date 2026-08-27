@@ -110,7 +110,7 @@ const reorderTasks = async (newTasks: ScheduledTask[]) => {
 onMounted(() => { loadTasks(); loadHistory() })
 
 // ---- live progress: poll the history while any task is pending/running
-// (batch_operation rows self-report progress into their result summary) ----
+// (batch_operation rows self-report progress into the `progress` column) ----
 const hasRunningTask = computed(() =>
   history.value.some(h => ['pending', 'running'].includes((h.status || '').toLowerCase())),
 )

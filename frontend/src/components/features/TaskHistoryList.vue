@@ -75,6 +75,13 @@ const batchArgsLabel = (item: TaskHistory) => {
 const isBatchTask = (item: TaskHistory) =>
   item.name === 'batch_operation' || item.name === 'batch_export'
 
+/** Live progress for running/pending rows — prefer the dedicated `progress`
+ * column, falling back to the (legacy) result summary. */
+const liveProgress = (item: TaskHistory) => {
+  if (typeof item.progress === 'string' && item.progress) return item.progress
+  return parseResult(item.result).summary || ''
+}
+
 const handleDownloadExport = (item: TaskHistory) => {
   // Navigate straight to the attachment URL (works in in-app browsers /
   // WebViews that don't support blob: downloads).
@@ -126,9 +133,9 @@ const statusIs = (status: string, ...names: string[]) =>
                   <p class="text-sm font-medium text-gray-900 truncate">{{ item.name }}</p>
                   <template v-if="isBatchTask(item)">
                     <p class="text-xs text-gray-500 mt-1 truncate">{{ batchArgsLabel(item) }}</p>
-                    <!-- 进度仅运行/等待中显示；完成后信息已由行内其他字段表达 -->
-                    <p v-if="statusIs(item.status, 'running', 'pending') && parseResult(item.result).summary" class="text-xs text-blue-600 mt-0.5 truncate" :title="parseResult(item.result).summary">
-                      {{ parseResult(item.result).summary }}
+                    <!-- 进度优先读 progress 列；为空时回退到 result summary（兼容旧数据/终态） -->
+                    <p v-if="statusIs(item.status, 'running', 'pending') && liveProgress(item)" class="text-xs text-blue-600 mt-0.5 truncate" :title="liveProgress(item)">
+                      {{ liveProgress(item) }}
                     </p>
                   </template>
                   <p v-else class="text-xs text-gray-500 mt-1 font-mono truncate max-w-lg" :title="item.arguments ? JSON.stringify(item.arguments) : 'None'">args: {{ item.arguments ? JSON.stringify(item.arguments) : 'None' }}</p>

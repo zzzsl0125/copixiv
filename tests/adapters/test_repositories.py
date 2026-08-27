@@ -355,7 +355,7 @@ class TestSQLAlchemyTaskRepository:
         repo = SQLAlchemyTaskRepository(session)
 
         # Add
-        task_id = repo.add_task_sync("test-task", {"key": "value"})
+        task_id = repo.add_task_sync("test-task", {"key": "value"}, "test-task")
         session.commit()
         assert task_id > 0
 
@@ -374,7 +374,7 @@ class TestSQLAlchemyTaskRepository:
         import json
 
         repo = SQLAlchemyTaskRepository(session)
-        task_id = repo.add_task_sync("dur-test", {"a": 1})
+        task_id = repo.add_task_sync("dur-test", {"a": 1}, "dur-test")
         session.commit()
 
         result = json.dumps({"log": "ok", "new_novels_count": 5})

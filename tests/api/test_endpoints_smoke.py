@@ -23,6 +23,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
+from copixiv.app import _domain_error_http_status
 from copixiv.config import AppConfig
 from copixiv.core.exceptions import DomainError, NotFoundError
 from copixiv.db.models import (
@@ -72,7 +73,8 @@ def client(session_factory, tmp_path):
     @app.exception_handler(DomainError)
     async def _domain_error_handler(request, exc: DomainError):
         return JSONResponse(
-            status_code=exc.status_code, content={"detail": exc.detail},
+            status_code=_domain_error_http_status(exc),
+            content={"detail": exc.detail},
         )
 
     app.state.session_factory = session_factory
@@ -334,8 +336,8 @@ class TestDomainErrorMapping:
         r = client.delete("/api/novels/777")
         assert r.status_code == 404
         assert "detail" in r.json()
-        # And NotFoundError itself carries the right status
-        assert NotFoundError("x").status_code == 404
+        # And the shared handler maps NotFoundError to 404
+        assert _domain_error_http_status(NotFoundError("x")) == 404
 
 
 # ---------------------------------------------------------------------------

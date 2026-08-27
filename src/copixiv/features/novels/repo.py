@@ -10,7 +10,6 @@ Merged into one module from the split ``novel_read.py`` / ``novel_write.py``
 from __future__ import annotations
 
 import asyncio
-import time as _time
 from typing import Any
 
 from sqlalchemy import (
@@ -35,6 +34,7 @@ from copixiv.db.base import (
     model_to_dict,
     update_summary,
 )
+from copixiv.db.data_version import current_epoch
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
 from copixiv.features.novels.fts import FTSManager
 
@@ -833,27 +833,27 @@ class NovelQueryBuilder(BaseQueryBuilder):
 
 
 # ---------------------------------------------------------------------------
-# Count-result TTL cache (process-wide)
+# Count-result cache (process-wide, epoch-validated)
 #
 # Count queries are expensive on popular tags (186-222 ms for R-18) but
 # change only when the novel set is mutated (ingest / delete / tag edit /
 # blocked-tag change / favourite toggle).  Writes are sparse relative to
 # reads, and the count is already consumed fire-and-forget by the frontend
-# (ExclusionBar / BatchBar), so a short TTL gives near-exact freshness at
-# a fraction of the cost.
+# (ExclusionBar / BatchBar), so caching gives near-exact freshness at a
+# fraction of the cost.
 #
 # The cache is keyed on a normalized signature of everything that affects
 # the count: conditions, thresholds, and the effective blocked-tag set.
 # Entries with a non-empty ``exclude_ids`` are not cached (that path is
 # batch-scoped and rarely repeated with the same id list).
+#
+# Freshness is by version, not time: each cached value records the data
+# epoch (``current_epoch()``) at write time and is returned only while
+# that epoch is still current.  Every committed transaction bumps the
+# epoch (see ``copixiv.db.data_version``), which invalidates the whole
+# cache in one shot — no per-mutation invalidation, no TTL drift.
 # ---------------------------------------------------------------------------
-_COUNT_CACHE_TTL = 60.0          # seconds
-_count_cache: dict[tuple, tuple[float, int]] = {}
-
-
-def invalidate_count_cache() -> None:
-    """Drop every cached count (call after any novel-set mutation)."""
-    _count_cache.clear()
+_count_cache: dict[tuple, tuple[int, int]] = {}
 
 
 def _novel_from_orm(obj) -> Novel:
@@ -1092,7 +1092,7 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
             else frozenset()
         )
 
-        # TTL cache — skip when exclude_ids is set (batch-scoped, rarely
+        # Cache — skip when exclude_ids is set (batch-scoped, rarely
         # repeated).  blocked_names is part of the key so toggling the
         # exclusion setting or editing blocked tags produces a fresh entry.
         cache_key = None
@@ -1106,14 +1106,14 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
             )
             hit = _count_cache.get(cache_key)
             if hit is not None:
-                ts, val = hit
-                if _time.monotonic() - ts < _COUNT_CACHE_TTL:
+                cached_epoch, val = hit
+                if cached_epoch == current_epoch():
                     return val
 
         result = self._compute_count(spec, blocked_names)
 
         if cache_key is not None:
-            _count_cache[cache_key] = (_time.monotonic(), result)
+            _count_cache[cache_key] = (current_epoch(), result)
         return result
 
 
@@ -1527,7 +1527,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         fts = FTSManager(self.session)
         fts.update_novel_fts_index(list(set(new_ids + fts_dirty_ids)))
 
-        invalidate_count_cache()
         return len(new_ids)
 
     # ---- upsert helpers -----------------------------------------------------
@@ -1666,7 +1665,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         self.rewrite_tags(novel_id, set())
         FTSManager(self.session).delete_novel_fts(novel_id)
         self.session.delete(novel)
-        invalidate_count_cache()
 
 
     async def toggle_favourite(self, novel_id: int) -> None:
@@ -1684,7 +1682,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             self.session.delete(fav)
         else:
             self.session.add(models.Favourite(novel_id=novel_id))
-        invalidate_count_cache()
 
 
     async def toggle_special_follow(self, author_id: int) -> None:
@@ -1702,7 +1699,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             self.session.delete(follow)
         else:
             self.session.add(models.SpecialFollow(author_id=author_id))
-        invalidate_count_cache()
 
 
     async def update_has_epub_status(
@@ -1785,7 +1781,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         self.session.execute(
             _delete(models.Novel).where(models.Novel.id.in_(novel_ids))
         )
-        invalidate_count_cache()
         return [p for p in paths if p]
 
 
@@ -1847,7 +1842,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
 
         changed_ids = sorted({nid for nid, _tid in new_pairs})
         FTSManager(self.session).update_novel_fts_index(changed_ids)
-        invalidate_count_cache()
         return len(changed_ids)
 
 
@@ -1900,7 +1894,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
 
         changed_ids = sorted({nid for nid, _tid in doomed_pairs})
         FTSManager(self.session).update_novel_fts_index(changed_ids)
-        invalidate_count_cache()
         return len(changed_ids)
 
 
