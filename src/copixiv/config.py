@@ -7,9 +7,10 @@ the ``AppConfig`` singleton on first call.
 
 import os
 from pathlib import Path
+from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -33,25 +34,15 @@ class PixivClientConfig(BaseModel):
     max_concurrency: int = 5
 
 
-class TelegramConfig(BaseModel):
-    """Telegram bot credentials for notifications."""
-
-    token: str = ""
-    chat_id: str | int = ""
-
-
 class ProxyConfig(BaseModel):
-    """HTTP/HTTPS proxy URLs."""
+    """Proxy URL applied to both HTTP and HTTPS traffic.
 
-    http: str = ""
-    https: str = ""
+    A single ``url`` replaces the old ``http``/``https`` pair: pixivpy3's
+    per-account API and the anonymous image session both accept one proxy
+    for both schemes.
+    """
 
-
-class FrontendConfig(BaseModel):
-    """Default UI filter values."""
-
-    default_min_like: int = 500
-    default_min_text: int = 3000
+    url: str = ""
 
 
 class BatchDownloadConfig(BaseModel):
@@ -86,49 +77,63 @@ class SecurityConfig(BaseModel):
       (empty string disables it).
     - ``allowed_hosts``: extra Host-header values allowed past the
       Host-validation middleware (``localhost`` and IP literals always pass).
-    - ``allowed_origins``: CORS origin whitelist (no wildcard).
+    - ``allowed_origins``: CORS origin whitelist (no wildcard).  When it is
+      not set explicitly it is derived from ``allowed_hosts`` — each host is
+      allow-listed on the dev ports 5173/4173 — and with no hosts it falls
+      back to the local dev origins.
     """
 
     api_key: str = ""  # 空=关闭 API key 校验
     allowed_hosts: list[str] = Field(default_factory=list)  # 额外放行的域名/IP
-    allowed_origins: list[str] = Field(default_factory=lambda: [
-        "http://localhost:5173", "http://127.0.0.1:5173",
-        "http://localhost:4173", "http://127.0.0.1:4173",
-    ])
+    allowed_origins: list[str] | None = None  # 空=由 allowed_hosts 推导
+
+    @model_validator(mode="after")
+    def _derive_allowed_origins(self) -> "SecurityConfig":
+        if self.allowed_origins is not None:
+            return self
+        if self.allowed_hosts:
+            origins: list[str] = []
+            for host in self.allowed_hosts:
+                origins.append(f"http://{host}:5173")
+                origins.append(f"http://{host}:4173")
+            self.allowed_origins = origins
+        else:
+            self.allowed_origins = [
+                "http://localhost:5173", "http://127.0.0.1:5173",
+                "http://localhost:4173", "http://127.0.0.1:4173",
+            ]
+        return self
 
 
-class NotifiersConfig(BaseModel):
-    """Enabled notifier backends, in order (docs/MODULARITY.md §M6).
+class NotificationBackendConfig(BaseModel):
+    """A single notification backend (one class serves both kinds).
 
-    Recognized names: ``telegram`` / ``webhook`` (mapped in
-    ``notify/factory.py``).  Defaults to ``["telegram"]``
-    — empty list disables notifications entirely.
+    The unused fields stay empty: a ``telegram`` entry fills ``token`` and
+    ``chat_id``; a ``webhook`` entry fills ``url``.  ``type`` is a
+    ``Literal`` so an unknown backend fails fast at validation rather than
+    silently doing nothing.
     """
 
-    enabled: list[str] = Field(default_factory=lambda: ["telegram"])
-
-
-class WebhookConfig(BaseModel):
-    """Webhook notifier backend settings (§M6 第二后端)."""
-
-    url: str = ""  # 空=该后端跳过发送
+    type: Literal["telegram", "webhook"]
+    token: str = ""
+    chat_id: str | int = ""
+    url: str = ""
 
 
 class AppConfig(BaseModel):
     """Root configuration object."""
 
+    model_config = ConfigDict(extra="forbid")
+
     path: PathConfig = Field(default_factory=PathConfig)
     pixiv_client: PixivClientConfig = Field(default_factory=PixivClientConfig)
-    telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     proxy: ProxyConfig = Field(default_factory=ProxyConfig)
-    frontend: FrontendConfig = Field(default_factory=FrontendConfig)
     batch_download: BatchDownloadConfig = Field(
         default_factory=BatchDownloadConfig
     )
     backup: BackupConfig = Field(default_factory=BackupConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
-    notifiers: NotifiersConfig = Field(default_factory=NotifiersConfig)
-    webhook: WebhookConfig = Field(default_factory=WebhookConfig)
+    notifications: list[NotificationBackendConfig] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +146,7 @@ _DEFAULT_CONFIG_PATH = Path("config.yaml")
 def _env_overrides() -> dict:
     """Read COPIXIV_-prefixed env vars and nest them into the config shape.
 
-    Example: ``COPIXIV_PROXY_HTTP=http://…`` → ``{"proxy": {"http": "…"}}``
+    Example: ``COPIXIV_PROXY__URL=http://…`` → ``{"proxy": {"url": "…"}}``
     """
     prefix = "COPIXIV_"
     overrides: dict = {}
@@ -165,11 +170,52 @@ def _deep_merge(base: dict, overrides: dict) -> dict:
     return base
 
 
+# Old config keys → the migration hint shown when one is still present.
+_LEGACY_REMAPPING = {
+    "telegram": "合并为 notifications 列表（示例见 config.example.yaml）",
+    "notifiers": "合并为 notifications 列表（示例见 config.example.yaml）",
+    "webhook": "合并为 notifications 列表（示例见 config.example.yaml）",
+    "frontend": "默认值已内置前端源码（无需配置）",
+}
+
+
+def _fail_fast_on_legacy_config(raw: dict) -> None:
+    """Refuse to load configs still using the pre-K8 (config-cleanup) keys.
+
+    The config format was consolidated in K8: notifications became a list,
+    proxy collapsed to a single ``url``, and the frontend defaults moved
+    into the client bundle.  Any residual old key now fails fast — with an
+    actionable migration hint instead of a generic validation error —
+    rather than being silently ignored.
+    """
+    reasons: list[str] = []
+
+    for old_key, instruction in _LEGACY_REMAPPING.items():
+        if old_key in raw:
+            reasons.append(f"- {old_key!r} → {instruction}")
+
+    proxy = raw.get("proxy")
+    if isinstance(proxy, dict) and ("http" in proxy or "https" in proxy):
+        reasons.append("- 旧 proxy 的 http/https 双键 → 单键 proxy.url（env: COPIXIV_PROXY_URL）")
+
+    if os.environ.get("COPIXIV_PROXY_HTTP") or os.environ.get("COPIXIV_PROXY_HTTPS"):
+        reasons.append("- COPIXIV_PROXY_HTTP/HTTPS → COPIXIV_PROXY_URL")
+
+    if not reasons:
+        return
+
+    raise SystemExit(
+        "配置已迁移（配置格式在 2026-08 收尾中变更）：\n"
+        f"{chr(10).join(reasons)}\n"
+        "请按新格式更新 config.yaml；示例见 config.example.yaml。"
+    )
+
+
 def load_config(config_path: str | None = None) -> AppConfig:
     """Load configuration from YAML file (if present), then apply env overrides.
 
     Raises:
-        SystemExit: If the YAML file exists but is malformed.
+        SystemExit: If the YAML file uses a legacy key, or is malformed.
     """
     path = Path(config_path or _DEFAULT_CONFIG_PATH)
 
@@ -182,6 +228,10 @@ def load_config(config_path: str | None = None) -> AppConfig:
             raise SystemExit(f"Failed to parse {path}: {e}") from e
 
     raw = _deep_merge(raw, _env_overrides())
+
+    # Fail fast on the pre-K8 config keys BEFORE model validation, so the
+    # migration hint (not a generic "unexpected field" error) is shown.
+    _fail_fast_on_legacy_config(raw)
 
     try:
         return AppConfig(**raw)

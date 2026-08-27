@@ -1,4 +1,4 @@
-"""Table and column name constants — kept identical to v1 for DB compatibility."""
+"""Table and column name constants."""
 
 # Table Names
 TABLE_NOVEL = "novel"

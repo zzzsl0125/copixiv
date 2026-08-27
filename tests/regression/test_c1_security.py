@@ -76,6 +76,10 @@ def session_factory(tmp_path):
 def client(session_factory):
     config = AppConfig()
     config.security.allowed_hosts = ["testserver"]
+    # allowed_origins is explicit here so the CORS tests pin the real
+    # whitelist behaviour; when omitted it derives from allowed_hosts
+    # (covered separately in TestAllowedOriginsDerivation).
+    config.security.allowed_origins = ["http://localhost:5173"]
     app = _build_app(session_factory, config)
     with TestClient(app) as c:
         yield c
@@ -85,6 +89,7 @@ def client(session_factory):
 def keyed_client(session_factory):
     config = AppConfig()
     config.security.allowed_hosts = ["testserver"]
+    config.security.allowed_origins = ["http://localhost:5173"]
     config.security.api_key = "sekret"
     app = _build_app(session_factory, config)
     with TestClient(app) as c:
@@ -321,3 +326,29 @@ class TestApiKey:
         app = _build_app(session_factory, config)
         with TestClient(app) as c:
             assert c.get("/api/tokens/").status_code == 200
+
+
+class TestAllowedOriginsDerivation:
+    """K8: ``security.allowed_origins`` derives from ``allowed_hosts``
+    when it is not set explicitly."""
+
+    def test_default_no_hosts_is_local_dev_origins(self):
+        config = AppConfig()
+        assert config.security.allowed_origins == [
+            "http://localhost:5173", "http://127.0.0.1:5173",
+            "http://localhost:4173", "http://127.0.0.1:4173",
+        ]
+
+    def test_origins_derive_from_allowed_hosts(self):
+        config = AppConfig(security={"allowed_hosts": ["good.example", "other.example"]})
+        assert config.security.allowed_origins == [
+            "http://good.example:5173", "http://good.example:4173",
+            "http://other.example:5173", "http://other.example:4173",
+        ]
+
+    def test_explicit_origins_are_kept_as_is(self):
+        config = AppConfig(security={
+            "allowed_origins": ["http://custom.example:9000"],
+            "allowed_hosts": ["good.example"],
+        })
+        assert config.security.allowed_origins == ["http://custom.example:9000"]

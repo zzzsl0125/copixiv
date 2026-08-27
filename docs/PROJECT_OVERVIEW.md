@@ -28,7 +28,7 @@ app.py（组合根：create_app / lifespan / 中间件 / 异常映射 / 挂载�
 features/*  +  tasks/*         业务切片 + 任务内核
    │
    ▼
-core/                          纯 Python（实体 / 服务 / 异常，零依赖）
+core/                          纯 Python（实体 / 服务 / 异常；无框架/无 SQLAlchemy/无 web 依赖，仅标准库工具函数）
 
 app.py → features(+tasks) → core；db / pixiv / storage / notify 是适配层，
 只被 features / tasks / app 使用，彼此不互相 import。
@@ -40,7 +40,7 @@ app.py → features(+tasks) → core；db / pixiv / storage / notify 是适配�
 | `deps.py` | FastAPI 依赖（类型化 DI） |
 | `features/` | 按功能切片：api + repo + schemas 同置 |
 | `tasks/` | 任务注册表 + 调度内核 + 业务任务 |
-| `core/` | 纯 Python：Pydantic 实体、纯服务、域异常 |
+| `core/` | 纯 Python：Pydantic 实体、纯服务、域异常；无框架/无 SQLAlchemy/无 web 依赖（仅标准库工具函数） |
 | `db/` | SQLite 唯一适配：engine / uow / write_lock |
 | `pixiv/` | pixivpy3 防腐层（唯一厂商边界） |
 | `storage/` | 文件存储 / 图片下载 / EPUB |
@@ -54,7 +54,7 @@ src/copixiv/
 ├── config.py       # 配置模型与加载
 ├── deps.py         # FastAPI 依赖（读 app.state 单例）
 ├── log.py          # 日志
-├── core/           # 纯 Python：models.py / services.py / exceptions.py
+├── core/           # 纯 Python：models.py / services.py / exceptions.py（无框架/无 SQLAlchemy/无 web 依赖；含 zip/路径工具）
 ├── db/             # engine / uow / write_lock / backup / models / constants / base
 ├── pixiv/          # pixivpy3 防腐层（唯一允许 import pixivpy3 的目录）
 ├── storage/        # file_storage / image_downloader / epub
@@ -92,9 +92,10 @@ src/copixiv/
 | `/api/tag-aliases` | `features/tags/aliases.py` | 标签别名、相似标签建议 |
 | `/api/search-history` | `features/novels/history_api.py` | 搜索历史 |
 | `/api/tokens` | `features/accounts/api.py` | Pixiv 刷新令牌管理 |
+| `/api/failed-novels` | `features/failures/api.py` | 失败台账：查看/清除/重置计数/重试 |
 
-- 每个路由模块自带 `ROUTE = (prefix, tags)` 清单，由 `app.py` 的 `create_app()`
-  统一 `include_router` 挂载（见 MODULARITY.md）
+- `app.py` 的 `create_app()` 逐模块 `include_router` 显式挂载（前缀随路由
+  注册处，见 MODULARITY.md）
 - 写端点必须 `Depends(get_write_uow)`（全局写锁，见 MODULARITY.md 硬规则 §3.2）
 
 ## 6. 后台任务

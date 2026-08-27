@@ -24,12 +24,6 @@ class SearchHistoryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-# Route manifest — mounted automatically by the composition root
-# (docs/MODULARITY.md §M9): (prefix, tags) travels with the module.
-ROUTE = ("/api/search-history", ["search_history"])
-
-
-
 @router.get("/")
 async def get_search_history(
     limit: int = Query(50, ge=1, le=200),

@@ -1,7 +1,8 @@
 """Novel / batch-operation Pydantic schemas — carried with the novels feature.
 
-Kept identical to v1 for frontend compatibility.  Moved out of the former
-``web_api/schemas.py`` as part of the S1 structure simplification.
+Moved out of the former ``web_api/schemas.py`` as part of the S1 structure
+simplification.  The v2 API is now unfrozen — response details can evolve
+freely (kept in sync with the client bundle).
 """
 
 from __future__ import annotations

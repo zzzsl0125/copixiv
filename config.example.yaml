@@ -6,27 +6,28 @@ pixiv_client:
   min_interval: 2
   cooling_duration: 120
   max_concurrency: 5
-telegram:
-  token: "YOUR_TELEGRAM_BOT_TOKEN"
-  chat_id: "YOUR_TELEGRAM_CHAT_ID"
-# 通知后端（docs/MODULARITY.md §M6）：按名字装配，加渠道 = 新模块 + 一行配置
-notifiers:
-  enabled: [telegram]   # 可用: telegram, webhook；留空 [] 关闭所有通知
-webhook:
-  url: ""               # webhook 后端的 JSON 投递地址（空 = 该后端跳过）
-frontend:
-  default_min_like: 500
-  default_min_text: 3000
+# 通知后端：一个字段承载两种后端，多余字段留空；按列表顺序装配。
+#   - type: telegram → token + chat_id
+#   - type: webhook  → url（空 = 该后端跳过）
+# 留空 [] 关闭所有通知。旧 telegram / notifiers.enabled / webhook 键已合并到此列表。
+# 旧 env（如 COPIXIV_TELEGRAM__TOKEN / COPIXIV_WEBHOOK__URL）同样改为此列表。
+notifications:
+  - type: telegram
+    token: "YOUR_TELEGRAM_BOT_TOKEN"
+    chat_id: "YOUR_TELEGRAM_CHAT_ID"
+  - type: webhook
+    url: ""               # webhook 后端的 JSON 投递地址（空 = 该后端跳过）
+# proxy 单键：同时用于 HTTP 与 HTTPS。旧 proxy.http / proxy.https（及 env
+# COPIXIV_PROXY_HTTP / COPIXIV_PROXY_HTTPS）已废弃，改用 proxy.url / COPIXIV_PROXY_URL。
 proxy:
-  http: "127.0.0.1:20172"
-  https: "127.0.0.1:20172"
-pixiv_accounts: {}   # 已废弃：追更账号由「账号管理」内的 is_follow 标志指定
+  url: "127.0.0.1:20172"
+# 前端默认筛选值（min_like / min_text）已内置前端源码，不再有 frontend 段。
 batch_download:
   naming: "{author_name}/{series_name}/#{series_index}_{title}_{id}"
 security:
   api_key: ""
-  allowed_hosts: []
-  allowed_origins:
+  allowed_hosts: []         # 额外放行域名；allowed_origins 未配置时由此推导（:5173/:4173）
+  allowed_origins:          # 显式配置则原样使用；不配置则从 allowed_hosts 推导
     - "http://localhost:5173"
     - "http://127.0.0.1:5173"
     - "http://localhost:4173"

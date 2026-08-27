@@ -494,8 +494,8 @@ def _add_account(
                 valid=valid,
                 follow=follow,
             ),
-            proxy_http=cfg.proxy.http,
-            proxy_https=cfg.proxy.https,
+            proxy_http=cfg.proxy.url or None,
+            proxy_https=cfg.proxy.url or None,
             min_interval=cfg.pixiv_client.min_interval,
             cooling_duration=cfg.pixiv_client.cooling_duration,
         )
@@ -601,8 +601,8 @@ def _build(config_path: str | None = None) -> _AppSingletons:
     image_downloader = ImageDownloader(
         max_workers=4,
         epub_builder=epub_builder,
-        proxy_http=cfg.proxy.http,
-        proxy_https=cfg.proxy.https,
+        proxy_http=cfg.proxy.url or None,
+        proxy_https=cfg.proxy.url or None,
     )
 
     # Account pool (DB first, token file fallback) + shared client
@@ -782,16 +782,30 @@ def create_app(config_path: str | None = None):
         allow_headers=["*"],
     )
 
-    # Routers mount themselves: each endpoint module declares its own
-    # ``ROUTE = (prefix, tags)`` manifest (docs/MODULARITY.md §M9), so
-    # adding an API area means registering its module here — nothing
-    # else in the composition root needs to change.
-    for module in (
-        novels, tasks, system, tag_preferences, tag_aliases,
-        search_history, tokens, failed_novels,
-    ):
-        prefix, tags = module.ROUTE
-        app.include_router(module.router, prefix=prefix, tags=tags)
+    # Routers are mounted explicitly here, one ``include_router`` per API
+    # area.  Each endpoint module owns its ``APIRouter``; the prefix and
+    # tags travel with the registration call below.  Mount order matches
+    # the former per-module prefix manifest (novels → tasks → system →
+    # tag_preferences → tag_aliases → search_history → tokens →
+    # failed_novels).
+    app.include_router(novels.router, prefix="/api/novels", tags=["novels"])
+    app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
+    app.include_router(system.router, prefix="/api/system", tags=["system"])
+    app.include_router(
+        tag_preferences.router, prefix="/api/tag-preferences",
+        tags=["tag_preferences"],
+    )
+    app.include_router(
+        tag_aliases.router, prefix="/api/tag-aliases", tags=["tag_aliases"],
+    )
+    app.include_router(
+        search_history.router, prefix="/api/search-history",
+        tags=["search_history"],
+    )
+    app.include_router(tokens.router, prefix="/api/tokens", tags=["tokens"])
+    app.include_router(
+        failed_novels.router, prefix="/api/failed-novels", tags=["failed-novels"],
+    )
 
     return app
 

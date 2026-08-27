@@ -34,7 +34,7 @@ describe('useSystem', () => {
   })
 
   it('dedupes concurrent fetchConfig calls into one request', async () => {
-    const config = { default_min_like: 5, default_min_text: 0, batch_download_naming: '{id}' }
+    const config = { batch_download_naming: '{id}' }
     let resolveConfig!: (value: typeof config) => void
     getConfigMock.mockImplementation(
       () => new Promise<typeof config>((resolve) => { resolveConfig = resolve }),
@@ -68,7 +68,7 @@ describe('useSystem', () => {
   })
 
   it('exposes the fetched config on the shared ref', async () => {
-    const config = { default_min_like: 0, default_min_text: 0, batch_download_naming: '{id}-{title}' }
+    const config = { batch_download_naming: '{id}-{title}' }
     getConfigMock.mockResolvedValue(config)
     const state = await freshUseSystem()
 

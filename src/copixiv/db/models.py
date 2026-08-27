@@ -1,4 +1,4 @@
-"""SQLAlchemy ORM models — table schema kept identical to v1 for DB compatibility."""
+"""SQLAlchemy ORM models for the copixiv database."""
 
 import enum
 

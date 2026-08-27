@@ -14,8 +14,6 @@ from copixiv.features.system.repo import SQLAlchemySettingRepository
 # ---------------------------------------------------------------------------
 
 class SystemConfigResponse(BaseModel):
-    default_min_like: int
-    default_min_text: int
     batch_download_naming: str
     exclude_blocked_tag_novels: bool = True
 
@@ -24,12 +22,6 @@ class SystemConfigUpdate(BaseModel):
     exclude_blocked_tag_novels: bool | None = None
 
 router = APIRouter()
-
-
-# Route manifest — mounted automatically by the composition root
-# (docs/MODULARITY.md §M9): (prefix, tags) travels with the module.
-ROUTE = ("/api/system", ["system"])
-
 
 
 async def _config_response(uow: SqlUnitOfWork, app_config) -> dict:
@@ -43,8 +35,6 @@ async def _config_response(uow: SqlUnitOfWork, app_config) -> dict:
     the settings row is missing), so it can be toggled from the UI.
     """
     return {
-        "default_min_like": app_config.frontend.default_min_like,
-        "default_min_text": app_config.frontend.default_min_text,
         "batch_download_naming": app_config.batch_download.naming,
         "exclude_blocked_tag_novels": await SQLAlchemySettingRepository(
             uow.session

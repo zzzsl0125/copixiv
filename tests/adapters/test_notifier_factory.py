@@ -6,6 +6,7 @@ composite fault isolation.
 """
 
 import json
+from types import SimpleNamespace
 
 import httpx
 
@@ -18,11 +19,16 @@ from copixiv.notify.webhook import WebhookNotifier
 
 
 def _config(enabled: list[str]) -> AppConfig:
-    return AppConfig(
-        telegram={"token": "1:TOK", "chat_id": "42"},
-        webhook={"url": "http://x.test/h"},
-        notifiers={"enabled": enabled},
-    )
+    """Build an AppConfig (new ``notifications`` list shape) for *enabled*."""
+    notifications = []
+    for name in enabled:
+        if name == "telegram":
+            notifications.append(
+                {"type": "telegram", "token": "1:TOK", "chat_id": "42"}
+            )
+        elif name == "webhook":
+            notifications.append({"type": "webhook", "url": "http://x.test/h"})
+    return AppConfig(notifications=notifications)
 
 
 def test_enabled_maps_to_backends():
@@ -39,8 +45,18 @@ def test_empty_disables_notifications():
 def test_unknown_name_is_skipped_with_warning():
     from copixiv.log import capture_logs
 
+    # An unknown backend type cannot pass ``NotificationBackendConfig``'s
+    # ``Literal`` validation, so exercise the factory's defensive skip by
+    # feeding it a raw config object (as if assembled by hand).
+    config = SimpleNamespace(
+        proxy=SimpleNamespace(url=""),
+        notifications=[
+            SimpleNamespace(type="telegram", token="1:TOK", chat_id="42", url=""),
+            SimpleNamespace(type="nope", token="t", chat_id="1", url=""),
+        ],
+    )
     with capture_logs() as get_logs:
-        backends = build_notifiers(_config(["telegram", "nope"]))
+        backends = build_notifiers(config)
         logs = get_logs()  # buffer closes when the context exits
 
     assert len(backends) == 1

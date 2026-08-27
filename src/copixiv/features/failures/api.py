@@ -68,11 +68,6 @@ class FailedNovelRetryRequest(BaseModel):
 router = APIRouter()
 
 
-# Route manifest — mounted automatically by the composition root
-# (docs/MODULARITY.md §M9): (prefix, tags) travels with the module.
-ROUTE = ("/api/failed-novels", ["failed-novels"])
-
-
 # A single retry task fans out with one client per id; cap the payload so
 # an accidental "select all" cannot enqueue an unbounded task.
 MAX_RETRY_IDS = 500

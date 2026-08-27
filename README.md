@@ -8,7 +8,7 @@ Pixiv 小说管理器：轻松抓取、管理和导出 Pixiv 中文小说。
 - **便捷搜索**：关键词搜索涵盖标题、作者、系列名、标签，也支持指定字段搜索
 - **个人喜好**：支持收藏指定作品，追更指定作者；支持高亮标记喜好的标签
 - **厌恶标签排除**：带厌恶标签的小说从浏览/搜索/计数/全选中隐藏（全局开关，默认开启），可随时「查看被排除」并在视图内改筛选与排序
-- **定时任务**：支持定时执行爬取或维护任务，支持将任务结果发送至TG
+- **定时任务**：支持定时执行爬取或维护任务，支持将任务结果发送至TG；同一任务函数（**不同显示名也算**）已有 pending/running 时入队返回 409，任务进度在「任务管理」页实时展示（`progress` 字段）
 - **Pixiv 账号池**：支持多pixiv账号并发爬取，带负载均衡及防封号冷却；可在「账号管理」指定一个账号作为**追更账号**（`is_follow`），追更/关注更新任务固定使用它
 
 ## 快速开始
@@ -29,6 +29,12 @@ cp config.example.yaml config.yaml
 ```
 
 config.yaml 需先行修改，pixiv refresh_token 可留待后续在 webui 内修改。
+
+配置为新格式：`notifications` 是一个**通知后端列表**（`type: telegram|webhook`，
+多余字段留空，空数组 `[]` 关闭全部通知），`proxy.url` 单键同时用于 HTTP/HTTPS。
+遗留旧键（`telegram` / `notifiers.enabled` / `webhook` / `frontend` 段、旧
+`proxy.http`/`proxy.https` 及对应 env）会在启动时报错并给出迁移提示——请按新格式
+更新，示例见 `config.example.yaml`。
 
 ### 2. 启动后端
 
@@ -67,17 +73,34 @@ npm run preview
 | `/api/tag-aliases` | 标签别名、相似标签建议 |
 | `/api/search-history` | 搜索历史 |
 | `/api/tokens` | Pixiv 刷新令牌管理 |
+| `/api/failed-novels` | 失败台账：查看/清除/重置计数/重试 |
+
+> v2 API 已解冻：响应细节可随版本自由演进（与前端 bundle 同步维护）。
+> `/api/system/config` 只返回 `batch_download_naming` 与 `exclude_blocked_tag_novels`；
+> 旧的 `default_min_like`/`default_min_text` 已移除，前端默认筛选值内置在客户端
+> 源码（min_like=500 / min_text=3000）。
+
+## 架构
+
+模块化单体：`app.py` 组合根 + `core`（纯 Python 核心）+ 适配层
+（`db` / `pixiv` / `storage` / `notify`）+ `tasks` 任务内核 + 按功能切片的
+`features`。目录职责、依赖约定与硬规则见 `docs/MODULARITY.md`。
 
 ## 项目结构
 
 ```
 src/copixiv/
-├── app/            # 配置加载 + 依赖组装
-├── domain/         # 领域模型与纯业务逻辑
-├── application/    # 应用层用例
-├── infrastructure/ # 数据库、Pixiv 客户端、存储、EPUB 实现
-├── tasks/          # 后台任务
-└── web_api/        # FastAPI 路由
+├── app.py          # 组合根：create_app / lifespan / 中间件 / 异常映射 / 启动项 / main()
+├── config.py       # 配置模型与加载
+├── deps.py         # FastAPI 依赖
+├── log.py          # 日志
+├── core/           # 纯 Python：models / services / exceptions / draft
+├── db/             # engine / uow / write_lock / backup / models / constants / base
+├── pixiv/          # pixivpy3 防腐层（唯一厂商边界）
+├── storage/        # file_storage / image_downloader / epub
+├── notify/         # telegram / webhook / composite / factory
+├── tasks/          # kernel / api / novels / batch / maintenance / history_repo
+└── features/       # accounts / authors / failures / novels / system / tags（api + repo）
 alembic/            # 数据库迁移
 database/           # SQLite 数据库
 deploy/             # systemd 等部署文件

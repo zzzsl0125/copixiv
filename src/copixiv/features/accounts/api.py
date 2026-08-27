@@ -38,12 +38,6 @@ class TokenResponse(TokenBase):
 router = APIRouter()
 
 
-# Route manifest — mounted automatically by the composition root
-# (docs/MODULARITY.md §M9): (prefix, tags) travels with the module.
-ROUTE = ("/api/tokens", ["tokens"])
-
-
-
 def _mask_token(token: str) -> str:
     """Mask a refresh token so only its last 4 characters are visible."""
     if len(token) <= 4:
@@ -52,7 +46,7 @@ def _mask_token(token: str) -> str:
 
 
 def _token_to_masked_dict(t) -> dict:
-    """Build the v1-compatible token dict with the refresh token masked."""
+    """Build the API token dict with the refresh token masked."""
     return {
         "id": t.id,
         "name": t.name,

@@ -472,8 +472,7 @@ class TestSystemConfigEndpoint:
         r = client.get("/api/system/config")
         assert r.status_code == 200
         assert set(r.json()) == {
-            "default_min_like", "default_min_text", "batch_download_naming",
-            "exclude_blocked_tag_novels",
+            "batch_download_naming", "exclude_blocked_tag_novels",
         }
         assert r.json()["exclude_blocked_tag_novels"] is True
 

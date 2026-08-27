@@ -35,8 +35,7 @@ def config_path(tmp_path_factory):
             f"  download: {tmp_path / 'download'}",
             f"  token: {tmp_path / 'no-such-token-file.py'}",
             "pixiv_client: {min_interval: 1, max_concurrency: 2}",
-            "telegram: {token: '', chat_id: ''}",
-            "frontend: {default_min_like: 500, default_min_text: 3000}",
+            "notifications: []",
             "batch_download: {naming: '{id}_{title}'}",
             "security:",
             "  api_key: sekret",
@@ -174,8 +173,7 @@ class TestRealRouterMounting:
         r = client.get("/api/system/config", headers={"X-API-Key": "sekret"})
         assert r.status_code == 200
         assert set(r.json()) == {
-            "default_min_like", "default_min_text", "batch_download_naming",
-            "exclude_blocked_tag_novels",
+            "batch_download_naming", "exclude_blocked_tag_novels",
         }
         assert r.json()["exclude_blocked_tag_novels"] is True
 

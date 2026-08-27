@@ -1,4 +1,4 @@
-"""Novel API endpoints — identical contract to v1."""
+"""Novel API endpoints."""
 
 from collections.abc import Iterator
 from typing import Literal
@@ -48,12 +48,6 @@ from copixiv.features.novels.delete_novel import DeleteNovelUseCase
 from copixiv.features.novels.get_novel_file import GetNovelFileUseCase
 
 router = APIRouter()
-
-
-# Route manifest — mounted automatically by the composition root
-# (docs/MODULARITY.md §M9): (prefix, tags) travels with the module.
-ROUTE = ("/api/novels", ["novels"])
-
 
 
 def _iter_zip(buffer) -> Iterator[bytes]:

@@ -41,12 +41,6 @@ class TagAliasSuggestListResponse(BaseModel):
 router = APIRouter()
 
 
-# Route manifest — mounted automatically by the composition root
-# (docs/MODULARITY.md §M9): (prefix, tags) travels with the module.
-ROUTE = ("/api/tag-aliases", ["tag_aliases"])
-
-
-
 @router.get("/")
 async def get_tag_aliases(uow: SqlUnitOfWork = Depends(get_uow)):
     return await SQLAlchemyTagRepository(uow.session).get_aliases()

@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import Sidebar from './components/Sidebar.vue'
 import ToastContainer from './components/ui/ToastContainer.vue'
 import { useNovels, useSystem, useToast, useBatchMode } from './composables'
+import { DEFAULT_MIN_LIKE, DEFAULT_MIN_TEXT } from './config'
 import type { NovelFilters, BatchOperationResult } from './types'
 
 const {
@@ -141,10 +142,10 @@ const applyConfigAndLoad = () => {
   if (config) {
     const urlParams = new URLSearchParams(window.location.search)
     if (!urlParams.has('min_like')) {
-      filters.min_like = config.default_min_like
+      filters.min_like = DEFAULT_MIN_LIKE
     }
     if (!urlParams.has('min_text')) {
-      filters.min_text = config.default_min_text
+      filters.min_text = DEFAULT_MIN_TEXT
     }
   }
 
@@ -192,8 +193,8 @@ const handleResetToDefaults = () => {
   filters.keyword = ''
   filters.order_by = 'random'
   filters.order_direction = 'DESC'
-  filters.min_like = systemConfig.value?.default_min_like
-  filters.min_text = systemConfig.value?.default_min_text
+  filters.min_like = DEFAULT_MIN_LIKE
+  filters.min_text = DEFAULT_MIN_TEXT
 
   activeSection.value = 'novels'
   handleSearch(undefined, { setOrdering: false })

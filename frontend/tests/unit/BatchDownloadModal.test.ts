@@ -63,8 +63,6 @@ describe('BatchDownloadModal (选多少下多少 — no download-count decision)
     apiMock.batchDownloadPreview.mockResolvedValue({ path: '作者/标题_1.txt' })
     apiMock.batchDownload.mockResolvedValue(ZIP_RESPONSE)
     apiMock.getConfig.mockResolvedValue({
-      default_min_like: 0,
-      default_min_text: 0,
       batch_download_naming: '{id}-{title}',
     })
   })

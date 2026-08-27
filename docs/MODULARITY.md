@@ -11,7 +11,7 @@
 | `src/copixiv/app.py` | 组合根：create_app / lifespan / 中间件 / 异常映射 / 启动项 / main() |
 | `src/copixiv/config.py` | 配置模型与加载 |
 | `src/copixiv/deps.py` | FastAPI 依赖（get_session_factory / get_app_config / get_file_storage / get_task_manager / get_uow / get_write_uow / parse_json_param） |
-| `core/` | 纯 Python：models.py / services.py / exceptions.py / draft.py（零 IO、零框架、零 SQLAlchemy） |
+| `core/` | 纯 Python：models.py / services.py / exceptions.py / draft.py（无框架、无 SQLAlchemy、无 web 依赖；仅标准库工具函数，含 zip/路径处理） |
 | `db/` | engine / uow（纯事务边界）/ write_lock / backup / models / constants / base |
 | `pixiv/` | pixivpy3 防腐层（唯一允许 import pixivpy3 的目录） |
 | `storage/` | file_storage / image_downloader / epub 子包 |
@@ -56,5 +56,5 @@
 1. **新增功能 = 一个 `features/<name>/` 目录**：`api.py` / `repo.py` /
    `schemas.py` 同置，不各起各的层。
 2. **跨 feature 引用允许，但保持单向**：不要成环（A → B、B → A 互为依赖）。
-3. **`core` 不放 IO**：零框架、零 SQLAlchemy、零外部副作用；需要 IO 的东西
-   放 feature 或适配层。
+3. **`core` 保持纯 Python**：无框架、无 SQLAlchemy、无 web 依赖。标准库
+   工具函数（如 zip/路径处理）允许；别的依赖与副作用放 feature 或适配层。
