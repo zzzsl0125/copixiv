@@ -5,9 +5,9 @@ from pathlib import Path
 import pytest
 from sqlalchemy import text
 
-from copixiv.infrastructure.database.models import Author, Novel
-from copixiv.infrastructure.database.uow import SqlUnitOfWork
-from copixiv.tasks.context import TaskContext
+from copixiv.db.models import Author, Novel
+from copixiv.db.uow import SqlUnitOfWork
+from copixiv.tasks.kernel import TaskContext
 from copixiv.tasks.maintenance import check_epub, check_fts, rebuild_fts
 
 

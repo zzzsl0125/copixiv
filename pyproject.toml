@@ -36,7 +36,7 @@ dev = [
 ]
 
 [project.scripts]
-copixiv = "copixiv.app.main:main"
+copixiv = "copixiv.app:main"
 
 [tool.hatch.metadata]
 allow-direct-references = true

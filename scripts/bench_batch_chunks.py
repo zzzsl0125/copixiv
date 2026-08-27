@@ -18,11 +18,11 @@ SIZES = [1000, 2000, 5000, 10000, 20000, 50000]
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from sqlalchemy import text
-from copixiv.infrastructure.database.engine import (
+from copixiv.db.engine import (
     create_database_engine,
     create_session_factory,
 )
-from copixiv.infrastructure.repositories.novel import SQLAlchemyNovelRepository
+from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 
 
 def make_work_copy() -> None:

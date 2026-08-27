@@ -15,15 +15,15 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 
-from copixiv.app.config import AppConfig
-from copixiv.domain.exceptions import DomainError
-from copixiv.infrastructure.database.engine import create_session_factory
-from copixiv.infrastructure.database.models import Base, Token
-from copixiv.web_api.endpoints import tokens
-from copixiv.web_api.host_middleware import (
+from copixiv.config import AppConfig
+from copixiv.core.exceptions import DomainError
+from copixiv.db.engine import create_session_factory
+from copixiv.db.models import Base, Token
+from copixiv.features.accounts import api as tokens
+from copixiv.app import (
     HostValidationMiddleware, _normalize_host,
 )
-from copixiv.web_api.api_key_middleware import APIAuthMiddleware
+from copixiv.app import APIAuthMiddleware
 
 
 def _build_app(session_factory, config: AppConfig) -> FastAPI:

@@ -21,10 +21,10 @@ from pathlib import Path
 
 import pytest
 
-from copixiv.infrastructure.epub.builder import EpubBuilder
-from copixiv.infrastructure.storage.file_storage import FileStorage
-from copixiv.domain.models.novel import Novel
-from copixiv.infrastructure.storage.image_downloader import ImageDownloader
+from copixiv.storage.epub.builder import EpubBuilder
+from copixiv.storage.file_storage import FileStorage
+from copixiv.core.models import Novel
+from copixiv.storage.image_downloader import ImageDownloader
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +83,7 @@ def test_download_image_failure_keeps_existing_file(tmp_path, monkeypatch):
             pass
 
     monkeypatch.setattr(
-        "copixiv.infrastructure.storage.image_downloader.create_image_session",
+        "copixiv.storage.image_downloader.create_image_session",
         lambda *a, **k: BoomSession(),
     )
 
@@ -127,7 +127,7 @@ def test_download_image_atomic_on_partial_write(tmp_path, monkeypatch):
             pass
 
     monkeypatch.setattr(
-        "copixiv.infrastructure.storage.image_downloader.create_image_session",
+        "copixiv.storage.image_downloader.create_image_session",
         lambda *a, **k: FakeSession(),
     )
 

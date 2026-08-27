@@ -4,7 +4,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from copixiv.web_api.endpoints import novels as novels_endpoint
+from copixiv.features.novels import api as novels_endpoint
 
 
 @pytest.fixture()

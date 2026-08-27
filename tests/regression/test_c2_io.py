@@ -17,10 +17,10 @@ import httpx
 import pytest
 
 from copixiv.log import capture_logs
-from copixiv.infrastructure.pixiv.account import PixivAccount, TokenInfo
-from copixiv.infrastructure.pixiv.accounts import AccountPool
-from copixiv.infrastructure.pixiv.client import PixivClient
-from copixiv.infrastructure.notifier.telegram import TelegramNotifier
+from copixiv.pixiv.account import PixivAccount, TokenInfo
+from copixiv.pixiv.accounts import AccountPool
+from copixiv.pixiv.client import PixivClient
+from copixiv.notify.telegram import TelegramNotifier
 
 
 def _account(username: str) -> PixivAccount:

@@ -1,106 +1,60 @@
-# copixiv 架构边界速查
+# copixiv 目录速查
 
-> 本文件的定位：**给人和 AI 的共识边界卡，不是宪法。**
-> 它只保证一件事——**哪些规则有测试钉死、哪些只是约定**，全部如实标注。
-> 曾经的路线图/状态表/验收清单已删除（历史见 git log `refactor/modularity`）。
+> 本文件的定位：**给人和 AI 的目录边界卡**。它写清每个目录的职责、
+> 依赖约定与硬规则，并如实标注**哪些规则有测试钉死、哪些只是约定**。
+> 结构已从六边形分层精简为模块化单体；旧的分层矩阵 / M 编号体系已作废。
 
-## 1. 分层
+## 1. 目录职责
 
-依赖方向严格单向，import 规则见 §3.1（有测试执法）：
+| 目录 | 一句话职责 |
+|------|-----------|
+| `src/copixiv/app.py` | 组合根：create_app / lifespan / 中间件 / 异常映射 / 启动项 / main() |
+| `src/copixiv/config.py` | 配置模型与加载 |
+| `src/copixiv/deps.py` | FastAPI 依赖（get_session_factory / get_app_config / get_file_storage / get_task_manager / get_uow / get_write_uow / parse_json_param） |
+| `core/` | 纯 Python：models.py / services.py / exceptions.py（零 IO、零框架、零 SQLAlchemy） |
+| `db/` | engine / uow（纯事务边界）/ write_lock / backup / models / constants / base |
+| `pixiv/` | pixivpy3 防腐层（唯一允许 import pixivpy3 的目录） |
+| `storage/` | file_storage / image_downloader / epub 子包 |
+| `notify/` | telegram / webhook / composite / factory |
+| `tasks/` | kernel.py（registry + context + history + executor + scheduler + manager 合并）/ history_repo / schemas / api / novels / batch / maintenance / pipeline |
+| `features/` | accounts / authors / failures / novels / system / tags（每目录 api(+schemas)+repo） |
 
-```
-web_api → application → domain ← infrastructure
-        （tasks 在两者之间：允许 domain/application/infrastructure/tasks）
-                 ↑
-             app（组合根，允许一切）
-```
+## 2. 依赖规则（约定，无矩阵执法）
 
-| 层 | 目录 | 一句话职责 |
-|---|---|---|
-| app | `src/copixiv/app/` | 组合根：Container 装配一切（§M10） |
-| web_api | `web_api/` | 薄 FastAPI 适配层（§M9） |
-| application | `application/` | 用例编排，一个用例一个文件（§M7） |
-| domain | `domain/` | Pydantic 实体 + 端口 Protocol + 纯函数服务（§M3） |
-| infrastructure | `infrastructure/` | 数据库、pixiv、存储、EPUB、通知的实现（§M2/M4/M5/M6） |
-| tasks | `tasks/` | 任务内核（registry/executor/scheduler）+ 业务任务（§M8） |
+1. **`core` 不 import 任何其他目录。**
+2. **`db/pixiv/storage/notify` 为适配层**：彼此不互相 import，
+   只被 `features` / `tasks` / `app` 使用。
+3. **`features` 之间允许单向 import**（模块化单体），一行一个方向，避免成环。
 
-## 2. 硬规则（违反 = 测试变红）
+> 不再有全局 import 矩阵执法，这是**有意的取舍**——这个体量配不上 7 层矩阵。
+> 前两条靠"目录即文档"与 code review 守住；只有下面的两条是测试执法。
 
-### 2.1 分层 import 矩阵（§3.1）
+## 3. 硬规则（违反 = 测试变红）
 
-执法：`tests/architecture/test_layering.py::test_layer_import_matrix`（AST 扫描）
+### 3.1 pixivpy3 厂商白名单
 
-| 导入方 ＼ 被导入 | domain | application | infrastructure | tasks | web_api | app | log |
-|---|---|---|---|---|---|---|---|
-| **domain** | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓* |
-| **application** | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ | ✓* |
-| **infrastructure** | ✓ | ✗ | ✓ | ✗ | ✗ | ✗ | ✓ |
-| **tasks** | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ |
-| **web_api** | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ | ✓ |
-| **app** | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+`import pixivpy3` 只允许出现在 `pixiv/` 下（`patch.py` / `account.py` /
+`errors.py`，后者因异常族必须继承 `pixivpy3.PixivError`）。其余代码一律
+通过 `pixiv/` 导出的接口与异常族。
 
-\* domain / application 现状不 import logger，规则仅为未来预留。
+执法：`tests/architecture/test_vendor_whitelist.py::test_pixivpy3_vendor_whitelist`
+（AST 扫描整个 `src`，任何新模块 import pixivpy3 都会立刻失败）。
 
-### 2.2 pixivpy3 厂商白名单（§3.2）
-
-执法：`tests/architecture/test_layering.py::test_pixivpy3_vendor_whitelist`
-
-`import pixivpy3` 只允许出现在 `infrastructure/pixiv/patch.py`、`account.py` 与
-`errors.py`（异常层次必须继承 `pixivpy3.PixivError` 才能被既有 `except` 链捕获）。
-其余代码一律通过 `domain/ports/pixiv.py` 的 Protocol 和 `account.py` 导出的异常族。
-
-### 2.3 写路径必须走全局写锁
-
-执法：`tests/regression/test_m6_m10_write_lock_and_ports.py`
+### 3.2 写路径必须走全局写锁
 
 - API 写端点必须声明 `Depends(get_write_uow)`；读端点用 `get_uow`。
-- 后台任务写库走 `uow.begin()` / `db_write()`。SQLite 单写者，API 与后台任务共享同一把锁。
+- 后台任务写库走 `uow.begin()` / `db_write()`。SQLite 单写者，API 与后台任务
+  共享同一把锁。
 
-### 2.4 application 层零基础设施依赖
+执法：`tests/regression/test_m6_write_lock.py`（`test_get_write_uow_holds_global_lock`
+/ `test_write_endpoints_declare_write_uow`）。
 
-执法：`tests/regression/...::test_application_layer_does_not_import_infrastructure`
+> 这两条是**仅剩的**测试执法边界；其余规则在 §2 与 §4，皆为约定，违反不会红。
 
-## 3. 约定（没有测试执法，违反不会红，发现就修）
+## 4. 约法三章（新增代码的默认姿势）
 
-- 具体实现类（`SqlUnitOfWork`、各 `SQLAlchemy*Repository`、`TelegramNotifier`、`FileStorage`、`PixivClient` 等）的 import 只应出现在：自家包内 / `app/container.py` / `web_api/deps.py`。
-- 端点里 `SqlUnitOfWork` 只作类型注解，实例一律来自 `Depends(...)`；不得摸 `uow.session`。
-- 新增 API 区域 = 一个端点模块（自带 `ROUTE = (prefix, tags)` 清单）+ container 里加一行注册。
-
-> 反省记录（2025-08）：旧版 §3.3 声称以上"具体类规则"由测试钉死，实际从未实现执法测试。本版如实降级为约定——宪法可以有承诺，速查卡只写事实。
-
-## 4. 模块定位表（M 编号，供代码注释引用）
-
-| 编号 | 模块 | 定位 | 说明 |
-|---|---|---|---|
-| M0 | `copixiv/log.py` | 平台 | 任何层可 import；`app/logger.py` 是兼容 shim |
-| M2 | `infrastructure/pixiv` | 防腐层（唯一"接口可替换"） | 公开 API 见 `pixiv/__init__.py`；异常翻译在 `account.py` |
-| M3 | `domain` | 内核 | Pydantic 实体（读写共用）+ 纯服务；业务策略在 domain 不在 repo |
-| M4 | `infrastructure/database` + `repositories` | 固定 | SQLite 是产品特性；读写仓储分离；`QuerySpec` 值对象 |
-| M5 | `storage` / `epub` | 固定 | 本地文件目录是产品形态 |
-| M6 | `notifier` | 配置驱动 | `notifiers.enabled` 选后端；`CompositeNotifier` 故障隔离 |
-| M7 | `application` | 用例 | 只保留有真实编排的用例；CRUD 由端点直连仓库 |
-| M8 | `tasks` | 注册表 | `@register(name, args=Pydantic模型)` + `TaskContext` 注入；`DEFAULT_TASK_MODULES` 内置发现 |
-| M9 | `web_api` | 薄适配 | `deps.py` 是唯一碰 `app.state` 的地方；ROUTE 自述清单 |
-| M10 | `app/container` | 组合根 | 按域 `_build_*` 装配；`create_app()` import 零副作用 |
-
-## 5. domain/ports 的真实定位
-
-端口 Protocol（约 370 行、零运行时开销）有两个作用，按重要性排序：
-
-1. **分层矩阵的承重墙**：application/tasks 被禁止 import infrastructure（§2.1），端口是它们引用这些能力的唯一合法通道；
-2. **类型契约文档**：标注方法签名，供 IDE / 类型检查器。
-
-它们**不是**"可替换性"承诺：除 pixiv（M2）外全部端口只有一个实现，测试也不构造端口的替代实现（fake 均为鸭子类型）。新增端口前先问一句：是否真有第二个实现或跨层引用需求？
-
-## 6. 明确不做（除非出现真实需求，不重新打开）
-
-- DB 方言多态（SQLite 锁定是特性）
-- 存储后端多态（S3 等）
-- Pixiv 源替换 / 多源
-- web 路由热插拔
-- 任务 / 通知的第三方插件生态（任务发现只走内置 `DEFAULT_TASK_MODULES`，无 entry point 机制）
-
-## 7. 配套文档
-
-- `PROJECT_OVERVIEW.md`：项目事实速览（技术栈、目录、API、运行方式）
-- `README.md`：用户侧文档
+1. **新增功能 = 一个 `features/<name>/` 目录**：`api.py` / `repo.py` /
+   `schemas.py` 同置，不各起各的层。
+2. **跨 feature 引用允许，但保持单向**：不要成环（A → B、B → A 互为依赖）。
+3. **`core` 不放 IO**：零框架、零 SQLAlchemy、零外部副作用；需要 IO 的东西
+   放 feature 或适配层。

@@ -1,9 +1,9 @@
 """domain 层 Minor 问题复现（文件名引擎三漏洞 / parse_tags / series order / TaskResult）。"""
 
-from copixiv.domain.models.task_result import TaskResult
-from copixiv.domain.services.filename import NovelNamingTemplate, _sanitize_path_segment
-from copixiv.domain.services.parsing import guess_series_order
-from copixiv.domain.services.tags import parse_tags
+from copixiv.core.models import TaskResult
+from copixiv.core.services import NovelNamingTemplate, _sanitize_path_segment
+from copixiv.core.services import guess_series_order
+from copixiv.core.services import parse_tags
 
 
 # 文件名引擎 -------------------------------------------------------

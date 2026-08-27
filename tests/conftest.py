@@ -14,8 +14,8 @@ import pytest
 from sqlalchemy import create_engine, event
 from sqlalchemy.pool import StaticPool
 
-from copixiv.infrastructure.database.engine import create_session_factory
-from copixiv.infrastructure.database.models import Base
+from copixiv.db.engine import create_session_factory
+from copixiv.db.models import Base
 
 
 def _enable_foreign_keys(engine) -> None:

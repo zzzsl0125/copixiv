@@ -5,10 +5,9 @@ layer may import it; it belongs to no layer.  Call ``setup_logging()``
 once at startup (the entry point does) and then use
 ``from copixiv.log import logger`` everywhere.
 
-Moved out of ``copixiv.app.logger`` so that ``infrastructure`` /
-``application`` no longer depend on the ``app`` layer.  (The old
-``copixiv.app.logger`` shim was removed — internal code imports from
-here directly.)
+Moved out of the former ``app.logger`` module so that ``infrastructure`` /
+``application`` no longer depend on the ``app`` layer.  (The old logging
+shim was removed — internal code imports from here directly.)
 """
 
 import sys

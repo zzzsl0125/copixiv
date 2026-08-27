@@ -17,7 +17,7 @@ if config.config_file_name is not None:
 # ---------------------------------------------------------------------------
 # Target metadata — all ORM models registered on Base
 # ---------------------------------------------------------------------------
-from copixiv.infrastructure.database.models import Base
+from copixiv.db.models import Base
 target_metadata = Base.metadata
 
 # ---------------------------------------------------------------------------
@@ -50,7 +50,7 @@ def _get_database_url() -> str:
 
     # 3. copixiv config.yaml
     try:
-        from copixiv.app.config import config as app_config
+        from copixiv.config import config as app_config
         db_path = app_config.path.database
         if not Path(db_path).is_absolute():
             db_path = str(_project_root / db_path)

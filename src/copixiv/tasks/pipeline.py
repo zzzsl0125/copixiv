@@ -10,17 +10,19 @@ import calendar
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from copixiv.infrastructure.database.write_lock import db_write
+from copixiv.db.write_lock import db_write
 
-from copixiv.domain.models.novel import Novel
-from copixiv.domain.services.language import is_chinese
-from copixiv.application.novel.download_novel import fetch_novel_and_assets
-from copixiv.application.novel.persist import persist_novels
+from copixiv.core.models import Novel
+from copixiv.core.services import is_chinese
+from copixiv.features.novels.download_novel import fetch_novel_and_assets
+from copixiv.features.novels.persist import persist_novels
+from copixiv.features.novels.repo import SQLAlchemyNovelRepository
+from copixiv.features.failures.repo import FailedNovelRepository
 
-from copixiv.domain.services.novel_factory import (
+from copixiv.core.services import (
     NovelInfoLike, build_from_novel_info,
 )
-from copixiv.domain.services.parsing import safe_get
+from copixiv.core.services import safe_get
 
 from copixiv.log import logger
 
@@ -67,7 +69,7 @@ async def _batch_upsert(
 ) -> int:
     """Upsert novels and update author/series summaries.
 
-    Thin wrapper over :func:`copixiv.application.novel.persist.persist_novels`
+    Thin wrapper over :func:`copixiv.features.novels.persist.persist_novels`
     that adds batch-level logging.
 
     Pure write helper: the caller is responsible for wrapping it in
@@ -162,7 +164,7 @@ async def _plan_batch(
         return [], []
 
     ids = {n.id for n in novels}
-    existing = await uow.novels.get_existing_ids(ids)
+    existing = await SQLAlchemyNovelRepository(uow.session).get_existing_ids(ids)
 
     # Exclude novels that have already failed too many times
     skip_ids: set[int] = set()
@@ -258,13 +260,13 @@ async def _batch_handle(
     if not novels:
         return [], set()
 
-    from copixiv.infrastructure.database.uow import SqlUnitOfWork
+    from copixiv.db.uow import SqlUnitOfWork
 
     # 1. Plan — read-only, short transaction, no lock.
     uow = SqlUnitOfWork(session_factory)
     async with uow.begin():
         existing_meta, download_ids = await _plan_batch(
-            novels, uow, redownload=redownload, failed_repo=uow.failed_novels,
+            novels, uow, redownload=redownload, failed_repo=FailedNovelRepository(uow.session),
         )
 
     # 2. Download — concurrent network/file I/O, no database.
@@ -306,7 +308,7 @@ async def _batch_handle(
             titles, new_author_ids = await _persist_batch(
                 existing_meta, downloaded, uow,
                 failed_records=failed_records + asset_failures,
-                failed_repo=uow.failed_novels,
+                failed_repo=FailedNovelRepository(uow.session),
                 titles=titles_by_id,
             )
 

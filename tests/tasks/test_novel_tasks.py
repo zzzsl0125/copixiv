@@ -14,12 +14,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from copixiv.infrastructure.database.engine import create_session_factory
-from copixiv.infrastructure.database import models
-from copixiv.infrastructure.database.uow import SqlUnitOfWork
-from copixiv.infrastructure.database.write_lock import db_write, DbWriteLock
-from copixiv.infrastructure.repositories.fts import FTSManager
-from copixiv.tasks import novel_tasks
+from copixiv.db.engine import create_session_factory
+from copixiv.db import models
+from copixiv.db.uow import SqlUnitOfWork
+from copixiv.db.write_lock import db_write, DbWriteLock
+from copixiv.features.novels.fts import FTSManager
+from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
+from copixiv.tasks import novels
 from copixiv.tasks.pipeline import _batch_handle
 
 
@@ -68,7 +69,7 @@ class TestChineseFiltering:
         uow = SqlUnitOfWork(session_factory)
         async with db_write():
             async with uow.begin():
-                uow.authors.ensure_exists({1})
+                SQLAlchemyAuthorRepository(uow.session).ensure_exists({1})
 
         seen: dict = {}
 
@@ -76,11 +77,11 @@ class TestChineseFiltering:
             seen["novels"] = list(novels)
             return [], set()
 
-        monkeypatch.setattr(novel_tasks, "_batch_handle", fake_batch_handle)
+        monkeypatch.setattr(novels, "_batch_handle", fake_batch_handle)
 
-        result = await novel_tasks.author_fetch(
-            novel_tasks.AuthorFetchArgs(author_id=1, force=True),
-            novel_tasks.TaskContext(
+        result = await novels.author_fetch(
+            novels.AuthorFetchArgs(author_id=1, force=True),
+            novels.TaskContext(
                 uow=uow, client=FakeClient([CN_NOVEL, EN_NOVEL]),
                 file_storage=None, image_downloader=None, config=None,
                 write_lock=DbWriteLock(),
@@ -101,11 +102,11 @@ class TestChineseFiltering:
             seen["novels"] = list(novels)
             return [], set()
 
-        monkeypatch.setattr(novel_tasks, "_batch_handle", fake_batch_handle)
+        monkeypatch.setattr(novels, "_batch_handle", fake_batch_handle)
 
-        result = await novel_tasks.novel_follow(
-            novel_tasks.NovelFollowArgs(),
-            novel_tasks.TaskContext(
+        result = await novels.novel_follow(
+            novels.NovelFollowArgs(),
+            novels.TaskContext(
                 uow=uow, client=FakeClient([CN_NOVEL, EN_NOVEL]),
                 file_storage=None, image_downloader=None, config=None,
                 write_lock=DbWriteLock(),
@@ -191,9 +192,9 @@ class TestNovelFetchFailureRecorded:
         session_factory = create_session_factory(engine)
         uow = SqlUnitOfWork(session_factory)
 
-        result = await novel_tasks.novel_fetch(
-            novel_tasks.NovelFetchArgs(id=999),
-            novel_tasks.TaskContext(
+        result = await novels.novel_fetch(
+            novels.NovelFetchArgs(id=999),
+            novels.TaskContext(
                 client=_NullWebviewClient(),
                 uow=uow,
                 file_storage=None,
@@ -255,7 +256,7 @@ class TestFailedRetryTask:
             ))
             s.commit()
 
-        ctx = novel_tasks.TaskContext(
+        ctx = novels.TaskContext(
             client=_RetryWebviewClient(),
             uow=SqlUnitOfWork(session_factory),
             session_factory=session_factory,
@@ -263,8 +264,8 @@ class TestFailedRetryTask:
             image_downloader=_RetryImageDownloader(),
             write_lock=DbWriteLock(),
         )
-        result = await novel_tasks.failed_retry(
-            novel_tasks.FailedRetryArgs(novel_ids=[100]), ctx,
+        result = await novels.failed_retry(
+            novels.FailedRetryArgs(novel_ids=[100]), ctx,
         )
 
         assert "成功 1/1" in result.summary
@@ -282,7 +283,7 @@ class TestFailedRetryTask:
             ))
             s.commit()
 
-        ctx = novel_tasks.TaskContext(
+        ctx = novels.TaskContext(
             client=_NullWebviewClient(),
             uow=SqlUnitOfWork(session_factory),
             session_factory=session_factory,
@@ -290,8 +291,8 @@ class TestFailedRetryTask:
             image_downloader=None,
             write_lock=DbWriteLock(),
         )
-        result = await novel_tasks.failed_retry(
-            novel_tasks.FailedRetryArgs(novel_ids=[999]), ctx,
+        result = await novels.failed_retry(
+            novels.FailedRetryArgs(novel_ids=[999]), ctx,
         )
 
         assert "成功 0/1" in result.summary

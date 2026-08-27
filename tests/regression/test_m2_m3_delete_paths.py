@@ -5,9 +5,9 @@ import asyncio
 import pytest
 from sqlalchemy import select
 
-from copixiv.infrastructure.database import models
-from copixiv.infrastructure.repositories.novel import SQLAlchemyNovelRepository
-from copixiv.infrastructure.repositories.author import SQLAlchemyAuthorRepository
+from copixiv.db import models
+from copixiv.features.novels.repo import SQLAlchemyNovelRepository
+from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 
 # factory = file_session_factory from tests/conftest.py
 factory = pytest.fixture(name="factory")(lambda file_session_factory: file_session_factory)

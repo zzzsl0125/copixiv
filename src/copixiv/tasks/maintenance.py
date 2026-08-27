@@ -13,15 +13,19 @@ plain summary instead of incorrectly labelling results as "new novels".
 from pathlib import Path
 import time
 
-from copixiv.application.author.resolve_names import resolve_author_names
-from copixiv.domain.models.novel import EpubStatus
-from copixiv.domain.models.task_result import TaskResult
-from copixiv.domain.services.language import has_image_placeholders
-from copixiv.infrastructure.database.write_lock import db_write
+from copixiv.features.authors.resolve_names import resolve_author_names
+from copixiv.core.models import EpubStatus
+from copixiv.core.models import TaskResult
+from copixiv.core.services import has_image_placeholders
+from copixiv.db.write_lock import db_write
+from copixiv.features.novels.repo import (
+    SQLAlchemyNovelRepository,
+    SQLAlchemySeriesRepository,
+)
 from copixiv.log import logger
 
-from .context import TaskContext
-from .registry import register
+from .kernel import TaskContext
+from .kernel import register
 
 
 @register("check_epub")
@@ -38,7 +42,7 @@ async def check_epub(ctx: TaskContext) -> TaskResult:
     * 1 (pending) + file missing      → stays pending otherwise
     """
     from sqlalchemy import select as _select
-    from copixiv.infrastructure.database import models
+    from copixiv.db import models
 
     uow = ctx.uow
 
@@ -82,17 +86,17 @@ async def check_epub(ctx: TaskContext) -> TaskResult:
     if completed_ids:
         async with db_write():
             async with uow.begin():
-                await uow.novels.update_has_epub_status(completed_ids, EpubStatus.DONE)
+                await SQLAlchemyNovelRepository(uow.session).update_has_epub_status(completed_ids, EpubStatus.DONE)
 
     if revert_ids:
         async with db_write():
             async with uow.begin():
-                await uow.novels.update_has_epub_status(revert_ids, EpubStatus.PENDING)
+                await SQLAlchemyNovelRepository(uow.session).update_has_epub_status(revert_ids, EpubStatus.PENDING)
 
     if downgrade_ids:
         async with db_write():
             async with uow.begin():
-                await uow.novels.update_has_epub_status(downgrade_ids, EpubStatus.NO)
+                await SQLAlchemyNovelRepository(uow.session).update_has_epub_status(downgrade_ids, EpubStatus.NO)
 
     logger.info(
         f"check_epub: completed={len(completed_ids)}, reverted={len(revert_ids)}, "
@@ -159,7 +163,7 @@ async def sync_empty_name(ctx: TaskContext) -> TaskResult:
     ``author`` table first, then falls back to the Pixiv API.
     """
     from sqlalchemy import select as _select
-    from copixiv.infrastructure.database import models
+    from copixiv.db import models
 
     uow = ctx.uow
 
@@ -196,7 +200,7 @@ async def rebuild_fts(ctx: TaskContext) -> TaskResult:
     uow = ctx.uow
     async with db_write():
         async with uow.begin():
-            count = await uow.novels.rebuild_fts()
+            count = await SQLAlchemyNovelRepository(uow.session).rebuild_fts()
 
     return TaskResult(summary=f"FTS 索引重建完成（{count} 本小说）")
 
@@ -210,7 +214,7 @@ async def check_fts(ctx: TaskContext) -> TaskResult:
     index row) entries, so ops can decide whether a ``rebuild_fts`` run
     is needed.
     """
-    from copixiv.infrastructure.repositories.fts import FTSManager
+    from copixiv.features.novels.fts import FTSManager
 
     uow = ctx.uow
 
@@ -245,14 +249,14 @@ async def fix_series_index(ctx: TaskContext) -> TaskResult:
     Each series is fetched and committed immediately so partial
     progress is preserved even if the task times out.
     """
-    from copixiv.domain.services.novel_factory import build_from_novel_info
-    from copixiv.domain.services.parsing import safe_get, safe_set
+    from copixiv.core.services import build_from_novel_info
+    from copixiv.core.services import safe_get, safe_set
     from .pipeline import _batch_upsert
 
     uow = ctx.uow
 
     async with uow.begin():
-        series_ids = await uow.series.series_with_empty_index()
+        series_ids = await SQLAlchemySeriesRepository(uow.session).series_with_empty_index()
 
     if not series_ids:
         return TaskResult(summary="系列章节号检查: 无需修复")
@@ -302,7 +306,7 @@ async def rebuild_tag_counts(ctx: TaskContext) -> TaskResult:
     for every tag in a single correlated UPDATE — fast and exact.
     """
     from sqlalchemy import text, func, select
-    from copixiv.infrastructure.database import models
+    from copixiv.db import models
 
     uow = ctx.uow
     async with db_write():
@@ -324,9 +328,7 @@ async def rebuild_tag_counts(ctx: TaskContext) -> TaskResult:
                 "  FROM novel_tag nt WHERE nt.tag_id = tag.id)"
             )).scalar() or 0
 
-    from copixiv.infrastructure.repositories.novel_read import (
-        invalidate_count_cache,
-    )
+    from copixiv.features.novels.repo import invalidate_count_cache
     invalidate_count_cache()
 
     return TaskResult(

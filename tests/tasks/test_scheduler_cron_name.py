@@ -15,9 +15,9 @@ The earlier ``run_task_now`` path already did both.  The cron path
 ``(display_name, function_name, params)`` to the enqueue callback.
 """
 
-from copixiv.infrastructure.database.models import ScheduledTask
-from copixiv.tasks.registry import discover_tasks, get_spec
-from copixiv.tasks.scheduler import CronScheduler
+from copixiv.db.models import ScheduledTask
+from copixiv.tasks.kernel import discover_tasks, get_spec
+from copixiv.tasks.kernel import CronScheduler
 
 DISPLAY_NAME = "我的自定义任务（早上三点）"
 FUNCTION_NAME = "check_epub"

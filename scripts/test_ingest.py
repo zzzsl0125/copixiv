@@ -95,13 +95,13 @@ if not TOKEN_PY.exists() and TOKEN_JSON.exists():
 from copixiv.log import setup_logging
 setup_logging()
 
-from copixiv.app.container import Container
-from copixiv.infrastructure.database import models
-from copixiv.infrastructure.database.engine import create_database_engine, create_session_factory
-from copixiv.infrastructure.database.uow import SqlUnitOfWork
-from copixiv.infrastructure.database.write_lock import DbWriteLock
-from copixiv.tasks.context import TaskContext
-from copixiv.tasks.registry import describe_tasks, discover_tasks, get_spec
+from copixiv.app import _build
+from copixiv.db import models
+from copixiv.db.engine import create_database_engine, create_session_factory
+from copixiv.db.uow import SqlUnitOfWork
+from copixiv.db.write_lock import DbWriteLock
+from copixiv.tasks.kernel import TaskContext
+from copixiv.tasks.kernel import describe_tasks, discover_tasks, get_spec
 
 # Trigger task registration (entry points with built-in fallback)
 discover_tasks()
@@ -177,14 +177,14 @@ def _coerce_guess(value: str) -> Any:
     return value
 
 
-def _injected_deps(container: Container):
+def _injected_deps(app_singletons):
     """Return the dependency dict that tasks expect."""
     return {
-        "client": container._client,
-        "file_storage": container._file_storage,
-        "image_downloader": container._image_downloader,
-        "epub_builder": container._epub_builder,
-        "config": container.config,
+        "client": app_singletons.client,
+        "file_storage": app_singletons.file_storage,
+        "image_downloader": app_singletons.image_downloader,
+        "epub_builder": app_singletons.epub_builder,
+        "config": app_singletons.config,
     }
 
 
@@ -322,19 +322,18 @@ def run_task(task_name: str, params: dict[str, Any], dry_run: bool = False) -> A
     print(f"[setup] Params:       {json.dumps(params, ensure_ascii=False)}")
     print()
 
-    # -- Build container -----------------------------------------------------
+    # -- Build composition root ---------------------------------------------
     print("[build] Building container (DB + migrations + accounts)...")
-    container = Container()
-    container.build()
+    singletons = _build()
     print("[build] Container ready.\n")
 
     # -- Run the task --------------------------------------------------------
-    deps = _injected_deps(container)
-    uow = SqlUnitOfWork(container._session_factory)
+    deps = _injected_deps(singletons)
+    uow = SqlUnitOfWork(singletons.session_factory)
 
     ctx = TaskContext(
         uow=uow,
-        session_factory=container._session_factory,
+        session_factory=singletons.session_factory,
         client=deps.get("client"),
         file_storage=deps.get("file_storage"),
         image_downloader=deps.get("image_downloader"),

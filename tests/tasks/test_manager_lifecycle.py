@@ -11,9 +11,9 @@ import json
 import pytest
 from sqlalchemy import select
 
-from copixiv.domain.models.task_result import TaskResult
-from copixiv.infrastructure.database.models import TaskHistory
-from copixiv.tasks.manager import TaskManagerSystem
+from copixiv.core.models import TaskResult
+from copixiv.db.models import TaskHistory
+from copixiv.tasks.kernel import TaskManagerSystem
 
 
 @pytest.fixture()

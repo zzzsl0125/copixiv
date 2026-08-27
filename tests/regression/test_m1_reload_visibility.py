@@ -14,10 +14,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from copixiv.domain.exceptions import DomainError
-from copixiv.infrastructure.repositories.task import SQLAlchemyTaskRepository
-from copixiv.tasks.manager import TaskManagerSystem
-from copixiv.web_api.endpoints import tasks as tasks_endpoint
+from copixiv.core.exceptions import DomainError
+from copixiv.tasks.history_repo import SQLAlchemyTaskRepository
+from copixiv.tasks.kernel import TaskManagerSystem
+from copixiv.tasks import api as tasks_endpoint
 
 
 # file_session_factory comes from tests/conftest.py

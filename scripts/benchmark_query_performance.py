@@ -38,10 +38,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from copixiv.infrastructure.database.engine import create_database_engine  # noqa: E402
-from copixiv.infrastructure.database import models  # noqa: E402
-from copixiv.infrastructure.repositories.novel import SQLAlchemyNovelRepository  # noqa: E402
-from copixiv.infrastructure.repositories.query_builder import NovelQueryBuilder  # noqa: E402
+from copixiv.db.engine import create_database_engine  # noqa: E402
+from copixiv.db import models  # noqa: E402
+from copixiv.features.novels.repo import SQLAlchemyNovelRepository  # noqa: E402
+from copixiv.features.novels.repo import NovelQueryBuilder  # noqa: E402
 
 DB_PATH = str(ROOT / "database" / "database.db")
 
@@ -400,7 +400,7 @@ for label, old_sql, new_sql in c5_cases:
 # --- C6: P5 tag suggest -----------------------------------------------------
 
 print("\nC6. P5 标签建议：当前实现 vs 实验性前缀-only")
-from copixiv.infrastructure.repositories.tag import SQLAlchemyTagRepository  # noqa: E402
+from copixiv.features.tags.repo import SQLAlchemyTagRepository  # noqa: E402
 tag_repo = SQLAlchemyTagRepository(s)
 
 def _suggest_aliases():

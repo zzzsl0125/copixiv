@@ -7,7 +7,7 @@ place where the app is built at import time — importing
 docs/MODULARITY.md §M10).
 """
 
-from copixiv.app.main import create_app, main
+from copixiv.app import create_app, main
 
 app = create_app()  # noqa: F401 — re-exported for uvicorn main:app
 

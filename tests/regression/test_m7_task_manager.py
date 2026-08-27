@@ -12,10 +12,10 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from copixiv.domain.exceptions import DomainError, TaskAlreadyRunningError
-from copixiv.infrastructure.database.models import TaskHistory
-from copixiv.tasks.manager import TaskManagerSystem
-from copixiv.web_api.endpoints import tasks as tasks_endpoint
+from copixiv.core.exceptions import DomainError, TaskAlreadyRunningError
+from copixiv.db.models import TaskHistory
+from copixiv.tasks.kernel import TaskManagerSystem
+from copixiv.tasks import api as tasks_endpoint
 
 
 @pytest.fixture()

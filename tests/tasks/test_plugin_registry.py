@@ -14,7 +14,7 @@ docs/MODULARITY.md §6.
 
 import pytest
 
-from copixiv.tasks.registry import (
+from copixiv.tasks.kernel import (
     DEFAULT_TASK_MODULES,
     describe_tasks,
     discover_tasks,
@@ -30,8 +30,8 @@ def test_builtin_discovery_registers_in_tree_tasks():
 
     # The built-in list is the single source of truth for in-tree modules.
     assert set(DEFAULT_TASK_MODULES) == {
-        "copixiv.tasks.novel_tasks",
-        "copixiv.tasks.batch_tasks",
+        "copixiv.tasks.novels",
+        "copixiv.tasks.batch",
         "copixiv.tasks.maintenance",
     }
 
@@ -58,7 +58,7 @@ def test_describe_tasks_derives_arguments_from_args_model():
 
 
 def test_args_model_validates_params():
-    from copixiv.tasks.novel_tasks import NovelFetchArgs
+    from copixiv.tasks.novels import NovelFetchArgs
 
     args = NovelFetchArgs.model_validate({"id": "123"})  # coerces str → int
     assert args.id == 123
