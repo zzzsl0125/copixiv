@@ -24,9 +24,10 @@ class EpubStatus(IntEnum):
 class Novel(BaseModel):
     """A Pixiv novel, stored locally after download.
 
-    Canonical domain object for the write path: the factory functions in
-    ``core/services.py`` return instances of this model and repositories
-    accept them (translating to ORM rows internally).  Plain dicts only
+    Read-path domain object: the read repository builds these from ORM
+    rows.  The *write* path is carried by
+    :class:`~copixiv.core.draft.NovelDraft` (built by the
+    factory functions in ``core/draft.py``); plain dicts only
     appear at the HTTP wire boundary.
 
     Types mirror the database columns — ``create_time`` is a *string*

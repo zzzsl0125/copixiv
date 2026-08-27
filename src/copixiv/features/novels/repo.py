@@ -24,6 +24,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from copixiv.db import models
 from copixiv.db import constants as C
 from copixiv.core.models import Novel, EpubStatus
+from copixiv.core.draft import NovelDraft
 from copixiv.core.services import (
     EXCLUDE_BLOCKED_SETTING_KEY,
     resolve_active,
@@ -1461,12 +1462,13 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
 
 
     async def upsert_novels(
-        self, novels: list[Novel], force_update: list[str] | None = None
+        self, novels: list[NovelDraft], force_update: list[str] | None = None
     ) -> int:
         """Insert or update novels, then sync tags and FTS index.
 
-        Accepts :class:`Novel` domain models (canonical write-path object);
-        plain dicts are still tolerated for callers that only have row data.
+        Accepts :class:`~copixiv.core.draft.NovelDraft` (the
+        canonical write-path object); plain dicts are still tolerated for
+        callers that only have row data.
 
         Heavy write path (alias resolution, batch upsert, tag sync, FTS
         index update) — runs in a worker thread so the event loop is not
@@ -1478,31 +1480,18 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
 
 
     def _upsert_novels_sync(
-        self, novels: list[Novel], force_update: list[str] | None = None
+        self, novels: list[NovelDraft], force_update: list[str] | None = None
     ) -> int:
         """Insert or update novels, then sync tags and FTS index."""
         if not novels:
             return 0
 
-        # Normalize: accept both Novel models and legacy dicts at the edge.
-        #
-        # Serializer-free conversion: read field values straight from the
-        # instance __dict__ instead of model_dump().  pydantic v2's
-        # model_dump() routes through __pydantic_serializer__, which
-        # pydantic may transiently rebuild — model_rebuild() *deletes and
-        # recreates* it and is explicitly "not thread-safe" (see pydantic
-        # main.py model_rebuild).  This method runs in a worker thread
-        # (asyncio.to_thread), so the rebuild race can leave the serializer
-        # as None and model_dump() raises
-        # "TypeError: 'None' is not an instance of 'SchemaSerializer'" —
-        # the exact failure that took down the 08-19 每日更新/每日排行 cron
-        # runs.  Field values are populated at construction (event loop)
-        # and never mutated afterwards, so reading __dict__ here is
-        # thread-safe and byte-identical to model_dump() for Novel (no
-        # private attrs, no computed fields, extra!='allow').
-        from pydantic import BaseModel
+        # Normalize: accept both NovelDraft objects and legacy dicts at the
+        # edge.  Reading field values straight from ``__dict__`` is safe —
+        # a frozen dataclass has no runtime validators or serializers, so
+        # there is no thread-rebuild race in a worker thread.
         novels = [
-            dict(n.__dict__) if isinstance(n, BaseModel) else dict(n)
+            dict(n.__dict__) if hasattr(n, "__dict__") else dict(n)
             for n in novels
         ]
 

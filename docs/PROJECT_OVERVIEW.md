@@ -149,6 +149,7 @@ cd frontend && npm install && npm run build && npm run preview   # 前端 :4173
 | `src/copixiv/core/models.py` | 全部 Pydantic 实体 |
 | `src/copixiv/core/services.py` | 纯函数服务（parsing / filename / language / tags / exclusion / archive / query_spec 等） |
 | `src/copixiv/core/exceptions.py` | 域异常（无 status_code，映射在 app.py） |
+| `src/copixiv/core/draft.py` | NovelDraft 纯数据结构 + 写路径工厂（build_novel / build_from_webview / build_from_novel_info） |
 | `src/copixiv/db/uow.py` | SqlUnitOfWork（纯事务边界） |
 | `src/copixiv/db/write_lock.py` | 全进程写锁（db_write） |
 | `src/copixiv/features/novels/repo.py` | novel 读写仓储 |

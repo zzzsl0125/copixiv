@@ -5,7 +5,7 @@ Covers the two regressions the refactor could have introduced:
 1. Chinese-language filtering must still happen in ``author_fetch`` /
    ``novel_follow`` (the old per-page handler filtered every page; the
    collect mode filters once after accumulation).
-2. ``_batch_handle`` end-to-end: plan → download → persist writes land
+2. ``ingest`` end-to-end: plan → download → persist writes land
    in the database exactly once, with no lock errors.
 """
 
@@ -20,12 +20,12 @@ from copixiv.db.uow import SqlUnitOfWork
 from copixiv.db.write_lock import db_write, DbWriteLock
 from copixiv.features.novels.fts import FTSManager
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
+from copixiv.features.novels.ingest import ingest
 from copixiv.tasks import novels
-from copixiv.tasks.pipeline import _batch_handle
 
 
 def _engine_with_fts(file_engine):
-    """Conftest file engine + a rebuilt novel_fts table (pipeline needs it)."""
+    """Conftest file engine + a rebuilt novel_fts table (ingest needs it)."""
     with file_engine.connect() as conn:
         FTSManager(conn).rebuild_novel_fts()
     return file_engine
@@ -73,11 +73,11 @@ class TestChineseFiltering:
 
         seen: dict = {}
 
-        async def fake_batch_handle(novels, session_factory, **kwargs):
+        async def fake_ingest(novels, **kwargs):
             seen["novels"] = list(novels)
-            return [], set()
+            return SimpleNamespace(titles=[], new_author_ids=set(), failed=[], new_count=0)
 
-        monkeypatch.setattr(novels, "_batch_handle", fake_batch_handle)
+        monkeypatch.setattr(novels, "ingest", fake_ingest)
 
         result = await novels.author_fetch(
             novels.AuthorFetchArgs(author_id=1, force=True),
@@ -98,11 +98,11 @@ class TestChineseFiltering:
 
         seen: dict = {}
 
-        async def fake_batch_handle(novels, session_factory, **kwargs):
+        async def fake_ingest(novels, **kwargs):
             seen["novels"] = list(novels)
-            return [], set()
+            return SimpleNamespace(titles=[], new_author_ids=set(), failed=[], new_count=0)
 
-        monkeypatch.setattr(novels, "_batch_handle", fake_batch_handle)
+        monkeypatch.setattr(novels, "ingest", fake_ingest)
 
         result = await novels.novel_follow(
             novels.NovelFollowArgs(),
@@ -140,6 +140,9 @@ class TestBatchHandleEndToEnd:
                     images=None, illusts=None, cover_url=None,
                 )
 
+            async def user_detail(self, user_id):
+                return {"user": {"name": "测试作者"}}
+
         class FakeStorage:
             download_dir = str(tmp_path / "download")
 
@@ -161,14 +164,15 @@ class TestBatchHandleEndToEnd:
             tags=[SimpleNamespace(name="中文")],
         )]
 
-        titles, new_author_ids = await _batch_handle(
-            novels, session_factory,
+        out = await ingest(
+            novels, session_factory=session_factory,
             client=FakeClient(), file_storage=FakeStorage(),
-            image_downloader=FakeImageDownloader(), redownload=False,
+            image_downloader=FakeImageDownloader(), force=False,
         )
 
-        assert titles == ["新小说"]
-        assert new_author_ids == {1}
+        assert out.titles == ["新小说"]
+        assert out.new_count == 1
+        assert out.new_author_ids == {1}
 
         with session_factory() as session:
             assert session.get(models.Novel, 100) is not None
@@ -197,6 +201,7 @@ class TestNovelFetchFailureRecorded:
             novels.TaskContext(
                 client=_NullWebviewClient(),
                 uow=uow,
+                session_factory=session_factory,
                 file_storage=None,
                 image_downloader=None,
                 write_lock=DbWriteLock(),

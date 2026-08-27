@@ -13,7 +13,7 @@ plain summary instead of incorrectly labelling results as "new novels".
 from pathlib import Path
 import time
 
-from copixiv.features.authors.resolve_names import resolve_author_names
+from copixiv.features.authors.resolve_names import collect_author_names, writeback_author_names
 from copixiv.core.models import EpubStatus
 from copixiv.core.models import TaskResult
 from copixiv.core.services import has_image_placeholders
@@ -159,8 +159,9 @@ def _no_images_ever_and_stale(txt_path: Path, novel_id: int) -> bool:
 async def sync_empty_name(ctx: TaskContext) -> TaskResult:
     """Fix novels whose ``author_name`` is NULL.
 
-    Delegates to :func:`resolve_author_names` which checks the local
-    ``author`` table first, then falls back to the Pixiv API.
+    Collects names via :func:`collect_author_names` (local ``author``
+    table first, then Pixiv API) and writes them back under the write
+    lock via :func:`writeback_author_names`.
     """
     from sqlalchemy import select as _select
     from copixiv.db import models
@@ -177,13 +178,16 @@ async def sync_empty_name(ctx: TaskContext) -> TaskResult:
         return TaskResult(summary="作者名同步: 无需修复")
 
     author_ids = {row.author_id for row in rows}
-    resolved = await resolve_author_names(
-        author_ids, client=ctx.client, uow=uow, write_lock=ctx.write_lock,
+    mapping = await collect_author_names(
+        author_ids, client=ctx.client, uow=uow,
     )
+    async with ctx.write_lock():
+        async with uow.begin():
+            await writeback_author_names(mapping, uow)
 
-    # 诚实统计：resolved 才是实际成功解析的作者数；novel 行由
+    # 诚实统计：mapping 才是实际成功解析的作者数；novel 行由
     # update_author_name 按作者批量补齐（rows 全部会被处理）。
-    author_count = len(resolved)
+    author_count = len(mapping)
     return TaskResult(
         summary=f"作者名同步: 处理 {len(rows)} 本空名小说 ({author_count} 位作者解析成功)"
     )
@@ -249,9 +253,9 @@ async def fix_series_index(ctx: TaskContext) -> TaskResult:
     Each series is fetched and committed immediately so partial
     progress is preserved even if the task times out.
     """
-    from copixiv.core.services import build_from_novel_info
+    from copixiv.core.draft import build_from_novel_info
     from copixiv.core.services import safe_get, safe_set
-    from .pipeline import _batch_upsert
+    from copixiv.features.novels.ingest import batch_upsert
 
     uow = ctx.uow
 
@@ -280,7 +284,7 @@ async def fix_series_index(ctx: TaskContext) -> TaskResult:
         novel_models = [build_from_novel_info(n) for n in novels]
         async with db_write():
             async with uow.begin():
-                await _batch_upsert(novel_models, uow)
+                await batch_upsert(novel_models, uow)
         done += 1
         processed += len(novel_models)
 

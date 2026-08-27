@@ -1,28 +1,37 @@
-"""Download + persistence pipeline shared by task functions.
+"""Unified ingestion pipeline — plan → download → gate → persist → writeback.
 
-These are the building blocks that registered tasks compose together:
-batch upserter, concurrent downloader, plan/persist phases, and
-small pure helpers for filtering / date-range generation.
+This module is the single ingestion pipeline for every novel-fetching task.
+Registered tasks (``tasks/novels.py``) are now thin adapters over
+:func:`ingest`: they only do the discovery/enumeration work (ranking,
+search, follow feeds, author catalogues) and then hand the collected novel
+list (or an explicit id list) to :func:`ingest`, which owns the rest:
+
+1. plan (read-only, no write lock) — decide what still needs downloading;
+2. download (concurrent, no DB access);
+3. asset gate (``image_downloader.await_all()``);
+4. author-name collect (lock-free) before the write transaction;
+5. persist + author-name writeback in a single ``db_write()`` transaction.
+
+Nothing here depends on :class:`~copixiv.tasks.kernel.TaskContext` — task
+adapters pass the fields they need (``session_factory``, ``client``,
+``file_storage``, ``image_downloader``) explicitly.
 """
 
 import asyncio
 import calendar
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from pathlib import Path
 
+from copixiv.db.uow import SqlUnitOfWork
 from copixiv.db.write_lock import db_write
 
-from copixiv.core.models import Novel
-from copixiv.core.services import is_chinese
+from copixiv.core.draft import NovelDraft, NovelInfoLike, build_from_novel_info
+from copixiv.core.services import is_chinese, safe_get
 from copixiv.features.novels.download_novel import fetch_novel_and_assets
 from copixiv.features.novels.persist import persist_novels
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.features.failures.repo import FailedNovelRepository
-
-from copixiv.core.services import (
-    NovelInfoLike, build_from_novel_info,
-)
-from copixiv.core.services import safe_get
+from copixiv.features.authors.resolve_names import collect_author_names, writeback_author_names
 
 from copixiv.log import logger
 
@@ -64,8 +73,8 @@ def _filter_chinese_novels(novels: list) -> list:
 # ---------------------------------------------------------------------------
 
 
-async def _batch_upsert(
-    novels: list[Novel], uow, force_update: list[str] | None = None,
+async def batch_upsert(
+    novels: list[NovelDraft], uow, force_update: list[str] | None = None,
 ) -> int:
     """Upsert novels and update author/series summaries.
 
@@ -80,7 +89,7 @@ async def _batch_upsert(
     novels = [n for n in novels if n]
     if novels:
         logger.info(
-            f"_batch_upsert: {count} newly inserted out of "
+            f"batch_upsert: {count} newly inserted out of "
             f"{len(novels)} input novels (sample id: {novels[0].id!r})"
         )
     return count
@@ -97,7 +106,7 @@ async def _download_novels(
     file_storage,
     image_downloader,
     redownload: bool = False,
-) -> tuple[list[Novel], list[tuple[int, str]]]:
+) -> tuple[list[NovelDraft], list[tuple[int, str]]]:
     """Download novels via webview concurrently.
 
     Fires all webview_novel calls in parallel — the client semaphore + LRU
@@ -108,11 +117,16 @@ async def _download_novels(
     never held across network I/O).  Failed downloads are returned as
     ``(novel_id, reason)`` records for the caller to persist inside the
     write transaction.
+
+    An empty ``webview_novel`` response (deleted/restricted novel) is
+    recorded as a failure too, with reason "webview_novel 返回空" — the
+    same ledger convention as the single-novel path, so both paths leave a
+    trace for permanently-gone content.
     """
     if not novel_ids:
         return [], []
 
-    async def _fetch_one(nid: int) -> Novel | None:
+    async def _fetch_one(nid: int) -> NovelDraft | None:
         data = await fetch_novel_and_assets(
             nid, client, file_storage, image_downloader, redownload,
         )
@@ -125,7 +139,7 @@ async def _download_novels(
         return_exceptions=True,
     )
 
-    valid: list[Novel] = []
+    valid: list[NovelDraft] = []
     failed_records: list[tuple[int, str]] = []
     for nid, result in zip(novel_ids, results):
         if isinstance(result, Exception):
@@ -133,7 +147,9 @@ async def _download_novels(
                 f"下载: #{nid} 失败: {type(result).__name__}: {result}"
             )
             failed_records.append((nid, str(result)))
-        elif result is not None:
+        elif result is None:
+            failed_records.append((nid, "webview_novel 返回空"))
+        else:
             valid.append(result)
 
     logger.info(
@@ -143,7 +159,7 @@ async def _download_novels(
 
 
 # ---------------------------------------------------------------------------
-# Batch handle (metadata + download)
+# Plan / persist phases
 # ---------------------------------------------------------------------------
 
 
@@ -152,7 +168,7 @@ async def _plan_batch(
     uow,
     redownload: bool = False,
     failed_repo=None,
-) -> tuple[list[Novel], list[int]]:
+) -> tuple[list[NovelDraft], list[int]]:
     """Plan phase (read-only): decide what to download and what to upsert.
 
     Must run outside the write lock — it only reads.  Returns
@@ -180,7 +196,7 @@ async def _plan_batch(
         f"{len(need_download)} need download",
     )
 
-    existing_meta: list[Novel] = []
+    existing_meta: list[NovelDraft] = []
     if not redownload:
         existing_meta = [
             build_from_novel_info(n) for n in novels if n.id in existing
@@ -191,22 +207,24 @@ async def _plan_batch(
 
 
 async def _persist_batch(
-    existing_meta: list[Novel],
-    downloaded: list[Novel],
+    existing_meta: list[NovelDraft],
+    downloaded: list[NovelDraft],
     uow,
     failed_records: list[tuple[int, str]] | None = None,
     failed_repo=None,
     titles: dict[int, str] | None = None,
-) -> tuple[list[str], set[int]]:
+) -> tuple[list[str], set[int], int]:
     """Persist phase (write-only): run inside ``db_write()`` + ``uow.begin()``.
 
     Records download failures, upserts existing metadata + downloaded
     novels, and forgets success markers — all in the caller's write
-    transaction.  Returns ``(titles, new_author_ids)``.
+    transaction.  Returns ``(titles, new_author_ids, new_count)`` where
+    ``new_count`` is the number of newly-inserted novels.
     """
     title_map = titles or {}
     titles: list[str] = []
     new_author_ids: set[int] = set()
+    new_count: int = 0
 
     # Failed downloads — recorded in the same write transaction.
     if failed_records and failed_repo is not None:
@@ -217,72 +235,120 @@ async def _persist_batch(
 
     # Metadata-only upsert for existing
     if existing_meta:
-        upserted = await _batch_upsert(existing_meta, uow)
+        upserted = await batch_upsert(existing_meta, uow)
+        new_count += upserted
         logger.info(
             f"_persist_batch: metadata upsert done for {upserted} existing novels",
         )
 
     if downloaded:
         success_ids = {d.id for d in downloaded}
-        await _batch_upsert(downloaded, uow)
+        upserted = await batch_upsert(downloaded, uow)
+        new_count += upserted
         if failed_repo is not None:
-            failed_repo.forget_many(success_ids)
+            # A novel that both downloaded successfully AND has a recorded
+            # failure (e.g. an asset-processing failure) keeps its ledger
+            # entry — forgetting it would erase the "downloaded but asset
+            # failed" trace.  Only clean successes clear the ledger.
+            failed_ids = {nid for nid, _ in (failed_records or [])}
+            failed_repo.forget_many(success_ids - failed_ids)
         titles = [d.title for d in downloaded if d.title]
         new_author_ids = {d.author_id for d in downloaded if d.author_id}
         logger.info(
             f"_persist_batch: {len(downloaded)} novels downloaded and upserted",
         )
 
-    return titles, new_author_ids
+    return titles, new_author_ids, new_count
 
 
-async def _batch_handle(
-    novels: list[NovelInfoLike],
+# ---------------------------------------------------------------------------
+# Ingest outcome
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class IngestOutcome:
+    """Result of one :func:`ingest` call.
+
+    ``titles`` lists the titles of novels downloaded this call;
+    ``new_author_ids`` is the set of authors seen among downloaded novels;
+    ``failed`` carries every recorded failure ``(novel_id, reason)``
+    (webview-empty / network / asset processing);
+    ``new_count`` is the number of newly-inserted novel rows (0 when the
+    novel already existed — lets the single-novel adapter distinguish
+    "downloaded" from "already known / skipped").
+    """
+
+    titles: list[str] = field(default_factory=list)
+    new_author_ids: set[int] = field(default_factory=set)
+    failed: list[tuple[int, str]] = field(default_factory=list)
+    new_count: int = 0
+
+
+# ---------------------------------------------------------------------------
+# The pipeline
+# ---------------------------------------------------------------------------
+
+
+async def ingest(
+    novels: list[NovelInfoLike] | None = None,
+    *,
+    ids: list[int] | None = None,
+    force: bool = False,
     session_factory,
     client=None,
     file_storage=None,
     image_downloader=None,
-    redownload: bool = False,
-) -> tuple[list[str], set[int]]:
+) -> IngestOutcome:
     """Process a batch of novels end-to-end: plan → download → persist.
 
     The pipeline keeps every database write inside ``db_write()`` and
     never holds a transaction (or the write lock) across network
     downloads.  Concurrent calls are safe: the plan phase reads without
-    the lock, the download phase touches no database, and the persist
-    phase serializes through ``db_write()``.
+    the lock, the download phase touches no database, the collect phase
+    resolves author names without the lock, and the persist phase
+    serializes through ``db_write()``.
 
-    Returns ``(titles, new_author_ids)`` — the titles and author IDs of
-    newly downloaded novels (which may have missing author names because
-    the webview API doesn't return them).  Callers should pass
-    ``new_author_ids`` to :func:`resolve_author_names` to fill in the gaps.
+    When *novels* is provided, the plan phase decides what to download.
+    When *novels* is omitted but *ids* is given, every id is downloaded
+    unconditionally (no plan) — this is the single-novel path
+    (``novel_fetch``); the failure ledger still gets its record/forget
+    semantics through the persist phase.
+
+    Author-name resolution is two-phase: :func:`collect_author_names` runs
+    *outside* the write lock (lock-free reads + network), and
+    :func:`writeback_author_names` runs *inside* the same ``db_write()``
+    transaction as the persist — the final D3 shape.
     """
-    if not novels:
-        return [], set()
+    if not novels and not ids:
+        return IngestOutcome()
 
-    from copixiv.db.uow import SqlUnitOfWork
+    uow = SqlUnitOfWork(session_factory)
 
     # 1. Plan — read-only, short transaction, no lock.
-    uow = SqlUnitOfWork(session_factory)
-    async with uow.begin():
-        existing_meta, download_ids = await _plan_batch(
-            novels, uow, redownload=redownload, failed_repo=FailedNovelRepository(uow.session),
-        )
+    if novels:
+        async with uow.begin():
+            existing_meta, download_ids = await _plan_batch(
+                novels, uow, redownload=force,
+                failed_repo=FailedNovelRepository(uow.session),
+            )
+    else:
+        existing_meta: list[NovelDraft] = []
+        download_ids: list[int] = list(ids or [])
 
     # 2. Download — concurrent network/file I/O, no database.
-    downloaded: list[Novel] = []
+    downloaded: list[NovelDraft] = []
     failed_records: list[tuple[int, str]] = []
-    if download_ids:
-        if client and file_storage and image_downloader:
-            downloaded, failed_records = await _download_novels(
-                download_ids, client, file_storage, image_downloader,
-                redownload=redownload,
-            )
-        else:
-            logger.warning(
-                f"_batch_handle: {len(download_ids)} novels need download "
-                f"but no client/storage provided — skipping download",
-            )
+    if download_ids and client is not None:
+        downloaded, failed_records = await _download_novels(
+            download_ids, client, file_storage, image_downloader,
+            redownload=force,
+        )
+    elif download_ids:
+        logger.warning(
+            f"ingest: {len(download_ids)} novels need download "
+            f"but no client provided — skipping download",
+        )
 
     # 2.5 Gate — wait for in-flight image/EPUB tasks before persisting, so
     # the write transaction only sees novels whose files are actually on
@@ -293,24 +359,45 @@ async def _batch_handle(
         asset_failures = await image_downloader.await_all()
         if asset_failures:
             logger.warning(
-                f"_batch_handle: {len(asset_failures)} novels failed "
+                f"ingest: {len(asset_failures)} novels failed "
                 f"image/EPUB processing",
             )
 
-    # 3. Persist — one write transaction inside the global write lock.
-    # Titles accompany the failure records so the "下载失败" view can show
-    # a human-readable label without querying Pixiv again.
-    titles_by_id = {
-        n.id: n.title for n in novels if getattr(n, "title", None)
+    # 3. Collect author names — lock-free, before the write transaction.
+    new_author_ids: set[int] = {
+        d.author_id for d in downloaded if d.author_id
     }
+    mapping: dict[int, str] = {}
+    if new_author_ids and client is not None:
+        mapping = await collect_author_names(new_author_ids, uow=uow, client=client)
+
+    # 4. Persist — one write transaction inside the global write lock.
+    # Titles accompany the failure records so the "下载失败" view can show
+    # a human-readable label without querying Pixiv again.  In the *ids*
+    # path there is no novelInfo payload, so downloaded titles fill in the
+    # label for asset failures.
+    titles_by_id: dict[int, str] = {}
+    for n in (novels or []):
+        if getattr(n, "title", None):
+            titles_by_id.setdefault(n.id, n.title)
+    for d in downloaded:
+        if d.title:
+            titles_by_id.setdefault(d.id, d.title)
+
     async with db_write():
         async with uow.begin():
-            titles, new_author_ids = await _persist_batch(
+            titles, _new_author_ids, new_count = await _persist_batch(
                 existing_meta, downloaded, uow,
                 failed_records=failed_records + asset_failures,
                 failed_repo=FailedNovelRepository(uow.session),
                 titles=titles_by_id,
             )
+            if mapping:
+                await writeback_author_names(mapping, uow)
 
-    return titles, new_author_ids
-
+    return IngestOutcome(
+        titles=titles,
+        new_author_ids=new_author_ids,
+        failed=failed_records + asset_failures,
+        new_count=new_count,
+    )

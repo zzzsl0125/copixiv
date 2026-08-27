@@ -11,7 +11,7 @@
 | `src/copixiv/app.py` | 组合根：create_app / lifespan / 中间件 / 异常映射 / 启动项 / main() |
 | `src/copixiv/config.py` | 配置模型与加载 |
 | `src/copixiv/deps.py` | FastAPI 依赖（get_session_factory / get_app_config / get_file_storage / get_task_manager / get_uow / get_write_uow / parse_json_param） |
-| `core/` | 纯 Python：models.py / services.py / exceptions.py（零 IO、零框架、零 SQLAlchemy） |
+| `core/` | 纯 Python：models.py / services.py / exceptions.py / draft.py（零 IO、零框架、零 SQLAlchemy） |
 | `db/` | engine / uow（纯事务边界）/ write_lock / backup / models / constants / base |
 | `pixiv/` | pixivpy3 防腐层（唯一允许 import pixivpy3 的目录） |
 | `storage/` | file_storage / image_downloader / epub 子包 |

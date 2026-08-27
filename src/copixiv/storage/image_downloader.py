@@ -9,6 +9,7 @@ in flight.
 
 import asyncio
 import atexit
+import copy
 import os
 import threading
 import time
@@ -18,7 +19,7 @@ from typing import Any
 
 import requests
 
-from copixiv.core.models import Novel
+from copixiv.core.draft import NovelDraft
 from copixiv.pixiv.http import create_image_session, pick_image_url
 from copixiv.log import logger
 
@@ -117,13 +118,12 @@ class ImageDownloader:
                 local_session.close()
 
     async def process_novel_assets(
-        self, novel: Novel, force: bool = False,
+        self, novel: NovelDraft, force: bool = False,
     ) -> None:
         """Download all assets for a novel and attempt EPUB creation.
 
-        Takes the domain :class:`Novel` (typed contract, docs/MODULARITY.md
-        §M5); runs in the thread pool and returns immediately
-        (fire-and-forget).
+        Takes the write-path :class:`~copixiv.core.draft.NovelDraft`;
+        runs in the thread pool and returns immediately (fire-and-forget).
         """
         path_str = novel.path
         if not path_str:
@@ -144,7 +144,7 @@ class ImageDownloader:
 
         try:
             future = self._executor.submit(
-                self._download_assets, novel.model_copy(),
+                self._download_assets, copy.copy(novel),
             )
         except Exception:
             with self._in_flight_lock:
@@ -163,7 +163,7 @@ class ImageDownloader:
         """Wait for all in-flight asset tasks (image download + EPUB) to finish.
 
         Downloads stay fire-and-forget, but callers that need "files are
-        ready before I persist" — the batch pipeline before its persist
+        ready before I persist" — the ingest pipeline before its persist
         phase, single-novel tasks before their upsert — must ``await``
         this.  Uses ``asyncio.wrap_future`` so waiting never blocks the
         event loop.
@@ -188,7 +188,7 @@ class ImageDownloader:
                 failures.append((novel_id, str(exc)))
         return failures
 
-    def _download_assets(self, novel: Novel) -> str | None:
+    def _download_assets(self, novel: NovelDraft) -> str | None:
         """Synchronous asset download + EPUB creation (runs in thread pool).
 
         Returns ``None`` on success, or a failure reason string so the

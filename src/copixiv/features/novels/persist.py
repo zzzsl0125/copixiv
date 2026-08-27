@@ -1,5 +1,5 @@
-"""Canonical novel-persist helper — shared by the single-novel use case
-and the batch task pipeline.
+"""Canonical novel-persist helper — shared by the ingest pipeline and the
+single-novel task.
 
 Owns the invariant that every novel upsert is accompanied by author/series
 placeholder rows (FK constraints) and refreshed aggregate summaries.
@@ -10,7 +10,7 @@ starts or commits a transaction itself.
 
 from __future__ import annotations
 
-from copixiv.core.models import Novel
+from copixiv.core.draft import NovelDraft
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.novels.repo import (
     SQLAlchemyNovelRepository,
@@ -21,7 +21,7 @@ from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 
 async def persist_novels(
     uow: SqlUnitOfWork,
-    novels: list[Novel],
+    novels: list[NovelDraft],
     force_update: list[str] | None = None,
 ) -> int:
     """Upsert *novels* and refresh author/series summaries.

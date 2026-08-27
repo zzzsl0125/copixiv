@@ -1,22 +1,22 @@
-"""Unit tests for DownloadNovelUseCase + persist_novels (application layer).
+"""Unit tests for the ``ingest`` pipeline (features/novels/ingest.py).
 
-Covers the refactored single-novel download path (``novel_fetch`` task
-delegates here) with fake client/storage/downloader — no network:
+Covers the refactored single-novel ingestion path (the ``novel_fetch``
+task delegates here) with fake client/storage/downloader — no network:
 
 - success path: fetch → save text → persist (author/series placeholders,
-  FTS-adjacent upsert) → author-name resolution
-- already-known skip path (upsert returns 0)
-- fetch-failure path: ``webview_novel`` returns None → failed_novel trace
+  upsert) → author-name two-phase writeback
+- already-known skip path (upsert returns 0 → ``outcome.new_count == 0``)
+- fetch-failure path: ``webview_novel`` returns None → ``outcome.failed``
+  and a failed_novel trace
 - asset-failure path: await_all failures recorded in the same transaction
 - persist_novels invariants: FK placeholders + refreshed summaries
 """
 
 from types import SimpleNamespace
 
-from copixiv.features.novels.download_novel import DownloadNovelUseCase
+from copixiv.features.novels.ingest import ingest
 from copixiv.features.novels.persist import persist_novels
-from copixiv.core.services import build_novel
-from copixiv.db.write_lock import DbWriteLock
+from copixiv.core.draft import build_novel
 from copixiv.db.models import (
     Author, FailedNovel, Novel, Series,
 )
@@ -56,7 +56,7 @@ class FakeImageDownloader:
         self.processed: list[int] = []
 
     async def process_novel_assets(self, data, force=False):
-        # data is now a Novel domain model (M9 contract)
+        # data is now a write-path NovelDraft (K3 contract)
         self.processed.append(data.id)
 
     async def await_all(self):
@@ -74,34 +74,35 @@ def _webview(novel_id: int, title: str = "新小说", text: str = "正文内容"
     )
 
 
-def _make_use_case(session_factory, tmp_path, client, downloader):
-    return DownloadNovelUseCase(
+def _ingest_kwargs(session_factory, tmp_path, client, downloader):
+    return dict(
+        session_factory=session_factory,
         client=client,
-        uow=SqlUnitOfWork(session_factory),
         file_storage=FakeStorage(tmp_path),
         image_downloader=downloader,
-        write_lock=DbWriteLock(),
     )
 
 
-class TestDownloadNovelUseCase:
+class TestIngest:
     async def test_download_new_novel_persists(
         self, session_factory, tmp_path,
     ):
         client = FakeClient(_webview(100))
         storage = FakeStorage(tmp_path)
         downloader = FakeImageDownloader()
-        use_case = DownloadNovelUseCase(
-            client=client, uow=SqlUnitOfWork(session_factory),
-            file_storage=storage, image_downloader=downloader,
-            write_lock=DbWriteLock(),
+
+        out = await ingest(
+            ids=[100],
+            session_factory=session_factory,
+            client=client,
+            file_storage=storage,
+            image_downloader=downloader,
         )
 
-        result = await use_case.execute(100)
-
-        assert result.summary == "下载完成: 新小说"
-        assert result.new_novel_titles == ["新小说"]
-        assert result.new_novel_count == 1
+        assert out.titles == ["新小说"]
+        assert out.new_count == 1
+        assert out.new_author_ids == {1}
+        assert out.failed == []
         assert storage.saved == [(100, "新小说", False)]
         assert downloader.processed == [100]
 
@@ -124,13 +125,12 @@ class TestDownloadNovelUseCase:
             s.commit()
 
         client = FakeClient(_webview(100))
-        use_case = _make_use_case(
-            session_factory, tmp_path, client, FakeImageDownloader(),
+        out = await ingest(
+            ids=[100],
+            **_ingest_kwargs(session_factory, tmp_path, client, FakeImageDownloader()),
         )
 
-        result = await use_case.execute(100)
-
-        assert result.new_novel_count == 1
+        assert out.new_count == 1
         with session_factory() as s:
             novel = s.get(Novel, 100)
             assert novel is not None
@@ -148,14 +148,12 @@ class TestDownloadNovelUseCase:
             s.commit()
 
         client = FakeClient(_webview(100))
-        use_case = _make_use_case(
-            session_factory, tmp_path, client, FakeImageDownloader(),
+        out = await ingest(
+            ids=[100],
+            **_ingest_kwargs(session_factory, tmp_path, client, FakeImageDownloader()),
         )
 
-        result = await use_case.execute(100)
-
-        assert "已存在，跳过" in result.summary
-        assert result.new_novel_count == 0
+        assert out.new_count == 0
         # Author name already known locally → no API call for it
         assert client.user_detail_calls == []
 
@@ -163,14 +161,14 @@ class TestDownloadNovelUseCase:
         self, session_factory, tmp_path,
     ):
         client = FakeClient(None)  # webview_novel returns None (deleted novel)
-        use_case = _make_use_case(
-            session_factory, tmp_path, client, FakeImageDownloader(),
+        out = await ingest(
+            ids=[999],
+            **_ingest_kwargs(session_factory, tmp_path, client, FakeImageDownloader()),
         )
 
-        result = await use_case.execute(999)
-
-        assert "获取失败" in result.summary
-        assert result.new_novel_titles == []
+        assert (999, "webview_novel 返回空") in out.failed
+        assert out.titles == []
+        assert out.new_count == 0
         with session_factory() as s:
             row = s.get(FailedNovel, 999)
             assert row is not None
@@ -182,12 +180,14 @@ class TestDownloadNovelUseCase:
     ):
         client = FakeClient(_webview(100))
         downloader = FakeImageDownloader(failures=[(100, "图片下载失败")])
-        use_case = _make_use_case(session_factory, tmp_path, client, downloader)
-
-        result = await use_case.execute(100)
+        out = await ingest(
+            ids=[100],
+            **_ingest_kwargs(session_factory, tmp_path, client, downloader),
+        )
 
         # Novel still persisted, failure recorded alongside
-        assert result.new_novel_count == 1
+        assert out.new_count == 1
+        assert (100, "图片下载失败") in out.failed
         with session_factory() as s:
             assert s.get(Novel, 100) is not None
             row = s.get(FailedNovel, 100)
@@ -197,12 +197,14 @@ class TestDownloadNovelUseCase:
     async def test_redownload_forces_save(self, session_factory, tmp_path):
         client = FakeClient(_webview(100))
         storage = FakeStorage(tmp_path)
-        use_case = DownloadNovelUseCase(
-            client=client, uow=SqlUnitOfWork(session_factory),
-            file_storage=storage, image_downloader=FakeImageDownloader(),
-            write_lock=DbWriteLock(),
+        out = await ingest(
+            ids=[100],
+            force=True,
+            session_factory=session_factory,
+            client=client,
+            file_storage=storage,
+            image_downloader=FakeImageDownloader(),
         )
-        await use_case.execute(100, redownload=True)
         assert storage.saved == [(100, "新小说", True)]
 
     async def test_success_forgets_failure_record(self, session_factory, tmp_path):
@@ -216,13 +218,12 @@ class TestDownloadNovelUseCase:
             s.commit()
 
         client = FakeClient(_webview(100))
-        use_case = _make_use_case(
-            session_factory, tmp_path, client, FakeImageDownloader(),
+        out = await ingest(
+            ids=[100],
+            **_ingest_kwargs(session_factory, tmp_path, client, FakeImageDownloader()),
         )
 
-        result = await use_case.execute(100)
-
-        assert result.new_novel_count == 1
+        assert out.new_count == 1
         with session_factory() as s:
             assert s.get(FailedNovel, 100) is None
             assert s.get(Novel, 100) is not None

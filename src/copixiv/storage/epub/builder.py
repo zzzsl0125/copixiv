@@ -9,7 +9,7 @@ from pathlib import Path
 from PIL import Image
 from ebooklib import epub
 
-from copixiv.core.models import Novel
+from copixiv.core.draft import NovelDraft
 from copixiv.core.services import has_image_placeholders
 
 from copixiv.log import logger
@@ -33,11 +33,12 @@ h1 { text-align: center; }
 class EpubBuilder:
     """Creates EPUB files from downloaded novel text and images."""
 
-    def create_epub(self, novel: Novel, compress_quality: int = 75) -> bool:
-        """Build an EPUB from the domain *novel* model.
+    def create_epub(self, novel: NovelDraft, compress_quality: int = 75) -> bool:
+        """Build an EPUB from the write-path *novel* draft.
 
         Typed input (docs/MODULARITY.md §M5): the builder consumes the
-        domain :class:`Novel`, never a raw dict.
+        write-path :class:`~copixiv.core.draft.NovelDraft`,
+        never a raw dict.
 
         Returns True if the EPUB was written successfully.
         """
@@ -220,7 +221,7 @@ class EpubBuilder:
 
     @staticmethod
     def _build_image_map(
-        parent_dir: Path, novel_id: str, novel: Novel
+        parent_dir: Path, novel_id: str, novel: NovelDraft
     ) -> dict[str, Path]:
         image_map: dict[str, Path] = {}
         known: list[tuple[str, str]] = []

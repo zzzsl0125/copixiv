@@ -43,7 +43,7 @@ class FailedNovelRepository:
 
         Uses SQLite ``ON CONFLICT DO UPDATE`` so the whole operation is
         a single atomic statement — no read-then-write race.  *title* is
-        only overwritten when a non-empty value is provided (the batch
+        only overwritten when a non-empty value is provided (the ingest
         pipeline knows the title; other callers may not), and
         ``last_failed_at`` is always bumped to now.
         """

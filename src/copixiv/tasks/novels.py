@@ -17,8 +17,8 @@ from datetime import datetime, timedelta
 
 from pydantic import BaseModel
 
-from copixiv.features.authors.resolve_names import resolve_author_names
-from copixiv.features.novels.download_novel import DownloadNovelUseCase
+from copixiv.features.authors.resolve_names import collect_author_names, writeback_author_names
+from copixiv.features.novels.ingest import ingest, _filter_chinese_novels, _month_ranges
 from copixiv.core.models import TaskResult
 from copixiv.core.services import safe_get
 from copixiv.db.write_lock import db_write
@@ -26,11 +26,6 @@ from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 from copixiv.log import logger
 
 from .kernel import TaskContext
-from .pipeline import (
-    _batch_handle,
-    _filter_chinese_novels,
-    _month_ranges,
-)
 from .kernel import register
 
 
@@ -131,14 +126,24 @@ async def _fan_out_author_fetch(
 @register("novel_fetch", args=NovelFetchArgs)
 async def novel_fetch(args: NovelFetchArgs, ctx: TaskContext) -> TaskResult:
     """Download and persist a single novel by ID."""
-    use_case = DownloadNovelUseCase(
+    out = await ingest(
+        ids=[args.id],
+        force=args.redownload,
+        session_factory=ctx.session_factory,
         client=ctx.client,
-        uow=ctx.uow,
         file_storage=ctx.file_storage,
         image_downloader=ctx.image_downloader,
-        write_lock=ctx.write_lock,
     )
-    return await use_case.execute(args.id, redownload=args.redownload)
+    if out.failed:
+        summary = f"小说 #{args.id} 获取失败"
+    elif out.titles and out.new_count:
+        summary = f"下载完成: {out.titles[0]}"
+    else:
+        summary = "已存在，跳过"
+    return TaskResult(
+        summary=summary,
+        new_novel_titles=out.titles,
+    )
 
 
 @register("novel_follow", args=NovelFollowArgs)
@@ -150,7 +155,7 @@ async def novel_follow(args: NovelFollowArgs, ctx: TaskContext) -> TaskResult:
     authenticated account's own following list.
 
     Collect-then-persist: the feed is fetched without touching the
-    database, then processed by :func:`_batch_handle`.
+    database, then processed by :func:`ingest`.
     """
     fetch_til = datetime.now().astimezone() - timedelta(days=args.days)
     async with ctx.client.account_rule(
@@ -159,21 +164,16 @@ async def novel_follow(args: NovelFollowArgs, ctx: TaskContext) -> TaskResult:
         resp = await ctx.client.novel_follow(fetch_til=fetch_til)
 
     novels = _filter_chinese_novels(safe_get(resp, "novels", []))
-    titles, new_author_ids = await _batch_handle(
-        novels, ctx.session_factory,
+    out = await ingest(
+        novels, force=args.force,
+        session_factory=ctx.session_factory,
         client=ctx.client, file_storage=ctx.file_storage,
-        image_downloader=ctx.image_downloader, redownload=args.force,
+        image_downloader=ctx.image_downloader,
     )
 
-    if new_author_ids:
-        await resolve_author_names(
-            new_author_ids,
-            client=ctx.client, uow=ctx.uow, write_lock=ctx.write_lock,
-        )
-
     return TaskResult(
-        summary=f"关注更新: 新增 {len(titles)} 本小说",
-        new_novel_titles=titles,
+        summary=f"关注更新: 新增 {len(out.titles)} 本小说",
+        new_novel_titles=out.titles,
     )
 
 
@@ -183,10 +183,10 @@ async def author_fetch(args: AuthorFetchArgs, ctx: TaskContext) -> TaskResult:
 
     Collect-then-persist flow: the whole catalogue is fetched without
     touching the database (client accumulates pages into ``resp.novels``),
-    then :func:`_batch_handle` downloads new novels concurrently and
-    persists everything in a single write transaction inside
-    ``db_write()``.  No transaction is ever held across network I/O, and
-    no write happens outside the global write lock.
+    then :func:`ingest` downloads new novels concurrently and persists
+    everything in a single write transaction inside ``db_write()``.  No
+    transaction is ever held across network I/O, and no write happens
+    outside the global write lock.
     """
     session_factory = ctx.session_factory
     uow = ctx.uow
@@ -214,10 +214,11 @@ async def author_fetch(args: AuthorFetchArgs, ctx: TaskContext) -> TaskResult:
     novels = _filter_chinese_novels(safe_get(resp, "novels", []))
 
     # Persist — plan → download → write, writes serialized by db_write().
-    titles, _new_author_ids = await _batch_handle(
-        novels, session_factory,
+    out = await ingest(
+        novels, force=args.redownload,
+        session_factory=session_factory,
         client=ctx.client, file_storage=ctx.file_storage,
-        image_downloader=ctx.image_downloader, redownload=args.redownload,
+        image_downloader=ctx.image_downloader,
     )
 
     # Mark the author as updated today (same write discipline).
@@ -226,16 +227,18 @@ async def author_fetch(args: AuthorFetchArgs, ctx: TaskContext) -> TaskResult:
             await SQLAlchemyAuthorRepository(uow.session).update_last_update(args.author_id)
 
     # Resolve author name — webview API doesn't return it.
-    resolved = await resolve_author_names(
-        {args.author_id},
-        client=ctx.client, uow=uow, write_lock=ctx.write_lock,
+    mapping = await collect_author_names(
+        {args.author_id}, uow=uow, client=ctx.client,
     )
-    name = resolved.get(args.author_id, "")
+    async with db_write():
+        async with uow.begin():
+            await writeback_author_names(mapping, uow)
+    name = mapping.get(args.author_id, "")
 
     label = name or f"#{args.author_id}"
     return TaskResult(
-        summary=f"作者 {label}: 新增 {len(titles)} 本小说",
-        new_novel_titles=titles,
+        summary=f"作者 {label}: 新增 {len(out.titles)} 本小说",
+        new_novel_titles=out.titles,
     )
 
 
@@ -283,21 +286,15 @@ async def author_special_follow(ctx: TaskContext) -> TaskResult:
         if novels:
             all_novels.extend(novels)
 
-    titles, new_author_ids = await _batch_handle(
-        all_novels, ctx.session_factory,
+    out = await ingest(
+        all_novels, session_factory=ctx.session_factory,
         client=ctx.client, file_storage=ctx.file_storage,
         image_downloader=ctx.image_downloader,
     )
 
-    if new_author_ids:
-        await resolve_author_names(
-            new_author_ids,
-            client=ctx.client, uow=ctx.uow, write_lock=ctx.write_lock,
-        )
-
     return TaskResult(
-        summary=f"特别关注: 新增 {len(titles)} 本小说",
-        new_novel_titles=titles,
+        summary=f"特别关注: 新增 {len(out.titles)} 本小说",
+        new_novel_titles=out.titles,
     )
 
 

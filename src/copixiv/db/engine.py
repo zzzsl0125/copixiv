@@ -25,7 +25,7 @@ def create_database_engine(
     Pool config: QueuePool(pool_size=6, max_overflow=12) — six persistent
     connections for concurrent reads (WAL mode supports multiple readers)
     plus up to 12 overflow connections for bursts.  Concurrency is kept
-    in check by the page-handler semaphore in ``tasks/pipeline.py``, so
+    in check by the page-handler semaphore in ``copixiv.features.novels.ingest``, so
     the pool only needs to cover that cap plus API traffic.
 
     Memory budget: each connection's ``cache_size=-50000`` holds up to
