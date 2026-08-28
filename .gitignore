@@ -26,6 +26,7 @@ frontend/dist-ssr/
 database/*.db
 database/*.db-shm
 database/*.db-wal
+database/*.db.lock
 database/backups/
 
 # === Log files ===
