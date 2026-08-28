@@ -557,6 +557,36 @@ def _load_accounts(
     logger.warning("No Pixiv accounts loaded — API calls will fail.")
 
 
+def _rebuild_fts_if_needed(session_factory: sessionmaker[Session]) -> None:
+    """Ensure ``novel_fts`` is a char-gram index; rebuild once if legacy/missing.
+
+    Alembic migrations create/replace ``novel_fts`` (see the char-gram
+    migration), but a pre-existing database may still hold a legacy
+    ``porter unicode61`` / jieba table, an old external-content table, or a
+    table whose row count is stale relative to ``novel``.
+    ``FTSManager.needs_rebuild()`` is the single upgrade self-heal entry
+    point: when it reports True we rebuild the whole index here in one-shot
+    (idempotent, ~7-15 s on a full corpus) so keyword search is never served
+    against a legacy or stale index.
+
+    MUST stay synchronous and loop-agnostic: the uvicorn factory invokes
+    ``create_app()`` INSIDE a running event loop (``python main.py`` →
+    ``uvicorn.run`` → ``config.load()``), so ``asyncio.run()`` here would
+    raise "cannot be called from a running event loop".  The write lock
+    (``db_write``) is unnecessary in this path: startup is single-threaded
+    and pre-serve, and the process already holds the exclusive instance
+    lock (``flock``, acquired before engine creation), so no concurrent
+    writer can exist.
+    """
+    with session_factory() as session:
+        manager = FTSManager(session)
+        if not manager.needs_rebuild():
+            return
+        logger.info("检测到旧/缺失 FTS 索引，正在重建为 char-gram（一次性）...")
+        manager.batch_rebuild_fts()
+        session.commit()
+
+
 def _build(config_path: str | None = None) -> _AppSingletons:
     """Create and wire all singletons (the old ``Container.build()``).
 
@@ -589,8 +619,11 @@ def _build(config_path: str | None = None) -> _AppSingletons:
     init_database(engine, db_path_str)
     logger.info("Database initialized (Alembic migrations applied).")
 
-    # FTS warm-up
-    FTSManager.warm_up()
+    # Ensure the novel_fts index is the char-gram form — Alembic migrations
+    # create/replace the table, but a pre-existing database may still hold a
+    # legacy porter/jieba or external-content table, or a stale index.  This
+    # is the one-time upgrade self-heal rebuild (~7-15 s, idempotent).
+    _rebuild_fts_if_needed(session_factory)
 
     # Database cache warm-up — preload hot index pages into OS cache
     _warmup_database_cache(session_factory, db_path_str)

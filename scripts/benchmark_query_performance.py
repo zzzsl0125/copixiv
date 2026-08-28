@@ -154,7 +154,7 @@ print("=" * 78)
 s = make_session("MEMORY")
 repo = SQLAlchemyNovelRepository(s)
 
-# warm up shared caches (SQLite pages, FTS, jieba)
+# warm up shared caches (SQLite pages, FTS, gram)
 repo._get_novels_sync(order_by="random", per_page=30, min_like=500, min_text=3000)
 repo._get_novels_sync(queries={"恋": "keyword"}, order_by="like",
                       order_direction="DESC", per_page=30, min_like=0, min_text=0)

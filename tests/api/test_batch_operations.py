@@ -19,7 +19,7 @@ from copixiv.core.exceptions import DomainError
 from copixiv.db.models import (
     Author, Novel, Tag, NovelTag,
 )
-from copixiv.features.novels.fts import FTSManager
+from copixiv.features.novels.fts import FTSManager, gram_tokenize
 from copixiv.features.novels import api as novels
 
 
@@ -272,7 +272,7 @@ class TestBatchTags:
                     "SELECT tags FROM novel_fts WHERE rowid = 1"
                 )
             ).scalar()
-        assert row is not None and "幻想" in row
+        assert row is not None and gram_tokenize("幻想") in row
 
     def test_unknown_operation_is_400(self, client, session_factory):
         _seed(session_factory, 1, "标题1", str(Path("/tmp/1.txt")))

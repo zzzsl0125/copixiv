@@ -37,7 +37,7 @@ from copixiv.db.base import (
 )
 from copixiv.db.data_version import current_epoch
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
-from copixiv.features.novels.fts import FTSManager
+from copixiv.features.novels.fts import FTSManager, gram_tokenize
 
 # =========================================================================
 # Query builder — base (FTS availability cache, pagination/ordering)
@@ -50,13 +50,6 @@ from copixiv.features.novels.fts import FTSManager
 # there is no need to probe it on every single keyword query.
 # ------------------------------------------------------------------
 _fts_available: bool | None = None
-
-# FTS5 query-language reserved words — kept out of MATCH queries because
-# a bare reserved word is parsed as an operator (e.g. ``AND OR`` is a
-# syntax error), turning user input into a 500 response.
-_FTS5_RESERVED: frozenset[str] = frozenset({
-    "and", "or", "not", "near",
-})
 
 
 def reset_fts_cache() -> None:
@@ -106,51 +99,43 @@ class BaseQueryBuilder:
     def _build_fts_query_string(keyword_string: str) -> str:
         """Convert a user keyword string into an FTS5-safe AND query.
 
-        Tokenises through jieba so that the search query matches the same
-        tokens that were indexed (the FTS index was built with jieba too).
-        Tokens containing spaces are wrapped in double-quotes for phrase
-        matching; single tokens are left bare.  Tokens that are pure
-        punctuation / FTS5 operators are dropped to avoid syntax errors.
+        Char-gram semantics (see :func:`copixiv.features.novels.fts.gram_tokenize`):
+
+        * the input is split on whitespace into segments — whitespace is an
+          explicit ``AND`` (mirrors the old "space-separated tokens" UX);
+        * a segment made up entirely of non-alphanumeric characters (a
+          "pure punctuation" segment such as ``---``) carries no search
+          meaning and is dropped — matching the rule that a query that
+          collapses to nothing filters nothing;
+        * every other segment is char-grammed (``gram_tokenize``) and the
+          whole result wrapped in double quotes to form a FTS5 phrase —
+          a no-space query is therefore an exact contiguous-substring
+          match (``哈利波特`` → ``"哈 利 波 特"``);
+        * segments are joined with `` AND ``; if nothing survives the
+          empty contract is preserved (``""`` means "no MATCH clause").
+
+        Because each emitted term is a quoted phrase, the FTS5 query
+        language (``AND``/``OR``/``NOT``/``NEAR``) is no longer a syntax
+        risk and no reserved-word filtering is needed.  And because
+        ``gram_tokenize`` maps every non-alphanumeric character — including
+        ``"`` and ``'`` — to the placeholder ``龖``, the emitted phrase can
+        never contain a quote character, so neither FTS5 string-literal
+        escaping nor the old single-quote stripping is required.
         """
         if not keyword_string.strip():
             return ""
 
-        # Tokenise the same way the index was built (see FTSManager._tokenize)
-        try:
-            import jieba
-            raw_tokens = list(jieba.cut(keyword_string, HMM=True))
-            # Only keep tokens that contain at least one alphanumeric / CJK
-            # character — pure-punctuation tokens (like "-") are invalid in
-            # FTS5 MATCH queries.
-            tokens = [
-                t.strip() for t in raw_tokens
-                if t.strip() and any(ch.isalnum() or ord(ch) > 127 for ch in t)
-            ]
-        except ImportError:
-            tokens = [t for t in keyword_string.split() if any(ch.isalnum() for ch in t)]
+        phrases: list[str] = []
+        for seg in keyword_string.split():
+            # Drop pure-punctuation segments (e.g. ``---``): they contain no
+            # alphanumeric character, so they cannot form a meaningful phrase.
+            if not any(ch.isalpha() or ch.isnumeric() for ch in seg):
+                continue
+            phrases.append(f'"{gram_tokenize(seg)}"')
 
-        if not tokens:
+        if not phrases:
             return ""
-
-        # The MATCH query is passed as a bound parameter (see
-        # ``_where_fts_filter``), so no SQL-string escaping is needed here.
-        # This step only keeps the query valid as an FTS5 expression:
-        # tokens containing spaces are wrapped in double-quotes to form a
-        # phrase; a bare single-quote inside a token would otherwise start
-        # an unterminated FTS5 string literal (syntax error), so such
-        # quotes are stripped; and tokens that are FTS5 reserved words
-        # (AND/OR/NOT/NEAR) are dropped — left bare they'd be parsed as
-        # operators and could turn the whole query into a syntax error.
-        tokens = [
-            t for t in tokens
-            if t.strip().lower() not in _FTS5_RESERVED
-        ]
-        if not tokens:
-            return ""
-
-        return " AND ".join(
-            f'"{t}"' if " " in t else t.replace("'", "") for t in tokens
-        )
+        return " AND ".join(phrases)
 
     def _apply_cursor(
         self, stmt: Select, cursor: dict | None, order_by: str,
@@ -686,6 +671,14 @@ class NovelQueryBuilder(BaseQueryBuilder):
 
         fts_query = self._build_fts_query_string(keyword_string)
         self._fts_query = fts_query
+
+        # An empty query (e.g. a keyword made entirely of punctuation, or a
+        # keyword that collapsed to nothing) means "no MATCH clause".  FTS5
+        # rejects an empty MATCH expression with a syntax error, so emit no
+        # filter rather than ``MATCH ''``.  (This is the "纯标点查询 = 无过滤"
+        # contract — no scattered-AND fallback here, per decision record §7.)
+        if not fts_query:
+            return stmt
 
         # Check that the FTS virtual table exists in the database.
         # Result is cached at module level — only probes DB once per process.

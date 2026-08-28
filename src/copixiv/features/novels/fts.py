@@ -1,9 +1,17 @@
-r"""FTS5 full-text search manager — jieba-powered indexing.
+r"""FTS5 full-text search manager — character-unigram (char-gram) indexing.
+
+The index stores each text column as a single-space-joined sequence of
+character tokens (see :func:`gram_tokenize`), indexed with the default
+``unicode61`` tokeniser.  Query construction (``repo._build_fts_query_string``)
+turns a keyword into quoted character phrases joined by ``AND``, so a
+no-space query is an exact contiguous-substring match and whitespace is an
+explicit AND — no external segmentation dictionary needed.
 
 Features:
 - Idempotent rebuild with ``CREATE VIRTUAL TABLE IF NOT EXISTS``
 - Incremental and batch FTS updates
 - FTS health check via ``INSERT INTO ..._fts(..._fts) VALUES('rebuild')``
+- ``needs_rebuild()`` upgrade self-heal entry point
 """
 
 from __future__ import annotations
@@ -22,41 +30,67 @@ if TYPE_CHECKING:
 from copixiv.log import logger
 
 
+# The placeholder character substituted for any non-alphanumeric character
+# (punctuation etc.) on BOTH the index side and the query side.  This is
+# U+9F96 (a CJK unified ideograph), chosen because it is a token character
+# for the ``unicode61`` tokeniser, resides in the same Unicode block as CJK
+# text, and is expected to appear ~0 times in the corpus (so it never
+# collides with real content).  Index and query MUST use the same
+# placeholder — see :func:`gram_tokenize`.
+_GRAM_PLACEHOLDER = "龖"
+
+
+def gram_tokenize(text: str) -> str:
+    """Convert *text* into character-unigram token text for FTS5 indexing.
+
+    This is the single source of truth shared by the index side
+    (FT5 insertion) and the query side (``repo._build_fts_query_string``).
+    Both sides MUST call this exact function and produce identical strings —
+    any divergence between them silently breaks every keyword search
+    (R1 regression), so keep them in lockstep.
+
+    Rules (applied per character, then joined by a single space):
+    * whitespace characters are skipped (they carry no meaning as tokens);
+    * ``ch.isalpha() or ch.isnumeric()`` keeps the character unchanged
+      (the original case is preserved);
+    * every other character maps to the placeholder ``龖``.
+
+    Examples::
+
+        gram_tokenize("普通文本") == "普 通 文 本"
+        gram_tokenize("R-18")     == "R 龖 1 8"
+
+    ``unicode61`` folds case on both the index and the query side, so case
+    differences between the stored text and the query never affect matching
+    (``TS`` and ``ts`` match each other).  The empty string (or text made
+    entirely of whitespace) maps to ``""``, preserving the "empty in, empty
+    out" contract of the tokeniser it replaces.
+    """
+    if not text:
+        return ""
+    chars: list[str] = []
+    for ch in text:
+        if ch.isspace():
+            continue
+        if ch.isalpha() or ch.isnumeric():
+            chars.append(ch)
+        else:
+            chars.append(_GRAM_PLACEHOLDER)
+    return " ".join(chars)
+
+
 class FTSManager:
-    """Manages the novel_fts virtual table with jieba tokenisation."""
+    """Manages the novel_fts virtual table with char-gram tokenisation."""
 
     def __init__(self, session: Session):
         self.session = session
-        self._jieba = None
-
-    @property
-    def jieba(self):
-        if self._jieba is None:
-            import jieba
-            self._jieba = jieba
-        return self._jieba
-
-    @staticmethod
-    def warm_up() -> None:
-        """Pre-load jieba's dict so the first keyword search isn't slow.
-
-        jieba loads its 4.95 MB default dict and builds the prefix trie on
-        the first ``cut()`` call, not on import (import alone is ~37 ms;
-        the real ~700 ms cost lands on the first ``cut()``). Triggering it
-        here shifts that cost to startup instead of the first user search.
-        """
-        try:
-            import jieba
-            list(jieba.cut("预热", HMM=True))
-        except ImportError:
-            pass
 
     # ------------------------------------------------------------------
     # Rebuild (idempotent)
     # ------------------------------------------------------------------
 
     # The FTS table is a *standalone* FTS5 table (no external-content
-    # clause).  The index stores jieba-tokenised text that deliberately
+    # clause).  The index stores char-gram-tokenised text that deliberately
     # differs from the raw ``novel`` rows, so a content-synchronised
     # table would make FTS5's 'delete' command unable to match rows.
     # Column set matches the table as it exists in production
@@ -66,7 +100,7 @@ class FTSManager:
     _CREATE_SQL = (
         f"CREATE VIRTUAL TABLE IF NOT EXISTS {C.TABLE_NOVEL_FTS} USING fts5("
         f"  {C.COL_TITLE}, {C.COL_AUTHOR_NAME}, {C.COL_SERIES_NAME}, tags,"
-        f"  tokenize='porter unicode61'"
+        f"  tokenize='unicode61'"
         f")"
     )
 
@@ -87,6 +121,44 @@ class FTSManager:
         self.session.execute(_text(self._CREATE_SQL))
         self._batch_insert_all_novels()
         logger.info("FTS5 index rebuilt from scratch.")
+
+    def needs_rebuild(self) -> bool:
+        """Return True when ``novel_fts`` must be rebuilt as a char-gram index.
+
+        This is the single upgrade self-heal entry point: it is called once
+        at startup (see ``app._ensure_gram_fts_index``) — after Alembic
+        migrations — and whenever a rebuild decision is needed.  A rebuild is
+        required when any of the following holds:
+
+        * the ``novel_fts`` virtual table does not exist;
+        * its stored ``sqlite_master`` definition predates the char-gram
+          index: SQL that lacks the ``unicode61`` tokeniser string (the
+          legacy external-content table, whose definition has no explicit
+          tokenise clause) **or still carries the porter stemmer** — note
+          ``tokenize='porter unicode61'`` *contains* the substring
+          ``unicode61``, so a mere substring check is not enough and the
+          ``porter`` marker must be tested explicitly;
+        * its row count differs from ``novel`` (a fresh or stale index).
+
+        The index is derived data, so EVERY rebuild is idempotent and safe —
+        there is no data to lose, only the one-time (7-15 s) cost to pay.
+        """
+        row = self.session.execute(_text(
+            f"SELECT sql FROM sqlite_master "
+            f"WHERE type='table' AND name='{C.TABLE_NOVEL_FTS}'"
+        )).fetchone()
+        if row is None:
+            return True  # table does not exist yet
+        sql = row[0] or ""
+        if "unicode61" not in sql or "porter" in sql:
+            return True  # legacy porter/jieba or external-content table
+        fts_count = self.session.execute(
+            _text(f"SELECT COUNT(*) FROM {C.TABLE_NOVEL_FTS}")
+        ).scalar() or 0
+        novel_count = self.session.execute(
+            select(func.count()).select_from(models.Novel)
+        ).scalar() or 0
+        return fts_count != novel_count
 
     # ------------------------------------------------------------------
     # Incremental update
@@ -286,20 +358,13 @@ class FTSManager:
         except Exception:
             return False
 
-    def _tokenize(self, text: str) -> str:
-        """Tokenize *text* using jieba, adding spaces between CJK chars."""
-        if not text:
-            return ""
-        tokens = list(self.jieba.cut(text, HMM=True))
-        return " ".join(t for t in tokens if t.strip())
-
     def _batch_insert_fts_entries(
         self, rows: list[tuple[int, str, str, str]],
     ) -> None:
         """Insert multiple FTS entries in a single batch.
 
-        Tokenizes each row individually (jieba can't run inside SQLite) but
-        issues a single multi-row INSERT for efficiency.
+        Char-grams each row individually (the tokeniser can't run inside
+        SQLite) but issues a single multi-row INSERT for efficiency.
 
         Uses raw SQL instead of ``Base.metadata.tables``: the ``novel_fts``
         virtual table is created via raw DDL and is deliberately NOT part
@@ -312,10 +377,10 @@ class FTSManager:
         values = [
             {
                 "id": nid,
-                "title": self._tokenize(title),
-                "author_name": self._tokenize(author),
-                "series_name": self._tokenize(series),
-                "tags": self._tokenize(tags),
+                "title": gram_tokenize(title),
+                "author_name": gram_tokenize(author),
+                "series_name": gram_tokenize(series),
+                "tags": gram_tokenize(tags),
             }
             for nid, title, author, series, tags in rows
         ]
@@ -329,8 +394,8 @@ class FTSManager:
     def _batch_insert_all_novels(self) -> int:
         """Insert all novels from the novel table into FTS in one bulk operation.
 
-        Uses raw SQL for efficiency — each row's text columns are tokenized
-        individually because jieba can't run inside SQLite.
+        Uses raw SQL for efficiency — each row's text columns are char-grammed
+        individually because the tokeniser can't run inside SQLite.
         """
         novels = self.session.execute(
             select(

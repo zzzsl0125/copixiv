@@ -8,7 +8,7 @@ from copixiv.db.models import (
     Base, Novel, Author, Favourite, Tag, TagAlias, NovelTag,
 )
 from copixiv.db.engine import create_session_factory
-from copixiv.features.novels.fts import FTSManager
+from copixiv.features.novels.fts import FTSManager, gram_tokenize
 
 
 @pytest.fixture
@@ -351,6 +351,22 @@ class TestFtsTagsIndexing:
 
         assert sorted(self._keyword_ids(repo_session, "neko")) == [1, 2]
 
+    def test_pure_punctuation_keyword_filters_nothing(self, repo_session):
+        """A keyword made entirely of punctuation must filter nothing.
+
+        The query builder returns "" for such a keyword (empty = no MATCH
+        clause); ``_where_fts_filter`` must honour that by emitting no filter.
+        Without the guard FTS5 raises a syntax error on ``MATCH ''``.
+        """
+        self._seed_tagged_novel(repo_session, 1, "标题一", ["neko"])
+        self._seed_tagged_novel(repo_session, 2, "标题二", ["日常"])
+
+        fts = FTSManager(repo_session)
+        fts.rebuild_novel_fts()
+        repo_session.commit()
+
+        assert sorted(self._keyword_ids(repo_session, "---")) == [1, 2]
+
     def test_orphan_fts_row_detected_by_health_check(self, repo_session):
         """check_fts_health reports orphan entries (FTS row without a novel)."""
         self._seed_tagged_novel(repo_session, 1, "标题", ["neko"])
@@ -366,6 +382,129 @@ class TestFtsTagsIndexing:
         result = fts.check_fts_health()
         assert result["is_healthy"] is False
         assert result["orphan_entries"] >= 1
+
+
+class TestGramTokenize:
+    """Character-unigram tokeniser — the single source of truth (R1 guard).
+
+    The index side (``FTSManager`` insertion) and the query side
+    (``_build_fts_query_string``) both call ``gram_tokenize``; these tests
+    pin its exact contract so the two sides cannot drift apart.
+    """
+
+    def test_empty_string(self):
+        assert gram_tokenize("") == ""
+
+    def test_pure_whitespace(self):
+        assert gram_tokenize("   ") == ""
+        assert gram_tokenize(" \t\n  ") == ""
+
+    def test_pure_punctuation_maps_to_placeholder(self):
+        assert gram_tokenize("---") == "龖 龖 龖"
+        assert gram_tokenize("...") == "龖 龖 龖"
+
+    def test_cjk_chars_kept(self):
+        assert gram_tokenize("普通文本") == "普 通 文 本"
+        assert gram_tokenize("扶她女校") == "扶 她 女 校"
+
+    def test_latin_alphanumeric_kept_case_preserved(self):
+        assert gram_tokenize("Harry") == "H a r r y"
+        assert gram_tokenize("hello123") == "h e l l o 1 2 3"
+
+    def test_punctuation_maps_to_placeholder(self):
+        assert gram_tokenize("R-18") == "R 龖 1 8"
+
+    def test_whitespace_inside_text_is_skipped(self):
+        assert gram_tokenize("哈利 波特") == "哈 利 波 特"
+
+    def test_mixed_cjk_latin_digits(self):
+        assert gram_tokenize("hello世界123") == "h e l l o 世 界 1 2 3"
+
+    def test_emoji_maps_to_placeholder(self):
+        assert gram_tokenize("😀😀") == "龖 龖"
+        # Emoji are not alpha/numeric → placeholder, breaking between words.
+        assert gram_tokenize("a😀b") == "a 龖 b"
+
+    def test_double_quote_maps_to_placeholder(self):
+        assert gram_tokenize('他说"你好"') == "他 说 龖 你 好 龖"
+
+    def test_apostrophe_maps_to_placeholder(self):
+        assert gram_tokenize("what's") == "w h a t 龖 s"
+        assert gram_tokenize("a'b") == "a 龖 b"
+
+
+class TestNeedsRebuild:
+    """`FTSManager.needs_rebuild` — the upgrade self-heal decision."""
+
+    def test_missing_table_needs_rebuild(self, session):
+        # The conftest engine has all ORM tables but no novel_fts virtual
+        # table (create_all does not emit virtual-table DDL).
+        assert FTSManager(session).needs_rebuild() is True
+
+    def test_unicode61_table_with_matching_counts_no_rebuild(self, session):
+        fts = FTSManager(session)
+        fts.rebuild_novel_fts()
+        session.commit()
+        assert fts.needs_rebuild() is False
+
+    def test_legacy_external_content_table_needs_rebuild(self, session):
+        # A definition without an explicit 'unicode61' tokeniser clause (the
+        # v1 external-content shape, or a porter/jieba table) is legacy.
+        session.execute(text("DROP TABLE IF EXISTS novel_fts"))
+        session.execute(text(
+            "CREATE VIRTUAL TABLE novel_fts USING fts5("
+            "title, author_name, series_name, tags)"
+        ))
+        session.commit()
+        assert FTSManager(session).needs_rebuild() is True
+
+    def test_count_mismatch_needs_rebuild(self, session):
+        session.add(Author(author_id=1, author_name="a"))
+        session.add(Novel(id=1, title="T", author_id=1, path="/tmp/t.txt"))
+        session.commit()
+        fts = FTSManager(session)
+        fts.rebuild_novel_fts()
+        session.commit()
+        assert fts.needs_rebuild() is False
+        # Delete the novel row without rebuilding → stale index → rebuild.
+        session.delete(session.get(Novel, 1))
+        session.commit()
+        assert fts.needs_rebuild() is True
+
+
+class TestStartupRebuildLoopAgnostic:
+    """Regression: uvicorn's factory calls ``create_app()`` inside a RUNNING
+    event loop (``python main.py`` → ``uvicorn.run`` → ``config.load()``),
+    so the startup FTS self-heal must never use ``asyncio.run()`` (which
+    raises "cannot be called from a running event loop").  Calling the
+    helper from inside an async test reproduces the production path."""
+
+    @pytest.mark.asyncio
+    async def test_rebuild_if_needed_inside_running_loop(self, engine):
+        from copixiv.app import _rebuild_fts_if_needed
+
+        # Legacy porter/jieba table → needs_rebuild() is True.
+        with engine.connect() as conn:
+            conn.execute(text(
+                "CREATE VIRTUAL TABLE novel_fts USING fts5("
+                "title, author_name, series_name, tags,"
+                "tokenize='porter unicode61')"
+            ))
+            conn.commit()
+
+        session_factory = create_session_factory(engine)
+        # Called synchronously INSIDE the (running) event loop:
+        _rebuild_fts_if_needed(session_factory)
+
+        with session_factory() as session:
+            sql = session.execute(text(
+                "SELECT sql FROM sqlite_master WHERE name='novel_fts'"
+            )).scalar()
+            assert "unicode61" in sql and "porter" not in sql
+            assert (
+                session.execute(text("SELECT COUNT(*) FROM novel_fts")).scalar()
+                == session.execute(text("SELECT COUNT(*) FROM novel")).scalar()
+            )
 
 
 class TestConnectionPoolConfig:

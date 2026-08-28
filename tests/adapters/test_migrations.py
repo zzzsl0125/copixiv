@@ -8,7 +8,9 @@ Two scenarios:
    tag_aliases, no shuffle column, old index set, legacy 3-column FTS
    table) plus sample data is upgraded and verified: revision stamped,
    alias names resolved to integer FKs, shuffle backfilled, new indexes
-   created, legacy FTS table left in place (a rebuild_fts run replaces it).
+   created, and the legacy FTS table replaced by the char-gram definition
+   (its content is a derived index, repopulated by the startup self-heal
+   or a ``rebuild_fts`` run).
 2. Fresh-database scenarios — empty file upgraded to head, and the
    upgrade being idempotent (second run is a no-op).
 """
@@ -22,7 +24,7 @@ from sqlalchemy import create_engine
 from copixiv.db.engine import run_migrations
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-HEAD_REVISION = "d4e5f6a7b8c9"
+HEAD_REVISION = "69cbf0dfa207"
 
 # v1 schema — the shape the old project left behind.  Deliberately
 # *different* from the migrations' own baseline where v1 differed:
@@ -294,12 +296,14 @@ class TestUpgradeV1Database:
         # the old shuffle-only index was replaced
         assert "ix_novel_shuffle" not in indexes
 
-        # legacy FTS table untouched by migrations (rebuild_fts replaces it)
+        # FTS table replaced by the char-gram migration (the content is a
+        # derived index, repopulated by the startup self-heal / rebuild_fts)
         with sqlite3.connect(v1_db) as conn:
             fts = conn.execute(
                 "SELECT sql FROM sqlite_master WHERE name='novel_fts'"
             ).fetchone()[0]
         assert "novel_fts" in fts
+        assert "unicode61" in fts
 
         # original data intact
         with sqlite3.connect(v1_db) as conn:
