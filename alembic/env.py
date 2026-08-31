@@ -1,10 +1,10 @@
-"""Alembic environment configuration — reads database path from copixiv config."""
+"""Alembic environment configuration — reads the database URL from copixiv config."""
 
 import sys
 from logging.config import fileConfig
 from pathlib import Path
 
-from sqlalchemy import engine_from_config, pool, event
+from sqlalchemy import engine_from_config, pool
 from alembic import context
 
 # Alembic Config object
@@ -34,8 +34,10 @@ def _get_database_url() -> str:
 
     Priority:
       1. Command-line ``-x url=...`` override
-      2. ``alembic.ini`` ``sqlalchemy.url`` (if it's not the placeholder)
-      3. copixiv ``config.yaml`` ``path.database`` (resolved relative to project root)
+      2. ``alembic.ini`` ``sqlalchemy.url`` (if it's a real PG URL — the
+         ``engine.run_migrations`` path sets this) [replaces the old SQLite
+         ``path.database`` resolution]
+      3. copixiv ``config.yaml`` ``database_url``
       4. ``alembic.ini`` ``sqlalchemy.url`` (as-is fallback)
     """
     # 1. Command-line -x url=... override
@@ -43,18 +45,17 @@ def _get_database_url() -> str:
     if url_override:
         return url_override
 
-    # 2. alembic.ini sqlalchemy.url (use if not the default placeholder)
+    # 2. alembic.ini sqlalchemy.url (PG URL set by engine.run_migrations).
+    #    The default alembic.ini still carries the old SQLite placeholder
+    #    (``sqlite:///...``); ignore that and resolve from app config.
     ini_url = config.get_main_option("sqlalchemy.url")
-    if ini_url and "driver://" not in ini_url:
+    if ini_url and not ini_url.startswith("sqlite:///") and "://" in ini_url:
         return ini_url
 
-    # 3. copixiv config.yaml
+    # 3. copixiv config.yaml database_url
     try:
         from copixiv.config import config as app_config
-        db_path = app_config.path.database
-        if not Path(db_path).is_absolute():
-            db_path = str(_project_root / db_path)
-        return f"sqlite:///{db_path}"
+        return app_config.database_url
     except Exception:
         pass
 
@@ -73,7 +74,6 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        render_as_batch=True,  # batch mode for SQLite ALTER support
     )
 
     with context.begin_transaction():
@@ -90,23 +90,10 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
 
-    # Enable WAL + FK pragmas on every connection, including migrations
-    @event.listens_for(connectable, "connect")
-    def _set_pragmas(dbapi_connection, _connection_record):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA synchronous=NORMAL")
-        # Keep temp B-trees (e.g. CREATE INDEX on 232k rows) in memory.
-        cursor.execute("PRAGMA temp_store=MEMORY")
-        cursor.execute("PRAGMA busy_timeout=10000")
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
-
     with connectable.connect() as connection:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
-            render_as_batch=True,
         )
 
         with context.begin_transaction():

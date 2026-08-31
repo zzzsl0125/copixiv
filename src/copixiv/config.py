@@ -19,10 +19,17 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class PathConfig(BaseModel):
-    """Filesystem paths for data and tokens."""
+    """Filesystem paths for data and tokens.
+
+    ``database`` is **DEPRECATED** (postgres-migration): the database is now a
+    PostgreSQL server addressed by ``AppConfig.database_url``, not a file path.
+    The field is retained only so an existing ``config.yaml`` that still lists
+    ``path.database`` keeps parsing; it is ignored by the application.  Remove
+    it in a later cleanup pass.
+    """
 
     token: str = "pixiv_token.py"
-    database: str = "database/database.db"
+    database: str = "database/database.db"  # DEPRECATED — see AppConfig.database_url
     download: str = "download"
 
 
@@ -124,6 +131,13 @@ class AppConfig(BaseModel):
     """Root configuration object."""
 
     model_config = ConfigDict(extra="forbid")
+
+    # PostgreSQL connection string (postgres-migration).  This replaces the
+    # SQLite ``path.database`` as the single source of truth for how the app
+    # reaches its database.  Default targets the local dev instance on port
+    # 5433 (see scripts/pg_dev.py); a real deployment overrides it via
+    # ``config.yaml`` ``database_url`` (or, once supported, an env override).
+    database_url: str = "postgresql+psycopg2://postgres@127.0.0.1:5433/copixiv"
 
     path: PathConfig = Field(default_factory=PathConfig)
     pixiv_client: PixivClientConfig = Field(default_factory=PixivClientConfig)

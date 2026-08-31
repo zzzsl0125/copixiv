@@ -613,10 +613,13 @@ def _build(config_path: str | None = None) -> _AppSingletons:
         logger.info("First startup this week — creating automatic backup.")
         _maybe_backup(db_path, cfg)
 
-    # Per-domain assembly
-    engine = create_database_engine(db_path_str)
+    # Per-domain assembly — the database is a PostgreSQL server addressed by
+    # ``cfg.database_url`` (postgres-migration).  The SQLite-era instance lock /
+    # auto-backup / warmup calls below still use ``cfg.path.database`` and are
+    # removed in phase 2.
+    engine = create_database_engine(cfg.database_url)
     session_factory = create_session_factory(engine)
-    init_database(engine, db_path_str)
+    init_database(engine, cfg.database_url)
     logger.info("Database initialized (Alembic migrations applied).")
 
     # Ensure the novel_fts index is the char-gram form — Alembic migrations

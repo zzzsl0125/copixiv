@@ -3,7 +3,7 @@
 from typing import Any, TypeVar
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 
 from copixiv.db import constants as C
 
@@ -84,7 +84,7 @@ def update_summary(
 
         insert_values = {pk_col.name: target_id, **values}
         stmt = (
-            sqlite_insert(model_class)
+            postgresql_insert(model_class)
             .values(insert_values)
             .on_conflict_do_update([pk_col], set_=values)
         )

@@ -23,6 +23,7 @@ frontend/dist-ssr/
 *.local
 
 # === Database (local data, not source) ===
+.spike/
 database/*.db
 database/*.db-shm
 database/*.db-wal

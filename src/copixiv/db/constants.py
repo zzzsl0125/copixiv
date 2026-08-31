@@ -1,24 +1,42 @@
-"""Table and column name constants."""
+"""Table and column name constants.
+
+postgres-migration: table names now match the greenfield target schema
+(``db_greenfield_design.md`` §4).  Several old SQLite-era names have been
+dropped or repointed; the placeholders below are kept ONLY so that the
+not-yet-rewritten repository layer (phase 2) imports without an
+``AttributeError`` at module load.  Each placeholder is annotated
+DEPRECATED and must be cleaned up in phase 2.
+"""
 
 # Table Names
 TABLE_NOVEL = "novel"
-TABLE_NOVEL_FTS = "novel_fts"
+# DEPRECATED placeholder (phase 2): the char-gram search table is now
+# ``novel_search``; old FTSManager code (``features/novels/fts.py``) still
+# references ``TABLE_NOVEL_FTS`` and must be rewritten in phase 2.
+TABLE_NOVEL_FTS = "novel_search"
+TABLE_NOVEL_SEARCH = "novel_search"
 TABLE_AUTHOR = "author"
 TABLE_SERIES = "series"
 TABLE_TAG = "tag"
+# DEPRECATED placeholder (phase 2): the novel_tag join table is gone —
+# tags now live in ``novel.tags text[]``.  Kept only so repository code
+# referencing ``C.TABLE_NOVEL_TAG`` still imports.
 TABLE_NOVEL_TAG = "novel_tag"
+# DEPRECATED placeholder (phase 2): favourite is now ``novel.is_favourite``.
 TABLE_FAVOURITE = "favourite"
+# DEPRECATED placeholder (phase 2): special_follow is now
+# ``author.is_special_follow``.
 TABLE_SPECIAL_FOLLOW = "special_follow"
 TABLE_FAILED_NOVEL = "failed_novel"
 TABLE_SEARCH_HISTORY = "search_history"
 TABLE_AUTHOR_CACHE = "author_cache"
 TABLE_SERIES_CACHE = "series_cache"
 TABLE_TASK_HISTORY = "task_history"
-TABLE_SCHEDULED_TASK = "scheduled_tasks"
-TABLE_TAG_PREFERENCE = "tag_preferences"
-TABLE_TAG_ALIAS = "tag_aliases"
-TABLE_TOKEN = "tokens"
-TABLE_SETTINGS = "settings"
+TABLE_SCHEDULED_TASK = "scheduled_task"
+TABLE_TAG_PREFERENCE = "tag_preference"
+TABLE_TAG_ALIAS = "tag_alias"
+TABLE_TOKEN = "token"
+TABLE_SETTINGS = "setting"
 
 # Column Names
 COL_ID = "id"

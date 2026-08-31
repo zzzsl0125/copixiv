@@ -1,54 +1,59 @@
-"""Global serialization for SQLite writes.
+"""Write-scope marker (postgres-migration).
 
-SQLite allows only one writer at a time (even in WAL mode).  All
-database writes in this application must happen inside ``db_write()``
-so that write transactions from concurrent tasks never collide with
-"database is locked" errors.
+``db_write()`` was a *global* write lock that serialized all writes because
+SQLite allows only one writer at a time (even in WAL mode).  PostgreSQL is a
+MVCC multi-writer engine: a global mutex would only become a write
+bottleneck.  Under PG the responsibility for correctness moves to the
+**transaction** (a multi-statement ``begin()`` block that commits as one unit)
+plus **``ON CONFLICT`` upserts** for idempotency and row-level locking for
+concurrency.
 
-Invariant: inside ``db_write()`` you may hold at most one write
-transaction, and it must be committed before the lock is released —
-the lock covers both the writes AND the commit, otherwise the next
-writer could start while SQLite's write lock is still held.
+What remains here is a *documented* transaction-boundary marker: ``db_write``
+is still an ``asynccontextmanager`` so callers that historically wrapped
+their write batch in ``async with db_write():`` keep working, but the body
+now just yields — it no longer holds any lock.  ``DbWriteLock`` is kept so
+the task-runner injection point (which supplied the serialized-write adapter
+behind the removed ``WriteLockPort`` protocol) still type-checks.
 
-Usage::
+Usage (unchanged shape, no longer mutually exclusive)::
 
     async with db_write():
         async with uow.begin():
             await SQLAlchemyNovelRepository(uow.session).upsert_novels([...])
             await SQLAlchemyAuthorRepository(uow.session).update_last_update(author_id)
 
-Read-only queries never need the lock (WAL supports concurrent reads).
+Read-only queries never needed the lock (WAL supported concurrent reads),
+and under PG they still don't.
 """
 
-import asyncio
+from __future__ import annotations
+
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-
-_db_write_lock = asyncio.Lock()
 
 
 @asynccontextmanager
 async def db_write() -> AsyncIterator[None]:
-    """Serialize SQLite write transactions across all tasks.
+    """Mark a write transaction boundary (no global mutual exclusion).
 
-    The lock is process-wide (module-level ``asyncio.Lock``), matching
-    the single-process uvicorn deployment (systemd runs one worker, and
-    ``COPIXIV_RELOAD=1`` is dev-only).  If the service ever moves to
-    multiple uvicorn workers, this lock silently stops covering the other
-    processes — SQLite's own write serialization (busy_timeout) would
-    still prevent corruption, but "database is locked" errors become
-    possible.  A file lock (``fcntl.flock`` on a lockfile) or an
-    externalized lock would be required then.
+    Under PostgreSQL MVCC there is no single-writer rule to enforce, so this
+    context manager intentionally acquires **no lock**.  It exists as:
+
+    * a place to document that a block performs writes,
+    * a compatibility shim for callers that wrapped writes in ``db_write()``.
+
+    Correctness for concurrent writers is provided by the enclosing
+    transaction (commit/rollback atomicity) and by ``ON CONFLICT``
+    upserts, not by a process-wide mutex.
     """
-    async with _db_write_lock:
-        yield
+    yield
 
 
 class DbWriteLock:
-    """Callable wrapping ``db_write()`` as a serialized-write context manager.
+    """Callable wrapping ``db_write()`` as a write-boundary context manager.
 
     Injected into application-layer use cases by the task runner so they
-    acquire the write lock through ``db_write()`` (compat: this was the
+    acquire the write boundary through ``db_write()`` (compat: this was the
     one concrete adapter behind the now-removed ``WriteLockPort`` protocol).
     """
 
