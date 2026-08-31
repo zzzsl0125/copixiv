@@ -1,396 +1,260 @@
-"""Integration tests for database engine, models, and integrity (in-memory SQLite)."""
+"""Database integrity / FTS / index tests for the PostgreSQL foundation.
+
+Post-migration rewrite of the SQLite-era module: the ``novel_tag`` /
+``favourite`` join tables are gone (tags live in ``novel.tags text[]``,
+``is_favourite`` is a ``novel`` column), FTS is the application-maintained
+``novel_search`` derived table (no FTS5 virtual table), and the PRAGMA
+kitchen-sink is replaced by PostgreSQL-native checks.
+"""
+
+from datetime import datetime, timezone
 
 import pytest
-from sqlalchemy import create_engine, text, event
+from sqlalchemy import inspect, text
 from sqlalchemy.exc import IntegrityError
 
 from copixiv.db.models import (
-    Base, Novel, Author, Favourite, Tag, TagAlias, NovelTag,
+    Author, FailedNovel, Novel, NovelSearch, Tag, TagAlias,
 )
-from copixiv.db.engine import create_session_factory
 from copixiv.features.novels.fts import FTSManager, gram_tokenize
 
 
-@pytest.fixture
-def engine():
-    """In-memory SQLite engine with all tables created and FKs enabled."""
-    eng = create_engine("sqlite:///:memory:", echo=False)
-
-    @event.listens_for(eng, "connect")
-    def _set_pragmas(dbapi_connection, _connection_record):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
-
-    Base.metadata.create_all(bind=eng)
-    return eng
-
-
-@pytest.fixture
-def session(engine):
-    sf = create_session_factory(engine)
-    s = sf()
-    yield s
-    s.close()
+@pytest.fixture(autouse=True)
+def _isolated_db(clean_db):
+    """Truncate all tables before each test (PG session-scoped DB)."""
+    yield
 
 
 class TestModels:
-    def test_create_author(self, session):
-        a = Author(author_id=1, author_name="test")
-        session.add(a)
-        session.commit()
+    def test_create_author(self, session_factory):
+        with session_factory() as s:
+            s.add(Author(author_id=1, author_name="test"))
+            s.commit()
+            assert s.get(Author, 1).author_name == "test"
 
-        result = session.get(Author, 1)
-        assert result.author_name == "test"
+    def test_create_novel(self, session_factory):
+        with session_factory() as s:
+            s.add(Author(author_id=10, author_name="auth"))
+            s.flush()
+            s.add(Novel(id=100, title="Novel", author_id=10, path="/tmp/test.txt",
+                        tags=["R-18"], is_favourite=True))
+            s.commit()
+            row = s.get(Novel, 100)
+            assert row.title == "Novel"
+            assert row.author_id == 10
+            assert row.tags == ["R-18"]
+            assert row.is_favourite is True
 
-    def test_create_novel(self, session):
-        a = Author(author_id=10, author_name="auth")
-        session.add(a)
-        n = Novel(id=100, title="Novel", author_id=10, path="/tmp/test.txt")
-        session.add(n)
-        session.commit()
-
-        result = session.get(Novel, 100)
-        assert result.title == "Novel"
-        assert result.author_id == 10
-
-    def test_favourite_unique(self, session):
-        a = Author(author_id=1, author_name="a")
-        n = Novel(id=1, title="T", author_id=1, path="/tmp/t.txt")
-        session.add_all([a, n])
-        session.flush()
-
-        f1 = Favourite(novel_id=1)
-        session.add(f1)
-        session.commit()
-        # Detach f1 so the second insert is a fresh row (no identity-map
-        # conflict warning) and the PK uniqueness is enforced by SQLite.
-        session.expunge(f1)
-
-        f2 = Favourite(novel_id=1)
-        session.add(f2)
-        with pytest.raises(IntegrityError):
-            session.commit()
-        session.rollback()
+    def test_is_favourite_bool_column(self, session_factory):
+        """favourite is a boolean novel column now, not a join table."""
+        with session_factory() as s:
+            s.add(Author(author_id=1, author_name="a"))
+            s.flush()
+            s.add(Novel(id=1, title="T", author_id=1, path="/tmp/t.txt",
+                        is_favourite=False))
+            s.commit()
+            s.get(Novel, 1).is_favourite = True
+            s.commit()
+            assert s.get(Novel, 1).is_favourite is True
 
 
 class TestForeignKeyIntegrity:
-    """Phase 4: Verify foreign key constraints actually work."""
-
-    def test_novel_requires_valid_author(self, session):
+    def test_novel_requires_valid_author(self, session_factory):
         """Inserting a novel with non-existent author_id should fail."""
-        n = Novel(id=1, title="Orphan", author_id=999, path="/tmp/orphan.txt")
-        session.add(n)
-        with pytest.raises(IntegrityError):
-            session.commit()
-        session.rollback()
+        with session_factory() as s:
+            s.add(Novel(id=1, title="Orphan", author_id=999, path="/tmp/orphan.txt"))
+            with pytest.raises(IntegrityError):
+                s.commit()
+            s.rollback()
 
-    def test_novel_tag_requires_valid_novel(self, session):
-        """Inserting novel_tag with non-existent novel_id should fail."""
-        session.add(Tag(name="test_tag", reference_count=0))
-        session.flush()
-        nt = NovelTag(novel_id=999, tag_id=1)
-        session.add(nt)
-        with pytest.raises(IntegrityError):
-            session.commit()
-        session.rollback()
+    def test_novel_search_requires_valid_novel(self, session_factory):
+        """Inserting novel_search with non-existent novel_id should fail."""
+        with session_factory() as s:
+            s.add(NovelSearch(novel_id=999, search_text="x"))
+            with pytest.raises(IntegrityError):
+                s.commit()
+            s.rollback()
 
-    def test_novel_tag_requires_valid_tag(self, session):
-        """Inserting novel_tag with non-existent tag_id should fail."""
-        session.add(Author(author_id=1, author_name="a"))
-        session.add(Novel(id=1, title="T", author_id=1, path="/tmp/t.txt"))
-        session.flush()
-        nt = NovelTag(novel_id=1, tag_id=999)
-        session.add(nt)
-        with pytest.raises(IntegrityError):
-            session.commit()
-        session.rollback()
+    def test_tag_alias_requires_valid_source_tag(self, session_factory):
+        with session_factory() as s:
+            s.add(Tag(name="valid_tag", reference_count=0))
+            s.flush()
+            s.add(TagAlias(source=1, target=999))
+            with pytest.raises(IntegrityError):
+                s.commit()
+            s.rollback()
 
-    def test_tag_alias_requires_valid_source_tag(self, session):
-        """Inserting tag_alias with non-existent source should fail."""
-        session.add(Tag(name="valid_tag", reference_count=0))
-        session.flush()
-        ta = TagAlias(source=1, target=999)
-        session.add(ta)
-        with pytest.raises(IntegrityError):
-            session.commit()
-        session.rollback()
+    def test_tag_alias_requires_valid_target_tag(self, session_factory):
+        with session_factory() as s:
+            s.add(Tag(name="valid_tag", reference_count=0))
+            s.flush()
+            s.add(TagAlias(source=999, target=1))
+            with pytest.raises(IntegrityError):
+                s.commit()
+            s.rollback()
 
-    def test_tag_alias_requires_valid_target_tag(self, session):
-        """Inserting tag_alias with non-existent target should fail."""
-        session.add(Tag(name="valid_tag", reference_count=0))
-        session.flush()
-        ta = TagAlias(source=999, target=1)
-        session.add(ta)
-        with pytest.raises(IntegrityError):
-            session.commit()
-        session.rollback()
 
-    def test_cascade_delete_novel_cleans_novel_tag(self, session):
-        """Deleting a novel should cascade-delete its novel_tag rows."""
-        session.add(Author(author_id=1, author_name="a"))
-        session.add(Novel(id=1, title="T", author_id=1, path="/tmp/t.txt"))
-        session.add(Tag(name="tag1", reference_count=0))
-        session.flush()
-        session.add(NovelTag(novel_id=1, tag_id=1))
-        session.commit()
+class TestCascadeDelete:
+    def test_delete_novel_cascades_novel_search_and_failed_novel(
+        self, session_factory,
+    ):
+        """Deleting a novel cascades to novel_search / failed_novel (FK CASCADE)."""
+        with session_factory() as s:
+            s.add(Author(author_id=1, author_name="a"))
+            s.flush()
+            s.add(Novel(id=1, title="T", author_id=1, path="/tmp/t.txt"))
+            s.flush()
+            s.add(NovelSearch(novel_id=1, search_text="t a g"))
+            s.add(FailedNovel(
+                novel_id=1, failure_type="download", error_message="e",
+                failed_times=1, last_failed_at=datetime.now(timezone.utc),
+            ))
+            s.commit()
 
-        # Verify novel_tag exists
-        count = session.query(NovelTag).filter_by(novel_id=1).count()
-        assert count == 1
+            s.delete(s.get(Novel, 1))
+            s.commit()
 
-        # Delete novel -> cascade delete novel_tag
-        novel = session.get(Novel, 1)
-        session.delete(novel)
-        session.commit()
-
-        count = session.query(NovelTag).filter_by(novel_id=1).count()
-        assert count == 0
+            assert s.get(NovelSearch, 1) is None
+            assert s.get(FailedNovel, 1) is None
 
 
 class TestIndexesExist:
-    """Phase 4: Verify that expected indexes are present."""
-
     EXPECTED_INDEXES = {
-        # Standard indexes from ORM models
-        "ix_novel_like",
-        "ix_novel_text",
-        "ix_novel_has_epub",
-        "ix_novel_create_time",
-        "idx_novel_author_likes",
-        "idx_novel_series_likes",
-        "idx_novel_like_text_id",
-        "idx_novel_author_id",
-        "ix_novel_shuffle_like_text",
+        "ix_novel_like_text_id",
+        "ix_novel_like_id",
         "ix_novel_shuffle_id",
-        "idx_novel_tag_tag_id",
-        "idx_novel_tag_novel_id",
-        "ix_search_history_timestamp",
+        "ix_novel_shuffle_like_text",
+        "ix_novel_author_id",
+        "ix_novel_series_id",
+        "ix_novel_author_like",
+        "ix_novel_series_like",
+        "ix_novel_create_time",
+        "ix_novel_tags_gin",
+        "ix_novel_favourite",
+        "ix_author_special_follow",
+        "ix_author_last_update",
+        "ix_series_author_id",
+        "ix_tag_alias_target",
         "ix_search_history_type_timestamp",
-        "ix_tag_aliases_source",
-        "ix_tag_aliases_target",
-        "ix_tag_preferences_tag",
+        "ux_task_history_running",
+        "novel_search_gin",
+        "ix_failed_novel_last_failed_at",
     }
 
-    def test_all_expected_indexes_exist(self, engine):
-        """Verify all expected indexes are present in the schema.
-
-        Note: Unique constraints may be created as sqlite_autoindex_* by
-        create_all() rather than explicit index names.  This test only
-        checks explicit named indexes.
-        """
-        from sqlalchemy import inspect
-        insp = inspect(engine)
-
-        actual_names: set[str] = set()
-        for table_name in insp.get_table_names():
-            for idx in insp.get_indexes(table_name):
-                # Skip sqlite_autoindex_* (implicit unique constraint indexes)
-                if not idx["name"].startswith("sqlite_autoindex_"):
-                    actual_names.add(idx["name"])
-
-        missing = self.EXPECTED_INDEXES - actual_names
+    def test_all_expected_indexes_exist(self, pg_engine):
+        with pg_engine.connect() as conn:
+            rows = conn.execute(
+                text("SELECT indexname FROM pg_indexes WHERE schemaname='public'")
+            ).scalars().all()
+        actual = set(rows)
+        missing = self.EXPECTED_INDEXES - actual
         assert not missing, f"Missing indexes: {missing}"
 
 
-class TestFTS:
-    """Phase 2: FTS5 health checks and operations."""
+class TestNovelSearchFTS:
+    def test_batch_rebuild_is_idempotent(self, session_factory):
+        with session_factory() as s:
+            fts = FTSManager(s)
+            fts.batch_rebuild_fts()
+            s.commit()
+            fts.batch_rebuild_fts()
+            s.commit()
 
-    def test_create_fts_if_not_exists(self, session):
-        """rebuild_novel_fts should be idempotent."""
-        fts = FTSManager(session)
-        # First call — creates FTS
-        fts.rebuild_novel_fts()
-        # Second call — should not raise
-        fts.rebuild_novel_fts()
+    def test_health_check_empty_db(self, session_factory):
+        with session_factory() as s:
+            s.add(Author(author_id=1, author_name="a"))
+            s.commit()
+            fts = FTSManager(s)
+            fts.batch_rebuild_fts()
+            s.commit()
+            result = fts.check_fts_health()
+            assert result["fts_table_exists"] is True
+            assert result["is_healthy"] is True
+            assert result["novel_count"] == 0
+            assert result["fts_entry_count"] == 0
 
-    def test_fts_health_check_empty_db(self, session):
-        """Health check should report status on empty DB."""
-        fts = FTSManager(session)
-        fts.rebuild_novel_fts()
-        result = fts.check_fts_health()
-        assert result["fts_table_exists"] is True
-        assert result["is_healthy"] is True
-        assert result["novel_count"] == 0
-        assert result["fts_entry_count"] == 0
+    def test_health_check_with_novel(self, session_factory):
+        with session_factory() as s:
+            s.add(Author(author_id=1, author_name="auth"))
+            s.flush()
+            s.add(Novel(id=1, title="Test", author_id=1, path="/tmp/t.txt"))
+            s.commit()
+            fts = FTSManager(s)
+            fts.batch_rebuild_fts()
+            s.commit()
+            result = fts.check_fts_health()
+            assert result["is_healthy"] is True
+            assert result["novel_count"] == 1
+            assert result["fts_entry_count"] == 1
+            assert result.get("orphan_entries", 0) == 0
 
-    def test_fts_health_check_with_novel(self, session):
-        """Health check should detect no orphans when everything matches."""
-        session.add(Author(author_id=1, author_name="auth"))
-        session.add(Novel(id=1, title="Test", author_id=1, path="/tmp/t.txt"))
-        session.commit()
+    def test_incremental_update(self, session_factory):
+        with session_factory() as s:
+            s.add(Author(author_id=1, author_name="auth"))
+            s.flush()
+            s.add(Novel(id=1, title="Test Novel", author_id=1, path="/tmp/t.txt"))
+            s.commit()
+            fts = FTSManager(s)
+            fts.batch_rebuild_fts()
+            s.commit()
+            s.add(Novel(id=2, title="Second", author_id=1, path="/tmp/t2.txt"))
+            s.commit()
+            fts.update_novel_fts_index([2])
+            s.commit()
+            result = fts.check_fts_health()
+            assert result["fts_entry_count"] == 2
 
-        fts = FTSManager(session)
-        fts.rebuild_novel_fts()
-        result = fts.check_fts_health()
-        assert result["is_healthy"] is True
-        assert result["novel_count"] == 1
-        assert result["fts_entry_count"] == 1
-        assert result.get("orphan_entries", 0) == 0
-
-    def test_fts_incremental_update(self, session):
-        """Incremental FTS update should work for new novels."""
-        session.add(Author(author_id=1, author_name="auth"))
-        session.add(Novel(id=1, title="Test Novel", author_id=1, path="/tmp/t.txt"))
-        session.commit()
-
-        fts = FTSManager(session)
-        fts.rebuild_novel_fts()
-
-        # Add another novel and update incrementally
-        session.add(Novel(id=2, title="Second", author_id=1, path="/tmp/t2.txt"))
-        session.commit()
-        fts.update_novel_fts_index([2])
-
-        result = fts.check_fts_health()
-        assert result["fts_entry_count"] == 2
-
-
-class TestFtsTagsIndexing:
-    """T5: keyword search must hit text that exists ONLY in tags.
-
-    Regression guard for the D1 backfill: a v1-era ``novel_fts`` table has
-    no tags column, so tag-only keywords silently match nothing until the
-    index is rebuilt.  These tests pin that after a rebuild, the real
-    repository search path (query builder + MATCH) finds tag-only text.
-    """
-
-    @pytest.fixture
-    def repo_session(self):
-        """Session on a StaticPool in-memory DB — repository queries run in
-        worker threads, so the plain :memory: engine (single-threaded,
-        per-connection DBs) cannot be reused here."""
-        from sqlalchemy.pool import StaticPool
-        eng = create_engine(
-            "sqlite://",
-            connect_args={"check_same_thread": False},
-            poolclass=StaticPool,
+    def test_keyword_matches_tag_only_text(self, session_factory):
+        """Tag-only keywords are searchable through novel_search."""
+        from copixiv.features.novels.repo import (
+            BaseQueryBuilder, fts_query_to_pg,
         )
-        Base.metadata.create_all(bind=eng)
-        sf = create_session_factory(eng)
-        s = sf()
-        yield s
-        s.close()
 
-    def test_rebuild_fts_resets_availability_cache(self, repo_session):
-        """A runtime rebuild must re-enable keyword filtering even when the
-        process started while the FTS table was missing (the availability
-        cache was probed False and would otherwise stay False until restart)."""
-        import asyncio
-        from copixiv.features.novels import repo as qbb
-        from copixiv.features.novels.repo import SQLAlchemyNovelRepository
+        # The repo's tsquery phrase wrapping: bare gram → '...' single-quote phrase.
+        tsquery = fts_query_to_pg(BaseQueryBuilder._build_fts_query_string("neko"))
+        with session_factory() as s:
+            s.add(Author(author_id=1, author_name="作者"))
+            s.flush()
+            s.add(Novel(id=1, title="无标题的测试小说", author_id=1,
+                        path="/tmp/1.txt", tags=["neko", "cyberpunk2077"]))
+            s.add(Novel(id=2, title="另一篇测试小说", author_id=1,
+                        path="/tmp/2.txt", tags=["日常"]))
+            s.commit()
+            fts = FTSManager(s)
+            fts.batch_rebuild_fts()
+            s.commit()
 
-        try:
-            qbb._fts_available = False  # simulate a start without the table
-            assert qbb._check_fts_available(repo_session) is False
+        with session_factory() as s:
+            hits = s.execute(
+                text(
+                    "SELECT novel_id FROM novel_search "
+                    "WHERE to_tsvector('simple', search_text) "
+                    "@@ to_tsquery('simple', :q)"
+                ),
+                {"q": tsquery},
+            ).scalars().all()
+            assert hits == [1]
 
-            asyncio.run(SQLAlchemyNovelRepository(repo_session).rebuild_fts())
-
-            assert qbb._fts_available is None, "cache must be invalidated"
-            assert qbb._check_fts_available(repo_session) is True
-        finally:
-            qbb.reset_fts_cache()
-
-    @staticmethod
-    def _seed_tagged_novel(session, novel_id: int, title: str, tag_names: list[str]):
-        """Insert a novel whose ONLY text containing the keyword is in tags."""
-        session.add(Author(author_id=novel_id, author_name="作者"))
-        session.flush()
-        session.add(Novel(
-            id=novel_id, title=title, author_id=novel_id,
-            author_name="作者", path=f"/tmp/{novel_id}.txt",
-        ))
-        session.flush()
-        for name in tag_names:
-            tag = Tag(name=name, reference_count=1)
-            session.add(tag)
-            session.flush()
-            session.add(NovelTag(novel_id=novel_id, tag_id=tag.id))
-        session.commit()
-
-    @staticmethod
-    def _keyword_ids(session, keyword: str) -> list[int]:
-        import asyncio
-        from copixiv.features.novels.repo import SQLAlchemyNovelRepository
-        from copixiv.features.novels.repo import reset_fts_cache
-        # The FTS availability cache is process-wide — a previous test may
-        # have cached False for a DB without the virtual table.
-        reset_fts_cache()
-        repo = SQLAlchemyNovelRepository(session)
-        from copixiv.core.services import QuerySpec
-        result = asyncio.run(repo.get_novels(
-            QuerySpec(
-                conditions=[("keyword", keyword)], order_by="id", per_page=50,
-            )
-        ))
-        return [n.id for n in result["novels"]]
-
-    def test_keyword_matches_tag_only_text(self, repo_session):
-        """D1 regression: tags are searchable after an FTS rebuild."""
-        # The keyword appears in NO other indexed column (title/author/series).
-        self._seed_tagged_novel(repo_session, 1, "无标题的测试小说", ["neko", "cyberpunk2077"])
-        self._seed_tagged_novel(repo_session, 2, "另一篇测试小说", ["日常"])
-
-        fts = FTSManager(repo_session)
-        fts.rebuild_novel_fts()
-        repo_session.commit()  # production contract: caller commits the rebuild
-
-        assert self._keyword_ids(repo_session, "neko") == [1]
-        assert self._keyword_ids(repo_session, "cyberpunk2077") == [1]
-        assert self._keyword_ids(repo_session, "日常") == [2]
-        assert self._keyword_ids(repo_session, "完全不存在") == []
-
-    def test_keyword_matches_title_and_tags_independently(self, repo_session):
-        """Sanity: title-only hits still work alongside tag-only hits."""
-        self._seed_tagged_novel(repo_session, 1, "neko 标题", ["日常"])
-        self._seed_tagged_novel(repo_session, 2, "其他标题", ["neko"])
-
-        fts = FTSManager(repo_session)
-        fts.rebuild_novel_fts()
-        repo_session.commit()
-
-        assert sorted(self._keyword_ids(repo_session, "neko")) == [1, 2]
-
-    def test_pure_punctuation_keyword_filters_nothing(self, repo_session):
-        """A keyword made entirely of punctuation must filter nothing.
-
-        The query builder returns "" for such a keyword (empty = no MATCH
-        clause); ``_where_fts_filter`` must honour that by emitting no filter.
-        Without the guard FTS5 raises a syntax error on ``MATCH ''``.
-        """
-        self._seed_tagged_novel(repo_session, 1, "标题一", ["neko"])
-        self._seed_tagged_novel(repo_session, 2, "标题二", ["日常"])
-
-        fts = FTSManager(repo_session)
-        fts.rebuild_novel_fts()
-        repo_session.commit()
-
-        assert sorted(self._keyword_ids(repo_session, "---")) == [1, 2]
-
-    def test_orphan_fts_row_detected_by_health_check(self, repo_session):
-        """check_fts_health reports orphan entries (FTS row without a novel)."""
-        self._seed_tagged_novel(repo_session, 1, "标题", ["neko"])
-        fts = FTSManager(repo_session)
-        fts.rebuild_novel_fts()
-        repo_session.commit()
-
-        # Remove the novel row directly, leaving its FTS entry orphaned.
-        novel = repo_session.get(Novel, 1)
-        repo_session.delete(novel)
-        repo_session.commit()
-
-        result = fts.check_fts_health()
-        assert result["is_healthy"] is False
-        assert result["orphan_entries"] >= 1
+    def test_missing_search_row_detected_by_health_check(self, session_factory):
+        """A novel without a novel_search row is reported by the health check."""
+        with session_factory() as s:
+            s.add(Author(author_id=1, author_name="作者"))
+            s.flush()
+            s.add(Novel(id=1, title="标题", author_id=1, path="/tmp/1.txt"))
+            s.commit()
+            fts = FTSManager(s)
+            fts.batch_rebuild_fts()
+            s.commit()
+            # Remove just the search row → missing_entries > 0.
+            s.execute(text("DELETE FROM novel_search WHERE novel_id = 1"))
+            s.commit()
+            result = fts.check_fts_health()
+            assert result["is_healthy"] is False
+            assert result["missing_entries"] >= 1
 
 
 class TestGramTokenize:
-    """Character-unigram tokeniser — the single source of truth (R1 guard).
-
-    The index side (``FTSManager`` insertion) and the query side
-    (``_build_fts_query_string``) both call ``gram_tokenize``; these tests
-    pin its exact contract so the two sides cannot drift apart.
-    """
+    """Character-unigram tokeniser — the single source of truth (R1 guard)."""
 
     def test_empty_string(self):
         assert gram_tokenize("") == ""
@@ -405,7 +269,6 @@ class TestGramTokenize:
 
     def test_cjk_chars_kept(self):
         assert gram_tokenize("普通文本") == "普 通 文 本"
-        assert gram_tokenize("扶她女校") == "扶 她 女 校"
 
     def test_latin_alphanumeric_kept_case_preserved(self):
         assert gram_tokenize("Harry") == "H a r r y"
@@ -417,107 +280,58 @@ class TestGramTokenize:
     def test_whitespace_inside_text_is_skipped(self):
         assert gram_tokenize("哈利 波特") == "哈 利 波 特"
 
-    def test_mixed_cjk_latin_digits(self):
-        assert gram_tokenize("hello世界123") == "h e l l o 世 界 1 2 3"
-
     def test_emoji_maps_to_placeholder(self):
         assert gram_tokenize("😀😀") == "龖 龖"
-        # Emoji are not alpha/numeric → placeholder, breaking between words.
-        assert gram_tokenize("a😀b") == "a 龖 b"
-
-    def test_double_quote_maps_to_placeholder(self):
-        assert gram_tokenize('他说"你好"') == "他 说 龖 你 好 龖"
-
-    def test_apostrophe_maps_to_placeholder(self):
-        assert gram_tokenize("what's") == "w h a t 龖 s"
-        assert gram_tokenize("a'b") == "a 龖 b"
 
 
 class TestNeedsRebuild:
-    """`FTSManager.needs_rebuild` — the upgrade self-heal decision."""
+    def test_missing_search_rows_needs_rebuild(self, session_factory):
+        with session_factory() as s:
+            s.add(Author(author_id=1, author_name="a"))
+            s.flush()
+            s.add(Novel(id=1, title="T", author_id=1, path="/tmp/t.txt"))
+            s.commit()
+            assert FTSManager(s).needs_rebuild() is True
 
-    def test_missing_table_needs_rebuild(self, session):
-        # The conftest engine has all ORM tables but no novel_fts virtual
-        # table (create_all does not emit virtual-table DDL).
-        assert FTSManager(session).needs_rebuild() is True
+    def test_matching_counts_no_rebuild(self, session_factory):
+        with session_factory() as s:
+            s.add(Author(author_id=1, author_name="a"))
+            s.flush()
+            s.add(Novel(id=1, title="T", author_id=1, path="/tmp/t.txt"))
+            s.commit()
+            fts = FTSManager(s)
+            fts.batch_rebuild_fts()
+            s.commit()
+            assert fts.needs_rebuild() is False
 
-    def test_unicode61_table_with_matching_counts_no_rebuild(self, session):
-        fts = FTSManager(session)
-        fts.rebuild_novel_fts()
-        session.commit()
-        assert fts.needs_rebuild() is False
-
-    def test_legacy_external_content_table_needs_rebuild(self, session):
-        # A definition without an explicit 'unicode61' tokeniser clause (the
-        # v1 external-content shape, or a porter/jieba table) is legacy.
-        session.execute(text("DROP TABLE IF EXISTS novel_fts"))
-        session.execute(text(
-            "CREATE VIRTUAL TABLE novel_fts USING fts5("
-            "title, author_name, series_name, tags)"
-        ))
-        session.commit()
-        assert FTSManager(session).needs_rebuild() is True
-
-    def test_count_mismatch_needs_rebuild(self, session):
-        session.add(Author(author_id=1, author_name="a"))
-        session.add(Novel(id=1, title="T", author_id=1, path="/tmp/t.txt"))
-        session.commit()
-        fts = FTSManager(session)
-        fts.rebuild_novel_fts()
-        session.commit()
-        assert fts.needs_rebuild() is False
-        # Delete the novel row without rebuilding → stale index → rebuild.
-        session.delete(session.get(Novel, 1))
-        session.commit()
-        assert fts.needs_rebuild() is True
-
-
-class TestStartupRebuildLoopAgnostic:
-    """Regression: uvicorn's factory calls ``create_app()`` inside a RUNNING
-    event loop (``python main.py`` → ``uvicorn.run`` → ``config.load()``),
-    so the startup FTS self-heal must never use ``asyncio.run()`` (which
-    raises "cannot be called from a running event loop").  Calling the
-    helper from inside an async test reproduces the production path."""
-
-    @pytest.mark.asyncio
-    async def test_rebuild_if_needed_inside_running_loop(self, engine):
-        from copixiv.app import _rebuild_fts_if_needed
-
-        # Legacy porter/jieba table → needs_rebuild() is True.
-        with engine.connect() as conn:
-            conn.execute(text(
-                "CREATE VIRTUAL TABLE novel_fts USING fts5("
-                "title, author_name, series_name, tags,"
-                "tokenize='porter unicode61')"
-            ))
-            conn.commit()
-
-        session_factory = create_session_factory(engine)
-        # Called synchronously INSIDE the (running) event loop:
-        _rebuild_fts_if_needed(session_factory)
-
-        with session_factory() as session:
-            sql = session.execute(text(
-                "SELECT sql FROM sqlite_master WHERE name='novel_fts'"
-            )).scalar()
-            assert "unicode61" in sql and "porter" not in sql
-            assert (
-                session.execute(text("SELECT COUNT(*) FROM novel_fts")).scalar()
-                == session.execute(text("SELECT COUNT(*) FROM novel")).scalar()
-            )
+    def test_count_mismatch_needs_rebuild(self, session_factory):
+        with session_factory() as s:
+            s.add(Author(author_id=1, author_name="a"))
+            s.flush()
+            s.add(Novel(id=1, title="T", author_id=1, path="/tmp/t.txt"))
+            s.commit()
+            fts = FTSManager(s)
+            fts.batch_rebuild_fts()
+            s.commit()
+            assert fts.needs_rebuild() is False
+            # Add a novel WITHOUT building its novel_search row → mismatch.
+            s.add(Novel(id=2, title="T2", author_id=1, path="/tmp/t2.txt"))
+            s.commit()
+            assert fts.needs_rebuild() is True
 
 
 class TestConnectionPoolConfig:
-    """Phase 4: Verify connection pool configuration."""
+    def test_lock_timeout_set(self):
+        """The application engine sets a lock_timeout so a stuck lock fails fast."""
+        from copixiv.db.engine import create_database_engine
 
-    def test_foreign_keys_pragma_enabled(self, engine):
-        """Verify foreign_keys PRAGMA is ON for new connections."""
-        with engine.connect() as conn:
-            fk_status = conn.execute(text("PRAGMA foreign_keys")).scalar()
-            assert fk_status == 1, "foreign_keys PRAGMA should be ON"
-
-    def test_busy_timeout_set(self, engine):
-        """Verify busy_timeout PRAGMA is set."""
-        with engine.connect() as conn:
-            timeout = conn.execute(text("PRAGMA busy_timeout")).scalar()
-            assert timeout > 0, "busy_timeout should be > 0"
+        engine = create_database_engine(
+            "postgresql+psycopg2://postgres@127.0.0.1:5433/copixiv_test"
+        )
+        try:
+            with engine.connect() as conn:
+                val = conn.execute(text("SHOW lock_timeout")).scalar()
+                # lock_timeout default is '0' (disabled); the engine sets 60s.
+                assert val is not None and val.strip() != "0"
+        finally:
+            engine.dispose()

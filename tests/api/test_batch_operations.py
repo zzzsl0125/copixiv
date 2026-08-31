@@ -17,10 +17,16 @@ from copixiv.app import _domain_error_http_status
 from copixiv.config import AppConfig
 from copixiv.core.exceptions import DomainError
 from copixiv.db.models import (
-    Author, Novel, Tag, NovelTag,
+    Author, Novel, Tag,
 )
 from copixiv.features.novels.fts import FTSManager, gram_tokenize
 from copixiv.features.novels import api as novels
+
+
+@pytest.fixture(autouse=True)
+def _isolated_db(clean_db):
+    """Truncate all tables before each test (PG session-scoped DB)."""
+    yield
 
 
 class _FakeFileStorage:
@@ -66,16 +72,12 @@ def _seed(sf, novel_id: int, title: str, path: str, **extra):
         s.commit()
 
 
-def _seed_tags(sf, novel_id: int, tags: list[str]):
+def _set_tags(sf, novel_id: int, tags: list[str]):
+    """Set a novel's tag array directly (the trigger keeps reference_count in sync)."""
     with sf() as s:
-        for tag in tags:
-            t = s.query(Tag).filter_by(name=tag).one_or_none()
-            if t is None:
-                t = Tag(name=tag, reference_count=0)
-                s.add(t)
-                s.flush()
-            t.reference_count += 1
-            s.add(NovelTag(novel_id=novel_id, tag_id=t.id))
+        novel = s.get(Novel, novel_id)
+        assert novel is not None, f"novel {novel_id} not seeded"
+        novel.tags = tags
         s.commit()
 
 
@@ -92,9 +94,9 @@ class TestBatchDelete:
             p = tmp_path / f"{i}.txt"
             p.write_text(f"正文{i}", encoding="utf-8")
             _seed(session_factory, i, f"标题{i}", str(p))
-        _seed_tags(session_factory, 1, ["R-18"])
-        _seed_tags(session_factory, 2, ["R-18"])
-        _seed_tags(session_factory, 3, ["其他"])
+        _set_tags(session_factory, 1, ["R-18"])
+        _set_tags(session_factory, 2, ["R-18"])
+        _set_tags(session_factory, 3, ["其他"])
 
         r = client.post("/api/novels/batch", json={
             "operation": "delete",
@@ -189,7 +191,7 @@ class TestBatchTags:
     def test_add_tags_merges_and_counts(self, client, session_factory):
         _seed(session_factory, 1, "标题1", str(Path("/tmp/1.txt")))
         _seed(session_factory, 2, "标题2", str(Path("/tmp/2.txt")))
-        _seed_tags(session_factory, 1, ["R-18"])
+        _set_tags(session_factory, 1, ["R-18"])
 
         r = client.post("/api/novels/batch", json={
             "operation": "add_tags",
@@ -204,19 +206,15 @@ class TestBatchTags:
             assert r18.reference_count == 2
             new_tag = s.query(Tag).filter_by(name="新标签").one()
             assert new_tag.reference_count == 2
-            links = sorted(
-                s.query(NovelTag.novel_id, NovelTag.tag_id).all()
-            )
-            r18_id, new_id = r18.id, new_tag.id
-            assert links == sorted([
-                (1, r18_id), (1, new_id), (2, r18_id), (2, new_id),
-            ])
+            # Both novels now carry both tags (no duplicate array elements).
+            assert set(s.get(Novel, 1).tags) == {"R-18", "新标签"}
+            assert set(s.get(Novel, 2).tags) == {"R-18", "新标签"}
 
     def test_remove_tags(self, client, session_factory):
         _seed(session_factory, 1, "标题1", str(Path("/tmp/1.txt")))
         _seed(session_factory, 2, "标题2", str(Path("/tmp/2.txt")))
-        _seed_tags(session_factory, 1, ["R-18", "保留"])
-        _seed_tags(session_factory, 2, ["R-18"])
+        _set_tags(session_factory, 1, ["R-18", "保留"])
+        _set_tags(session_factory, 2, ["R-18"])
 
         r = client.post("/api/novels/batch", json={
             "operation": "remove_tags",
@@ -231,7 +229,9 @@ class TestBatchTags:
             assert r18.reference_count == 0
             kept = s.query(Tag).filter_by(name="保留").one()
             assert kept.reference_count == 1
-            assert s.query(NovelTag).filter_by(tag_id=r18.id).count() == 0
+            assert "R-18" not in s.get(Novel, 1).tags
+            assert "R-18" not in s.get(Novel, 2).tags
+            assert "保留" in s.get(Novel, 1).tags
 
     def test_remove_tag_nobody_has_affects_zero(
         self, client, session_factory,
@@ -259,7 +259,8 @@ class TestBatchTags:
     def test_add_tags_updates_fts_index(self, client, session_factory):
         _seed(session_factory, 1, "标题1", str(Path("/tmp/1.txt")))
         with session_factory() as s:
-            FTSManager(s).rebuild_novel_fts()
+            FTSManager(s).batch_rebuild_fts()
+            s.commit()
 
         client.post("/api/novels/batch", json={
             "operation": "add_tags",
@@ -269,7 +270,7 @@ class TestBatchTags:
         with session_factory() as s:
             row = s.execute(
                 __import__("sqlalchemy").text(
-                    "SELECT tags FROM novel_fts WHERE rowid = 1"
+                    "SELECT search_text FROM novel_search WHERE novel_id = 1"
                 )
             ).scalar()
         assert row is not None and gram_tokenize("幻想") in row
@@ -418,7 +419,7 @@ class TestNovelsByIdsEndpoint:
     ):
         for i in (1, 2, 3):
             _seed(session_factory, i, f"标题{i}", str(Path(f"/tmp/{i}.txt")))
-        _seed_tags(session_factory, 1, ["R-18"])
+        _set_tags(session_factory, 1, ["R-18"])
 
         r = client.post("/api/novels/by-ids", json={"novel_ids": [3, 1]})
         assert r.status_code == 200

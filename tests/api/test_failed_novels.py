@@ -9,12 +9,21 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import pytest
 
 from copixiv.app import _domain_error_http_status
 from copixiv.core.exceptions import DomainError
-from copixiv.db.models import FailedNovel
+from copixiv.db.models import Author, FailedNovel, Novel
 from copixiv.features.failures import api as failed_novels
+
+
+@pytest.fixture(autouse=True)
+def _isolated_db(clean_db):
+    """Truncate all tables before each test (PG session-scoped DB)."""
+    yield
 
 
 class _FakeTaskManager:
@@ -51,8 +60,17 @@ def client(session_factory):
 
 
 def _seed(sf, novel_id: int, title: str | None, failed_times: int = 1,
-          last_failed_at: str | None = "2026-08-19 19:54:58"):
+          last_failed_at: datetime | None = None):
+    """Seed a failed-novel ledger row backed by a real novel (FK CASCADE)."""
     with sf() as s:
+        s.add(Author(author_id=novel_id, author_name=f"作者{novel_id}"))
+        s.flush()
+        s.add(Novel(
+            id=novel_id, title=title or f"标题{novel_id}",
+            author_id=novel_id, author_name=f"作者{novel_id}",
+            path=f"/tmp/{novel_id}.txt",
+        ))
+        s.flush()
         s.add(FailedNovel(
             novel_id=novel_id,
             failure_type="download",
@@ -72,7 +90,8 @@ class TestFailedNovelList:
         assert body == {"items": [], "total": 0, "offset": 0, "limit": 100}
 
     def test_list_shape_and_ordering(self, client, session_factory):
-        _seed(session_factory, 2, "标题B", last_failed_at="2026-08-19 20:00:00")
+        _seed(session_factory, 2, "标题B",
+              last_failed_at=datetime(2026, 8, 19, 20, 0, tzinfo=ZoneInfo("Asia/Shanghai")))
         _seed(session_factory, 1, None, last_failed_at=None)  # 存量旧记录
         r = client.get("/api/failed-novels/")
         assert r.status_code == 200
@@ -83,7 +102,7 @@ class TestFailedNovelList:
         assert first["title"] == "标题B"
         assert first["failed_times"] == 1
         assert first["error_message"] == "error-2"
-        assert first["last_failed_at"] == "2026-08-19 20:00:00"
+        assert first["last_failed_at"].startswith("2026-08-19T20:00:00")
         # 旧记录：标题与时间为 null
         assert body["items"][1]["title"] is None
         assert body["items"][1]["last_failed_at"] is None
@@ -91,7 +110,7 @@ class TestFailedNovelList:
     def test_pagination(self, client, session_factory):
         for i in range(1, 6):
             _seed(session_factory, i, f"标题{i}",
-                  last_failed_at=f"2026-08-19 20:0{i}:00")
+                  last_failed_at=datetime(2026, 8, 19, 20, i, tzinfo=ZoneInfo("Asia/Shanghai")))
         r = client.get("/api/failed-novels/", params={"offset": 0, "limit": 2})
         assert [i["novel_id"] for i in r.json()["items"]] == [5, 4]
         r = client.get("/api/failed-novels/", params={"offset": 2, "limit": 2})
@@ -107,21 +126,26 @@ class TestFailedNovelList:
     def test_not_found_family_sorted_last(self, client, session_factory):
         """Page-not-found 家族排最后，其余按时间倒序（用户排序要求）。"""
         with session_factory() as s:
-            s.add(FailedNovel(
-                novel_id=1, failure_type="download",
-                error_message="EPUB 生成失败: novel 1", failed_times=1,
-                title="可修复", last_failed_at="2026-08-19 20:55:00",
-            ))
-            s.add(FailedNovel(
-                novel_id=2, failure_type="download",
-                error_message="webview_novel 返回空", failed_times=1,
-                title=None, last_failed_at="2026-08-19 20:56:00",
-            ))
-            s.add(FailedNovel(
-                novel_id=3, failure_type="download",
-                error_message="Page not found", failed_times=1,
-                title=None, last_failed_at="2026-08-19 20:57:00",
-            ))
+            for nid, title in ((1, "可修复"), (2, None), (3, None)):
+                s.add(Author(author_id=nid, author_name=f"作者{nid}"))
+                s.flush()
+                s.add(Novel(
+                    id=nid, title=f"标题{nid}", author_id=nid,
+                    path=f"/tmp/{nid}.txt",
+                ))
+                s.flush()
+                s.add(FailedNovel(
+                    novel_id=nid, failure_type="download",
+                    error_message=(
+                        "EPUB 生成失败: novel 1" if nid == 1
+                        else ("webview_novel 返回空" if nid == 2
+                              else "Page not found")
+                    ),
+                    failed_times=1,
+                    title=title,
+                    last_failed_at=datetime(
+                        2026, 8, 19, 20, 55 + nid, tzinfo=ZoneInfo("Asia/Shanghai")),
+                ))
             s.commit()
 
         body = client.get("/api/failed-novels/").json()

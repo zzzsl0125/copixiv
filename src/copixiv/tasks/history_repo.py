@@ -2,7 +2,7 @@
 
 import json
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
@@ -34,7 +34,8 @@ class SQLAlchemyTaskRepository(BaseRepository):
             task_func=task_func,
             arguments=json.dumps(arguments, ensure_ascii=False),
             status="pending",
-            start_time=datetime.now().astimezone().isoformat(),
+            # timestamptz — store an aware UTC datetime (not an ISO string).
+            start_time=datetime.now(timezone.utc),
         )
         self.session.add(task)
         self.session.flush()
@@ -58,8 +59,17 @@ class SQLAlchemyTaskRepository(BaseRepository):
             # end_time only on terminal states — "running" rows must not
             # carry an end timestamp.
             if status in ("success", "failed", "interrupted"):
-                task.end_time = datetime.now().astimezone().isoformat()
+                task.end_time = datetime.now(timezone.utc)
             if result is not None:
+                # result/progress are JSONB columns.  Store a parsed dict so
+                # reads return structured data (the API response model already
+                # parses a JSON string defensively, but the ORM should not
+                # leave a raw JSON string behind either).
+                if isinstance(result, str):
+                    try:
+                        result = json.loads(result)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
                 task.result = result
             # Live progress lives in its own column.  We only ever write
             # (never clear) progress here — callers that want to stop showing

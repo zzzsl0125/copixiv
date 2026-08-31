@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -75,11 +76,15 @@ class TaskHistoryResponse(BaseModel):
     name: str
     arguments: dict | None = None
     status: str
-    start_time: str
-    end_time: str | None = None
+    # timestamptz → datetime; Pydantic serializes to an ISO string on the wire.
+    start_time: datetime
+    end_time: datetime | None = None
     duration: float | None = None
     result: dict | None = None
-    progress: str | None = None
+    # ``progress`` is a JSONB column.  Tasks write a plain message string; keep
+    # it permissive (Any) so a future dict-shaped progress doesn't break the
+    # wire contract.
+    progress: Any | None = None
     model_config = ConfigDict(from_attributes=True)
 
     _parse_arguments = field_validator("arguments", mode="before")(_parse_json_str)

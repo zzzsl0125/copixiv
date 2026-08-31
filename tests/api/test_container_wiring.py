@@ -12,6 +12,10 @@ directly (which performs the build + FastAPI factory) and drives it through
 ``TestClient`` — exactly the way the production app is exercised.
 """
 
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 from starlette.middleware.cors import CORSMiddleware
@@ -23,6 +27,26 @@ from copixiv.app import (
     HostValidationMiddleware,
 )
 
+WIRING_DB = "copixiv_wiring_test"
+WIRING_URL = f"postgresql+psycopg2://postgres@127.0.0.1:5433/{WIRING_DB}"
+
+
+def _ensure_wiring_db() -> None:
+    """Create + migrate a dedicated empty database for the wiring app."""
+    from copixiv.db.engine import run_migrations
+
+    subprocess.run(
+        [sys.executable, str(Path(__file__).resolve().parent.parent.parent / "scripts" / "pg_dev.py"),
+         "createdb", WIRING_DB],
+        check=True,
+    )
+    run_migrations(WIRING_URL)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _wiring_db():
+    _ensure_wiring_db()
+
 
 @pytest.fixture(scope="module")
 def config_path(tmp_path_factory):
@@ -30,6 +54,7 @@ def config_path(tmp_path_factory):
     config_file = tmp_path / "config.yaml"
     config_file.write_text(
         "\n".join([
+            "database_url: " + WIRING_URL,
             "path:",
             f"  database: {tmp_path / 'db' / 'app.db'}",
             f"  download: {tmp_path / 'download'}",
@@ -178,10 +203,14 @@ class TestRealRouterMounting:
         assert r.json()["exclude_blocked_tag_novels"] is True
 
     def test_migrations_ran_against_real_config_path(self, client):
-        """create_app() must have created the configured database."""
-        from pathlib import Path
+        """create_app() must have migrated the configured PostgreSQL DB."""
+        from sqlalchemy import create_engine, text
 
-        # config.path.database is written as an absolute path in the fixture;
-        # the composition root keeps absolute paths absolute.
-        db_path = Path(client.app.state.config.path.database)
-        assert db_path.exists(), "Alembic migrations did not create the DB file"
+        url = client.app.state.config.database_url
+        assert url.startswith("postgresql"), "app must target PostgreSQL now"
+        eng = create_engine(url)
+        try:
+            with eng.connect() as conn:
+                assert conn.execute(text("SELECT 1")).scalar() == 1
+        finally:
+            eng.dispose()

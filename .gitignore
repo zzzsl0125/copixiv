@@ -29,6 +29,7 @@ database/*.db-shm
 database/*.db-wal
 database/*.db.lock
 database/backups/
+backups/
 
 # === Log files ===
 log/

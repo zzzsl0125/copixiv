@@ -17,11 +17,17 @@ from copixiv.app import _domain_error_http_status
 from copixiv.config import AppConfig
 from copixiv.core.exceptions import DomainError
 from copixiv.db.models import (
-    Author, Novel, Tag, NovelTag,
+    Author, Novel,
 )
 from copixiv.features.novels import api as novels
 from copixiv.features.tags import preferences as tag_preferences
 from copixiv.features.system import api as system
+
+
+@pytest.fixture(autouse=True)
+def _isolated_db(clean_db):
+    """Truncate all tables before each test (PG session-scoped DB)."""
+    yield
 
 
 class _FakeFileStorage:
@@ -59,22 +65,15 @@ def client(session_factory, tmp_path):
 
 
 def _seed_novel(sf, novel_id: int, title: str, path: str, tags=(), **extra):
-    """Seed a novel, optionally with tags (creates Tag/NovelTag rows)."""
+    """Seed a novel with a tag array (the trigger keeps reference_count in sync)."""
     with sf() as s:
         s.add(Author(author_id=novel_id, author_name=f"作者{novel_id}"))
         s.flush()
         s.add(Novel(
             id=novel_id, title=title, author_id=novel_id,
             author_name=f"作者{novel_id}", path=path, has_epub=0,
-            **extra,
+            tags=list(tags), **extra,
         ))
-        for tag_name in tags:
-            tag = s.query(Tag).filter_by(name=tag_name).first()
-            if tag is None:
-                tag = Tag(name=tag_name, reference_count=0)
-                s.add(tag)
-                s.flush()
-            s.add(NovelTag(novel_id=novel_id, tag_id=tag.id))
         s.commit()
 
 

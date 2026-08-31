@@ -21,6 +21,7 @@ frontend can show what failed, when, and why — and act on it:
 """
 
 from fastapi import APIRouter, Body, Depends, Query
+from datetime import datetime
 from pydantic import BaseModel, ConfigDict
 
 from copixiv.core.exceptions import ValidationError
@@ -47,7 +48,8 @@ class FailedNovelItem(BaseModel):
     failure_type: str | None = None
     error_message: str | None = None
     failed_times: int = 1
-    last_failed_at: str | None = None
+    # timestamptz → datetime; Pydantic serializes to an ISO string on the wire.
+    last_failed_at: datetime | None = None
     model_config = ConfigDict(from_attributes=True)
 
 

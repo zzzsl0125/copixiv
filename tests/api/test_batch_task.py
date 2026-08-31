@@ -7,6 +7,7 @@ adds a recording fake task manager.
 """
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -17,12 +18,18 @@ from copixiv.app import _domain_error_http_status
 from copixiv.config import AppConfig
 from copixiv.core.exceptions import DomainError, TaskAlreadyRunningError
 from copixiv.db.models import (
-    Author, Novel, Tag, NovelTag, TaskHistory,
+    Author, Novel, Tag, TaskHistory,
 )
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.db.write_lock import DbWriteLock
 from copixiv.features.novels import api as novels
 from copixiv.tasks.batch import batch_operation
+
+
+@pytest.fixture(autouse=True)
+def _isolated_db(clean_db):
+    """Truncate all tables before each test (PG session-scoped DB)."""
+    yield
 
 
 class _FakeFileStorage:
@@ -82,6 +89,15 @@ def _seed(sf, novel_id: int, title: str, path: str, **extra):
             author_name=f"作者{novel_id}", path=path,
             has_epub=0, **extra,
         ))
+        s.commit()
+
+
+def _set_tags(sf, novel_id: int, tags: list[str]):
+    """Set a novel's tag array directly (the trigger keeps reference_count in sync)."""
+    with sf() as s:
+        novel = s.get(Novel, novel_id)
+        assert novel is not None, f"novel {novel_id} not seeded"
+        novel.tags = tags
         s.commit()
 
 
@@ -176,7 +192,7 @@ async def _run_task(session_factory, tmp_path, *, operation, novel_ids,
                 row = TaskHistory(
                     name="batch_operation", status="pending",
                     arguments=json.dumps({}),
-                    start_time="2026-01-01T00:00:00",
+                    start_time=datetime(2026, 1, 1, tzinfo=timezone.utc),
                 )
                 s.add(row)
                 s.commit()
@@ -208,13 +224,8 @@ class TestBatchOperationTask:
             p = tmp_path / f"{i}.txt"
             p.write_text(f"正文{i}", encoding="utf-8")
             _seed(session_factory, i, f"标题{i}", str(p))
-        with session_factory() as s:
-            tag = Tag(name="R-18", reference_count=2)
-            s.add(tag)
-            s.flush()
-            s.add_all([NovelTag(novel_id=1, tag_id=tag.id),
-                       NovelTag(novel_id=2, tag_id=tag.id)])
-            s.commit()
+        _set_tags(session_factory, 1, ["R-18"])
+        _set_tags(session_factory, 2, ["R-18"])
 
         result = pytest.mark.asyncio and None
         import asyncio
@@ -270,7 +281,8 @@ class TestBatchOperationTask:
         with session_factory() as s:
             tag = s.query(Tag).filter_by(name="新标签").one()
             assert tag.reference_count == 3
-            assert s.query(NovelTag).filter_by(tag_id=tag.id).count() == 3
+            # Every novel's tag array now contains the new tag.
+            assert all("新标签" in s.get(Novel, i).tags for i in (1, 2, 3))
 
     def test_partial_chunk_failure_is_reported(self, session_factory, tmp_path):
         _seed(session_factory, 1, "标题1", str(Path("/tmp/1.txt")))
@@ -345,7 +357,7 @@ class TestBatchExportTask:
             row = TaskHistory(
                 name="batch_export", status="pending",
                 arguments=json.dumps({"zip_name": "导出测试"}),
-                start_time="2026-01-01T00:00:00",
+                start_time=datetime(2026, 1, 1, tzinfo=timezone.utc),
             )
             s.add(row)
             s.commit()

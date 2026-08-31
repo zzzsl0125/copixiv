@@ -19,6 +19,12 @@ from copixiv.deps import get_uow
 # session_factory comes from tests/conftest.py (shared in-memory engine).
 
 
+@pytest.fixture(autouse=True)
+def _isolated_db(clean_db):
+    """Truncate all tables before each test (PG session-scoped DB)."""
+    yield
+
+
 @pytest.fixture
 def client(session_factory, monkeypatch):
     app = FastAPI()

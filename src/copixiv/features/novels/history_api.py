@@ -1,5 +1,7 @@
 """Search history API endpoints."""
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, ConfigDict
 
@@ -20,11 +22,12 @@ class SearchHistoryResponse(BaseModel):
     type: str
     value: str
     display_value: str | None = None
-    timestamp: str
+    # timestamptz → datetime; Pydantic serializes to an ISO string on the wire.
+    timestamp: datetime
     model_config = ConfigDict(from_attributes=True)
 
 
-@router.get("/")
+@router.get("/", response_model=list[SearchHistoryResponse])
 async def get_search_history(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),

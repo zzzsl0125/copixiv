@@ -12,7 +12,11 @@ task delegates here) with fake client/storage/downloader — no network:
 - persist_novels invariants: FK placeholders + refreshed summaries
 """
 
+from datetime import datetime
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
+
+import pytest
 
 from copixiv.features.novels.ingest import ingest
 from copixiv.features.novels.persist import persist_novels
@@ -23,6 +27,12 @@ from copixiv.db.models import (
 from copixiv.db.uow import SqlUnitOfWork
 
 # session_factory comes from tests/conftest.py (shared in-memory engine).
+
+
+@pytest.fixture(autouse=True)
+def _isolated_db(clean_db):
+    """Truncate all tables before each test (PG session-scoped DB)."""
+    yield
 
 
 class FakeClient:
@@ -166,14 +176,14 @@ class TestIngest:
             **_ingest_kwargs(session_factory, tmp_path, client, FakeImageDownloader()),
         )
 
+        # The pipeline still reports the failure to callers/notifier.
         assert (999, "webview_novel 返回空") in out.failed
         assert out.titles == []
         assert out.new_count == 0
+        # The novel was NEVER persisted, so under the failed_novel FK
+        # (ON DELETE CASCADE to novel) it cannot be ledgered — skip it.
         with session_factory() as s:
-            row = s.get(FailedNovel, 999)
-            assert row is not None
-            assert row.failure_type == "download"
-            assert "webview_novel 返回空" in row.error_message
+            assert s.get(FailedNovel, 999) is None
 
     async def test_asset_failures_recorded_in_persist_transaction(
         self, session_factory, tmp_path,
@@ -210,10 +220,15 @@ class TestIngest:
     async def test_success_forgets_failure_record(self, session_factory, tmp_path):
         """成功下载必须清除失败台账——否则手动重试成功后记录永远残留。"""
         with session_factory() as s:
+            s.add(Author(author_id=1, author_name="测试作者"))
+            s.flush()
+            s.add(Novel(id=100, title="新小说", author_id=1, path="/tmp/100.txt"))
+            s.flush()
             s.add(FailedNovel(
                 novel_id=100, failure_type="download",
                 error_message="旧失败", failed_times=3,
-                title="新小说", last_failed_at="2026-08-19 19:00:00",
+                title="新小说", last_failed_at=datetime(2026, 8, 19, 19, 0,
+                                                         tzinfo=ZoneInfo("Asia/Shanghai")),
             ))
             s.commit()
 
@@ -223,7 +238,9 @@ class TestIngest:
             **_ingest_kwargs(session_factory, tmp_path, client, FakeImageDownloader()),
         )
 
-        assert out.new_count == 1
+        # The novel was already persisted (seed), so this is a metadata-only
+        # re-upsert (new_count 0) — the failure record must still be cleared.
+        assert out.new_count == 0
         with session_factory() as s:
             assert s.get(FailedNovel, 100) is None
             assert s.get(Novel, 100) is not None
@@ -240,7 +257,8 @@ class TestPersistNovels:
             tags=["测试标签"],
         )
 
-        count = await persist_novels(uow, [novel])
+        async with uow.begin():
+            count = await persist_novels(uow, [novel])
 
         assert count == 1
         with session_factory() as s:
@@ -262,12 +280,14 @@ class TestPersistNovels:
             s.commit()
 
         uow = SqlUnitOfWork(session_factory)
-        count = await persist_novels(uow, [
-            build_novel(id=300, title="T", author_id=3),
-        ])
+        async with uow.begin():
+            count = await persist_novels(uow, [
+                build_novel(id=300, title="T", author_id=3),
+            ])
         assert count == 0
 
     async def test_empty_input_is_noop(self, session_factory):
         uow = SqlUnitOfWork(session_factory)
-        assert await persist_novels(uow, []) == 0
-        assert await persist_novels(uow, [None]) == 0
+        async with uow.begin():
+            assert await persist_novels(uow, []) == 0
+            assert await persist_novels(uow, [None]) == 0

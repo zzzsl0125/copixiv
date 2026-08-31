@@ -17,6 +17,7 @@ Pins the v1-compatible wire contract:
 import io
 import json
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -27,7 +28,7 @@ from copixiv.app import _domain_error_http_status
 from copixiv.config import AppConfig
 from copixiv.core.exceptions import DomainError, NotFoundError
 from copixiv.db.models import (
-    Author, Novel, SearchHistory, Tag, NovelTag, TaskHistory,
+    Author, Novel, SearchHistory, Tag, TaskHistory,
 )
 from copixiv.tasks import api as tasks
 from copixiv.features.novels import api as novels
@@ -35,6 +36,12 @@ from copixiv.features.novels import history_api as search_history
 from copixiv.features.tags import aliases as tag_aliases
 from copixiv.features.tags import preferences as tag_preferences
 from copixiv.features.system import api as system
+
+
+@pytest.fixture(autouse=True)
+def _isolated_db(clean_db):
+    """Truncate all tables before each test (PG session-scoped DB)."""
+    yield
 
 
 class _FakeFileStorage:
@@ -305,8 +312,10 @@ class TestTasksEndpoints:
 class TestSearchHistory:
     def test_clear_all(self, client, session_factory):
         with session_factory() as s:
-            s.add(SearchHistory(type="keyword", value="R-18", timestamp="2026-01-01T00:00:00"))
-            s.add(SearchHistory(type="author_id", value="123", timestamp="2026-01-02T00:00:00"))
+            s.add(SearchHistory(type="keyword", value="R-18",
+                                timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc)))
+            s.add(SearchHistory(type="author_id", value="123",
+                                timestamp=datetime(2026, 1, 2, tzinfo=timezone.utc)))
             s.commit()
 
         r = client.get("/api/search-history/")
@@ -402,11 +411,8 @@ class TestDeleteNovelSuccess:
             s.flush()
             s.add(Novel(
                 id=1, title="标题", author_id=1, author_name="作者1",
-                path=str(novel_path),
+                path=str(novel_path), tags=["R-18"],
             ))
-            s.add(Tag(name="R-18", reference_count=1))
-            s.flush()
-            s.add(NovelTag(novel_id=1, tag_id=1))
             s.commit()
 
         r = client.delete("/api/novels/1")
@@ -417,8 +423,7 @@ class TestDeleteNovelSuccess:
 
         with session_factory() as s:
             assert s.get(Novel, 1) is None
-            assert s.query(NovelTag).filter_by(novel_id=1).count() == 0
-            tag = s.get(Tag, 1)
+            tag = s.query(Tag).filter_by(name="R-18").one()
             assert tag.reference_count == 0, (
                 f"tag.reference_count should drop to 0, got {tag.reference_count}"
             )
@@ -581,17 +586,18 @@ class TestTaskHistoryShape:
                 TaskHistory(
                     name="novel_fetch", status="success",
                     arguments='{"id": 1}',
-                    start_time="2026-01-01T00:00:00",
-                    result='{"summary": "下载完成", "new_novels_count": 1, "new_novel_titles": ["t"]}',
+                    start_time=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                    result={"summary": "下载完成", "new_novels_count": 1,
+                            "new_novel_titles": ["t"]},
                 ),
                 TaskHistory(
                     name="rebuild_fts", status="running",
-                    start_time="2026-01-02T00:00:00",
+                    start_time=datetime(2026, 1, 2, tzinfo=timezone.utc),
                 ),
                 TaskHistory(
                     name="check_epub", status="failed",
-                    start_time="2026-01-03T00:00:00",
-                    result='{"summary": "boom"}',
+                    start_time=datetime(2026, 1, 3, tzinfo=timezone.utc),
+                    result={"summary": "boom"},
                 ),
             ])
             s.commit()

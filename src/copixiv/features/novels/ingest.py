@@ -226,13 +226,6 @@ async def _persist_batch(
     new_author_ids: set[int] = set()
     new_count: int = 0
 
-    # Failed downloads — recorded in the same write transaction.
-    if failed_records and failed_repo is not None:
-        for nid, reason in failed_records:
-            failed_repo.record(
-                nid, "download", reason, title=title_map.get(nid),
-            )
-
     # Metadata-only upsert for existing
     if existing_meta:
         upserted = await batch_upsert(existing_meta, uow)
@@ -257,6 +250,18 @@ async def _persist_batch(
         logger.info(
             f"_persist_batch: {len(downloaded)} novels downloaded and upserted",
         )
+
+    # Failed downloads — recorded AFTER the upserts above so a novel that was
+    # both downloaded AND failed asset processing (and is therefore persisted
+    # in this transaction) satisfies the ``failed_novel`` FK.  A brand-new
+    # novel that failed before persistence has no ``novel`` row and cannot be
+    # recorded under the FK — those are skipped (the download flow retries
+    # them naturally on the next run); see ``FailedNovelRepository.record``.
+    if failed_records and failed_repo is not None:
+        for nid, reason in failed_records:
+            failed_repo.record(
+                nid, "download", reason, title=title_map.get(nid),
+            )
 
     return titles, new_author_ids, new_count
 

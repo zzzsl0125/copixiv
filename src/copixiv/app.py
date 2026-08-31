@@ -43,7 +43,6 @@ from copixiv.db.engine import (
     create_session_factory,
     init_database,
 )
-from copixiv.features.novels.fts import FTSManager
 from copixiv.log import InterceptHandler, logger, setup_logging
 from copixiv.notify.composite import CompositeNotifier
 from copixiv.notify.factory import build_notifiers
@@ -303,181 +302,33 @@ class _AppSingletons:
     client: PixivClient
     notifier: CompositeNotifier | None
     task_manager: TaskManagerSystem
-    # Open file object from _acquire_instance_lock (None on non-POSIX).
-    instance_lock: Any = None
 
 
 # ---------------------------------------------------------------------------
 # Build — wire everything together
 # ---------------------------------------------------------------------------
 
-
-def _resolve_database_path(cfg) -> str:
-    """Resolve the configured database path against the working directory."""
-    db_path = Path(cfg.path.database)
-    if not db_path.is_absolute():
-        db_path = Path.cwd() / db_path
-    return str(db_path)
+# Weekly ``pg_dump`` backups land in this directory (project-relative).
+_BACKUP_DIR = "backups"
 
 
-def _should_auto_backup(db_path: Path) -> bool:
+def _should_auto_backup() -> bool:
     """Return True if this week's backup doesn't already exist."""
-    backup_dir = db_path.parent / "backups"
     this_week = date.today().strftime("%G-W%V")
-    week_backup = backup_dir / f"{this_week}.db"
+    week_backup = Path(_BACKUP_DIR) / f"{this_week}.dump"
     return not week_backup.exists()
 
 
-def _maybe_backup(db_path: Path, cfg) -> None:
-    """Create a weekly backup and remove older ones (keep N most recent)."""
+def _maybe_backup(cfg) -> None:
+    """Create a weekly pg_dump backup and remove older ones (keep N most recent)."""
     try:
-        backup_database(str(db_path))
-        cleanup_old_backups(str(db_path), keep_count=cfg.backup.keep_count)
+        backup_database(cfg.database_url, backup_dir=_BACKUP_DIR)
+        cleanup_old_backups(
+            cfg.database_url, keep_count=cfg.backup.keep_count,
+            backup_dir=_BACKUP_DIR,
+        )
     except Exception:
         logger.exception("Backup failed — continuing without backup.")
-
-
-def _acquire_instance_lock(db_path: str):
-    """Acquire an exclusive ``flock`` on ``<resolved db path>.lock``.
-
-    The lock file is a sibling of the database file.  A second copixiv
-    process pointed at the same database fails fast with ``SystemExit``
-    ("另一个 copixiv 实例正在使用此数据库") instead of silently sharing a
-    SQLite file it would corrupt (R1 / F12).
-
-    Returns the open lock *file object* — kept open for the process
-    lifetime and released on process exit or by the lifespan shutdown —
-    or ``None`` when ``fcntl`` is unavailable (non-POSIX), where locking
-    is best-effort and never blocks startup.
-    """
-    try:
-        import fcntl
-    except ImportError:  # pragma: no cover — non-POSIX fallback
-        logger.warning(
-            "fcntl unavailable (non-POSIX) — skipping instance lock for {}",
-            db_path,
-        )
-        return None
-
-    lock_path = Path(str(Path(db_path).resolve()) + ".lock")
-    # The engine usually creates the database directory; create it too if it
-    # does not exist yet (e.g. a totally fresh path).
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-
-    fd = open(lock_path, "a+")
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        # LOCK_NB raises BlockingIOError (an OSError) when another open file
-        # description already holds the exclusive lock — even for a second
-        # open() on the same path in *this* process (flock is per-OFD).
-        fd.close()
-        logger.error("另一个 copixiv 实例正在使用此数据库：{}", db_path)
-        raise SystemExit("另一个 copixiv 实例正在使用此数据库")
-    return fd
-
-
-def _warmup_database_cache(session_factory: sessionmaker[Session], db_path_str: str) -> None:
-    """Preload database pages into the OS page cache.
-
-    After a server restart — or once memory pressure evicts the ~270 MB
-    hot working set (novel like-index + novel_tag index + FTS5 data
-    segment) while the server sits idle — the first query that touches
-    cold pages pays seconds of *random* disk I/O.  This is I/O wait, not
-    CPU: measured ~7000 ms wall vs ~830 ms CPU for a cold first keyword
-    search on this 532 MB / 232k-novel DB.  The pain is most acute on
-    the first keyword search, which walks several large indexes.
-
-    The old shallow warmup (two small queries touching ~100 rows) did
-    almost nothing for this: it left the 94 MB FTS5 index and the bulk
-    of the novel indexes cold, and a representative query for one token
-    warms only that token's pages (R-18 does not help 「恋」).
-
-    The fix that actually works: a daemon thread **sequentially reads
-    the whole DB file once**.  Sequential I/O is 10-50× faster than the
-    random reads the queries will later issue, so once the file is
-    resident every query is an OS-cache hit.  Verified end-to-end: cold
-    first-search 7000 ms → 63 ms after a sequential full-file read.
-
-    It is non-blocking — the server is ready immediately and the read
-    races ahead of the user's first query (opening the page and typing a
-    search typically takes 3-8 s, by which point the read is done).  If
-    a query lands before the read finishes it just pays one cold pass
-    — no worse than today — and everything after is warm.  A tiny
-    synchronous representative query is kept so the very first request
-    still finds a few hot pages; the background read is the real fix.
-
-    ``fadvise(WILLNEED)`` was tried and rejected: the kernel's
-    readahead is sequential and does not match B-tree random access, so
-    it provided no measurable benefit.
-    """
-    logger.info("Warming database cache...")
-    try:
-        from sqlalchemy import func as _func, select as _select
-        from copixiv.db import models as _models
-        with session_factory() as session:
-            session.execute(
-                _select(_models.Novel)
-                .where(
-                    _models.Novel.shuffle > 0,
-                    _models.Novel.like >= 500,
-                    _models.Novel.text >= 3000,
-                )
-                .order_by(_models.Novel.shuffle.asc())
-                .limit(100)
-            )
-            session.execute(
-                _select(_func.count()).select_from(_models.NovelTag)
-                .where(
-                    _models.NovelTag.novel_id.in_(
-                        _select(_models.Novel.id).limit(100)
-                    )
-                )
-            )
-    except Exception:
-        logger.warning("Database cache warmup (shallow) failed — continuing.")
-
-    # Background sequential full-file read — the real cold-start fix.
-    # Pulls every page into the OS page cache without blocking startup.
-    import threading
-
-    def _seqread(path: str) -> None:
-        try:
-            t0 = time.perf_counter()
-            size = 0
-            with open(path, "rb") as f:
-                while True:
-                    chunk = f.read(1 << 20)  # 1 MB chunks
-                    if not chunk:
-                        break
-                    size += len(chunk)
-            logger.info(
-                f"Database cache warmup (sequential read) complete — "
-                f"{size // (1 << 20)} MB in "
-                f"{time.perf_counter() - t0:.1f}s."
-            )
-        except Exception:
-            logger.warning(
-                f"Database sequential-read warmup failed for {path} "
-                f"— continuing."
-            )
-
-    def _run() -> None:
-        # Warm the main DB file first (it holds the indexes that drive
-        # query latency); the WAL is small but read it too so committed
-        # pages not yet checkpointed are also resident.
-        for ext in ("", "-wal"):
-            p = db_path_str + ext
-            try:
-                if os.path.exists(p) and os.path.getsize(p) > 0:
-                    _seqread(p)
-            except Exception:
-                logger.warning(f"Sequential-read warmup skipped {p}.")
-
-    threading.Thread(
-        target=_run, name="db-cache-warmup", daemon=True,
-    ).start()
-    logger.info("Database cache warmup scheduled (background sequential read).")
 
 
 def _add_account(
@@ -557,36 +408,6 @@ def _load_accounts(
     logger.warning("No Pixiv accounts loaded — API calls will fail.")
 
 
-def _rebuild_fts_if_needed(session_factory: sessionmaker[Session]) -> None:
-    """Ensure ``novel_fts`` is a char-gram index; rebuild once if legacy/missing.
-
-    Alembic migrations create/replace ``novel_fts`` (see the char-gram
-    migration), but a pre-existing database may still hold a legacy
-    ``porter unicode61`` / jieba table, an old external-content table, or a
-    table whose row count is stale relative to ``novel``.
-    ``FTSManager.needs_rebuild()`` is the single upgrade self-heal entry
-    point: when it reports True we rebuild the whole index here in one-shot
-    (idempotent, ~7-15 s on a full corpus) so keyword search is never served
-    against a legacy or stale index.
-
-    MUST stay synchronous and loop-agnostic: the uvicorn factory invokes
-    ``create_app()`` INSIDE a running event loop (``python main.py`` →
-    ``uvicorn.run`` → ``config.load()``), so ``asyncio.run()`` here would
-    raise "cannot be called from a running event loop".  The write lock
-    (``db_write``) is unnecessary in this path: startup is single-threaded
-    and pre-serve, and the process already holds the exclusive instance
-    lock (``flock``, acquired before engine creation), so no concurrent
-    writer can exist.
-    """
-    with session_factory() as session:
-        manager = FTSManager(session)
-        if not manager.needs_rebuild():
-            return
-        logger.info("检测到旧/缺失 FTS 索引，正在重建为 char-gram（一次性）...")
-        manager.batch_rebuild_fts()
-        session.commit()
-
-
 def _build(config_path: str | None = None) -> _AppSingletons:
     """Create and wire all singletons (the old ``Container.build()``).
 
@@ -599,37 +420,16 @@ def _build(config_path: str | None = None) -> _AppSingletons:
 
     cfg = config if config_path is None else load_config(config_path)
 
-    # Resolve database path
-    db_path_str = _resolve_database_path(cfg)
-
-    # Instance-exclusive lock — acquire *before* any DB access (engine
-    # creation, migrations, backup).  A second copixiv process using the
-    # same database exits fast instead of corrupting it (R1 / F12).
-    instance_lock = _acquire_instance_lock(db_path_str)
-
-    # Auto-backup: first startup of each ISO week
-    db_path = Path(db_path_str)
-    if _should_auto_backup(db_path):
+    # Auto-backup: first startup of each ISO week (pg_dump — driven by
+    # ``cfg.database_url``, not a file path).
+    if _should_auto_backup():
         logger.info("First startup this week — creating automatic backup.")
-        _maybe_backup(db_path, cfg)
+        _maybe_backup(cfg)
 
-    # Per-domain assembly — the database is a PostgreSQL server addressed by
-    # ``cfg.database_url`` (postgres-migration).  The SQLite-era instance lock /
-    # auto-backup / warmup calls below still use ``cfg.path.database`` and are
-    # removed in phase 2.
     engine = create_database_engine(cfg.database_url)
     session_factory = create_session_factory(engine)
     init_database(engine, cfg.database_url)
     logger.info("Database initialized (Alembic migrations applied).")
-
-    # Ensure the novel_fts index is the char-gram form — Alembic migrations
-    # create/replace the table, but a pre-existing database may still hold a
-    # legacy porter/jieba or external-content table, or a stale index.  This
-    # is the one-time upgrade self-heal rebuild (~7-15 s, idempotent).
-    _rebuild_fts_if_needed(session_factory)
-
-    # Database cache warm-up — preload hot index pages into OS cache
-    _warmup_database_cache(session_factory, db_path_str)
 
     # File storage + EPUB builder + image downloader
     file_storage = FileStorage(cfg.path.download or "download")
@@ -677,7 +477,6 @@ def _build(config_path: str | None = None) -> _AppSingletons:
         client=client,
         notifier=notifier,
         task_manager=task_manager,
-        instance_lock=instance_lock,
     )
 
 
@@ -719,9 +518,6 @@ def create_app(config_path: str | None = None):
         # Startup
         logger.info("Starting copixiv v2...")
         # Store key dependencies on app.state for access by endpoints/tasks.
-        # The instance-lock fd is kept here so the shutdown branch can
-        # release it even if a startup step raises before yield.
-        app.state.instance_lock = s.instance_lock
         app.state.session_factory = s.session_factory
         app.state.config = s.config
         app.state.client = s.client
@@ -758,16 +554,6 @@ def create_app(config_path: str | None = None):
             s.image_downloader.shutdown()
             if s.notifier is not None:
                 await s.notifier.close()
-            # Release the instance lock (closing the fd releases the flock).
-            # Guarded against a re-entrant lifespan — a module-scoped app
-            # reused across several TestClient runs enters/leaves this twice.
-            lock = getattr(app.state, "instance_lock", None)
-            if lock is not None:
-                try:
-                    if not lock.closed:
-                        lock.close()
-                finally:
-                    app.state.instance_lock = None
 
     app = FastAPI(title="Novel Database API", lifespan=lifespan)
 

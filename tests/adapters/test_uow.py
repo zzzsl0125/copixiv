@@ -8,6 +8,12 @@ from copixiv.db.uow import SqlUnitOfWork
 # session_factory comes from tests/conftest.py (shared in-memory engine).
 
 
+@pytest.fixture(autouse=True)
+def _isolated_db(clean_db):
+    """Truncate all tables before each test (PG session-scoped DB)."""
+    yield
+
+
 class TestBeginTransactionSemantics:
     """begin() must commit on clean exit and roll back on exception."""
 

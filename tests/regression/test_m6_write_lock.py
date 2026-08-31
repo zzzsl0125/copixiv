@@ -1,41 +1,14 @@
-"""M6 复现：API 写路径必须纳入全局写锁。
+"""M6 复现：API 写路径必须通过 ``get_write_uow`` 写入边界。
 
-（M10 的 application 层纯度检查已随精简重构删除。）
+（M10 的 application 层纯度检查已随精简重构删除；全局写锁已随
+postgres-migration 移除——``get_write_uow`` 现在只是 ``db_write()``
+标记，不在 M6 断言全局互斥。）
 """
 
 import ast
-import asyncio
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
-from copixiv.db.models import Base
-from copixiv.db.write_lock import _db_write_lock
-from copixiv import deps
-
-
-# M6 -------------------------------------------------------------
-
-
-@pytest.fixture()
-def session_factory(tmp_path):
-    engine = create_engine(f"sqlite:///{tmp_path / 't.db'}")
-    Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine)
-
-
-def test_get_write_uow_holds_global_lock(session_factory):
-    """期望：get_write_uow yield 期间持有全局写锁。"""
-    results = {}
-
-    async def scenario():
-        async for _uow in deps.get_write_uow(session_factory=session_factory):
-            results["locked"] = _db_write_lock.locked()
-
-    asyncio.run(scenario())
-    assert results["locked"] is True
 
 
 def test_write_endpoints_declare_write_uow():
