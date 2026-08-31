@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import case, delete, func, or_, select, update
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from copixiv.db import models
 
@@ -13,8 +13,8 @@ from copixiv.db import models
 _MAX_RETRIES = 3
 
 
-def _now() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class FailedNovelRepository:
@@ -41,15 +41,15 @@ class FailedNovelRepository:
     ) -> None:
         """Record (or increment) a failure for *novel_id*.
 
-        Uses SQLite ``ON CONFLICT DO UPDATE`` so the whole operation is
+        Uses PostgreSQL ``ON CONFLICT DO UPDATE`` so the whole operation is
         a single atomic statement — no read-then-write race.  *title* is
         only overwritten when a non-empty value is provided (the ingest
         pipeline knows the title; other callers may not), and
-        ``last_failed_at`` is always bumped to now.
+        ``last_failed_at`` is always bumped to now (UTC).
         """
         now = _now()
         stmt = (
-            sqlite_insert(models.FailedNovel)
+            pg_insert(models.FailedNovel)
             .values(
                 novel_id=novel_id,
                 failure_type=failure_type,

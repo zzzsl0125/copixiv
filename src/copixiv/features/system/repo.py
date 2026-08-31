@@ -6,7 +6,7 @@ caller decides the default.
 """
 
 from sqlalchemy import select
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from copixiv.db import models
 from copixiv.db.base import BaseRepository
@@ -24,7 +24,7 @@ class SQLAlchemySettingRepository(BaseRepository):
     async def set_value(self, key: str, value: str) -> str:
         """Upsert a setting value and return it."""
         self.session.execute(
-            sqlite_insert(models.Setting)
+            pg_insert(models.Setting)
             .values(key=key, value=value)
             .on_conflict_do_update(
                 index_elements=[models.Setting.key],

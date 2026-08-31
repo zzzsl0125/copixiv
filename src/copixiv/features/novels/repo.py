@@ -1,25 +1,32 @@
 """Novel data layer — read/write repos, facade, query builder, and series repo.
 
-Merged into one module from the split ``novel_read.py`` / ``novel_write.py``
-/ ``novel.py`` (read/write facade) / ``query_builder.py`` /
-``query_builder_base.py`` / ``series.py`` (docs/SIMPLIFY_PLAN.md §3 S3,
-§5 S1-4a).  ``FTSManager`` moves separately to
-``copixiv.features.novels.fts``.
+postgres-migration: the novel_tag/favourite/special_follow join tables are
+gone.  Tags live in ``novel.tags text[]`` (+ GIN), ``is_favourite`` is a
+``novel`` column, ``is_special_follow`` is an ``author`` column, and keyword
+search runs against the application-maintained ``novel_search`` derived table
+(``to_tsvector('simple', search_text) @@ to_tsquery('simple', '<gram>')``).
+``reference_count`` is maintained by the ``sync_tag_refs`` trigger, deleted
+rows cascade to ``novel_search``/``failed_novel`` via FK ``ON DELETE
+CASCADE``, and ``id = ANY($1)`` / ``tags @>`` / ``NOT (tags && ...)`` replace
+the SQLite-era ``IN``/``EXISTS`` adaptive filters and manual DELETE bookkeeping.
+
+``FTSManager`` moves separately to ``copixiv.features.novels.fts``.
 """
 
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
     select, select as _select,
-    func, case, Select, update, delete as _delete,
-    text, text as _text,
-    table, column, Integer, literal_column, exists as _exists, tuple_ as _tuple,
+    func, Select, update, delete as _delete,
+    text as _text,
+    literal_column, exists as _exists, tuple_ as _tuple,
 )
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from copixiv.db import models
 from copixiv.db import constants as C
@@ -28,6 +35,7 @@ from copixiv.core.draft import NovelDraft
 from copixiv.core.services import (
     EXCLUDE_BLOCKED_SETTING_KEY,
     resolve_active,
+    parse_pixiv_time,
 )
 from copixiv.core.services import QuerySpec
 from copixiv.db.base import (
@@ -39,47 +47,26 @@ from copixiv.db.data_version import current_epoch
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
 from copixiv.features.novels.fts import FTSManager, gram_tokenize
 
-# =========================================================================
-# Query builder — base (FTS availability cache, pagination/ordering)
-# =========================================================================
 
+def fts_query_to_pg(fts_query: str) -> str:
+    """Convert a char-gram FTS query string into a PostgreSQL tsquery phrase.
 
-# ------------------------------------------------------------------
-# FTS availability cache — checked once per process lifetime.
-# The FTS virtual table is created at database init and persists, so
-# there is no need to probe it on every single keyword query.
-# ------------------------------------------------------------------
-_fts_available: bool | None = None
-
-
-def reset_fts_cache() -> None:
-    """Reset the FTS availability cache (call after FTS index rebuild).
-
-    ``rebuild_fts`` can run while the process is alive (maintenance task) —
-    without this reset, a process that started with the FTS table missing
-    would keep skipping keyword filters even after the rebuild created it.
+    ``BaseQueryBuilder._build_fts_query_string`` emits whitespace-joined char
+    grams (``哈 利 波 特``), with ``&`` between AND-ed segments.  PostgreSQL's
+    phrase syntax wraps each gram phrase in **single** quotes (a
+    ``to_tsquery('simple', '<gram>')`` phrase is ``'哈 利 波 特'`` — a
+    ``<->`` adjacency phrase).  This converts the unquoted gram text into the
+    value bound to ``to_tsquery('simple', :fts_query)``.
     """
-    global _fts_available
-    _fts_available = None
+    if not fts_query:
+        return ""
+    phrases = [p.strip() for p in fts_query.split("&") if p.strip()]
+    return " & ".join(f"'{p}'" for p in phrases)
 
 
-def _check_fts_available(session: Session) -> bool:
-    """Return True if the FTS virtual table exists in the database.
-
-    The result is cached at module level — the check runs at most once
-    per process lifetime (unless ``reset_fts_cache()`` is called).
-    """
-    global _fts_available
-    if _fts_available is not None:
-        return _fts_available
-    try:
-        session.execute(
-            _text(f"SELECT 1 FROM {C.TABLE_NOVEL_FTS} LIMIT 0")
-        )
-        _fts_available = True
-    except Exception:
-        _fts_available = False
-    return _fts_available
+# =========================================================================
+# Query builder — base (pagination/ordering)
+# =========================================================================
 
 
 class BaseQueryBuilder:
@@ -97,7 +84,7 @@ class BaseQueryBuilder:
 
     @staticmethod
     def _build_fts_query_string(keyword_string: str) -> str:
-        """Convert a user keyword string into an FTS5-safe AND query.
+        """Convert a user keyword string into a char-gram phrase query.
 
         Char-gram semantics (see :func:`copixiv.features.novels.fts.gram_tokenize`):
 
@@ -107,20 +94,16 @@ class BaseQueryBuilder:
           "pure punctuation" segment such as ``---``) carries no search
           meaning and is dropped — matching the rule that a query that
           collapses to nothing filters nothing;
-        * every other segment is char-grammed (``gram_tokenize``) and the
-          whole result wrapped in double quotes to form a FTS5 phrase —
-          a no-space query is therefore an exact contiguous-substring
-          match (``哈利波特`` → ``"哈 利 波 特"``);
-        * segments are joined with `` AND ``; if nothing survives the
-          empty contract is preserved (``""`` means "no MATCH clause").
+        * every other segment is char-grammed (``gram_tokenize``), yielding a
+          space-separated phrase — a no-space query is therefore an exact
+          contiguous-substring match (``哈利波特`` → ``哈 利 波 特``);
+        * segments are joined with ``&`` (PostgreSQL tsquery AND); if nothing
+          survives the empty contract is preserved (``""`` means "no filter").
 
-        Because each emitted term is a quoted phrase, the FTS5 query
-        language (``AND``/``OR``/``NOT``/``NEAR``) is no longer a syntax
-        risk and no reserved-word filtering is needed.  And because
-        ``gram_tokenize`` maps every non-alphanumeric character — including
-        ``"`` and ``'`` — to the placeholder ``龖``, the emitted phrase can
-        never contain a quote character, so neither FTS5 string-literal
-        escaping nor the old single-quote stripping is required.
+        The emitted string carries **no quote characters** — the PostgreSQL
+        phrase quoting (single quotes) is applied by :func:`fts_query_to_pg`,
+        which the caller binds to ``to_tsquery('simple', ...)``.  (The FTS5
+        double-quote form is gone.)
         """
         if not keyword_string.strip():
             return ""
@@ -131,11 +114,11 @@ class BaseQueryBuilder:
             # alphanumeric character, so they cannot form a meaningful phrase.
             if not any(ch.isalpha() or ch.isnumeric() for ch in seg):
                 continue
-            phrases.append(f'"{gram_tokenize(seg)}"')
+            phrases.append(gram_tokenize(seg))
 
         if not phrases:
             return ""
-        return " AND ".join(phrases)
+        return " & ".join(phrases)
 
     def _apply_cursor(
         self, stmt: Select, cursor: dict | None, order_by: str,
@@ -146,6 +129,7 @@ class BaseQueryBuilder:
         Uses ``<`` for DESC (next page = smaller values) and ``>`` for ASC
         (next page = larger values).  Secondary-sorts on ``id`` to avoid
         skipping or duplicating rows that share the same sort-column value.
+        Row-value tuple comparison works directly in PostgreSQL (ROW...).
         """
         if not cursor:
             return stmt
@@ -161,17 +145,6 @@ class BaseQueryBuilder:
 
         col = getattr(self.main_model, order_by, None)
         if col is not None:
-            # Tiebreaker: when multiple rows share the same sort-column
-            # value, secondary-sort by id so no row is skipped or
-            # duplicated across pages.
-            #
-            # Use row-value tuple comparison (col, id) < (cursor_val, cursor_id)
-            # instead of (col < cursor_val) OR (col = cursor_val AND id < cursor_id).
-            # The tuple form lets SQLite use a single index range scan on a
-            # composite (col, id) index — the OR form forces a UNION of two
-            # separate seeks, which is dramatically slower on page 2 (the first
-            # page with a cursor) because it cannot terminate early after LIMIT
-            # rows and must exhaust both OR branches.
             descending = order_direction.upper() == "DESC"
             cursor_val = cursor[order_by]
             cursor_id = cursor["id"]
@@ -209,92 +182,39 @@ class BaseQueryBuilder:
 
 
 # =========================================================================
-# Query builder — single-phase Novel list/count builder
+# Query builder — single-phase Novel list/count builder (PostgreSQL)
 # =========================================================================
 
-# """Novel query builder — single-phase, filter-driven queries for SQLite.
-#
-# Key design decisions (v2 rewrite):
-# - Single-phase: no nested "filtered_ids subquery → main query" pattern.
-#   The old two-phase approach caused ``USE TEMP B-TREE FOR ORDER BY`` on every
-#   request because SQLite lost ordering across the subquery boundary.
-# - Filter-driven with WHERE-IN: tag and FTS filters produce independent
-#   subqueries of novel IDs, used via ``WHERE novel.id IN (...)``.  This lets
-#   SQLite use covering indexes (ix_novel_like, idx_novel_author_likes, etc.)
-#   for ORDER BY + LIMIT because the outer scan stays on the novel table.
-# - JOIN for small tables: favourite/special_follow filters use INNER JOIN
-#   since those tables are tiny (67 and 58 rows respectively).
-# """
 
+def blocked_tags_excluded(names):
+    """Build a ``NOT (tags && ARRAY[...])`` clause excluding blocked novels.
 
-# Lightweight table reference for the FTS5 virtual table so SQLAlchemy's
-# ORM compile state can handle subqueries that select from it (TextClause
-# lacks a .selectable attribute and causes AttributeError).
-_fts_table = table(
-    C.TABLE_NOVEL_FTS,
-    column("rowid", Integer),
-)
-
-# Adaptive filter thresholds (benchmarked on the real 232k-novel database).
-# For list queries, low-selectivity tag/keyword filters are faster as
-# ``WHERE id IN (...)``, while high-selectivity filters are faster as
-# correlated ``EXISTS`` (which can stop early along the ORDER BY index).
-# These thresholds sit at the measured crossover point.
-_ADAPTIVE_TAG_THRESHOLD = 3000
-_ADAPTIVE_KEYWORD_THRESHOLD = 15000
-
-# Blocked-tag exclusion: below this many blocked novels the count is
-# computed by restricting on the blocked-id list (PK lookups, ~18ms on
-# 232k rows); above it the correlated NOT EXISTS form is faster because
-# it short-circuits on the first match (~150ms for a 92%-coverage tag).
-_BLOCKED_COUNT_THRESHOLD = 30000
-
-
-def blocked_tags_not_exists(names):
-    """Build a ``NOT EXISTS`` clause excluding novels carrying any of *names*.
-
-    Correlated subquery over ``novel_tag JOIN tag`` — keeps the outer
-    query's covering-index walk (ORDER BY + LIMIT early termination)
-    intact.  Returns None for an empty name set so callers can skip the
-    condition entirely (zero overhead when nothing is blocked).
+    Returns None for an empty name set so callers can skip the condition
+    entirely (zero overhead when nothing is blocked).
     """
     if not names:
         return None
-    return ~_exists(
-        select(literal_column("1"))
-        .select_from(models.NovelTag)
-        .join(models.Tag, models.NovelTag.tag_id == models.Tag.id)
-        .where(
-            models.NovelTag.novel_id == models.Novel.id,
-            models.Tag.name.in_(names),
-        )
-    )
+    return ~models.Novel.tags.overlap(list(names))
 
 
 class NovelQueryBuilder(BaseQueryBuilder):
-    """Builds single-phase Novel list and count queries.
+    """Builds single-phase Novel list and count queries (PostgreSQL forms).
 
     Query structure (conceptual)::
 
-        SELECT novel.*, CASE ... is_favourite, CASE ... is_special_follow
+        SELECT novel.*, (SELECT is_special_follow FROM author WHERE author_id=novel.author_id)
         FROM novel
-        LEFT JOIN favourite        ON novel.id = favourite.novel_id
-        LEFT JOIN special_follow   ON novel.author_id = sf.author_id
-        [JOIN favourite            ON ...]   -- if filtering by favourite
-        [JOIN special_follow       ON ...]   -- if filtering by sf
-        WHERE novel.id IN (<tag_id_subquery>)        -- if tags
-          AND novel.id IN (<fts_id_subquery>)         -- if keyword
+        WHERE novel.tags @> ARRAY[...]                 -- tag filters (AND)
+          AND NOT (novel.tags && ARRAY[blocked])       -- blocked exclusion
+          AND to_tsvector('simple', novel_search.search_text) @@ to_tsquery('simple', '...')
           AND [thresholds / author_id / series_id / cursor]
         ORDER BY ...
         LIMIT ...
 
-    The WHERE-IN pattern for tags and FTS is critical: because the outer
-    query scans the novel table via a covering index (e.g. ix_novel_like),
-    SQLite can use the index ordering to satisfy ORDER BY + LIMIT without
-    a temporary B-Tree.  The subqueries are independent (no outer reference),
-    so they are materialised once, not correlated per row.
-
-    Count query uses the same filter structure, drops ORDER BY / LIMIT.
+    ``is_favourite`` is a direct ``novel`` column; ``is_special_follow`` comes
+    from ``author``.  Tag filtering uses ``tags @> ARRAY[...]`` (all names
+    present = AND); blocked exclusion uses ``NOT (tags && ...)``.  Keyword
+    search uses a correlated EXISTS over ``novel_search``.
     """
 
     def __init__(
@@ -309,8 +229,6 @@ class NovelQueryBuilder(BaseQueryBuilder):
         super().__init__(repo.session, models.Novel)
         self.repo = repo
         self.spec = spec
-        # SQL-only inputs — supplied by the repository, not part of the
-        # user-facing QuerySpec (docs/MODULARITY.md §M3).
         self.ids = ids
         self.restrict_ids = restrict_ids
         self.blocked_tag_names = blocked_tag_names
@@ -324,37 +242,21 @@ class NovelQueryBuilder(BaseQueryBuilder):
         conditions = self.spec.conditions
         tags, keywords, field_filters = self._categorize(conditions)
 
-        # Skip display-flag JOINs when the query already filters by them
-        skip_fav = C.FIELD_IS_FAVOURITE in field_filters
-        skip_sf = C.FIELD_IS_SPECIAL_FOLLOW in field_filters
-        main = self._base_select(
-            skip_favourite_join=skip_fav,
-            skip_special_follow_join=skip_sf,
-        )
-
-        # Filter JOINs for favourite / special_follow (WHERE-IN subqueries)
+        main = self._base_select()
         main = self._join_field_filter_tables(main, field_filters)
-
-        # Tag and FTS filters — adaptive for list queries: rare filters
-        # use WHERE-IN, popular filters use EXISTS so SQLite can walk the
-        # covering index for ORDER BY + LIMIT without a temporary B-Tree.
-        main = self._where_tag_filter(main, tags, use_exists=True)
-        main = self._where_fts_filter(main, keywords, use_exists=True)
-
-        # WHERE conditions on novel columns
+        main = self._where_tag_filter(main, tags)
+        main = self._where_fts_filter(main, keywords)
         main = self._where_field_filters(main, field_filters)
         main = self._where_thresholds(main)
 
-        # Blocked-tag exclusion (NOT EXISTS; skipped entirely when empty)
         blocked = self.blocked_tag_names
         if blocked:
-            main = main.where(blocked_tags_not_exists(blocked))
+            main = main.where(blocked_tags_excluded(blocked))
 
         exclude_ids = self.spec.exclude_ids
         if exclude_ids:
             main = main.where(self.main_model.id.not_in(exclude_ids))
 
-        # Pagination, ordering, limit — applied last so indexes can serve ORDER BY
         main = self._apply_cursor(
             main, self.spec.cursor, self.spec.order_by,
             self.spec.order_direction,
@@ -367,39 +269,63 @@ class NovelQueryBuilder(BaseQueryBuilder):
         return main, self.spec
 
     def build_ids(self) -> Select:
-        """Build an ID-only query with the same filters, without limit.
-
-        Used by batch operations to resolve the full matching ID set in a
-        single lightweight scan (no display-flag JOINs, no column payload).
-        """
+        """Build an ID-only query with the same filters, without limit."""
         conditions = self.spec.conditions
         tags, keywords, field_filters = self._categorize(conditions)
 
         stmt = select(self.main_model.id).select_from(self.main_model)
-        stmt = self._join_field_filter_tables(
-            stmt, field_filters, use_exists_for_special_follow=False,
-        )
-        stmt = self._join_tag_filter(stmt, tags)
-        stmt = self._where_fts_filter(stmt, keywords, use_exists=False)
+        stmt = self._join_field_filter_tables(stmt, field_filters)
+        stmt = self._where_tag_filter(stmt, tags)
+        stmt = self._where_fts_filter(stmt, keywords)
         stmt = self._where_field_filters(stmt, field_filters)
         stmt = self._where_thresholds(stmt)
 
-        # Optional membership constraint: only return IDs from this set
-        # (used by match-ids to intersect the selection with the scope).
         id_set = self.ids
         if id_set:
             stmt = stmt.where(self.main_model.id.in_(id_set))
+
+        if self.blocked_tag_names:
+            stmt = stmt.where(
+                ~models.Novel.tags.overlap(list(self.blocked_tag_names))
+            )
 
         exclude_ids = self.spec.exclude_ids
         if exclude_ids:
             stmt = stmt.where(self.main_model.id.not_in(exclude_ids))
         return stmt
 
-    def build_count(self) -> Select | None:
+    def build_ids_in_scope(
+        self, novel_ids: list[int], blocked_tag_names: frozenset[str],
+    ) -> Select:
+        """Build an ID query intersecting *novel_ids* with *spec*, minus blocked."""
+        conditions = self.spec.conditions
+        tags, keywords, field_filters = self._categorize(conditions)
+
+        stmt = select(self.main_model.id).select_from(self.main_model)
+        stmt = self._join_field_filter_tables(stmt, field_filters)
+        stmt = self._where_tag_filter(stmt, tags)
+        stmt = self._where_fts_filter(stmt, keywords)
+        stmt = self._where_field_filters(stmt, field_filters)
+        stmt = self._where_thresholds(stmt)
+        stmt = stmt.where(self.main_model.id.in_(novel_ids))
+        if blocked_tag_names:
+            stmt = stmt.where(
+                ~models.Novel.tags.overlap(list(blocked_tag_names))
+            )
+        exclude_ids = self.spec.exclude_ids
+        if exclude_ids:
+            stmt = stmt.where(self.main_model.id.not_in(exclude_ids))
+        return stmt
+
+    def build_count(
+        self, *, count_blocked: bool = False,
+    ) -> Select | None:
         """Build a COUNT(*) query with the same filters, without limit.
 
         Returns None when there are no filters (caller can use a cheap
-        ``SELECT COUNT(*) FROM novel``).
+        ``SELECT COUNT(*) FROM novel``).  ``count_blocked=True`` counts the
+        novels that *do* carry blocked tags (the excluded set) instead of
+        excluding them.
         """
         conditions = self.spec.conditions
         tags, keywords, field_filters = self._categorize(conditions)
@@ -416,34 +342,19 @@ class NovelQueryBuilder(BaseQueryBuilder):
             return None
 
         stmt = select(func.count()).select_from(self.main_model)
-        # COUNT queries: special_follow uses IN instead of EXISTS (avoids
-        # a full novel scan).  Tags: JOIN when there are no thresholds
-        # (faster for popular tags — 171ms vs 249ms), but EXISTS when
-        # thresholds are active so SQLite drives from the small
-        # threshold-filtered index instead of the large tag membership set
-        # (measured: R-18 + 500/3000 = 202ms → 77ms).
-        has_thresholds = (
-            (self.spec.min_like is not None and self.spec.min_like > 0)
-            or (self.spec.min_text is not None and self.spec.min_text > 0)
-        )
-        stmt = self._join_field_filter_tables(
-            stmt, field_filters, use_exists_for_special_follow=False,
-        )
-        if tags and has_thresholds:
-            stmt = self._where_tag_filter(stmt, tags, use_exists=True)
-        else:
-            stmt = self._join_tag_filter(stmt, tags)
-        stmt = self._where_fts_filter(stmt, keywords, use_exists=False)
+        stmt = self._join_field_filter_tables(stmt, field_filters)
+        stmt = self._where_tag_filter(stmt, tags)
+        stmt = self._where_fts_filter(stmt, keywords)
         stmt = self._where_field_filters(stmt, field_filters)
         stmt = self._where_thresholds(stmt)
 
-        # Blocked-tag exclusion: restrict to / exclude from a set of ids.
-        restrict_ids = self.restrict_ids
-        if restrict_ids:
-            stmt = stmt.where(self.main_model.id.in_(restrict_ids))
+        if self.restrict_ids:
+            stmt = stmt.where(self.main_model.id.in_(self.restrict_ids))
+
         blocked = self.blocked_tag_names
         if blocked:
-            stmt = stmt.where(blocked_tags_not_exists(blocked))
+            cond = models.Novel.tags.overlap(list(blocked))
+            stmt = stmt.where(cond if count_blocked else ~cond)
 
         exclude_ids = self.spec.exclude_ids
         if exclude_ids:
@@ -454,54 +365,23 @@ class NovelQueryBuilder(BaseQueryBuilder):
     # Internal: SELECT columns
     # ------------------------------------------------------------------
 
-    def _base_select(
-        self,
-        skip_favourite_join: bool = False,
-        skip_special_follow_join: bool = False,
-    ) -> Select:
+    def _base_select(self) -> Select:
         """Build the SELECT clause with all novel columns + display flags.
 
-        When the query already filters by *is_favourite* or
-        *is_special_follow*, the corresponding OUTER JOIN can be skipped
-        because the flag value is statically known (1).
-
-        Tags are now loaded in batch by the repository after the main query
-        via ``_batch_load_tags`` — no per-row correlated subquery.
+        ``is_favourite`` is a ``novel`` column (already in the column set);
+        ``is_special_follow`` lives on ``author`` and is read via a scalar
+        subquery (the author table is small and per-row indexed by PK).
+        Tags are read directly from the ``novel.tags`` column — no batch
+        join is needed anymore.
         """
         cols: list = list(self.main_model.__table__.c)
-
-        if skip_favourite_join:
-            cols.append(literal_column("1").label(C.FIELD_IS_FAVOURITE))
-        else:
-            cols.append(
-                case(
-                    (models.Favourite.novel_id != None, 1), else_=0,
-                ).label(C.FIELD_IS_FAVOURITE),
-            )
-
-        if skip_special_follow_join:
-            cols.append(literal_column("1").label(C.FIELD_IS_SPECIAL_FOLLOW))
-        else:
-            cols.append(
-                case(
-                    (models.SpecialFollow.author_id != None, 1), else_=0,
-                ).label(C.FIELD_IS_SPECIAL_FOLLOW),
-            )
-
-        stmt = select(*cols).select_from(self.main_model)
-
-        if not skip_favourite_join:
-            stmt = stmt.outerjoin(
-                models.Favourite,
-                self.main_model.id == models.Favourite.novel_id,
-            )
-        if not skip_special_follow_join:
-            stmt = stmt.outerjoin(
-                models.SpecialFollow,
-                self.main_model.author_id == models.SpecialFollow.author_id,
-            )
-
-        return stmt
+        sf_subq = (
+            select(models.Author.is_special_follow)
+            .where(models.Author.author_id == self.main_model.author_id)
+            .scalar_subquery()
+        )
+        cols.append(sf_subq.label(C.FIELD_IS_SPECIAL_FOLLOW))
+        return select(*cols).select_from(self.main_model)
 
     # ------------------------------------------------------------------
     # Internal: filter categorisation
@@ -509,15 +389,7 @@ class NovelQueryBuilder(BaseQueryBuilder):
 
     @staticmethod
     def _categorize(conditions) -> tuple[set, set, dict]:
-        """Split an ordered condition list into (tags, keywords, field_filters).
-
-        - ``tags`` / ``keywords`` accumulate (AND semantics — every value
-          becomes its own WHERE branch downstream).
-        - Scalar field filters keep the LAST value per type: under AND
-          semantics two different values for the same column are
-          contradictory, and the ordered list makes the winner
-          deterministic.
-        """
+        """Split an ordered condition list into (tags, keywords, field_filters)."""
         tags: set[str] = set()
         keywords: set[str] = set()
         field_filters: dict[str, str] = {}
@@ -533,134 +405,28 @@ class NovelQueryBuilder(BaseQueryBuilder):
         return tags, keywords, field_filters
 
     # ------------------------------------------------------------------
-    # Internal: tag filter — WHERE-IN (count) or EXISTS (list)
+    # Internal: tag filter — tags @> ARRAY[...] (AND semantics)
     # ------------------------------------------------------------------
 
-    def _get_tag_reference_counts(
-        self, tag_names: set[str],
-    ) -> dict[str, int]:
-        """Return ``{tag_name: reference_count}`` for the given tag names."""
-        if not tag_names:
-            return {}
-        rows = self.session.execute(
-            select(models.Tag.name, models.Tag.reference_count)
-            .where(models.Tag.name.in_(tag_names))
-        ).all()
-        return {name: count for name, count in rows}
-
-    def _where_tag_filter(
-        self, stmt: Select, tag_names: set[str], use_exists: bool = False,
-        adaptive: bool = True,
-    ) -> Select:
-        """Add tag filter conditions.
-
-        For list queries (``use_exists=True``) the strategy is adaptive:
-        rare tags use ``WHERE id IN (...)``, popular tags use correlated
-        ``EXISTS``.  The threshold is based on ``tag.reference_count``,
-        which is maintained incrementally and is cheap to read.
-
-        * ``reference_count < _ADAPTIVE_TAG_THRESHOLD`` → IN
-        * otherwise → EXISTS
-
-        For count/filter-only queries (``use_exists=False``) the method
-        keeps the ``WHERE id IN (...)`` form (the count path now prefers
-        ``_join_tag_filter`` for large result sets).
-        """
+    def _where_tag_filter(self, stmt: Select, tag_names: set[str]) -> Select:
+        """Add tag filter conditions: ``tags @> ARRAY[names]`` (all present)."""
         if not tag_names:
             return stmt
-
-        ref_counts = (
-            self._get_tag_reference_counts(tag_names)
-            if use_exists and adaptive else {}
-        )
-
-        for tag_name in tag_names:
-            use_in = False
-            if use_exists:
-                if adaptive:
-                    ref = ref_counts.get(tag_name)
-                    # Missing tag means zero occurrences → treat as rare/IN.
-                    use_in = ref is None or ref < _ADAPTIVE_TAG_THRESHOLD
-                # else: adaptive=False keeps legacy EXISTS behaviour.
-
-            if use_exists and not use_in:
-                exists_subq = _exists(
-                    select(literal_column("1"))
-                    .select_from(models.NovelTag)
-                    .join(models.Tag, models.NovelTag.tag_id == models.Tag.id)
-                    .where(
-                        models.NovelTag.novel_id == self.main_model.id,
-                        models.Tag.name == tag_name,
-                    )
-                )
-                stmt = stmt.where(exists_subq)
-            else:
-                tag_ids_subq = (
-                    select(models.NovelTag.novel_id)
-                    .join(models.Tag, models.NovelTag.tag_id == models.Tag.id)
-                    .where(models.Tag.name == tag_name)
-                )
-                stmt = stmt.where(self.main_model.id.in_(tag_ids_subq))
-        return stmt
-
-    def _join_tag_filter(
-        self, stmt: Select, tag_names: set[str],
-    ) -> Select:
-        """Add tag filters as INNER JOINs (used by COUNT queries).
-
-        A direct join avoids materialising a large ``id IN (SELECT ...)``
-        list; for very popular tags this is faster and uses less temp space
-        (measured 249 ms → 171 ms for R-18 on 232k novels).
-        """
-        for idx, tag_name in enumerate(tag_names, start=1):
-            nt_alias = models.NovelTag.__table__.alias(f"nt_{idx}")
-            t_alias = models.Tag.__table__.alias(f"t_{idx}")
-            stmt = stmt.join(
-                nt_alias,
-                self.main_model.id == nt_alias.c.novel_id,
-            )
-            stmt = stmt.join(
-                t_alias,
-                nt_alias.c.tag_id == t_alias.c.id,
-            )
-            stmt = stmt.where(t_alias.c.name == tag_name)
-        return stmt
+        return stmt.where(self.main_model.tags.contains(list(tag_names)))
 
     # ------------------------------------------------------------------
-    # Internal: FTS / keyword filter — WHERE-IN (count) or EXISTS (list)
+    # Internal: FTS / keyword filter — to_tsvector @@ to_tsquery
     # ------------------------------------------------------------------
-
-    def _count_fts_matches(self, fts_query: str) -> int | None:
-        """Return the number of FTS rows matching *fts_query*.
-
-        This is a pure FTS5 count (no join to novel), which is very fast
-        even for large vocabularies (measured ~0–20 ms on 232k rows).
-        """
-        try:
-            return self.session.execute(
-                _text(
-                    f"SELECT count(*) FROM {C.TABLE_NOVEL_FTS} "
-                    f"WHERE {C.TABLE_NOVEL_FTS} MATCH :fts_query"
-                ).bindparams(fts_query=fts_query)
-            ).scalar() or 0
-        except Exception:
-            return None
 
     def _where_fts_filter(
-        self, stmt: Select, keywords: set[str], use_exists: bool = False,
-        adaptive: bool = True,
+        self, stmt: Select, keywords: set[str],
     ) -> Select:
-        """Add FTS keyword filter.
+        """Add keyword filter via correlated EXISTS over ``novel_search``.
 
-        For list queries (``use_exists=True``) the strategy is adaptive:
-        a cheap pure-FTS count decides between ``WHERE id IN (...)`` for
-        low-selectivity keywords and correlated ``EXISTS`` for popular
-        keywords.
-
-        * FTS match count < _ADAPTIVE_KEYWORD_THRESHOLD → IN
-        * otherwise → EXISTS
-
-        Pass ``adaptive=False`` to force the legacy EXISTS behaviour.
+        ``novel_search.search_text = build_search_text(title, author, series, tags)``
+        is the char-gram text; ``to_tsvector('simple', search_text) @@
+        to_tsquery('simple', '<gram phrase>')`` matches it.  The ``simple``
+        tokeniser keeps the ``龖`` placeholder, so punctuation queries work.
         """
         if not keywords:
             return stmt
@@ -673,48 +439,23 @@ class NovelQueryBuilder(BaseQueryBuilder):
         self._fts_query = fts_query
 
         # An empty query (e.g. a keyword made entirely of punctuation, or a
-        # keyword that collapsed to nothing) means "no MATCH clause".  FTS5
-        # rejects an empty MATCH expression with a syntax error, so emit no
-        # filter rather than ``MATCH ''``.  (This is the "纯标点查询 = 无过滤"
-        # contract — no scattered-AND fallback here, per decision record §7.)
+        # keyword that collapsed to nothing) means "no filter".
         if not fts_query:
             return stmt
 
-        # Check that the FTS virtual table exists in the database.
-        # Result is cached at module level — only probes DB once per process.
-        if not _check_fts_available(self.session):
-            return stmt
-
-        if use_exists and adaptive:
-            fts_count = self._count_fts_matches(fts_query)
-            if fts_count is not None and fts_count < _ADAPTIVE_KEYWORD_THRESHOLD:
-                use_exists = False
-
-        if use_exists:
-            # Use _fts_table (a sqlalchemy.table() reference) instead of
-            # _text() for the FROM clause — _text() creates a TextClause
-            # which lacks .selectable and crashes the ORM compile state.
-            exists_subq = _exists(
-                select(literal_column("1"))
-                .select_from(_fts_table)
-                .where(
-                    _text(f"{C.TABLE_NOVEL_FTS} MATCH :fts_query")
-                    .bindparams(fts_query=fts_query),
-                    _fts_table.c.rowid == self.main_model.id,
-                )
+        pg_query = fts_query_to_pg(fts_query)
+        exists_subq = _exists(
+            select(literal_column("1"))
+            .select_from(models.NovelSearch)
+            .where(
+                models.NovelSearch.novel_id == self.main_model.id,
+                _text(
+                    "to_tsvector('simple', novel_search.search_text) "
+                    "@@ to_tsquery('simple', :fts_query)"
+                ).bindparams(fts_query=pg_query),
             )
-            stmt = stmt.where(exists_subq)
-        else:
-            inner = (
-                select(literal_column("rowid"))
-                .select_from(_text(C.TABLE_NOVEL_FTS))
-                .where(
-                    _text(f"{C.TABLE_NOVEL_FTS} MATCH :fts_query")
-                    .bindparams(fts_query=fts_query)
-                )
-            )
-            stmt = stmt.where(self.main_model.id.in_(inner))
-        return stmt
+        )
+        return stmt.where(exists_subq)
 
     # ------------------------------------------------------------------
     # Internal: field filter tables (favourite, special_follow)
@@ -722,50 +463,24 @@ class NovelQueryBuilder(BaseQueryBuilder):
 
     def _join_field_filter_tables(
         self, stmt: Select, field_filters: dict,
-        use_exists_for_special_follow: bool = True,
     ) -> Select:
-        """Add filters for favourite / special_follow.
+        """Add filters for ``is_favourite`` / ``is_special_follow``.
 
-        These CANNOT use INNER JOIN because ``_base_select()`` already
-        LEFT JOINs the same tables for the display flags (is_favourite /
-        is_special_follow CASE expressions).  A second JOIN on the same
-        table would produce an ambiguous column reference.
-
-        *is_favourite* filters by novel PK, which is always efficient.
-
-        *is_special_follow* uses EXISTS for list queries (same pattern as
-        tag/FTS filters) so SQLite can walk the PK index for ORDER BY +
-        LIMIT instead of building a TEMP B-TREE over all matching rows
-        (benchmarked: 1.7 ms vs 4.5 ms for the WHERE-IN approach).
-        For COUNT queries there is no LIMIT, so EXISTS forces a full scan;
-        the caller passes ``use_exists_for_special_follow=False`` to use
-        ``author_id IN (SELECT ...)`` instead (measured 187 ms → 3 ms).
+        ``is_favourite`` is a ``novel`` column; ``is_special_follow`` is an
+        ``author`` column (filter via ``author_id IN (SELECT author_id FROM
+        author WHERE is_special_follow)`` — the author table is small).
         """
         for qtype, _value in field_filters.items():
             if qtype == C.FIELD_IS_FAVOURITE:
+                stmt = stmt.where(self.main_model.is_favourite == True)
+            elif qtype == C.FIELD_IS_SPECIAL_FOLLOW:
                 stmt = stmt.where(
-                    self.main_model.id.in_(
-                        select(models.Favourite.novel_id)
+                    self.main_model.author_id.in_(
+                        select(models.Author.author_id).where(
+                            models.Author.is_special_follow == True
+                        )
                     )
                 )
-            elif qtype == C.FIELD_IS_SPECIAL_FOLLOW:
-                if use_exists_for_special_follow:
-                    stmt = stmt.where(
-                        _exists(
-                            select(literal_column("1"))
-                            .select_from(models.SpecialFollow)
-                            .where(
-                                models.SpecialFollow.author_id
-                                == self.main_model.author_id,
-                            )
-                        )
-                    )
-                else:
-                    stmt = stmt.where(
-                        self.main_model.author_id.in_(
-                            select(models.SpecialFollow.author_id)
-                        )
-                    )
         return stmt
 
     # ------------------------------------------------------------------
@@ -796,28 +511,13 @@ class NovelQueryBuilder(BaseQueryBuilder):
     # ------------------------------------------------------------------
 
     def _where_thresholds(self, stmt: Select) -> Select:
-        """Add WHERE conditions for min_like / min_text thresholds.
-
-        Values of 0 are treated as "no threshold": the frontend uses 0 to
-        mean 不限, and generating ``like >= 0`` prevents SQLite from using
-        the more specific ``(author_id, id)`` / ``(series_id, id)``
-        indexes for ORDER BY id.
-
-        Uses bare column comparisons (no COALESCE) so SQLite can do a
-        direct index range scan.  The ``novel.like`` column has zero NULL
-        values in this dataset, and ``NULL >= 500`` evaluates to NULL
-        (falsy) in any case, so COALESCE is unnecessary.
-        """
+        """Add WHERE conditions for min_like / min_text thresholds."""
         min_like = self.spec.min_like
         min_text = self.spec.min_text
         if min_like is not None and min_like > 0:
-            stmt = stmt.where(
-                self.main_model.like >= min_like
-            )
+            stmt = stmt.where(self.main_model.like >= min_like)
         if min_text is not None and min_text > 0:
-            stmt = stmt.where(
-                self.main_model.text >= min_text
-            )
+            stmt = stmt.where(self.main_model.text >= min_text)
         return stmt
 
 
@@ -826,37 +526,32 @@ class NovelQueryBuilder(BaseQueryBuilder):
 # =========================================================================
 
 
-# ---------------------------------------------------------------------------
-# Count-result cache (process-wide, epoch-validated)
-#
-# Count queries are expensive on popular tags (186-222 ms for R-18) but
-# change only when the novel set is mutated (ingest / delete / tag edit /
-# blocked-tag change / favourite toggle).  Writes are sparse relative to
-# reads, and the count is already consumed fire-and-forget by the frontend
-# (ExclusionBar / BatchBar), so caching gives near-exact freshness at a
-# fraction of the cost.
-#
-# The cache is keyed on a normalized signature of everything that affects
-# the count: conditions, thresholds, and the effective blocked-tag set.
-# Entries with a non-empty ``exclude_ids`` are not cached (that path is
-# batch-scoped and rarely repeated with the same id list).
-#
-# Freshness is by version, not time: each cached value records the data
-# epoch (``current_epoch()``) at write time and is returned only while
-# that epoch is still current.  Every committed transaction bumps the
-# epoch (see ``copixiv.db.data_version``), which invalidates the whole
-# cache in one shot — no per-mutation invalidation, no TTL drift.
-# ---------------------------------------------------------------------------
+# Count-result cache (process-wide, epoch-validated).  See the original
+# design around the "filter signature + epoch invalidation" mechanism.
 _count_cache: dict[tuple, tuple[int, int]] = {}
 
 
 def _novel_from_orm(obj) -> Novel:
-    """Convert an ORM row to the domain :class:`Novel` model.
+    """Convert an ORM ``Novel`` to the domain :class:`Novel` model.
 
-    Pydantic coerces the DB int columns (``has_epub`` → EpubStatus,
-    display flags → bool); transient fields keep their defaults.
+    ``create_time`` is a ``timestamptz`` (``datetime``) in PostgreSQL; the
+    domain model keeps a string contract, so it is converted to an ISO string.
+    ``tags`` comes directly from the ``novel.tags`` column.
     """
-    return Novel(**{c.name: getattr(obj, c.name) for c in obj.__table__.columns})
+    d = {c.name: getattr(obj, c.name) for c in obj.__table__.columns}
+    ct = d.get(C.COL_CREATE_TIME)
+    if isinstance(ct, datetime):
+        d[C.COL_CREATE_TIME] = ct.isoformat()
+    return Novel(**d)
+
+
+def _novel_from_mapping(mapping) -> Novel:
+    """Convert a row ``RowMapping`` (column-based select) to a domain Novel."""
+    d = dict(mapping)
+    ct = d.get(C.COL_CREATE_TIME)
+    if isinstance(ct, datetime):
+        d[C.COL_CREATE_TIME] = ct.isoformat()
+    return Novel(**d)
 
 
 class SQLAlchemyNovelReadRepository(BaseRepository):
@@ -871,11 +566,19 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
             C.FIELD_IS_SPECIAL_FOLLOW, C.ORDER_BY_NONE, C.ORDER_BY_RANDOM,
         }
 
-
     async def get_by_id(self, novel_id: int) -> Novel | None:
         novel = self.session.get(models.Novel, novel_id)
-        return _novel_from_orm(novel) if novel else None
-
+        if novel is None:
+            return None
+        domain = _novel_from_orm(novel)
+        domain.is_special_follow = (
+            self.session.execute(
+                select(models.Author.is_special_follow).where(
+                    models.Author.author_id == novel.author_id
+                )
+            ).scalar() or False
+        )
+        return domain
 
     async def get_existing_ids(self, novel_ids: set[int]) -> set[int]:
         if not novel_ids:
@@ -884,18 +587,8 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         return set(self.session.execute(stmt).scalars().all())
 
     # ---- blocked-tag exclusion helpers -------------------------------------
-    #
-    # The *decision* lives in core/services.py (§M4): the
-    # repository only supplies the raw setting value and blocked names.
 
     def _exclusion_active(self, explicit: bool | None) -> bool:
-        """Resolve whether blocked-tag exclusion applies to this query.
-
-        *explicit* (from the API ``exclude_blocked`` param) wins when
-        given; otherwise the global runtime setting applies (default on
-        when the settings row is missing) — decided by the domain policy
-        :func:`copixiv.core.services.resolve_active`.
-        """
         row = self.session.execute(
             select(models.Setting).where(
                 models.Setting.key == EXCLUDE_BLOCKED_SETTING_KEY
@@ -905,9 +598,7 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
             explicit, row.value if row is not None else None,
         )
 
-
     def _blocked_tag_names(self) -> frozenset[str]:
-        """Names of user-blocked (厌恶) tags; empty set when none."""
         rows = self.session.execute(
             select(models.TagPreference.tag).where(
                 models.TagPreference.preference
@@ -916,32 +607,20 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         ).scalars().all()
         return frozenset(rows)
 
-
     def _blocked_novel_ids(self, names: frozenset[str]) -> list[int]:
-        """All novel IDs carrying any blocked tag (index-driven scan)."""
+        """All novel IDs carrying any blocked tag (``tags && ...``)."""
         if not names:
             return []
         return list(self.session.execute(
-            select(models.NovelTag.novel_id)
-            .join(models.Tag, models.NovelTag.tag_id == models.Tag.id)
-            .where(models.Tag.name.in_(names))
+            select(models.Novel.id).where(
+                models.Novel.tags.overlap(list(names))
+            )
         ).scalars().all())
 
-
     async def list_blocked_ids(self) -> list[int]:
-        """All novel IDs carrying blocked tags; [] when exclusion is off.
-
-        Powers the 「查看被排除」view — the endpoint filters this list
-        down to the current search scope.
-        """
         if not self._exclusion_active(None):
             return []
         return self._blocked_novel_ids(self._blocked_tag_names())
-
-    # Same value as BATCH_ID_CHUNK_SIZE in batch_operations — kept local
-    # so the repository layer doesn't import the use-case module.
-    _ID_CHUNK_SIZE = 30_000
-
 
     async def sort_novel_ids(
         self,
@@ -951,16 +630,12 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
     ) -> list[int]:
         """Return *novel_ids* ordered by a novel column (id / like / text).
 
-        Sort keys are fetched chunked from the novel table and ordered in
-        Python — SQLite cannot serve ORDER BY through a large IN-list via
-        its indexes.  Unsupported orders (e.g. ``random``) return the
-        input order unchanged.  Missing IDs are dropped.  Runs in a worker
-        thread (chunked fetches can touch hundreds of thousands of rows).
+        Pushes the sort to PostgreSQL: ``WHERE id = ANY($1) ORDER BY <col>``.
+        Missing IDs are dropped.  Runs in a worker thread.
         """
         return await asyncio.to_thread(
             self._sort_novel_ids_sync, novel_ids, order_by, order_direction,
         )
-
 
     def _sort_novel_ids_sync(
         self,
@@ -971,40 +646,23 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         if not novel_ids or order_by not in (C.COL_ID, C.COL_LIKES, C.COL_TEXTS):
             return list(novel_ids)
 
-        keys: dict[int, tuple[int, int]] = {}  # id -> (sort_key, id)
-        for i in range(0, len(novel_ids), self._ID_CHUNK_SIZE):
-            chunk = novel_ids[i:i + self._ID_CHUNK_SIZE]
-            rows = self.session.execute(
-                select(models.Novel.id, models.Novel.like, models.Novel.text)
-                .where(models.Novel.id.in_(chunk))
-            ).all()
-            for nid, like, text in rows:
-                if order_by == C.COL_LIKES:
-                    key = like or 0
-                elif order_by == C.COL_TEXTS:
-                    key = text or 0
-                else:
-                    key = nid
-                keys[nid] = (key, nid)
-
-        reverse = order_direction.upper() == "DESC"
-        ordered = [nid for nid, _ in sorted(keys.items(), key=lambda kv: kv[1], reverse=reverse)]
-        return ordered
-
+        col = getattr(models.Novel, order_by)
+        descending = order_direction.upper() == "DESC"
+        stmt = (
+            select(models.Novel.id)
+            .where(models.Novel.id.in_(novel_ids))
+            .order_by(
+                col.desc() if descending else col.asc(),
+                models.Novel.id.desc() if descending else models.Novel.id.asc(),
+            )
+        )
+        return list(self.session.execute(stmt).scalars())
 
     async def get_novels(self, spec: QuerySpec) -> dict:
-        """Retrieve a paginated, filtered list of novels per *spec*.
-
-        Heavy query — executes in a worker thread so the event loop is
-        never blocked by SQLite work (tag/FTS subqueries, sorting).
-
-        ``spec.exclude_blocked_tags``: None → global setting;
-        True/False → override.
-        """
+        """Retrieve a paginated, filtered list of novels per *spec*."""
         return await asyncio.to_thread(self._get_novels_sync, spec)
 
     def _get_novels_sync(self, spec: QuerySpec) -> dict:
-        # Validate fields
         if spec.order_by:
             self._validate_query_field(spec.order_by)
         self._validate_order_direction(spec.order_direction)
@@ -1017,10 +675,7 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
             else frozenset()
         )
 
-        # Random browsing — use precomputed shuffle column for fast index seek.
-        # First page: pick a random starting point in the shuffle space so
-        # each visit shows a different slice.  Wrap around if the tail
-        # doesn't have enough rows.
+        # Random browsing — precomputed shuffle column for fast index seek.
         if spec.order_by == "random" and not spec.conditions:
             if not spec.cursor:
                 novels = self._get_random_novels_shuffle(
@@ -1034,7 +689,6 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
                 return {"cursor": cursor_out, "novels": novels}
             # else: has cursor → fall through to query builder below
 
-        # +1 to detect if there are more pages
         page_spec = spec.model_copy(update={"per_page": spec.per_page + 1})
 
         builder = NovelQueryBuilder(
@@ -1043,7 +697,7 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         query, _ = builder.build()
 
         result = self.session.execute(query)
-        novels = [Novel(**dict(row._mapping)) for row in result.fetchall()]
+        novels = [_novel_from_mapping(row._mapping) for row in result.fetchall()]
 
         cursor_out = None
         if len(novels) > spec.per_page:
@@ -1056,25 +710,11 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
                     spec.order_by: getattr(n, spec.order_by, None),
                 }
 
-        # Batch-load tags for all returned novels (replaces per-row subquery)
-        if novels:
-            novel_ids = [n.id for n in novels]
-            tag_map = self._batch_load_tags(novel_ids)
-            for novel in novels:
-                novel.tags = tag_map.get(novel.id, [])
-
         return {"novels": novels, "cursor": cursor_out}
 
-
     async def count_novels(self, spec: QuerySpec) -> int:
-        """Count VISIBLE novels matching *spec* (runs in a worker thread).
-
-        Applies blocked-tag exclusion (unless overridden off) so the
-        count matches the list.  ``spec.exclude_blocked_tags``: None →
-        global setting; True/False → override.
-        """
+        """Count VISIBLE novels matching *spec* (runs in a worker thread)."""
         return await asyncio.to_thread(self._count_novels_sync, spec)
-
 
     def _count_novels_sync(self, spec: QuerySpec) -> int:
         for q_type, _qvalue in spec.conditions:
@@ -1086,9 +726,6 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
             else frozenset()
         )
 
-        # Cache — skip when exclude_ids is set (batch-scoped, rarely
-        # repeated).  blocked_names is part of the key so toggling the
-        # exclusion setting or editing blocked tags produces a fresh entry.
         cache_key = None
         if not spec.exclude_ids:
             cache_key = (
@@ -1110,30 +747,10 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
             _count_cache[cache_key] = (current_epoch(), result)
         return result
 
-
     def _compute_count(
         self, spec: QuerySpec, blocked_names: frozenset[str],
     ) -> int:
-        """The actual count logic, extracted from ``_count_novels_sync``."""
-        # No blocked tags — the existing cheap paths unchanged.
-        if not blocked_names:
-            return self._count_with_spec(spec)
-
-        base_total = self._count_with_spec(spec)
-        blocked_ids = self._blocked_novel_ids(blocked_names)
-        if not blocked_ids:
-            return base_total
-
-        if len(blocked_ids) <= _BLOCKED_COUNT_THRESHOLD:
-            # Sparse blocked set: count the blocked∩filters intersection via
-            # PK lookups on the blocked-id list (~18ms measured) and subtract.
-            excluded = self._count_with_spec(spec, restrict_ids=blocked_ids)
-            return base_total - excluded
-
-        # Dense blocked set: correlated NOT EXISTS short-circuits faster
-        # (~150-200ms for a 92%-coverage tag vs ~200ms+ for the IN form).
         return self._count_with_spec(spec, blocked_tag_names=blocked_names)
-
 
     def _count_with_spec(
         self,
@@ -1141,15 +758,14 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         *,
         restrict_ids: list[int] | None = None,
         blocked_tag_names: frozenset[str] = frozenset(),
+        count_blocked: bool = False,
     ) -> int:
-        """Execute a COUNT built from *spec*; plain COUNT(*) when the
-        builder reports no filters (cheap whole-table count)."""
         builder = NovelQueryBuilder(
             self, spec,
             restrict_ids=restrict_ids,
             blocked_tag_names=blocked_tag_names,
         )
-        count_stmt = builder.build_count()
+        count_stmt = builder.build_count(count_blocked=count_blocked)
         if count_stmt is None:
             result = self.session.execute(
                 select(func.count()).select_from(models.Novel)
@@ -1158,16 +774,9 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
             result = self.session.execute(count_stmt)
         return result.scalar()
 
-
     async def count_excluded_novels(self, spec: QuerySpec) -> int:
-        """Count novels matching *spec* that carry blocked tags.
-
-        Returns 0 when exclusion is off or no tags are blocked.  Powers
-        the ``excluded`` field of ``GET /api/novels/count`` so the UI can
-        show how many novels were hidden for the current search scope.
-        """
+        """Count novels matching *spec* that carry blocked tags."""
         return await asyncio.to_thread(self._count_excluded_novels_sync, spec)
-
 
     def _count_excluded_novels_sync(self, spec: QuerySpec) -> int:
         if not self._exclusion_active(spec.exclude_blocked_tags):
@@ -1178,72 +787,38 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         blocked_names = self._blocked_tag_names()
         if not blocked_names:
             return 0
-        blocked_ids = self._blocked_novel_ids(blocked_names)
-        if not blocked_ids:
-            return 0
-
-        if len(blocked_ids) <= _BLOCKED_COUNT_THRESHOLD:
-            return self._count_with_spec(spec, restrict_ids=blocked_ids)
-
-        # Dense: total minus visible (both via the builder).
-        base_total = self._count_with_spec(spec)
-        visible = self._count_with_spec(
-            spec, blocked_tag_names=blocked_names,
+        return self._count_with_spec(
+            spec, blocked_tag_names=blocked_names, count_blocked=True,
         )
-        return base_total - visible
-
 
     async def list_matching_ids(self, spec: QuerySpec) -> list[int]:
-        """Return every VISIBLE novel ID matching *spec*, unpaginated.
-
-        Blocked-tag exclusion is applied as a set difference (much faster
-        than per-row NOT EXISTS for full ID scans: ~105ms vs ~634ms).
-
-        Batch operations resolve their scope server-side through this
-        lightweight ID-only scan (no column payload, no display-flag JOINs).
-        Runs in a worker thread.
-        """
+        """Return every VISIBLE novel ID matching *spec*, unpaginated."""
         return await asyncio.to_thread(self._list_matching_ids_sync, spec)
-
 
     def _list_matching_ids_sync(self, spec: QuerySpec) -> list[int]:
         for q_type, _qvalue in spec.conditions:
             self._validate_query_field(q_type)
 
-        builder = NovelQueryBuilder(self, spec)
+        blocked_names = (
+            self._blocked_tag_names()
+            if self._exclusion_active(spec.exclude_blocked_tags)
+            else frozenset()
+        )
+        builder = NovelQueryBuilder(
+            self, spec, blocked_tag_names=blocked_names,
+        )
         stmt = builder.build_ids()
-        ids = list(self.session.execute(stmt).scalars())
-
-        return self._apply_blocked_exclusion(ids, spec.exclude_blocked_tags)
-
-
-    def _apply_blocked_exclusion(
-        self, ids: list[int], exclude_blocked_tags: bool | None,
-    ) -> list[int]:
-        """Subtract blocked-tag novels from *ids* (sorted for determinism)."""
-        if not ids or not self._exclusion_active(exclude_blocked_tags):
-            return ids
-        blocked = set(self._blocked_novel_ids(self._blocked_tag_names()))
-        if not blocked:
-            return ids
-        return sorted(set(ids) - blocked)
-
+        return list(self.session.execute(stmt).scalars())
 
     async def filter_ids_in_scope(
         self,
         novel_ids: list[int],
         spec: QuerySpec,
     ) -> list[int]:
-        """Return the subset of *novel_ids* matching *spec*.
-
-        Powers the scoped 「清除选择」action — intersect the accumulated
-        selection with the current search scope.  Cost is bounded by the
-        input ID list, not by the size of the matched set.
-        """
+        """Return the subset of *novel_ids* matching *spec*."""
         return await asyncio.to_thread(
             self._filter_ids_in_scope_sync, novel_ids, spec,
         )
-
 
     def _filter_ids_in_scope_sync(
         self,
@@ -1255,21 +830,23 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         for q_type, _qvalue in spec.conditions:
             self._validate_query_field(q_type)
 
-        builder = NovelQueryBuilder(self, spec, ids=list(novel_ids))
-        stmt = builder.build_ids()
-        ids = list(self.session.execute(stmt).scalars())
-
-        return self._apply_blocked_exclusion(ids, spec.exclude_blocked_tags)
-
+        blocked_names = (
+            self._blocked_tag_names()
+            if self._exclusion_active(spec.exclude_blocked_tags)
+            else frozenset()
+        )
+        builder = NovelQueryBuilder(self, spec)
+        stmt = builder.build_ids_in_scope(
+            novel_ids, blocked_tag_names=blocked_names,
+        )
+        return list(self.session.execute(stmt).scalars())
 
     async def get_novels_by_ids(self, novel_ids: list[int]) -> list[Novel]:
         """Return full novel models for the given IDs, in the given order.
 
-        Missing IDs are silently dropped.  Tags and display flags are
-        batch-loaded exactly like the list-query path.
+        Missing IDs are silently dropped.
         """
         return await asyncio.to_thread(self._get_novels_by_ids_sync, novel_ids)
-
 
     def _get_novels_by_ids_sync(self, novel_ids: list[int]) -> list[Novel]:
         if not novel_ids:
@@ -1279,62 +856,35 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         ).scalars().all()
         by_id = {n.id: _novel_from_orm(n) for n in rows}
 
-        present_ids = [nid for nid in novel_ids if nid in by_id]
-        if present_ids:
-            tag_map = self._batch_load_tags(present_ids)
-            fav_ids = set(self.session.execute(
-                select(models.Favourite.novel_id).where(
-                    models.Favourite.novel_id.in_(present_ids)
+        author_ids = {n.author_id for n in rows if n.author_id}
+        if author_ids:
+            sf = set(self.session.execute(
+                select(models.Author.author_id).where(
+                    models.Author.is_special_follow == True,
+                    models.Author.author_id.in_(author_ids),
                 )
             ).scalars().all())
-            sf_author_ids = set(self.session.execute(
-                select(models.SpecialFollow.author_id)
-            ).scalars().all())
-            for nid in present_ids:
-                novel = by_id[nid]
-                novel.tags = tag_map.get(nid, [])
-                novel.is_favourite = nid in fav_ids
-                novel.is_special_follow = novel.author_id in sf_author_ids
+            for nid, novel in by_id.items():
+                novel.is_special_follow = novel.author_id in sf
 
         return [by_id[nid] for nid in novel_ids if nid in by_id]
-
 
     def _get_random_novels_shuffle(
         self, limit: int, min_likes: int, min_texts: int,
         blocked_tag_names: frozenset[str] = frozenset(),
-    ) -> list[dict]:
-        """Return *limit* novels in shuffle order, starting from a random offset.
-
-        Uses the precomputed ``shuffle`` column and its index for O(1)
-        keyset-style performance.  A random starting threshold is picked so
-        each visit shows a different slice; if the tail doesn't have enough
-        rows the query wraps around from ``shuffle >= 0``.
-
-        The composite index ``ix_novel_shuffle_like_text`` (shuffle, like, text)
-        allows SQLite to evaluate the like/text filters directly from the index
-        without main-table lookups for candidate rows that don't pass.
-
-        ``blocked_tag_names`` adds the blocked-tag NOT EXISTS condition to
-        both SELECTs — the index seek stays intact; SQLite simply walks on
-        past excluded rows until *limit* visible ones are collected.
-
-        Tags, favourite, and special_follow flags are loaded in batch after
-        the main query — no per-row correlated subqueries.
-        """
+    ) -> list[Novel]:
+        """Return *limit* novels in shuffle order, starting from a random offset."""
         import random as _random
 
-        blocked_clause = blocked_tags_not_exists(blocked_tag_names)
+        blocked_clause = blocked_tags_excluded(blocked_tag_names)
 
-        # Query the max shuffle value so the random start is within range.
         max_shuffle = self.session.scalar(
             select(func.coalesce(func.max(models.Novel.shuffle), 0)),
         ) or 0
 
-        novels: list[dict] = []
+        novels: list[Novel] = []
         start = _random.randint(0, max_shuffle) if max_shuffle > 0 else 0
 
-        # First attempt: shuffle >= random start — fetch novel entities only,
-        # no correlated tags / favourite / sf subqueries.
         rows = self.session.execute(
             select(models.Novel)
             .where(
@@ -1349,7 +899,6 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         for novel in rows:
             novels.append(_novel_from_orm(novel))
 
-        # Wrap around if the tail didn't have enough rows.
         if len(novels) < limit and start > 0:
             remaining = limit - len(novels)
             seen_ids = {n.id for n in novels}
@@ -1371,53 +920,23 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
                     if len(novels) >= limit:
                         break
 
-        # ---- batch-load tags, favourite, and special_follow flags ---------
+        # is_special_follow / is_favourite flags.
         novel_ids = [n.id for n in novels]
-        if novel_ids:
-            tag_map = self._batch_load_tags(novel_ids)
-            fav_ids = set(self.session.execute(
-                select(models.Favourite.novel_id).where(
-                    models.Favourite.novel_id.in_(novel_ids)
+        author_ids = {n.author_id for n in novels if n.author_id}
+        sf: set[int] = set()
+        if author_ids:
+            sf = set(self.session.execute(
+                select(models.Author.author_id).where(
+                    models.Author.is_special_follow == True,
+                    models.Author.author_id.in_(author_ids),
                 )
             ).scalars().all())
-            sf_author_ids = set(self.session.execute(
-                select(models.SpecialFollow.author_id)
-            ).scalars().all())
-            for novel in novels:
-                novel.tags = tag_map.get(novel.id, [])
-                novel.is_favourite = novel.id in fav_ids
-                novel.is_special_follow = novel.author_id in sf_author_ids
+        for novel in novels:
+            novel.is_special_follow = novel.author_id in sf
 
         return novels
 
-    # ---- batch helpers -------------------------------------------------------
-
-
-    def _batch_load_tags(self, novel_ids: list[int]) -> dict[int, list[str]]:
-        """Return a mapping of novel_id → tag name list for the given IDs.
-
-        Replaces the per-row correlated scalar subquery with a single batch
-        query — one round-trip instead of N.  Uses ``|`` as the concat
-        separator — safe in practice because Pixiv tag names cannot
-        contain it; replace with JSON grouping if that ever changes.
-        """
-        if not novel_ids:
-            return {}
-        rows = self.session.execute(
-            select(
-                models.NovelTag.novel_id,
-                func.group_concat(models.Tag.name, '|'),
-            )
-            .join(models.Tag, models.NovelTag.tag_id == models.Tag.id)
-            .where(models.NovelTag.novel_id.in_(novel_ids))
-            .group_by(models.NovelTag.novel_id)
-        ).all()
-        return {
-            row[0]: (row[1] or "").split("|") for row in rows
-        }
-
     # ---- helpers -------------------------------------------------------------
-
 
     def _validate_query_field(self, field: str) -> None:
         from copixiv.core.exceptions import ValidationError
@@ -1426,7 +945,6 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
             raise ValidationError(f"Invalid query field: {field}")
 
     @staticmethod
-
     def _validate_order_direction(order_direction: str) -> None:
         from copixiv.core.exceptions import ValidationError
 
@@ -1453,36 +971,20 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             C.FIELD_IS_SPECIAL_FOLLOW, C.ORDER_BY_NONE, C.ORDER_BY_RANDOM,
         }
 
-
     async def upsert_novels(
         self, novels: list[NovelDraft], force_update: list[str] | None = None
     ) -> int:
-        """Insert or update novels, then sync tags and FTS index.
-
-        Accepts :class:`~copixiv.core.draft.NovelDraft` (the
-        canonical write-path object); plain dicts are still tolerated for
-        callers that only have row data.
-
-        Heavy write path (alias resolution, batch upsert, tag sync, FTS
-        index update) — runs in a worker thread so the event loop is not
-        blocked by SQLite write work or busy-timeout waits.
-        """
+        """Insert or update novels, then sync tags and the ``novel_search`` index."""
         return await asyncio.to_thread(
             self._upsert_novels_sync, novels, force_update,
         )
 
-
     def _upsert_novels_sync(
         self, novels: list[NovelDraft], force_update: list[str] | None = None
     ) -> int:
-        """Insert or update novels, then sync tags and FTS index."""
         if not novels:
             return 0
 
-        # Normalize: accept both NovelDraft objects and legacy dicts at the
-        # edge.  Reading field values straight from ``__dict__`` is safe —
-        # a frozen dataclass has no runtime validators or serializers, so
-        # there is no thread-rebuild race in a worker thread.
         novels = [
             dict(n.__dict__) if hasattr(n, "__dict__") else dict(n)
             for n in novels
@@ -1490,38 +992,64 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
 
         force_update = force_update or []
 
+        # 0. Ensure author/series placeholder rows satisfy FKs before any
+        #    novel insert (PG foreign keys are enforced).
+        self._ensure_parent_rows(novels)
+
         # 1. Resolve tag aliases
         novel_tags_map = self._resolve_tag_aliases(novels)
 
         # 2. Batch-fetch existing novels
         existing_map = self._fetch_existing_novels(novels)
 
-        # 3. Upsert rows
+        # 3. Upsert rows (tags handled separately below)
         new_ids, fts_dirty_ids = self._upsert_rows(
             novels, existing_map, force_update,
         )
 
-        # 4. Sync tags
+        # 4. Set the tags array on each novel (popped in _resolve_tag_aliases),
+        #    flush once, then refresh novel_search for all affected ids.
+        changed_ids: set[int] = set()
         for nid, tag_list in novel_tags_map.items():
-            self.rewrite_tags(nid, set(tag_list))
+            novel = existing_map.get(nid)
+            if novel is None:
+                novel = self.session.get(models.Novel, nid)
+            if novel is not None:
+                normalized = sorted(set(tag_list))
+                if list(novel.tags or []) != normalized:
+                    novel.tags = normalized
+                    changed_ids.add(nid)
+        self.session.flush()
 
-        # 5. Update FTS index
+        # 5. Update novel_search index
         fts = FTSManager(self.session)
-        fts.update_novel_fts_index(list(set(new_ids + fts_dirty_ids)))
+        all_dirty = set(new_ids) | set(fts_dirty_ids) | changed_ids
+        if all_dirty:
+            fts.update_novel_fts_index(list(all_dirty))
 
         return len(new_ids)
 
-    # ---- upsert helpers -----------------------------------------------------
+    def _ensure_parent_rows(self, novels: list[dict]) -> None:
+        """Ensure author + series placeholder rows exist before novel writes.
 
+        PostgreSQL enforces FKs (unlike the old SQLite ``PRAGMA
+        foreign_keys``-off tolerance), so a first-seen author/series must get a
+        placeholder row before the novel that references it is written.
+        """
+        from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
+
+        author_ids = {n["author_id"] for n in novels if n.get("author_id")}
+        series_ids = {n["series_id"] for n in novels if n.get("series_id")}
+        if author_ids:
+            SQLAlchemyAuthorRepository(self.session).ensure_exists(author_ids)
+        if series_ids:
+            SQLAlchemySeriesRepository(self.session).ensure_exists(series_ids)
+
+    # ---- upsert helpers -----------------------------------------------------
 
     def _resolve_tag_aliases(
         self, novels: list[dict],
     ) -> dict[int, set[str]]:
-        """Pop tags from each novel dict and apply alias mapping.
-
-        The canonical key is ``tags`` (``Novel.tags``); legacy callers may
-        still pass ``tag`` — both are accepted and popped.
-        """
         tag_repo = SQLAlchemyTagRepository(self.session)
         alias_map = tag_repo.get_alias_map_sync()
         novel_tags_map: dict[int, set[str]] = {}
@@ -1535,11 +1063,9 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
                 novel_tags_map[nid] = mapped_tags
         return novel_tags_map
 
-
     def _fetch_existing_novels(
         self, novels: list[dict],
     ) -> dict[int, Any]:
-        """Return a mapping of novel_id → ORM instance for all IDs in *novels*."""
         all_ids = [int(n["id"]) for n in novels if n.get("id")]
         if not all_ids:
             return {}
@@ -1548,7 +1074,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             n.id: n
             for n in self.session.execute(stmt).scalars().all()
         }
-
 
     def _upsert_rows(
         self,
@@ -1563,11 +1088,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         update_fields_set = set([
             "like", "view", "title", "text", "caption",
             "series_name", "create_time",
-            # Downloaded novels carry a freshly-computed has_epub and must
-            # refresh the stored state when the body text changed (e.g.
-            # author removed images).  Metadata-only dicts (from
-            # build_from_novel_info) do NOT carry this key, so they never
-            # touch it — see build_from_novel_info.
             "has_epub",
         ] + force_update)
 
@@ -1579,10 +1099,15 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
                 k: v for k, v in novel.items()
                 if k in self.VALID_NOVEL_FIELDS
             }
-            # has_epub=None means "don't overwrite" (metadata-only refresh
-            # from build_from_novel_info) — drop the key entirely.
             if filtered.get(C.COL_HAS_EPUB) is None:
                 filtered.pop(C.COL_HAS_EPUB, None)
+            # create_time is a string from the draft; store as aware UTC datetime.
+            if C.COL_CREATE_TIME in filtered and isinstance(
+                filtered[C.COL_CREATE_TIME], str
+            ):
+                filtered[C.COL_CREATE_TIME] = parse_pixiv_time(
+                    filtered[C.COL_CREATE_TIME]
+                )
             nid = int(novel["id"]) if novel.get("id") is not None else None
             existing = existing_map.get(nid)
 
@@ -1591,11 +1116,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
                     filtered[int_field] = int(filtered[int_field])
 
             if existing:
-                # Detect FTS-relevant changes BEFORE applying them —
-                # title/series_name are in *update_fields_set* and get
-                # setattr'ed below, so a comparison after that would
-                # always see equal values and the FTS index would never
-                # be marked dirty on title changes.
                 fts_fields = (C.COL_TITLE, C.COL_AUTHOR_NAME, C.COL_SERIES_NAME)
                 if nid and any(
                     key in filtered
@@ -1625,7 +1145,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
 
         return new_ids, fts_dirty_ids
 
-
     async def update_field(self, novel_id: int, field: str, value: Any) -> None:
         if field not in self.UPDATABLE_NOVEL_FIELDS:
             raise ValueError(f"Invalid or non-updatable field: {field}")
@@ -1633,55 +1152,41 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         if novel is not None:
             setattr(novel, field, value)
 
-
     async def delete(self, novel_id: int) -> None:
-        """Delete a novel row, keeping tag reference counts consistent.
+        """Delete a novel row.
 
-        ``rewrite_tags(novel_id, set())`` removes the novel_tag links AND
-        decrements the affected tags' ``reference_count`` — without it the
-        denormalized counter drifts permanently after every delete.
+        The ``sync_tag_refs`` trigger decrements ``tag.reference_count`` from
+        the deleted row's tags; the FK ``ON DELETE CASCADE`` removes the
+        ``novel_search`` and ``failed_novel`` rows.  No manual bookkeeping.
         """
         novel = self.session.get(models.Novel, novel_id)
         if novel is None:
             return
-        self.rewrite_tags(novel_id, set())
-        FTSManager(self.session).delete_novel_fts(novel_id)
         self.session.delete(novel)
-
 
     async def toggle_favourite(self, novel_id: int) -> None:
         from copixiv.core.exceptions import NotFoundError
 
-        novel = self.session.get(models.Novel, novel_id)
-        if novel is None:
-            raise NotFoundError(f"Novel {novel_id} not found")
-        fav = self.session.execute(
-            select(models.Favourite).where(
-                models.Favourite.novel_id == novel_id
-            )
+        result = self.session.execute(
+            update(models.Novel)
+            .where(models.Novel.id == novel_id)
+            .values(is_favourite=~models.Novel.is_favourite)
+            .returning(models.Novel.is_favourite)
         ).scalar_one_or_none()
-        if fav:
-            self.session.delete(fav)
-        else:
-            self.session.add(models.Favourite(novel_id=novel_id))
-
+        if result is None:
+            raise NotFoundError(f"Novel {novel_id} not found")
 
     async def toggle_special_follow(self, author_id: int) -> None:
         from copixiv.core.exceptions import NotFoundError
 
-        author = self.session.get(models.Author, author_id)
-        if author is None:
-            raise NotFoundError(f"Author {author_id} not found")
-        follow = self.session.execute(
-            select(models.SpecialFollow).where(
-                models.SpecialFollow.author_id == author_id
-            )
+        result = self.session.execute(
+            update(models.Author)
+            .where(models.Author.author_id == author_id)
+            .values(is_special_follow=~models.Author.is_special_follow)
+            .returning(models.Author.is_special_follow)
         ).scalar_one_or_none()
-        if follow:
-            self.session.delete(follow)
-        else:
-            self.session.add(models.SpecialFollow(author_id=author_id))
-
+        if result is None:
+            raise NotFoundError(f"Author {author_id} not found")
 
     async def update_has_epub_status(
         self, novel_ids: list[int], status: EpubStatus
@@ -1694,36 +1199,26 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             .values(has_epub=status)
         )
 
-
     async def rebuild_fts(self) -> int:
-        """Rebuild the FTS5 index from scratch (runs in a worker thread).
+        """Rebuild the ``novel_search`` derived table from scratch.
 
-        Returns the number of novels indexed.  Uses the batched rebuild
-        path (``FTSManager.batch_rebuild_fts``) — the canonical full
-        rebuild for production (maintenance task ``rebuild_fts``).
-
-        Resets the FTS-availability cache: a rebuild that runs while the
-        process is alive (e.g. after the table was missing at startup)
-        must re-enable keyword filtering immediately, not after restart.
+        Returns the number of novels indexed.  Uses ``FTSManager.batch_rebuild_fts``.
         """
         count = await asyncio.to_thread(
             FTSManager(self.session).batch_rebuild_fts
         )
-        reset_fts_cache()
         return count
 
     # ---- batch operations ----------------------------------------------------
 
-
     async def delete_many(self, novel_ids: list[int]) -> list[str]:
-        """Delete many novels, keeping tag reference counts and FTS exact.
+        """Delete many novels.
 
-        Returns the ``path`` of each deleted novel — best-effort file
-        cleanup is the caller's job (mirrors :class:`DeleteNovelUseCase`).
-        Runs in a worker thread.
+        Returns the ``path`` of each deleted novel (best-effort file cleanup
+        is the caller's job).  Deletion cascades to ``novel_search`` /
+        ``failed_novel`` and the trigger maintains ``reference_count``.
         """
         return await asyncio.to_thread(self._delete_many_sync, novel_ids)
-
 
     def _delete_many_sync(self, novel_ids: list[int]) -> list[str]:
         if not novel_ids:
@@ -1731,101 +1226,48 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         paths = list(self.session.execute(
             select(models.Novel.path).where(models.Novel.id.in_(novel_ids))
         ).scalars().all())
-
-        # Decrement tag reference counts for every doomed link, then drop
-        # the links themselves — per-novel rewrite_tags would be O(N)
-        # queries and drift the denormalized counter if not careful.
-        link_rows = self.session.execute(
-            select(models.NovelTag.tag_id, func.count())
-            .where(models.NovelTag.novel_id.in_(novel_ids))
-            .group_by(models.NovelTag.tag_id)
-        ).all()
-        # Benchmarked on the real 232k DB: a per-tag UPDATE loop here costs
-        # ~13s fixed per chunk (thousands of distinct tags × 1 statement
-        # each).  One temp-table-backed UPDATE collapses it to ~2 statements.
-        self._apply_tag_count_deltas({tid: -cnt for tid, cnt in link_rows})
-        self.session.execute(
-            _delete(models.NovelTag).where(
-                models.NovelTag.novel_id.in_(novel_ids)
-            )
-        )
-        self.session.execute(
-            _delete(models.Favourite).where(
-                models.Favourite.novel_id.in_(novel_ids)
-            )
-        )
-        self.session.execute(
-            _delete(models.FailedNovel).where(
-                models.FailedNovel.novel_id.in_(novel_ids)
-            )
-        )
-        FTSManager(self.session).delete_novel_fts_many(novel_ids)
         self.session.execute(
             _delete(models.Novel).where(models.Novel.id.in_(novel_ids))
         )
         return [p for p in paths if p]
-
 
     async def add_tags_to_novels(
         self, novel_ids: list[int], tags: set[str]
     ) -> int:
         """Add *tags* to every listed novel.
 
-        Returns the number of novels that actually received at least one
-        new tag.  FTS entries of changed novels are refreshed (tags are
-        indexed columns).
+        The ``sync_tag_refs`` trigger updates ``reference_count``; changed
+        ``novel_search`` rows are refreshed (tags are a search segment).
+        Returns the number of novels that actually received at least one new tag.
         """
         return await asyncio.to_thread(
             self._add_tags_to_novels_sync, novel_ids, tags,
         )
-
 
     def _add_tags_to_novels_sync(
         self, novel_ids: list[int], tags: set[str]
     ) -> int:
         if not novel_ids or not tags:
             return 0
-
+        tag_names = sorted(set(tags))
         self.session.execute(
-            sqlite_insert(models.Tag)
-            .values([{"name": t} for t in tags])
+            pg_insert(models.Tag)
+            .values([{"name": t, "reference_count": 0} for t in tag_names])
             .on_conflict_do_nothing(index_elements=["name"])
         )
-        tag_ids = list(self.session.execute(
-            select(models.Tag.id).where(models.Tag.name.in_(tags))
-        ).scalars().all())
-
-        existing = set(self.session.execute(
-            select(models.NovelTag.novel_id, models.NovelTag.tag_id)
-            .where(
-                models.NovelTag.novel_id.in_(novel_ids),
-                models.NovelTag.tag_id.in_(tag_ids),
-            )
-        ).all())
-        new_pairs = [
-            (nid, tid)
-            for nid in novel_ids
-            for tid in tag_ids
-            if (nid, tid) not in existing
-        ]
-        if not new_pairs:
-            return 0
-
-        self.session.execute(
-            sqlite_insert(models.NovelTag).values(
-                [{"novel_id": nid, "tag_id": tid} for nid, tid in new_pairs]
-            )
-        )
-
-        per_tag: dict[int, int] = {}
-        for _nid, tid in new_pairs:
-            per_tag[tid] = per_tag.get(tid, 0) + 1
-        self._apply_tag_count_deltas(per_tag)
-
-        changed_ids = sorted({nid for nid, _tid in new_pairs})
-        FTSManager(self.session).update_novel_fts_index(changed_ids)
-        return len(changed_ids)
-
+        changed: list[int] = []
+        novels = self.session.execute(
+            select(models.Novel).where(models.Novel.id.in_(novel_ids))
+        ).scalars().all()
+        for novel in novels:
+            new_tags = list(dict.fromkeys(list(novel.tags or []) + tag_names))
+            if new_tags != list(novel.tags or []):
+                novel.tags = new_tags
+                changed.append(novel.id)
+        if changed:
+            self.session.flush()
+            FTSManager(self.session).update_novel_fts_index(changed)
+        return len(changed)
 
     async def remove_tags_from_novels(
         self, novel_ids: list[int], tags: set[str]
@@ -1833,158 +1275,45 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         """Remove *tags* from every listed novel.
 
         Returns the number of novels that actually lost at least one tag.
-        FTS entries of changed novels are refreshed.
         """
         return await asyncio.to_thread(
             self._remove_tags_from_novels_sync, novel_ids, tags,
         )
-
 
     def _remove_tags_from_novels_sync(
         self, novel_ids: list[int], tags: set[str]
     ) -> int:
         if not novel_ids or not tags:
             return 0
-
-        tag_ids = list(self.session.execute(
-            select(models.Tag.id).where(models.Tag.name.in_(tags))
-        ).scalars().all())
-        if not tag_ids:
-            return 0
-
-        doomed_pairs = self.session.execute(
-            select(models.NovelTag.novel_id, models.NovelTag.tag_id)
-            .where(
-                models.NovelTag.novel_id.in_(novel_ids),
-                models.NovelTag.tag_id.in_(tag_ids),
-            )
-        ).all()
-        if not doomed_pairs:
-            return 0
-
-        self.session.execute(
-            _delete(models.NovelTag).where(
-                models.NovelTag.novel_id.in_(novel_ids),
-                models.NovelTag.tag_id.in_(tag_ids),
-            )
-        )
-
-        per_tag: dict[int, int] = {}
-        for _nid, tid in doomed_pairs:
-            per_tag[tid] = per_tag.get(tid, 0) + 1
-        self._apply_tag_count_deltas({tid: -cnt for tid, cnt in per_tag.items()})
-
-        changed_ids = sorted({nid for nid, _tid in doomed_pairs})
-        FTSManager(self.session).update_novel_fts_index(changed_ids)
-        return len(changed_ids)
-
-
-    def _apply_tag_count_deltas(self, deltas: dict[int, int]) -> None:
-        """Apply many ``reference_count`` deltas in ~2 statements.
-
-        A per-tag UPDATE loop costs ~1.2ms × distinct-tag-count — the
-        measured ~13s fixed overhead of every batch transaction on the
-        real 232k DB.  Staging the deltas in a connection-local temp table
-        and joining collapses the same work to one UPDATE.
-        """
-        if not deltas:
-            return
-        # Lightweight TableClause — a TextClause has no .selectable and
-        # crashes the ORM compile state when used as a subquery source.
-        deltas_table = table(
-            "_tag_count_deltas",
-            column("tag_id", Integer),
-            column("delta", Integer),
-        )
-        self.session.execute(
-            text(
-                "CREATE TEMP TABLE IF NOT EXISTS _tag_count_deltas "
-                "(tag_id INTEGER PRIMARY KEY, delta INTEGER)"
-            )
-        )
-        self.session.execute(
-            text("DELETE FROM _tag_count_deltas")
-        )
-        self.session.execute(
-            text(
-                "INSERT INTO _tag_count_deltas (tag_id, delta) "
-                "VALUES (:tag_id, :delta)"
-            ),
-            [{"tag_id": tid, "delta": d} for tid, d in deltas.items()],
-        )
-        self.session.execute(
-            update(models.Tag)
-            .where(models.Tag.id.in_(select(deltas_table.c.tag_id)))
-            .values(
-                reference_count=models.Tag.reference_count
-                + select(deltas_table.c.delta)
-                .where(deltas_table.c.tag_id == models.Tag.id)
-                .scalar_subquery()
-            )
-        )
-
-    # ---- tags ----------------------------------------------------------------
-
+        tag_names = set(tags)
+        changed: list[int] = []
+        novels = self.session.execute(
+            select(models.Novel).where(models.Novel.id.in_(novel_ids))
+        ).scalars().all()
+        for novel in novels:
+            new_tags = [t for t in (novel.tags or []) if t not in tag_names]
+            if new_tags != list(novel.tags or []):
+                novel.tags = new_tags
+                changed.append(novel.id)
+        if changed:
+            self.session.flush()
+            FTSManager(self.session).update_novel_fts_index(changed)
+        return len(changed)
 
     def rewrite_tags(self, novel_id: int, new_tags: set[str]) -> None:
         """Replace a novel's tag set, keeping ``tag.reference_count`` exact.
 
-        Handles the empty-set case through the same decrement path — the
-        old early return deleted the links without decrementing the
-        counter, so every novel delete permanently inflated the counts.
+        The ``sync_tag_refs`` trigger maintains ``reference_count`` from the
+        new array; ``novel_search`` is refreshed (tags are a search segment).
         """
-        existing = set(self.session.execute(
-            select(models.Tag.name)
-            .join(models.NovelTag, models.Tag.id == models.NovelTag.tag_id)
-            .where(models.NovelTag.novel_id == novel_id)
-        ).scalars().all())
-
-        to_add = new_tags - existing
-        to_remove = existing - new_tags
-
-        if to_remove:
-            tag_ids_stmt = select(models.Tag.id).where(
-                models.Tag.name.in_(to_remove)
-            )
-            self.session.execute(
-                _delete(models.NovelTag).where(
-                    models.NovelTag.novel_id == novel_id,
-                    models.NovelTag.tag_id.in_(tag_ids_stmt),
-                )
-            )
-            self._update_tag_ref_count(to_remove, -1)
-
-        if to_add:
-            self._add_tags(novel_id, to_add)
-
-
-    def _add_tags(self, novel_id: int, tags: set[str]) -> None:
-        self.session.execute(
-            sqlite_insert(models.Tag)
-            .values([{"name": t} for t in tags])
-            .on_conflict_do_nothing(index_elements=["name"])
-        )
-        tag_ids = self.session.execute(
-            select(models.Tag.id).where(models.Tag.name.in_(tags))
-        ).scalars().all()
-        if tag_ids:
-            self.session.bulk_insert_mappings(
-                models.NovelTag,
-                [{"novel_id": novel_id, "tag_id": tid} for tid in tag_ids],
-            )
-        self._update_tag_ref_count(tags, 1)
-
-
-    def _update_tag_ref_count(self, tags: set[str], delta: int) -> None:
-        if not tags:
+        novel = self.session.get(models.Novel, novel_id)
+        if novel is None:
             return
-        self.session.execute(
-            update(models.Tag)
-            .where(models.Tag.name.in_(tags))
-            .values(reference_count=models.Tag.reference_count + delta)
-        )
-
-    # ---- random selection ----------------------------------------------------
+        normalized = sorted(set(new_tags))
+        if list(novel.tags or []) != normalized:
+            novel.tags = normalized
+            self.session.flush()
+            FTSManager(self.session).update_novel_fts_index([novel_id])
 
 
 # =========================================================================
@@ -2011,12 +1340,12 @@ class SQLAlchemySeriesRepository(BaseRepository):
         super().__init__(session)
 
     def ensure_exists(self, series_ids: set[int]) -> None:
-        """INSERT OR IGNORE placeholder rows so FK constraints are satisfied."""
+        """INSERT ... ON CONFLICT DO NOTHING placeholder rows (FK safety)."""
         if not series_ids:
             return
         for sid in series_ids:
             self.session.execute(
-                sqlite_insert(models.Series)
+                pg_insert(models.Series)
                 .values(series_id=sid)
                 .on_conflict_do_nothing()
             )
@@ -2056,4 +1385,3 @@ class SQLAlchemySeriesRepository(BaseRepository):
             )
             .distinct()
         ).scalars().all())
-

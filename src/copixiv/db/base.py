@@ -86,7 +86,10 @@ def update_summary(
         stmt = (
             postgresql_insert(model_class)
             .values(insert_values)
-            .on_conflict_do_update([pk_col], set_=values)
+            # index_elements is a keyword: passing it as the first positional
+            # arg would bind it to ``constraint`` and crash.  (bugfix:
+            # postgres-migration)
+            .on_conflict_do_update(index_elements=[pk_col], set_=values)
         )
         session.execute(stmt)
 

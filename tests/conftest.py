@@ -92,3 +92,21 @@ def clean_db(pg_engine):
     with pg_engine.begin() as conn:
         conn.execute(text(f"TRUNCATE {table_list} RESTART IDENTITY CASCADE"))
     yield
+
+
+@pytest.fixture(scope="session")
+def seeded_db(pg_engine):
+    """Seed the test DB with a 200-novel sample from the SQLite source.
+
+    Runs ``scripts/migrate_sqlite_to_pg.py --limit 200 --reset`` once per test
+    session (TRUNCATE + re-insert, ~9s) so functional smoke assertions run
+    against real source data rather than hand-built fixtures.  Because the seed
+    is session-scoped and mutable smoke tests restore their own state (or use
+    dedicated rows) the sample stays intact across tests in the file.
+    """
+    subprocess.run(
+        [sys.executable, str(PROJECT_ROOT / "scripts" / "migrate_sqlite_to_pg.py"),
+         "--limit", "200", "--db", TEST_DB, "--reset"],
+        check=True,
+    )
+    yield pg_engine

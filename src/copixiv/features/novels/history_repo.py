@@ -1,10 +1,10 @@
 """Search history repository."""
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import select, delete as _delete
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from copixiv.db import models
@@ -34,9 +34,9 @@ class SQLAlchemySearchHistoryRepository(BaseRepository):
         value: str,
         display_value: str | None = None,
     ) -> None:
-        now = datetime.now().isoformat()
+        now = datetime.now(timezone.utc)
         stmt = (
-            sqlite_insert(models.SearchHistory)
+            pg_insert(models.SearchHistory)
             .values(
                 type=type_,
                 value=value,

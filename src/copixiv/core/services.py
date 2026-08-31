@@ -9,13 +9,61 @@ import logging
 import re
 import tempfile
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Callable
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
 
 from copixiv.core.models import EpubStatus
+
+
+# ---------------------------------------------------------------------------
+# Timestamp normalisation (postgres-migration) — pure functions.
+# ---------------------------------------------------------------------------
+
+# Pixiv API timestamps are either full ISO strings with a TZ offset (``cdate``)
+# or bare dates (``create_date[:10]``).  Naive values are interpreted as
+# Asia/Tokyo (JST) — the source-scale timezone — before being stored as UTC.
+_JST = ZoneInfo("Asia/Tokyo")
+
+
+def parse_pixiv_time(value: str | None) -> datetime | None:
+    """Normalise a Pixiv source timestamp to an aware UTC ``datetime``.
+
+    Accepts:
+      * an ISO timestamp with an offset (``+09:00`` etc.) — parsed via
+        ``dateutil``/``fromisoformat`` and converted to UTC;
+      * a bare date ``YYYY-MM-DD`` — assumed ``Asia/Tokyo`` midnight;
+      * an existing ``datetime`` (returned as-is, only converted to UTC).
+
+    Returns ``None`` for empty / unparseable input.  PostgreSQL stores
+    ``timestamptz`` internally as UTC, so the write path calls this before
+    binding so ordering/range queries behave correctly.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        s = str(value).strip()
+        if not s:
+            return None
+        if len(s) == 10 and s[4] == "-" and s[7] == "-":
+            dt = datetime.strptime(s, "%Y-%m-%d")
+        else:
+            try:
+                from dateutil.parser import isoparse
+                dt = isoparse(s)
+            except Exception:
+                try:
+                    dt = datetime.fromisoformat(s)
+                except Exception:
+                    return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_JST)
+    return dt.astimezone(timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -701,4 +749,5 @@ __all__ = [
     "guess_series_order",
     "parse_search_keyword",
     "build_batch_zip",
+    "parse_pixiv_time",
 ]

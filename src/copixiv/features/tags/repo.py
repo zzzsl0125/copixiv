@@ -8,12 +8,11 @@ name ↔ id translation internally.
 from collections.abc import Sequence
 from typing import Any
 
-from sqlalchemy import select, delete as _delete, update as _update, func
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy import select, update as _update, func
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from copixiv.db import models
-from copixiv.db import constants as C
 from copixiv.db.base import BaseRepository
 
 
@@ -38,7 +37,8 @@ class SQLAlchemyTagRepository(BaseRepository):
         if tag:
             return tag.id
         self.session.execute(
-            sqlite_insert(models.Tag).values(name=name, reference_count=0)
+            pg_insert(models.Tag).values(name=name, reference_count=0)
+            .on_conflict_do_nothing(index_elements=["name"])
         )
         self.session.flush()
         tag = self.session.execute(
@@ -272,65 +272,22 @@ class SQLAlchemyTagRepository(BaseRepository):
     async def apply_alias_retroactively(self, source: str, target: str) -> int:
         """Replace all occurrences of *source* tag with *target* tag on novels.
 
-        Args:
-            source: Source tag *name* (will be resolved to tag ID).
-            target: Target tag *name* (will be resolved to tag ID).
-
-        Returns:
-            Number of novels affected.
+        Uses a single array operation: ``UPDATE novel SET tags =
+        array_replace(tags, :source, :target) WHERE :source = ANY(tags)``.
+        The ``sync_tag_refs`` trigger fires on the UPDATE and adjusts
+        ``reference_count`` for both tags automatically.  Returns the number
+        of novels affected.
         """
-        # Find the tag IDs
         src_tag = self.session.execute(
             select(models.Tag).where(models.Tag.name == source)
         ).scalar_one_or_none()
         if not src_tag:
             return 0
+        self._get_or_create_tag_id(target)
 
-        tgt_tag_id = self._get_or_create_tag_id(target)
-
-        # Find novels with source tag
-        stmt = select(models.NovelTag.novel_id).where(
-            models.NovelTag.tag_id == src_tag.id
+        result = self.session.execute(
+            _update(models.Novel)
+            .where(models.Novel.tags.contains([source]))
+            .values(tags=func.array_replace(models.Novel.tags, source, target))
         )
-        novel_ids = self.session.execute(stmt).scalars().all()
-        if not novel_ids:
-            return 0
-
-        # Batch insert target links (skip existing)
-        self.session.execute(
-            sqlite_insert(models.NovelTag).values([
-                {"novel_id": nid, "tag_id": tgt_tag_id} for nid in novel_ids
-            ]).on_conflict_do_nothing(index_elements=["novel_id", "tag_id"])
-        )
-
-        # Batch delete source links
-        self.session.execute(
-            _delete(models.NovelTag).where(
-                models.NovelTag.novel_id.in_(novel_ids),
-                models.NovelTag.tag_id == src_tag.id,
-            )
-        )
-
-        # Update counts
-        affected = len(novel_ids)
-        self.session.execute(
-            _update(models.Tag)
-            .where(models.Tag.id == src_tag.id)
-            .values(reference_count=models.Tag.reference_count - affected)
-        )
-
-        already_had = self.session.execute(
-            select(func.count()).select_from(models.NovelTag).where(
-                models.NovelTag.novel_id.in_(novel_ids),
-                models.NovelTag.tag_id == tgt_tag_id,
-            )
-        ).scalar() or 0
-        newly_added = affected - already_had
-        if newly_added > 0:
-            self.session.execute(
-                _update(models.Tag)
-                .where(models.Tag.id == tgt_tag_id)
-                .values(reference_count=models.Tag.reference_count + newly_added)
-            )
-
-        return affected
+        return result.rowcount or 0

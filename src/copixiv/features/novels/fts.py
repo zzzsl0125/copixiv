@@ -1,28 +1,36 @@
-r"""FTS5 full-text search manager — character-unigram (char-gram) indexing.
+r"""``novel_search`` derived-table manager — character-unigram (char-gram) search.
 
-The index stores each text column as a single-space-joined sequence of
-character tokens (see :func:`gram_tokenize`), indexed with the default
-``unicode61`` tokeniser.  Query construction (``repo._build_fts_query_string``)
-turns a keyword into quoted character phrases joined by ``AND``, so a
-no-space query is an exact contiguous-substring match and whitespace is an
-explicit AND — no external segmentation dictionary needed.
+The SQLite-era ``FTS5`` virtual table is gone.  Keyword search now runs
+against the **application-maintained ``novel_search`` derived table**:
+a plain ``(novel_id, search_text)`` row whose ``search_text`` is the
+char-gram text computed by :func:`gram_tokenize` over
+``title + author_name + series_name + tags``.  The GIN index on
+``to_tsvector('simple', search_text)`` (created by the Alembic baseline)
+answers phrase queries.  ``search_text`` is recomputed in the write path
+(the repository calls this manager inside the same transaction) and there is
+a periodic full-rebuild fallback for any drift.
 
-Features:
-- Idempotent rebuild with ``CREATE VIRTUAL TABLE IF NOT EXISTS``
-- Incremental and batch FTS updates
-- FTS health check via ``INSERT INTO ..._fts(..._fts) VALUES('rebuild')``
-- ``needs_rebuild()`` upgrade self-heal entry point
+Because ``novel_search`` is an ordinary table with a ``FOREIGN KEY ... ON
+DELETE CASCADE`` to ``novel``, deleting a novel removes its search row
+automatically — no manual FTS delete is needed.  Keyword filter construction
+lives in ``repo._build_fts_query_string``; this module owns the *index
+maintenance* side (the single source of truth for ``search_text``).
+
+The query side uses ``to_tsvector('simple', search_text) @@
+to_tsquery('simple', '<gram phrase>')`` — the ``simple`` tokeniser treats the
+``龖`` placeholder (for non-alphanumerics) and CJK chars as word characters,
+so 1/2/multi-character phrases match exactly (spike_pg_report §4).
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import text as _text, select, delete as _delete, func, bindparam
+from sqlalchemy import text as _text, select, delete as _delete, func
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from copixiv.db import models
-from copixiv.db import constants as C
 
 if TYPE_CHECKING:
     pass
@@ -33,7 +41,7 @@ from copixiv.log import logger
 # The placeholder character substituted for any non-alphanumeric character
 # (punctuation etc.) on BOTH the index side and the query side.  This is
 # U+9F96 (a CJK unified ideograph), chosen because it is a token character
-# for the ``unicode61`` tokeniser, resides in the same Unicode block as CJK
+# for the ``simple`` tokeniser, resides in the same Unicode block as CJK
 # text, and is expected to appear ~0 times in the corpus (so it never
 # collides with real content).  Index and query MUST use the same
 # placeholder — see :func:`gram_tokenize`.
@@ -41,13 +49,14 @@ _GRAM_PLACEHOLDER = "龖"
 
 
 def gram_tokenize(text: str) -> str:
-    """Convert *text* into character-unigram token text for FTS5 indexing.
+    """Convert *text* into character-unigram token text for char-gram search.
 
     This is the single source of truth shared by the index side
-    (FT5 insertion) and the query side (``repo._build_fts_query_string``).
-    Both sides MUST call this exact function and produce identical strings —
-    any divergence between them silently breaks every keyword search
-    (R1 regression), so keep them in lockstep.
+    (``novel_search`` insertion via :func:`build_search_text`) and the query
+    side (``repo._build_fts_query_string``).  Both sides MUST call this exact
+    function and produce identical strings — any divergence between them
+    silently breaks every keyword search (R1 regression), so keep them in
+    lockstep.
 
     Rules (applied per character, then joined by a single space):
     * whitespace characters are skipped (they carry no meaning as tokens);
@@ -60,11 +69,11 @@ def gram_tokenize(text: str) -> str:
         gram_tokenize("普通文本") == "普 通 文 本"
         gram_tokenize("R-18")     == "R 龖 1 8"
 
-    ``unicode61`` folds case on both the index and the query side, so case
+    ``simple`` folds case on both the index and the query side, so case
     differences between the stored text and the query never affect matching
     (``TS`` and ``ts`` match each other).  The empty string (or text made
     entirely of whitespace) maps to ``""``, preserving the "empty in, empty
-    out" contract of the tokeniser it replaces.
+    out" contract.
     """
     if not text:
         return ""
@@ -79,343 +88,205 @@ def gram_tokenize(text: str) -> str:
     return " ".join(chars)
 
 
+def build_search_text(
+    title: str | None,
+    author_name: str | None,
+    series_name: str | None,
+    tags: list[str],
+) -> str:
+    """Build the ``novel_search.search_text`` for one novel.
+
+    This is the **single source of truth** for the derived ``search_text``:
+    both the one-time SQLite→PG migration (``scripts/migrate_sqlite_to_pg.py``)
+    and the runtime write path (``FTSManager``) call exactly this function, so
+    the migrated rows and the incrementally-maintained rows are always built
+    identically.
+
+    Semantics: char-gram each of ``title``/``author_name``/``series_name`` and
+    the space-joined tag names, then join the non-empty parts with a single
+    space.  Whitespace/cross-field boundaries collapse to a single space in the
+    stored token stream (the ``simple`` tokeniser splits each char into its own
+    token regardless), so within-field phrases (the common case) match exactly.
+    Empty parts are dropped, so an empty title never leaves a stray leading
+    space.
+    """
+    parts: list[str] = []
+    for text in (title, author_name, series_name, " ".join(tags or [])):
+        if text:
+            parts.append(gram_tokenize(text))
+    return " ".join(parts)
+
+
 class FTSManager:
-    """Manages the novel_fts virtual table with char-gram tokenisation."""
+    """Maintains the application-maintained ``novel_search`` derived table.
+
+    ``novel_search`` is NOT a full-text virtual table anymore — it is a plain
+    table the repository keeps in sync (same transaction as the ``novel``
+    write).  This manager provides the incremental upsert/delete helpers and
+    the full-rebuild fallback, plus health checks.
+    """
 
     def __init__(self, session: Session):
         self.session = session
-
-    # ------------------------------------------------------------------
-    # Rebuild (idempotent)
-    # ------------------------------------------------------------------
-
-    # The FTS table is a *standalone* FTS5 table (no external-content
-    # clause).  The index stores char-gram-tokenised text that deliberately
-    # differs from the raw ``novel`` rows, so a content-synchronised
-    # table would make FTS5's 'delete' command unable to match rows.
-    # Column set matches the table as it exists in production
-    # (``title, author_name, series_name, tags``) so
-    # ``CREATE ... IF NOT EXISTS`` never tries to recreate it with a
-    # different shape.
-    _CREATE_SQL = (
-        f"CREATE VIRTUAL TABLE IF NOT EXISTS {C.TABLE_NOVEL_FTS} USING fts5("
-        f"  {C.COL_TITLE}, {C.COL_AUTHOR_NAME}, {C.COL_SERIES_NAME}, tags,"
-        f"  tokenize='unicode61'"
-        f")"
-    )
-
-    def rebuild_novel_fts(self) -> None:
-        """Create FTS5 virtual table if missing, then rebuild from novels.
-
-        Idempotent: drops the virtual table first, then recreates it via
-        ``CREATE VIRTUAL TABLE``, so it works regardless of whether the
-        table already exists and what shape a legacy table has.
-        """
-        # DROP/CREATE are DDL and auto-commit in SQLite regardless; the
-        # INSERTs below stay inside the caller's transaction.  Callers run
-        # inside db_write() + uow.begin() (see the rebuild_fts task), which
-        # commits on exit — FTSManager never commits itself.
-        self.session.execute(
-            _text(f"DROP TABLE IF EXISTS {C.TABLE_NOVEL_FTS}")
-        )
-        self.session.execute(_text(self._CREATE_SQL))
-        self._batch_insert_all_novels()
-        logger.info("FTS5 index rebuilt from scratch.")
-
-    def needs_rebuild(self) -> bool:
-        """Return True when ``novel_fts`` must be rebuilt as a char-gram index.
-
-        This is the single upgrade self-heal entry point: it is called once
-        at startup (see ``app._ensure_gram_fts_index``) — after Alembic
-        migrations — and whenever a rebuild decision is needed.  A rebuild is
-        required when any of the following holds:
-
-        * the ``novel_fts`` virtual table does not exist;
-        * its stored ``sqlite_master`` definition predates the char-gram
-          index: SQL that lacks the ``unicode61`` tokeniser string (the
-          legacy external-content table, whose definition has no explicit
-          tokenise clause) **or still carries the porter stemmer** — note
-          ``tokenize='porter unicode61'`` *contains* the substring
-          ``unicode61``, so a mere substring check is not enough and the
-          ``porter`` marker must be tested explicitly;
-        * its row count differs from ``novel`` (a fresh or stale index).
-
-        The index is derived data, so EVERY rebuild is idempotent and safe —
-        there is no data to lose, only the one-time (7-15 s) cost to pay.
-        """
-        row = self.session.execute(_text(
-            f"SELECT sql FROM sqlite_master "
-            f"WHERE type='table' AND name='{C.TABLE_NOVEL_FTS}'"
-        )).fetchone()
-        if row is None:
-            return True  # table does not exist yet
-        sql = row[0] or ""
-        if "unicode61" not in sql or "porter" in sql:
-            return True  # legacy porter/jieba or external-content table
-        fts_count = self.session.execute(
-            _text(f"SELECT COUNT(*) FROM {C.TABLE_NOVEL_FTS}")
-        ).scalar() or 0
-        novel_count = self.session.execute(
-            select(func.count()).select_from(models.Novel)
-        ).scalar() or 0
-        return fts_count != novel_count
 
     # ------------------------------------------------------------------
     # Incremental update
     # ------------------------------------------------------------------
 
     def update_novel_fts_index(self, novel_ids: list[int]) -> None:
-        """Update FTS entries for the given novel IDs.
+        """Recompute ``search_text`` for the given novel IDs (upsert).
 
-        No-op if FTS table missing or *novel_ids* is empty.  Deletes
-        the affected rowids (plain DELETE — the standalone novel_fts
-        table has no external-content clause) then batch re-inserts
-        all affected rows.
+        Runs an ``INSERT ... ON CONFLICT (novel_id) DO UPDATE`` inside the
+        caller's transaction so the search row and the novel row are always
+        consistent.  No-op for empty input.
         """
         if not novel_ids:
             return
 
-        if not self._fts_table_exists():
-            return
-
-        # Remove the existing entries first.  novel_fts is a standalone
-        # FTS5 table, so a plain rowid DELETE is safe and exact (the
-        # FTS5 'delete' command would require the exact tokenised
-        # values stored in the index).  Without this, re-inserting the
-        # same rowid below would fail with an IntegrityError.
-        self.session.execute(
-            _text(
-                f"DELETE FROM {C.TABLE_NOVEL_FTS} WHERE rowid IN :nids"
-            ).bindparams(bindparam("nids", expanding=True)),
-            {"nids": novel_ids},
-        )
-
         novels = self.session.execute(
             select(
                 models.Novel.id,
                 models.Novel.title,
                 models.Novel.author_name,
                 models.Novel.series_name,
-                func.group_concat(models.Tag.name, " ").label("tags"),
+                models.Novel.tags,
             )
-            .outerjoin(models.NovelTag, models.Novel.id == models.NovelTag.novel_id)
-            .outerjoin(models.Tag, models.NovelTag.tag_id == models.Tag.id)
             .where(models.Novel.id.in_(novel_ids))
-            .group_by(models.Novel.id)
         ).all()
 
-        if novels:
-            self._batch_insert_fts_entries([
-                (nid, title or "", author or "", series_name or "", tags or "")
-                for nid, title, author, series_name, tags in novels
-            ])
+        for nid, title, author, series, tags in novels:
+            search_text = build_search_text(title, author, series, tags or [])
+            self.session.execute(
+                pg_insert(models.NovelSearch)
+                .values(novel_id=nid, search_text=search_text)
+                .on_conflict_do_update(
+                    index_elements=["novel_id"],
+                    set_={"search_text": search_text},
+                )
+            )
 
     def delete_novel_fts(self, novel_id: int) -> None:
-        """Remove an FTS entry for a deleted novel.
+        """Remove one ``novel_search`` row.
 
-        Plain rowid DELETE — safe on the standalone novel_fts table
-        and a no-op when the row doesn't exist.  Skips silently when the
-        FTS table itself is missing (unlike the sibling update path, this
-        used to raise ``no such table`` and roll back the whole delete).
+        Normally unnecessary (the FK ``ON DELETE CASCADE`` removes it when the
+        novel is deleted) — kept as an explicit helper for callers that delete
+        a search row without touching ``novel``.
         """
-        if not self._fts_table_exists():
-            return
         self.session.execute(
-            _text(f"DELETE FROM {C.TABLE_NOVEL_FTS} WHERE rowid = :id"),
-            {"id": novel_id},
+            _delete(models.NovelSearch).where(
+                models.NovelSearch.novel_id == novel_id
+            )
         )
 
     def delete_novel_fts_many(self, novel_ids: list[int]) -> None:
-        """Remove FTS entries for many deleted novels in one statement.
-
-        Same semantics as :meth:`delete_novel_fts` — a plain rowid DELETE
-        with an expanding bind parameter, a no-op for empty input or a
-        missing FTS table.
-        """
-        if not novel_ids or not self._fts_table_exists():
+        """Remove many ``novel_search`` rows in one statement."""
+        if not novel_ids:
             return
         self.session.execute(
-            _text(f"DELETE FROM {C.TABLE_NOVEL_FTS} WHERE rowid IN :nids")
-            .bindparams(bindparam("nids", expanding=True)),
-            {"nids": novel_ids},
+            _delete(models.NovelSearch).where(
+                models.NovelSearch.novel_id.in_(novel_ids)
+            )
         )
 
     # ------------------------------------------------------------------
-    # Batch operations (Phase 2)
+    # Full rebuild (fallback)
     # ------------------------------------------------------------------
 
     def batch_rebuild_fts(self, batch_size: int = 500) -> int:
-        """Rebuild the entire FTS index in batches, avoiding per-row upserts.
+        """Rebuild the entire ``novel_search`` derived table from ``novel``.
 
-        Drops and recreates the table (shape always matches
-        ``_CREATE_SQL``), then bulk-inserts every novel.
-        Returns the number of novels indexed.
+        ``TRUNCATE`` then bulk-inserts ``search_text`` for every novel computed
+        via :func:`build_search_text`.  Returns the number of novels indexed.
+        Uses a plain Python-side gram (the ``simple`` tokeniser run inside
+        PostgreSQL can't reproduce the ``龖`` placeholder logic), so rows are
+        built in the application and inserted in bulk.
         """
-        # Recreate the table so its shape always matches _CREATE_SQL
-        # (a legacy table may have a different definition), then bulk
-        # re-insert.  'delete-all' is not used: it only works on
-        # contentless / external-content FTS5 tables.
-        # DDL auto-commits in SQLite; the INSERTs below are committed by
-        # the caller's transaction (FTSManager never commits itself).
-        self.session.execute(
-            _text(f"DROP TABLE IF EXISTS {C.TABLE_NOVEL_FTS}")
-        )
-        self.session.execute(_text(self._CREATE_SQL))
-        count = self._batch_insert_all_novels()
-        logger.info(f"FTS5 batch rebuild complete — {count} novels indexed.")
-        return count
-
-    # ------------------------------------------------------------------
-    # Health check (Phase 2)
-    # ------------------------------------------------------------------
-
-    def check_fts_health(self) -> dict:
-        """Check FTS5 index health.
-
-        Uses ``INSERT INTO ..._fts(..._fts) VALUES('rebuild')`` to detect
-        corruption.  Returns a dict with health status and details.
-        """
-        result = {
-            "fts_table_exists": False,
-            "is_healthy": False,
-            "novel_count": 0,
-            "fts_entry_count": 0,
-            "error": None,
-        }
-
-        if not self._fts_table_exists():
-            result["error"] = "FTS virtual table does not exist"
-            return result
-
-        result["fts_table_exists"] = True
-
-        # Count entries
-        try:
-            fts_count = self.session.execute(
-                _text(f"SELECT COUNT(*) FROM {C.TABLE_NOVEL_FTS}")
-            ).scalar()
-            result["fts_entry_count"] = fts_count or 0
-
-            novel_count = self.session.execute(
-                select(func.count()).select_from(models.Novel)
-            ).scalar()
-            result["novel_count"] = novel_count or 0
-        except Exception as e:
-            result["error"] = f"Count query failed: {e}"
-            return result
-
-        # Corruption check: INSERT INTO ..._fts(..._fts) VALUES('rebuild')
-        # If the index is corrupt, this will raise an error.
-        # A SAVEPOINT (begin_nested) scopes the rollback to the probe row
-        # only — a plain session.rollback() here would also discard any
-        # unrelated pending writes in the caller's transaction.
-        try:
-            with self.session.begin_nested():
-                self.session.execute(
-                    _text(
-                        f"INSERT INTO {C.TABLE_NOVEL_FTS}({C.TABLE_NOVEL_FTS}) "
-                        f"VALUES('rebuild')"
-                    )
-                )
-        except Exception as e:
-            result["error"] = f"Integrity check failed: {e}"
-            return result
-
-        # Check for orphan entries (FTS rows pointing to nonexistent novels)
-        orphan_count = self.session.execute(_text(
-            f"SELECT COUNT(*) FROM {C.TABLE_NOVEL_FTS} "
-            f"WHERE rowid NOT IN (SELECT {C.COL_ID} FROM {C.TABLE_NOVEL})"
-        )).scalar()
-        result["orphan_entries"] = orphan_count or 0
-
-        # Check for missing entries (novels not in FTS)
-        missing_count = self.session.execute(_text(
-            f"SELECT COUNT(*) FROM {C.TABLE_NOVEL} "
-            f"WHERE {C.COL_ID} NOT IN (SELECT rowid FROM {C.TABLE_NOVEL_FTS})"
-        )).scalar()
-        result["missing_entries"] = missing_count or 0
-
-        result["is_healthy"] = (
-            result["error"] is None
-            and (orphan_count or 0) == 0
-        )
-
-        return result
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _fts_table_exists(self) -> bool:
-        """Return True if the FTS5 virtual table exists."""
-        fts_t = models.Base.metadata.tables.get(C.TABLE_NOVEL_FTS)
-        if fts_t is not None:
-            return True
-        # Also check directly — the table may exist in DB but not in MetaData
-        try:
-            self.session.execute(_text(f"SELECT 1 FROM {C.TABLE_NOVEL_FTS} LIMIT 0"))
-            return True
-        except Exception:
-            return False
-
-    def _batch_insert_fts_entries(
-        self, rows: list[tuple[int, str, str, str]],
-    ) -> None:
-        """Insert multiple FTS entries in a single batch.
-
-        Char-grams each row individually (the tokeniser can't run inside
-        SQLite) but issues a single multi-row INSERT for efficiency.
-
-        Uses raw SQL instead of ``Base.metadata.tables``: the ``novel_fts``
-        virtual table is created via raw DDL and is deliberately NOT part
-        of the ORM metadata, so ``metadata.tables.get()`` would always
-        return None and the insert would be silently skipped (the FTS
-        index would stay empty and keyword search would match nothing).
-        """
-        if not rows:
-            return
-        values = [
-            {
-                "id": nid,
-                "title": gram_tokenize(title),
-                "author_name": gram_tokenize(author),
-                "series_name": gram_tokenize(series),
-                "tags": gram_tokenize(tags),
-            }
-            for nid, title, author, series, tags in rows
-        ]
-        stmt = (
-            f"INSERT INTO {C.TABLE_NOVEL_FTS}"
-            f"(rowid, {C.COL_TITLE}, {C.COL_AUTHOR_NAME}, {C.COL_SERIES_NAME}, tags) "
-            f"VALUES (:id, :title, :author_name, :series_name, :tags)"
-        )
-        self.session.execute(_text(stmt), values)
-
-    def _batch_insert_all_novels(self) -> int:
-        """Insert all novels from the novel table into FTS in one bulk operation.
-
-        Uses raw SQL for efficiency — each row's text columns are char-grammed
-        individually because the tokeniser can't run inside SQLite.
-        """
+        self.session.execute(_text("TRUNCATE novel_search"))
         novels = self.session.execute(
             select(
                 models.Novel.id,
                 models.Novel.title,
                 models.Novel.author_name,
                 models.Novel.series_name,
-                func.group_concat(models.Tag.name, " ").label("tags"),
+                models.Novel.tags,
             )
-            .outerjoin(models.NovelTag, models.Novel.id == models.NovelTag.novel_id)
-            .outerjoin(models.Tag, models.NovelTag.tag_id == models.Tag.id)
-            .group_by(models.Novel.id)
         ).all()
+        rows = [
+            {
+                "novel_id": nid,
+                "search_text": build_search_text(title, author, series, tags or []),
+            }
+            for nid, title, author, series, tags in novels
+        ]
+        if rows:
+            self.session.execute(pg_insert(models.NovelSearch), rows)
+        logger.info(f"novel_search full rebuild complete — {len(rows)} novels indexed.")
+        return len(rows)
 
-        if not novels:
-            return 0
+    def needs_rebuild(self) -> bool:
+        """Return True when ``novel_search`` is missing or stale.
 
-        self._batch_insert_fts_entries([
-            (nid, title or "", author or "", series_name or "", tags or "")
-            for nid, title, author, series_name, tags in novels
-        ])
+        Compares ``count(novel_search)`` to ``count(novel)`` — the derived
+        table must have exactly one row per novel.  Kept as an instance method
+        (the app.startup self-heal path calls ``FTSManager(session).needs_rebuild()``).
+        """
+        ns_count = self.session.execute(
+            select(func.count()).select_from(models.NovelSearch)
+        ).scalar() or 0
+        novel_count = self.session.execute(
+            select(func.count()).select_from(models.Novel)
+        ).scalar() or 0
+        return ns_count != novel_count
 
-        return len(novels)
+    # ------------------------------------------------------------------
+    # Health check
+    # ------------------------------------------------------------------
+
+    def check_fts_health(self) -> dict:
+        """Check ``novel_search`` health.
+
+        The GIN index is created at migration time and always exists, so
+        ``fts_table_exists`` is always True.  Reports entry/novel counts and
+        any orphan (search row without a novel — should be 0 given the FK) /
+        missing (novel without a search row) entries.
+        """
+        result: dict = {
+            "fts_table_exists": True,
+            "is_healthy": False,
+            "novel_count": 0,
+            "fts_entry_count": 0,
+            "orphan_entries": 0,
+            "missing_entries": 0,
+            "error": None,
+        }
+
+        try:
+            fts_count = self.session.execute(
+                select(func.count()).select_from(models.NovelSearch)
+            ).scalar() or 0
+            novel_count = self.session.execute(
+                select(func.count()).select_from(models.Novel)
+            ).scalar() or 0
+            result["fts_entry_count"] = fts_count
+            result["novel_count"] = novel_count
+
+            orphan_count = self.session.execute(
+                _text(
+                    "SELECT count(*) FROM novel_search ns "
+                    "WHERE NOT EXISTS (SELECT 1 FROM novel n WHERE n.id = ns.novel_id)"
+                )
+            ).scalar() or 0
+            missing_count = self.session.execute(
+                _text(
+                    "SELECT count(*) FROM novel n "
+                    "WHERE NOT EXISTS (SELECT 1 FROM novel_search ns WHERE ns.novel_id = n.id)"
+                )
+            ).scalar() or 0
+            result["orphan_entries"] = orphan_count
+            result["missing_entries"] = missing_count
+            result["is_healthy"] = orphan_count == 0 and missing_count == 0
+        except Exception as e:  # pragma: no cover - defensive
+            result["error"] = str(e)
+            result["is_healthy"] = False
+
+        return result
