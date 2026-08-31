@@ -8,7 +8,6 @@ from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from copixiv.db import models
-from copixiv.log import logger
 
 
 _MAX_RETRIES = 3
@@ -48,21 +47,13 @@ class FailedNovelRepository:
         pipeline knows the title; other callers may not), and
         ``last_failed_at`` is always bumped to now (UTC).
 
-        ``failed_novel.novel_id`` carries an ``ON DELETE CASCADE`` FK to
-        ``novel(id)`` (B1), so a failure can only be recorded for a novel
-        that actually exists.  A brand-new id that failed **before** it was
-        ever persisted has no ``novel`` row and cannot be recorded without
-        polluting the novel list with a placeholder; such records are
-        skipped here (logged) and the download flow retries them naturally
-        on the next run.
+        ``failed_novel`` carries **no** FK on purpose: the ingest pipeline
+        downloads BEFORE persisting (plan → download → persist), so a
+        download failure can occur for a novel that has never been written
+        to ``novel`` — such records must still be captured in the ledger.
+        Deleting a novel cleans its ledger rows explicitly in the novel
+        repository (``delete`` / ``delete_many``).
         """
-        if self._session.get(models.Novel, novel_id) is None:
-            logger.warning(
-                "Skipping failure record for non-persisted novel #%s "
-                "(no novel row under the failed_novel FK)",
-                novel_id,
-            )
-            return
         now = _now()
         stmt = (
             pg_insert(models.FailedNovel)

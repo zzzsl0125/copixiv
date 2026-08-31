@@ -60,10 +60,13 @@ class TestMigrations:
         tags_col = next(c for c in insp.get_columns("novel") if c["name"] == "tags")
         assert "ARRAY" in str(tags_col["type"]).upper()
 
-    def test_failed_novel_has_fk(self, pg_engine):
+    def test_failed_novel_has_no_fk(self, pg_engine):
+        """The failure ledger deliberately has no FK: ingest downloads BEFORE
+        persisting, so failures for never-persisted novels must be recordable
+        (their cleanup is explicit in the novel repository layer)."""
         insp = inspect(pg_engine)
         fks = insp.get_foreign_keys("failed_novel")
-        assert any(fk["referred_table"] == "novel" for fk in fks)
+        assert not any(fk["referred_table"] == "novel" for fk in fks)
 
     def test_upgrade_is_idempotent(self):
         run_migrations(TEST_URL)

@@ -241,7 +241,7 @@ def upgrade() -> None:
     op.execute(
         """
         CREATE TABLE failed_novel (
-            novel_id       BIGINT PRIMARY KEY REFERENCES novel(id) ON DELETE CASCADE,
+            novel_id       BIGINT PRIMARY KEY,
             failure_type   TEXT,
             error_message  TEXT,
             failed_times   INTEGER NOT NULL DEFAULT 1,

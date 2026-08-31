@@ -1156,12 +1156,19 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         """Delete a novel row.
 
         The ``sync_tag_refs`` trigger decrements ``tag.reference_count`` from
-        the deleted row's tags; the FK ``ON DELETE CASCADE`` removes the
-        ``novel_search`` and ``failed_novel`` rows.  No manual bookkeeping.
+        the deleted row's tags; the ``novel_search`` FK ``ON DELETE CASCADE``
+        drops its search row.  The ``failed_novel`` ledger deliberately has
+        no FK (failures may be recorded for never-persisted novels), so its
+        rows for this novel are removed explicitly.
         """
         novel = self.session.get(models.Novel, novel_id)
         if novel is None:
             return
+        self.session.execute(
+            _delete(models.FailedNovel).where(
+                models.FailedNovel.novel_id == novel_id
+            )
+        )
         self.session.delete(novel)
 
     async def toggle_favourite(self, novel_id: int) -> None:
@@ -1226,6 +1233,13 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         paths = list(self.session.execute(
             select(models.Novel.path).where(models.Novel.id.in_(novel_ids))
         ).scalars().all())
+        # failed_novel has no FK by design (failures can be recorded for
+        # never-persisted novels) — clean its ledger rows explicitly.
+        self.session.execute(
+            _delete(models.FailedNovel).where(
+                models.FailedNovel.novel_id.in_(novel_ids)
+            )
+        )
         self.session.execute(
             _delete(models.Novel).where(models.Novel.id.in_(novel_ids))
         )

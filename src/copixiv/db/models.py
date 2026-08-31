@@ -327,9 +327,14 @@ class Token(Base):
 
 class FailedNovel(Base):
     __tablename__ = C.TABLE_FAILED_NOVEL
+    # NOTE: deliberately NO ForeignKey.  The ingest pipeline downloads
+    # BEFORE persisting (plan → download → persist), so a download failure
+    # can occur for a novel that has never been written to ``novel`` —
+    # such records must still be captured in the failure ledger.  Deleting
+    # a novel cleans its ledger rows explicitly in the repository layer
+    # (``SQLAlchemyNovelWriteRepository.delete`` / ``delete_many``).
     novel_id = Column(
         BigInteger,
-        ForeignKey(f"{C.TABLE_NOVEL}.id", ondelete="CASCADE"),
         primary_key=True,
     )
     failure_type = Column(Text)
@@ -337,8 +342,6 @@ class FailedNovel(Base):
     failed_times = Column(Integer, default=1, nullable=False)
     title = Column(Text, nullable=True)
     last_failed_at = Column(DateTime(timezone=True), nullable=True)
-
-    novel = relationship("Novel")
 
     __table_args__ = (
         Index("ix_failed_novel_last_failed_at", "last_failed_at"),

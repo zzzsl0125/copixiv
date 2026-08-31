@@ -404,15 +404,20 @@ class TestFailedNovelRepository:
             assert row.title == "标题B"
             assert row.error_message == "boom2"
 
-    def test_record_skips_non_persisted_novel(self, session_factory):
-        """A never-persisted novel cannot be ledgered under the FK — skipped."""
+    def test_record_allows_non_persisted_novel(self, session_factory):
+        """A never-persisted novel CAN be ledgered (no FK by design) — a
+        download failure must never be silently dropped."""
         from copixiv.features.failures.repo import FailedNovelRepository
 
         with session_factory() as s:
             repo = FailedNovelRepository(s)
             repo.record(999999, "download", "boom")
             s.commit()
-            assert s.get(FailedNovel, 999999) is None
+            row = s.get(FailedNovel, 999999)
+            assert row is not None
+            assert row.failed_times == 1
+            s.delete(row)
+            s.commit()
 
     def test_list_orders_by_last_failed_at_desc_nulls_last(self, session_factory):
         from copixiv.features.failures.repo import FailedNovelRepository

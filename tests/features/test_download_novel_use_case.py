@@ -180,10 +180,16 @@ class TestIngest:
         assert (999, "webview_novel 返回空") in out.failed
         assert out.titles == []
         assert out.new_count == 0
-        # The novel was NEVER persisted, so under the failed_novel FK
-        # (ON DELETE CASCADE to novel) it cannot be ledgered — skip it.
+        # The novel was NEVER persisted — but the ledger has no FK by
+        # design (ingest downloads BEFORE persisting), so the failure MUST
+        # still be recorded (product contract: download failures are never
+        # silently dropped).
         with session_factory() as s:
-            assert s.get(FailedNovel, 999) is None
+            row = s.get(FailedNovel, 999)
+            assert row is not None
+            assert row.failed_times == 1
+            s.delete(row)
+            s.commit()
 
     async def test_asset_failures_recorded_in_persist_transaction(
         self, session_factory, tmp_path,

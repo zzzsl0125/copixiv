@@ -39,7 +39,7 @@ from zoneinfo import ZoneInfo
 
 import psycopg2
 import sqlite3
-from psycopg2.extras import Json
+from psycopg2.extras import Json, execute_values
 from sqlalchemy.engine import make_url
 
 # Make copixiv importable for gram_tokenize (independent of how alembic configures src).
@@ -57,6 +57,14 @@ DEFAULT_PG_PORT = 5433
 # avoids SQLite's bind-variable cap for large limits and keeps the selection
 # consistent across all tables.
 _SEL = "(SELECT id FROM _selected)"
+
+
+def _clean(value):
+    """Strip NUL bytes — psycopg2 rejects ``\\x00`` in string literals and the
+    source corpus contains them in text fields (Pixiv raw data)."""
+    if isinstance(value, str) and "\x00" in value:
+        return value.replace("\x00", "")
+    return value
 
 
 def _convert_dt(value):
@@ -150,7 +158,7 @@ def migrate_author(src, cur) -> tuple[int, set[int]]:
         """,
         [
             (
-                r["author_id"], r["author_name"], r["novel_count"] or 0,
+                r["author_id"], _clean(r["author_name"]), r["novel_count"] or 0,
                 r["like"] or 0, r["view"] or 0, r["text"] or 0,
                 _convert_dt(r["last_update"]), _b(r["sf"]),
             )
@@ -176,7 +184,7 @@ def migrate_series(src, cur, author_ids: set[int]) -> tuple[int, set[int]]:
         """,
         [
             (
-                r["series_id"], r["series_name"], r["novel_count"] or 0,
+                r["series_id"], _clean(r["series_name"]), r["novel_count"] or 0,
                 r["author_id"] if r["author_id"] in author_ids else None,
                 r["like"] or 0, r["view"] or 0, r["text"] or 0,
             )
@@ -188,12 +196,13 @@ def migrate_series(src, cur, author_ids: set[int]) -> tuple[int, set[int]]:
 
 def migrate_tag(src, cur) -> int:
     rows = [dict(r) for r in src.execute("SELECT id, name FROM tag")]
-    cur.executemany(
-        "INSERT INTO tag (id, name, reference_count) VALUES (%s, %s, 0)",
-        [(r["id"], r["name"]) for r in rows],
+    execute_values(
+        cur,
+        "INSERT INTO tag (id, name, reference_count) VALUES %s",
+        [(r["id"], _clean(r["name"]), 0) for r in rows],
+        page_size=5000,
     )
     return len(rows)
-
 
 def _load_tags_by_novel(src) -> dict[int, list[str]]:
     """Build {novel_id: [unique tag names]} for the selected novels."""
@@ -236,43 +245,54 @@ def migrate_novel_and_search(src, cur, author_ids: set[int], series_ids: set[int
         # Null out orphan FKs that the source tolerated (foreign_keys pragma was off).
         author_id = r["author_id"] if r["author_id"] in author_ids else None
         series_id = r["series_id"] if r["series_id"] in series_ids else None
+        title, author_name = _clean(r["title"]), _clean(r["author_name"])
+        path, caption = _clean(r["path"]), _clean(r["caption"])
+        series_name = _clean(r["series_name"])
         novel_rows.append((
-            nid, r["title"], author_id, r["author_name"], r["path"],
-            r["like"] or 0, r["view"] or 0, r["text"] or 0, r["caption"],
-            series_id, r["series_name"], r["series_index"],
+            nid, title, author_id, author_name, path,
+            r["like"] or 0, r["view"] or 0, r["text"] or 0, caption,
+            series_id, series_name, r["series_index"],
             _convert_dt(r["create_time"]), r["has_epub"] or 0, r["shuffle"] or 0,
             tags, _b(r["fav"]),
         ))
         # Single source of truth for search_text (shared with the runtime
         # write path, ``copixiv.features.novels.fts.build_search_text``).
         search_map[nid] = build_search_text(
-            r["title"], r["author_name"], r["series_name"], tags,
+            title, author_name, series_name, tags,
         )
 
-    cur.executemany(
+    execute_values(
+        cur,
         """
         INSERT INTO novel (id, title, author_id, author_name, path, "like", "view",
                            "text", caption, series_id, series_name, series_index,
                            create_time, has_epub, shuffle, tags, is_favourite)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES %s
         """,
         novel_rows,
+        page_size=5000,
     )
     return len(novel_rows), search_map
 
 
 def migrate_novel_search(cur, search_map: dict[int, str]) -> int:
-    cur.executemany(
-        "INSERT INTO novel_search (novel_id, search_text) VALUES (%s, %s)",
+    execute_values(
+        cur,
+        "INSERT INTO novel_search (novel_id, search_text) VALUES %s",
         [(nid, txt) for nid, txt in search_map.items()],
+        page_size=5000,
     )
     return len(search_map)
 
 
 def migrate_failed_novel(src, cur) -> int:
+    # NOTE: no ``IN _SEL`` filter by design — the ledger may (and does,
+    # ~27 rows) contain failures for novels that have never been persisted
+    # to ``novel`` (ingest downloads BEFORE persisting); those must survive
+    # the migration.  failed_novel has no FK for exactly this reason.
     rows = [dict(r) for r in src.execute(
-        f"SELECT novel_id, failure_type, error_message, failed_times, title, "
-        f"last_failed_at FROM failed_novel WHERE novel_id IN {_SEL}"
+        "SELECT novel_id, failure_type, error_message, failed_times, title, "
+        "last_failed_at FROM failed_novel"
     )]
     cur.executemany(
         """
@@ -282,8 +302,8 @@ def migrate_failed_novel(src, cur) -> int:
         """,
         [
             (
-                r["novel_id"], r["failure_type"], r["error_message"],
-                r["failed_times"] or 1, r["title"], _convert_dt(r["last_failed_at"]),
+                r["novel_id"], _clean(r["failure_type"]), _clean(r["error_message"]),
+                r["failed_times"] or 1, _clean(r["title"]), _convert_dt(r["last_failed_at"]),
             )
             for r in rows
         ],
@@ -304,7 +324,8 @@ def migrate_task_history(src, cur) -> int:
         """,
         [
             (
-                r["name"], r["task_func"], r["arguments"], r["status"],
+                _clean(r["name"]), _clean(r["task_func"]), _clean(r["arguments"]),
+                _clean(r["status"]),
                 _convert_dt(r["start_time"]), _convert_dt(r["end_time"]),
                 r["duration"], _to_jsonb(r["result"]), _to_jsonb(r["progress"]),
             )
@@ -327,8 +348,9 @@ def migrate_scheduled_task(src, cur) -> int:
         """,
         [
             (
-                r["name"], r["task"], r["cron"], _to_jsonb(r["params"]),
-                _b(r["is_enabled"]), r["config"], r["sort_index"] or 0,
+                _clean(r["name"]), _clean(r["task"]), _clean(r["cron"]),
+                _to_jsonb(r["params"]),
+                _b(r["is_enabled"]), _clean(r["config"]), r["sort_index"] or 0,
             )
             for r in rows
         ],
@@ -347,7 +369,7 @@ def migrate_token(src, cur) -> int:
         """,
         [
             (
-                r["name"], r["token"], _b(r["premium"]), _b(r["valid"]),
+                _clean(r["name"]), _clean(r["token"]), _b(r["premium"]), _b(r["valid"]),
                 r["sort_index"] or 0, _b(r["is_follow"]),
             )
             for r in rows
@@ -362,7 +384,7 @@ def migrate_tag_preference(src, cur) -> int:
     )]
     cur.executemany(
         "INSERT INTO tag_preference (tag, preference, sort_index) VALUES (%s, %s, %s)",
-        [(r["tag"], r["preference"], r["sort_index"] or 0) for r in rows],
+        [(_clean(r["tag"]), r["preference"], r["sort_index"] or 0) for r in rows],
     )
     return len(rows)
 
@@ -386,7 +408,8 @@ def migrate_search_history(src, cur) -> int:
         VALUES (%s, %s, %s, %s)
         """,
         [
-            (r["type"], r["value"], r["display_value"], _convert_dt(r["timestamp"]))
+            (_clean(r["type"]), _clean(r["value"]), _clean(r["display_value"]),
+             _convert_dt(r["timestamp"]))
             for r in rows
         ],
     )
@@ -397,7 +420,7 @@ def migrate_setting(src, cur) -> int:
     rows = [dict(r) for r in src.execute("SELECT key, value FROM settings")]
     cur.executemany(
         "INSERT INTO setting (key, value) VALUES (%s, %s)",
-        [(r["key"], r["value"]) for r in rows],
+        [(_clean(r["key"]), _clean(r["value"])) for r in rows],
     )
     return len(rows)
 
@@ -474,6 +497,11 @@ def main(argv: list[str]) -> int:
             "SELECT setval(pg_get_serial_sequence('tag', 'id'), "
             "(SELECT COALESCE(max(id), 1) FROM tag))"
         )
+        # Bulk-insert 236k novels with the sync_tag_refs trigger enabled would
+        # cost ~4 statements per row; disable it for the load and recompute
+        # reference_count set-based below (the trigger is re-enabled before
+        # commit so runtime writes are covered again).
+        cur.execute("ALTER TABLE novel DISABLE TRIGGER trg_sync_tag_refs")
         n_novel, search_map = migrate_novel_and_search(src, cur, author_ids, series_ids)
         counts["novel"] = n_novel
         counts["novel_search"] = migrate_novel_search(cur, search_map)
@@ -500,6 +528,8 @@ def main(argv: list[str]) -> int:
             WHERE t.name = c.name
             """
         )
+
+        cur.execute("ALTER TABLE novel ENABLE TRIGGER trg_sync_tag_refs")
 
         pg.commit()
     except Exception:

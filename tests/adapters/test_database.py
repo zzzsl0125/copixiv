@@ -95,10 +95,14 @@ class TestForeignKeyIntegrity:
 
 
 class TestCascadeDelete:
-    def test_delete_novel_cascades_novel_search_and_failed_novel(
+    async def test_delete_novel_cleans_novel_search_and_failed_novel(
         self, session_factory,
     ):
-        """Deleting a novel cascades to novel_search / failed_novel (FK CASCADE)."""
+        """Deleting a novel through the repository drops its novel_search row
+        (FK CASCADE) and its failure-ledger row (explicit cleanup — the
+        ledger has no FK by design)."""
+        from copixiv.features.novels.repo import SQLAlchemyNovelRepository
+
         with session_factory() as s:
             s.add(Author(author_id=1, author_name="a"))
             s.flush()
@@ -111,7 +115,7 @@ class TestCascadeDelete:
             ))
             s.commit()
 
-            s.delete(s.get(Novel, 1))
+            await SQLAlchemyNovelRepository(s).delete(1)
             s.commit()
 
             assert s.get(NovelSearch, 1) is None
