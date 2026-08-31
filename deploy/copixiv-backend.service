@@ -1,0 +1,44 @@
+# Production unit for the copixiv backend (postgres-migration).
+#
+# The application now reads PostgreSQL via ``config.yaml`` ``database_url``
+# (default: postgresql+psycopg2://postgres@127.0.0.1:5433/copixiv) — there is
+# NO system-level PostgreSQL service on this host; the database runs as a
+# pgserver instance inside the project venv (data dir .spike/pgdata, managed
+# by scripts/pg_dev.py, port 5433).  ExecStartPre therefore brings the
+# database up before the app boots, so a plain
+#
+#     sudo systemctl restart copixiv-backend
+#
+# is fully self-sufficient (idempotent: exits 0 when Postgres already runs).
+# This also covers cold boot: the unit is enabled, so after a reboot systemd
+# starts the backend, and ExecStartPre starts Postgres first.
+#
+# Install (needs sudo — the checked-in copy is the source of truth):
+#   sudo cp deploy/copixiv-backend.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl restart copixiv-backend
+#
+# Debugging:
+#   journalctl -xeu copixiv-backend.service -n 80 --no-pager
+#   python scripts/pg_dev.py status   # database health/port
+
+[Unit]
+Description=Backend of Copixiv
+
+[Service]
+User=invocation
+Group=invocation
+WorkingDirectory=/home/invocation/copixiv/
+# Ensure the local PostgreSQL (pgserver) instance is running before the app
+# boots.  Idempotent: returns 0 immediately when the server is already up.
+ExecStartPre=/home/invocation/copixiv/.venv/bin/python /home/invocation/copixiv/scripts/pg_dev.py start
+ExecStart=/home/invocation/copixiv/.venv/bin/python -u main.py
+
+Restart=on-failure
+RestartSec=5s
+
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Install]
+WantedBy=multi-user.target
