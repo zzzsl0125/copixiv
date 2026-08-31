@@ -1,6 +1,10 @@
+# PostgreSQL 连接（postgres-migration）：应用只使用此 URL；path.database
+# （SQLite 文件路径）已废弃，仅为旧配置兼容解析保留。
+# 示例：本机 pgserver 实例（scripts/pg_dev.py 管理，端口 5433）
+database_url: postgresql+psycopg2://postgres@127.0.0.1:5433/copixiv
 path:
   token: pixiv_token.py
-  database: database/database.db
+  database: database/database.db  # DEPRECATED - 见 database_url
   download: download
 pixiv_client:
   min_interval: 2
