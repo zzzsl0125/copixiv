@@ -164,7 +164,12 @@ class TestCountExclusion:
     ):
         _seed_three(session_factory, tmp_path)
         _block(client, "NTR")
+        # ``with_excluded`` opts into the (expensive) excluded count; the
+        # default is excluded=0 because the ExclusionBar is now a lazy
+        # "查看被隐藏的小说" action backed by /blocked-ids.
         r = client.get("/api/novels/count")
+        assert r.json() == {"total": 2, "excluded": 0}
+        r = client.get("/api/novels/count", params={"with_excluded": "true"})
         assert r.json() == {"total": 2, "excluded": 1}
 
     def test_count_with_filters_excluded_scoped(
@@ -173,10 +178,10 @@ class TestCountExclusion:
         _seed_three(session_factory, tmp_path)
         _block(client, "NTR")
         # min_like=20 filters out the blocked novel anyway → excluded 0.
-        r = client.get("/api/novels/count", params={"min_like": 20})
+        r = client.get("/api/novels/count", params={"min_like": 20, "with_excluded": "true"})
         assert r.json() == {"total": 2, "excluded": 0}
         # min_like=5 keeps the blocked novel in scope (like=10) → excluded 1.
-        r = client.get("/api/novels/count", params={"min_like": 5})
+        r = client.get("/api/novels/count", params={"min_like": 5, "with_excluded": "true"})
         assert r.json() == {"total": 2, "excluded": 1}
 
     def test_count_override_false(self, client, session_factory, tmp_path):

@@ -105,6 +105,7 @@ async def count_novels(
     min_text: int | None = Query(None),
     excluded_ids: list[int] | None = Query(None),
     exclude_blocked: bool | None = Query(None),
+    with_excluded: bool = Query(False),
 ):
     conditions = parse_search_keyword(keyword) if keyword else None
     spec = QuerySpec(
@@ -117,8 +118,12 @@ async def count_novels(
     total = await SQLAlchemyNovelRepository(uow.session).count_novels(spec)
     # How many matching novels were hidden by blocked tags (0 when the
     # exclusion is off / nothing blocked) — powers the ExclusionBar.
+    # Off by default: it is the *slow* tail of this endpoint (the same
+    # keyword bitmap scan repeats), and since the ExclusionBar switched to
+    # a lazy "查看被隐藏的小说" action (which fetches /blocked-ids), no
+    # caller needs it eagerly.  Pass ``with_excluded=true`` to opt in.
     excluded = 0
-    if exclude_blocked is not False:
+    if with_excluded and exclude_blocked is not False:
         excluded = await SQLAlchemyNovelRepository(uow.session).count_excluded_novels(spec)
     return {"total": total, "excluded": excluded}
 

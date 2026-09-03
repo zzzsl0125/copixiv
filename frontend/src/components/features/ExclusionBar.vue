@@ -2,7 +2,6 @@
 import { EyeOff, Eye } from '@lucide/vue'
 
 defineProps<{
-  excludedCount: number
   /** True while the main grid shows the excluded novels (查看被排除). */
   isViewingExcluded: boolean
   /** False in batch mode — the bar stays info-only (批量模式优先互斥). */
@@ -23,7 +22,7 @@ const emit = defineEmits<{
       <div class="flex items-center gap-x-3 text-xs">
         <span class="inline-flex items-center gap-1.5 text-amber-700 shrink-0">
           <EyeOff class="h-3.5 w-3.5" />
-          已按厌恶标签排除 {{ excludedCount }} 篇
+          已按厌恶标签排除部分小说
         </span>
         <button
           v-if="interactive"
@@ -32,7 +31,7 @@ const emit = defineEmits<{
           @click="emit('toggle-view-excluded')"
         >
           <Eye class="h-3.5 w-3.5" />
-          {{ isViewingExcluded ? '返回浏览列表' : `查看被排除的 ${excludedCount} 篇` }}
+          {{ isViewingExcluded ? '返回浏览列表' : '查看被隐藏的小说' }}
         </button>
       </div>
     </div>

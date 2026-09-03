@@ -213,8 +213,7 @@ describe('useNovels', () => {
     )
   })
 
-  it('excludes blocked tags by default and reports the excluded count for searches', async () => {
-    novelApiMock.countNovels.mockResolvedValue({ total: 10, excluded: 3 })
+  it('excludes blocked tags by default and no longer fetches counts after searches', async () => {
     const state = mountUseNovels('/?keyword=猫')
 
     await state.loadNovels()
@@ -223,19 +222,17 @@ describe('useNovels', () => {
     expect(novelApiMock.getNovels).toHaveBeenCalledWith(
       expect.objectContaining({ exclude_blocked: true }),
     )
-    expect(novelApiMock.countNovels).toHaveBeenCalledWith(
-      expect.objectContaining({ keyword: '猫', exclude_blocked: true }),
-    )
-    expect(state.excludedCount.value).toBe(3)
+    // The ExclusionBar is now a lazy "查看被隐藏的小说" action (its data
+    // comes from /blocked-ids on click) — a search must not fire /count.
+    expect(novelApiMock.countNovels).not.toHaveBeenCalled()
   })
 
-  it('skips the excluded-count fetch on random browse (no keyword)', async () => {
+  it('never fetches counts on random browse (no keyword)', async () => {
     const state = mountUseNovels('/')
 
     await state.loadNovels()
     await flushPromises()
 
     expect(novelApiMock.countNovels).not.toHaveBeenCalled()
-    expect(state.excludedCount.value).toBe(0)
   })
 })

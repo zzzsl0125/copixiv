@@ -17,7 +17,6 @@ const {
   handleSearch,
   handleLoadMore,
   handleCardSearch,
-  excludedCount,
 } = useNovels()
 
 const { systemConfig, fetchConfig } = useSystem()
@@ -251,7 +250,6 @@ onMounted(() => {
         :has-selection="isNovelsRoute ? hasSelection : undefined"
         :has-filter="isNovelsRoute ? hasFilter : undefined"
         :batch-scope="isNovelsRoute ? batchScope : undefined"
-        :excluded-count="isNovelsRoute ? excludedCount : undefined"
         :is-batch-selected="isNovelsRoute ? isCardSelected : undefined"
         @logo-click="handleLogoClick"
         @load-more="handleLoadMore"

@@ -37,7 +37,10 @@ class Novel(BaseModel):
 
     id: int
     title: str
-    author_id: int
+    # ``author_id`` is nullable: novels orphaned by the SQLite→PG migration
+    # (author row missing) keep NULL, and a deleted Pixiv author stays NULL.
+    # Mirrors ``Series.author_id``.
+    author_id: int | None = None
     author_name: str | None = None
     path: str | None = None
     like: int = 0

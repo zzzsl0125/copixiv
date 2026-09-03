@@ -42,6 +42,13 @@ def create_database_engine(
         max_overflow=12,
     )
 
+    # Register the DML probe that drives the data-version epoch
+    # (``copixiv.db.data_version``): it hooks the engine's cursor events
+    # and marks a transaction as "mutated" when INSERT/UPDATE/DELETE/COPY
+    # run, so read-only commits never invalidate caches.  Importing the
+    # module triggers the listener registration.
+    import copixiv.db.data_version  # noqa: F401
+
     @event.listens_for(engine, "connect")
     def _set_pg_opts(dbapi_connection, _connection_record):
         cursor = dbapi_connection.cursor()

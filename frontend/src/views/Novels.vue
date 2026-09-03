@@ -31,8 +31,6 @@ const props = defineProps<{
   hasSelection: boolean
   hasFilter: boolean
   batchScope: BatchScope | null
-  /** 当前搜索被厌恶标签排除的小说数（>0 时显示 ExclusionBar） */
-  excludedCount: number
   isBatchSelected: (id: number) => boolean
 }>()
 
@@ -341,8 +339,7 @@ const handleToggleActive = (id: number | string) => {
         @logo-click="emit('logo-click')"
       />
       <ExclusionBar
-        v-if="props.excludedCount > 0 && props.filters.keyword.trim() !== ''"
-        :excluded-count="props.excludedCount"
+        v-if="props.filters.keyword.trim() !== ''"
         :is-viewing-excluded="viewingExcluded"
         :interactive="!props.batchMode"
         @toggle-view-excluded="toggleViewExcluded"
