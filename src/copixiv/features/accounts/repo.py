@@ -42,9 +42,10 @@ class SQLAlchemyTokenRepository(BaseRepository):
         """Designate one token as the「追更账号」, clearing the flag on all others.
 
         Returns ``False`` when *token_id* doesn't exist.  Runs as a single
-        transaction — the write UoW commits on clean exit — and is
-        serialized by the global write lock, so the clear-then-set never
-        races.  At most one account can be flagged at a time.
+        transaction — the write UoW commits on clean exit.  There is no
+        global write lock under PG; the single transaction keeps the
+        clear-then-set atomic.  At most one account can be flagged at a
+        time.
         """
         if is_follow:
             self.session.execute(

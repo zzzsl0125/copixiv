@@ -6,11 +6,12 @@ Registered tasks (``tasks/novels.py``) are now thin adapters over
 search, follow feeds, author catalogues) and then hand the collected novel
 list (or an explicit id list) to :func:`ingest`, which owns the rest:
 
-1. plan (read-only, no write lock) — decide what still needs downloading;
+1. plan (read-only, no write transaction) — decide what still needs downloading;
 2. download (concurrent, no DB access);
 3. asset gate (``image_downloader.await_all()``);
 4. author-name collect (lock-free) before the write transaction;
-5. persist + author-name writeback in a single ``db_write()`` transaction.
+5. persist + author-name writeback in a single short write transaction
+   (``run_write_transaction`` — no global lock, retries brief lock conflicts).
 
 Nothing here depends on :class:`~copixiv.tasks.kernel.TaskContext` — task
 adapters pass the fields they need (``session_factory``, ``client``,
@@ -23,7 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from copixiv.db.uow import SqlUnitOfWork
-from copixiv.db.write_lock import db_write
+from copixiv.db.write_lock import run_write_transaction
 
 from copixiv.core.draft import NovelDraft, NovelInfoLike, build_from_novel_info
 from copixiv.core.services import is_chinese, safe_get
@@ -81,9 +82,9 @@ async def batch_upsert(
     Thin wrapper over :func:`copixiv.features.novels.persist.persist_novels`
     that adds batch-level logging.
 
-    Pure write helper: the caller is responsible for wrapping it in
-    ``db_write()`` + ``uow.begin()`` so the whole batch (including the
-    commit) happens while holding the global write lock.
+    Pure write helper: the caller is responsible for wrapping it in a short
+    write transaction (``run_write_transaction``) so the whole batch
+    (including the commit) is atomic; there is no global write lock.
     """
     count = await persist_novels(uow, novels, force_update)
     novels = [n for n in novels if n]
@@ -113,8 +114,8 @@ async def _download_novels(
     account selection distribute the load across accounts automatically.
     Each novel's text, images, and EPUB are processed as it completes.
 
-    Pure download phase: no database access at all (the write lock is
-    never held across network I/O).  Failed downloads are returned as
+    Pure download phase: no database access at all (no write transaction
+    is ever held across network I/O).  Failed downloads are returned as
     ``(novel_id, reason)`` records for the caller to persist inside the
     write transaction.
 
@@ -171,7 +172,7 @@ async def _plan_batch(
 ) -> tuple[list[NovelDraft], list[int]]:
     """Plan phase (read-only): decide what to download and what to upsert.
 
-    Must run outside the write lock — it only reads.  Returns
+    Must run outside the write transaction — it only reads.  Returns
     ``(existing_meta, download_ids)`` where ``existing_meta`` holds the
     metadata dicts of already-known novels (empty when ``redownload``),
     and ``download_ids`` are the novel IDs that still need downloading.
@@ -214,7 +215,8 @@ async def _persist_batch(
     failed_repo=None,
     titles: dict[int, str] | None = None,
 ) -> tuple[list[str], set[int], int]:
-    """Persist phase (write-only): run inside ``db_write()`` + ``uow.begin()``.
+    """Persist phase (write-only): run inside a short write transaction
+    (``run_write_transaction`` + ``uow.begin()``).
 
     Records download failures, upserts existing metadata + downloaded
     novels, and forgets success markers — all in the caller's write
@@ -307,12 +309,13 @@ async def ingest(
 ) -> IngestOutcome:
     """Process a batch of novels end-to-end: plan → download → persist.
 
-    The pipeline keeps every database write inside ``db_write()`` and
-    never holds a transaction (or the write lock) across network
-    downloads.  Concurrent calls are safe: the plan phase reads without
-    the lock, the download phase touches no database, the collect phase
-    resolves author names without the lock, and the persist phase
-    serializes through ``db_write()``.
+    The pipeline keeps every database write inside one short write
+    transaction and never holds a transaction across network downloads.
+    Concurrent calls are safe: the plan phase reads without writing, the
+    download phase touches no database, the collect phase resolves author
+    names without a write transaction, and the persist phase is a short
+    ``run_write_transaction`` that retries transient LockNotAvailable
+    instead of serializing every write through a global lock.
 
     When *novels* is provided, the plan phase decides what to download.
     When *novels* is omitted but *ids* is given, every id is downloaded
@@ -321,9 +324,9 @@ async def ingest(
     semantics through the persist phase.
 
     Author-name resolution is two-phase: :func:`collect_author_names` runs
-    *outside* the write lock (lock-free reads + network), and
-    :func:`writeback_author_names` runs *inside* the same ``db_write()``
-    transaction as the persist — the final D3 shape.
+    *outside* the write transaction (lock-free reads + network), and
+    :func:`writeback_author_names` runs *inside* the same short persist
+    transaction — the final D3 shape.
     """
     if not novels and not ids:
         return IngestOutcome()
@@ -376,7 +379,9 @@ async def ingest(
     if new_author_ids and client is not None:
         mapping = await collect_author_names(new_author_ids, uow=uow, client=client)
 
-    # 4. Persist — one write transaction inside the global write lock.
+    # 4. Persist — one short write transaction, with LockNotAvailable
+    # retried on a fresh transaction/session (fan-out tasks do not hold a
+    # global write lock; brief contention on a hot tag row must self-heal).
     # Titles accompany the failure records so the "下载失败" view can show
     # a human-readable label without querying Pixiv again.  In the *ids*
     # path there is no novelInfo payload, so downloaded titles fill in the
@@ -389,16 +394,18 @@ async def ingest(
         if d.title:
             titles_by_id.setdefault(d.id, d.title)
 
-    async with db_write():
-        async with uow.begin():
-            titles, _new_author_ids, new_count = await _persist_batch(
-                existing_meta, downloaded, uow,
-                failed_records=failed_records + asset_failures,
-                failed_repo=FailedNovelRepository(uow.session),
-                titles=titles_by_id,
-            )
-            if mapping:
-                await writeback_author_names(mapping, uow)
+    async def _persist(uow) -> tuple[list[str], int]:
+        titles, _new_author_ids, new_count = await _persist_batch(
+            existing_meta, downloaded, uow,
+            failed_records=failed_records + asset_failures,
+            failed_repo=FailedNovelRepository(uow.session),
+            titles=titles_by_id,
+        )
+        if mapping:
+            await writeback_author_names(mapping, uow)
+        return titles, new_count
+
+    titles, new_count = await run_write_transaction(uow, _persist)
 
     return IngestOutcome(
         titles=titles,

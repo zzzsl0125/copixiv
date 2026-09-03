@@ -274,8 +274,9 @@ class SQLAlchemyTagRepository(BaseRepository):
 
         Uses a single array operation: ``UPDATE novel SET tags =
         array_replace(tags, :source, :target) WHERE :source = ANY(tags)``.
-        The ``sync_tag_refs`` trigger fires on the UPDATE and adjusts
-        ``reference_count`` for both tags automatically.  Returns the number
+        The statement-level ``sync_tag_refs`` trigger fires on the tags
+        UPDATE and adjusts ``reference_count`` for both tags automatically
+        (one aggregated delta set per statement).  Returns the number
         of novels affected.
         """
         src_tag = self.session.execute(

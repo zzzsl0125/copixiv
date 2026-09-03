@@ -270,8 +270,10 @@ class TaskContext:
 
 # Every task_history write goes through this class: enqueue (pending row),
 # status transitions (running/success/failed/interrupted), and
-# result/duration updates — all inside the global ``db_write()`` lock so
-# they serialize with every other write path.
+# result/duration updates — all inside short write transactions.  There is
+# no global ``db_write()`` lock any more: PostgreSQL MVCC lets independent
+# writes proceed concurrently, and data write paths retry the rare
+# LockNotAvailable conflict on a fresh transaction.
 
 class TaskHistoryRecorder:
     """Records task lifecycle rows (enqueue + status/result updates)."""
@@ -290,8 +292,8 @@ class TaskHistoryRecorder:
         the same ``task_func``, surfacing as ``sqlalchemy.exc.IntegrityError``
         (caught by the manager and mapped to ``TaskAlreadyRunningError``).
 
-        Short INSERT outside ``db_write()`` — task enqueue happens in sync
-        API paths; the 60s busy_timeout covers the rare collision.
+        Short INSERT outside any write transaction — task enqueue happens in sync
+        API paths; the 60s lock_timeout covers the rare collision.
         """
         from copixiv.tasks.history_repo import (
             SQLAlchemyTaskRepository,
@@ -314,7 +316,7 @@ class TaskHistoryRecorder:
         duration: float | None = None,
         progress: str | None = None,
     ) -> None:
-        """Update a TaskHistory row inside the global write lock."""
+        """Update a TaskHistory row in a short write transaction."""
         from copixiv.db.write_lock import db_write
         from copixiv.tasks.history_repo import (
             SQLAlchemyTaskRepository,
@@ -833,8 +835,8 @@ class TaskManagerSystem:
         # visible, and makes tasks complete in enqueue order.  Intra-task
         # concurrency (fan-out downloads via asyncio.gather inside a single
         # task) is unaffected: those are direct calls, not separate
-        # run_and_record invocations.  Same coroutine always acquires
-        # task-lock → db_write-lock in that order, so no deadlock.
+        # run_and_record invocations.  Same coroutine always acquires the
+        # task-lock before entering a write transaction, so no deadlock.
         self._task_lock = asyncio.Lock()
 
     @property

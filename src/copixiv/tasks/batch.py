@@ -42,6 +42,7 @@ from copixiv.tasks.history_repo import SQLAlchemyTaskRepository
 from copixiv.core.exceptions import ValidationError
 from copixiv.core.models import TaskResult
 from copixiv.core.services import build_batch_zip
+from copixiv.db.write_lock import run_write_transaction
 from copixiv.log import logger
 
 from .kernel import TaskContext
@@ -123,13 +124,14 @@ async def batch_operation(
         if ctx.task_id is None:
             return
         try:
-            async with ctx.write_lock():
-                async with ctx.uow.begin():
-                    await SQLAlchemyTaskRepository(ctx.uow.session).update_task(
-                        ctx.task_id,
-                        "running",
-                        progress=f"{_OP_LABELS[args.operation]}进行中：{stage}",
-                    )
+            await run_write_transaction(
+                ctx.uow,
+                lambda uw: SQLAlchemyTaskRepository(uw.session).update_task(
+                    ctx.task_id,
+                    "running",
+                    progress=f"{_OP_LABELS[args.operation]}进行中：{stage}",
+                ),
+            )
         except Exception:  # noqa: BLE001 — progress must never kill the task
             logger.exception("批量任务进度更新失败（不影响执行）")
 
@@ -138,9 +140,10 @@ async def batch_operation(
     for idx, chunk in enumerate(chunks, start=1):
         try:
             if args.operation == "delete":
-                async with ctx.write_lock():
-                    async with ctx.uow.begin():
-                        paths = await SQLAlchemyNovelRepository(ctx.uow.session).delete_many(chunk)
+                paths = await run_write_transaction(
+                    ctx.uow,
+                    lambda uw: SQLAlchemyNovelRepository(uw.session).delete_many(chunk),
+                )
                 # File cleanup AFTER the transaction — unlink failures must
                 # not roll the chunk back (DB-first, same as the sync path).
                 for path in paths:
@@ -150,15 +153,19 @@ async def batch_operation(
                         except Exception:  # noqa: BLE001
                             logger.exception("删除小说文件失败: %s", path)
             elif args.operation == "add_tags":
-                async with ctx.write_lock():
-                    async with ctx.uow.begin():
-                        await SQLAlchemyNovelRepository(ctx.uow.session).add_tags_to_novels(chunk, tag_set)
+                await run_write_transaction(
+                    ctx.uow,
+                    lambda uw: SQLAlchemyNovelRepository(uw.session).add_tags_to_novels(
+                        chunk, tag_set,
+                    ),
+                )
             else:  # remove_tags
-                async with ctx.write_lock():
-                    async with ctx.uow.begin():
-                        await SQLAlchemyNovelRepository(ctx.uow.session).remove_tags_from_novels(
-                            chunk, tag_set,
-                        )
+                await run_write_transaction(
+                    ctx.uow,
+                    lambda uw: SQLAlchemyNovelRepository(uw.session).remove_tags_from_novels(
+                        chunk, tag_set,
+                    ),
+                )
 
             done += len(chunk)
             await report_progress(
@@ -206,13 +213,14 @@ async def batch_export(args: BatchExportArgs, ctx: TaskContext) -> TaskResult:
         if ctx.task_id is None:
             return
         try:
-            async with ctx.write_lock():
-                async with ctx.uow.begin():
-                    await SQLAlchemyTaskRepository(ctx.uow.session).update_task(
-                        ctx.task_id,
-                        "running",
-                        progress=f"批量导出进行中：{stage}",
-                    )
+            await run_write_transaction(
+                ctx.uow,
+                lambda uw: SQLAlchemyTaskRepository(uw.session).update_task(
+                    ctx.task_id,
+                    "running",
+                    progress=f"批量导出进行中：{stage}",
+                ),
+            )
         except Exception:  # noqa: BLE001
             logger.exception("导出任务进度更新失败（不影响执行）")
 

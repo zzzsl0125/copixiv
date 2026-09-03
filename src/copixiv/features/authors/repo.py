@@ -73,9 +73,17 @@ class SQLAlchemyAuthorRepository(BaseRepository):
         )
 
     async def update_author_name(self, author_id: int, name: str) -> None:
+        # Only touch novel rows whose name actually changed.  The
+        # ``sync_tag_refs`` trigger is declared ``UPDATE OF tags``, so an
+        # author-name writeback must not produce any ``novel`` UPDATE that
+        # could interact with ``tag`` row locks; narrowing the predicate
+        # also keeps the write batch short (no no-op row updates).
         self.session.execute(
             _update(models.Novel)
-            .where(models.Novel.author_id == author_id)
+            .where(
+                models.Novel.author_id == author_id,
+                models.Novel.author_name.is_distinct_from(name),
+            )
             .values(author_name=name)
         )
         self.session.execute(

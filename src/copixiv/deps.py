@@ -53,12 +53,14 @@ async def get_uow(
 async def get_write_uow(
     session_factory=Depends(get_session_factory),
 ) -> AsyncIterator[SqlUnitOfWork]:
-    """Yield a request-scoped UoW **inside the global write lock**.
+    """Yield a request-scoped UoW inside a write-transaction boundary.
 
-    Write endpoints must use this dependency so API writes serialize with
-    background-task writes through the same ``db_write()`` lock — the
-    lock covers begin → commit, exactly like the task pipeline.  Read-only
-    endpoints keep using :func:`get_uow` (WAL reads need no lock).
+    There is no global write lock any more: ``db_write()`` is a no-op
+    transaction-boundary marker (PostgreSQL MVCC multi-writer).  Write
+    endpoints use this dependency so their writes go through
+    ``uow.begin()`` (commit on success / rollback on error) and stay
+    short and set-based, matching the task pipeline's discipline.
+    Read-only endpoints keep using :func:`get_uow`.
     """
     from copixiv.db.write_lock import db_write
 

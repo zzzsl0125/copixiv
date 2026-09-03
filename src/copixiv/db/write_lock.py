@@ -24,12 +24,24 @@ Usage (unchanged shape, no longer mutually exclusive)::
 
 Read-only queries never needed the lock (WAL supported concurrent reads),
 and under PG they still don't.
+
+For writes that must not fail on the rare hot-row lock conflict (fan-out
+cron tasks), :func:`run_write_transaction` wraps ``db_write()`` +
+``uow.begin()`` and retries ``LockNotAvailable`` on a fresh transaction
+with exponential backoff + jitter.
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import asyncio
+import random
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from typing import Any
+
+from sqlalchemy.exc import OperationalError
+
+from copixiv.log import logger
 
 
 @asynccontextmanager
@@ -47,6 +59,60 @@ async def db_write() -> AsyncIterator[None]:
     upserts, not by a process-wide mutex.
     """
     yield
+
+
+def _is_lock_not_available(exc: BaseException) -> bool:
+    """True for PostgreSQL ``LockNotAvailable`` lock-conflict errors.
+
+    A blocked write surfaces as ``OperationalError`` with the psycopg2
+    SQLSTATE ``55P03`` (``could not obtain lock ...``).  The failed
+    transaction is already aborted, so the caller must retry with a
+    **fresh** transaction/session — exactly what
+    :func:`run_write_transaction` does.
+    """
+    orig = getattr(exc, "orig", None)
+    return getattr(orig, "pgcode", None) == "55P03"
+
+
+async def run_write_transaction(
+    uow,
+    fn: Callable[[Any], Any],
+    *,
+    max_attempts: int = 3,
+    base_delay: float = 0.05,
+    max_delay: float = 0.5,
+) -> Any:
+    """Run ``fn(uow)`` inside ``db_write()`` + ``uow.begin()`` with retry.
+
+    PostgreSQL is an MVCC multi-writer engine: a write transaction is
+    short, and two concurrent fan-out writes may still briefly contend on
+    the same hot ``tag`` row.  Rather than serializing every write (the
+    old SQLite global lock) or failing the cron loudly, this helper
+    retries a lock conflict with exponential backoff + random jitter.
+
+    Retries use the *same* ``uow`` object but a **fresh** session/transaction
+    on every attempt: ``uow.begin()`` rolls back and closes the failed
+    session before re-raising, so the next attempt starts clean.
+
+    Only ``LockNotAvailable`` (SQLSTATE 55P03) is retried; real SQL/编程
+    错误 bubble up immediately.
+    """
+    for attempt in range(max_attempts):
+        try:
+            async with db_write():
+                async with uow.begin():
+                    return await fn(uow)
+        except OperationalError as exc:
+            if not _is_lock_not_available(exc) or attempt == max_attempts - 1:
+                raise
+            delay = min(base_delay * (2**attempt), max_delay)
+            delay *= random.uniform(0.5, 1.5)
+            logger.warning(
+                "写事务撞锁（第 {} / {} 次尝试），{:.3f}s 后重试：{}",
+                attempt + 1, max_attempts, delay, exc,
+            )
+            await asyncio.sleep(delay)
+    raise AssertionError("unreachable: retry loop must return or raise")
 
 
 class DbWriteLock:

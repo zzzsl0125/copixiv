@@ -21,7 +21,7 @@ from copixiv.features.authors.resolve_names import collect_author_names, writeba
 from copixiv.features.novels.ingest import ingest, _filter_chinese_novels, _month_ranges
 from copixiv.core.models import TaskResult
 from copixiv.core.services import safe_get
-from copixiv.db.write_lock import db_write
+from copixiv.db.write_lock import run_write_transaction
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 from copixiv.log import logger
 
@@ -85,8 +85,9 @@ async def _fan_out_author_fetch(
 
     Each concurrent ``author_fetch`` gets its own UnitOfWork (via
     ``ctx.child_uow()``) — sessions are never shared across coroutines.
-    All database writes are serialized by the global ``db_write()`` lock
-    inside the pipeline, so concurrency here only ever covers network I/O.
+    There is no global ``db_write()`` lock: concurrency covers network I/O
+    *and* short database write transactions, with LockNotAvailable retried
+    on a fresh session (``run_write_transaction``).
 
     Returns the combined list of newly-downloaded novel titles.
     """
@@ -184,9 +185,9 @@ async def author_fetch(args: AuthorFetchArgs, ctx: TaskContext) -> TaskResult:
     Collect-then-persist flow: the whole catalogue is fetched without
     touching the database (client accumulates pages into ``resp.novels``),
     then :func:`ingest` downloads new novels concurrently and persists
-    everything in a single write transaction inside ``db_write()``.  No
-    transaction is ever held across network I/O, and no write happens
-    outside the global write lock.
+    everything in one short write transaction.  No transaction is ever
+    held across network I/O, and there is no global write lock — brief
+    LockNotAvailable conflicts are retried (see ``run_write_transaction``).
     """
     session_factory = ctx.session_factory
     uow = ctx.uow
@@ -213,7 +214,8 @@ async def author_fetch(args: AuthorFetchArgs, ctx: TaskContext) -> TaskResult:
     resp = await ctx.client.user_novels(args.author_id, fetch_all=True)
     novels = _filter_chinese_novels(safe_get(resp, "novels", []))
 
-    # Persist — plan → download → write, writes serialized by db_write().
+    # Persist — plan → download → write, each write is a short retried
+    # transaction (no global lock).
     out = await ingest(
         novels, force=args.redownload,
         session_factory=session_factory,
@@ -222,17 +224,20 @@ async def author_fetch(args: AuthorFetchArgs, ctx: TaskContext) -> TaskResult:
     )
 
     # Mark the author as updated today (same write discipline).
-    async with db_write():
-        async with uow.begin():
-            await SQLAlchemyAuthorRepository(uow.session).update_last_update(args.author_id)
+    await run_write_transaction(
+        uow,
+        lambda uw: SQLAlchemyAuthorRepository(uw.session).update_last_update(
+            args.author_id
+        ),
+    )
 
     # Resolve author name — webview API doesn't return it.
     mapping = await collect_author_names(
         {args.author_id}, uow=uow, client=ctx.client,
     )
-    async with db_write():
-        async with uow.begin():
-            await writeback_author_names(mapping, uow)
+    await run_write_transaction(
+        uow, lambda uw: writeback_author_names(mapping, uw),
+    )
     name = mapping.get(args.author_id, "")
 
     label = name or f"#{args.author_id}"
@@ -245,9 +250,12 @@ async def author_fetch(args: AuthorFetchArgs, ctx: TaskContext) -> TaskResult:
 @register("author_delete", args=AuthorDeleteArgs)
 async def author_delete(args: AuthorDeleteArgs, ctx: TaskContext) -> TaskResult:
     """Delete an author and all their novels."""
-    async with db_write():
-        async with ctx.uow.begin():
-            await SQLAlchemyAuthorRepository(ctx.uow.session).delete_author_and_data(args.author_id)
+    await run_write_transaction(
+        ctx.uow,
+        lambda uw: SQLAlchemyAuthorRepository(uw.session).delete_author_and_data(
+            args.author_id
+        ),
+    )
 
     async with ctx.client.account_rule(
         force_follow=True

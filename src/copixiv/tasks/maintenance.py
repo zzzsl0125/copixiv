@@ -17,7 +17,7 @@ from copixiv.features.authors.resolve_names import collect_author_names, writeba
 from copixiv.core.models import EpubStatus
 from copixiv.core.models import TaskResult
 from copixiv.core.services import has_image_placeholders
-from copixiv.db.write_lock import db_write
+from copixiv.db.write_lock import run_write_transaction
 from copixiv.features.novels.repo import (
     SQLAlchemyNovelRepository,
     SQLAlchemySeriesRepository,
@@ -83,20 +83,22 @@ async def check_epub(ctx: TaskContext) -> TaskResult:
             elif has_epub_status == EpubStatus.PENDING:
                 pending_ids.append(novel_id)
 
+    async def _apply(ids: list[int], status: EpubStatus) -> None:
+        await run_write_transaction(
+            uow,
+            lambda uw: SQLAlchemyNovelRepository(uw.session).update_has_epub_status(
+                ids, status
+            ),
+        )
+
     if completed_ids:
-        async with db_write():
-            async with uow.begin():
-                await SQLAlchemyNovelRepository(uow.session).update_has_epub_status(completed_ids, EpubStatus.DONE)
+        await _apply(completed_ids, EpubStatus.DONE)
 
     if revert_ids:
-        async with db_write():
-            async with uow.begin():
-                await SQLAlchemyNovelRepository(uow.session).update_has_epub_status(revert_ids, EpubStatus.PENDING)
+        await _apply(revert_ids, EpubStatus.PENDING)
 
     if downgrade_ids:
-        async with db_write():
-            async with uow.begin():
-                await SQLAlchemyNovelRepository(uow.session).update_has_epub_status(downgrade_ids, EpubStatus.NO)
+        await _apply(downgrade_ids, EpubStatus.NO)
 
     logger.info(
         f"check_epub: completed={len(completed_ids)}, reverted={len(revert_ids)}, "
@@ -160,8 +162,8 @@ async def sync_empty_name(ctx: TaskContext) -> TaskResult:
     """Fix novels whose ``author_name`` is NULL.
 
     Collects names via :func:`collect_author_names` (local ``author``
-    table first, then Pixiv API) and writes them back under the write
-    lock via :func:`writeback_author_names`.
+    table first, then Pixiv API) and writes them back in a short write
+    transaction via :func:`writeback_author_names`.
     """
     from sqlalchemy import select as _select
     from copixiv.db import models
@@ -181,9 +183,9 @@ async def sync_empty_name(ctx: TaskContext) -> TaskResult:
     mapping = await collect_author_names(
         author_ids, client=ctx.client, uow=uow,
     )
-    async with ctx.write_lock():
-        async with uow.begin():
-            await writeback_author_names(mapping, uow)
+    await run_write_transaction(
+        uow, lambda uw: writeback_author_names(mapping, uw),
+    )
 
     # 诚实统计：mapping 才是实际成功解析的作者数；novel 行由
     # update_author_name 按作者批量补齐（rows 全部会被处理）。
@@ -202,9 +204,9 @@ async def rebuild_fts(ctx: TaskContext) -> TaskResult:
     search can hit tag-only text.
     """
     uow = ctx.uow
-    async with db_write():
-        async with uow.begin():
-            count = await SQLAlchemyNovelRepository(uow.session).rebuild_fts()
+    count = await run_write_transaction(
+        uow, lambda uw: SQLAlchemyNovelRepository(uw.session).rebuild_fts(),
+    )
 
     return TaskResult(summary=f"FTS 索引重建完成（{count} 本小说）")
 
@@ -213,7 +215,7 @@ async def rebuild_fts(ctx: TaskContext) -> TaskResult:
 async def check_fts(ctx: TaskContext) -> TaskResult:
     """FTS5 index health check — corruption, orphans, and missing entries.
 
-    Read-only (no write lock).  Reports the index-entry/novel counts and
+    Read-only (no write transaction).  Reports the index-entry/novel counts and
     any orphan (index row without a novel) / missing (novel without an
     index row) entries, so ops can decide whether a ``rebuild_fts`` run
     is needed.
@@ -282,9 +284,9 @@ async def fix_series_index(ctx: TaskContext) -> TaskResult:
         for i, n in enumerate(novels):
             safe_set(n, "series.index", i + 1)
         novel_models = [build_from_novel_info(n) for n in novels]
-        async with db_write():
-            async with uow.begin():
-                await batch_upsert(novel_models, uow)
+        await run_write_transaction(
+            uow, lambda uw: batch_upsert(novel_models, uw),
+        )
         done += 1
         processed += len(novel_models)
 
@@ -298,7 +300,7 @@ async def fix_series_index(ctx: TaskContext) -> TaskResult:
 
 @register("rebuild_tag_counts")
 async def rebuild_tag_counts(ctx: TaskContext) -> TaskResult:
-    """Recompute every tag's ``reference_count`` from the novel_tag table.
+    """Recompute every tag's ``reference_count`` from ``novel.tags``.
 
     The denormalized counter drifts over time: v1 legacy data, deletes
     that predated the decrement-on-delete fix, and alias retroactive
@@ -306,31 +308,35 @@ async def rebuild_tag_counts(ctx: TaskContext) -> TaskResult:
     ~10 % of tags (7500/73037) had a count that didn't match the actual
     distinct-novel count, with errors up to ±14000.
 
-    This task recalculates ``reference_count = COUNT(DISTINCT novel_id)``
-    for every tag in a single correlated UPDATE — fast and exact.
+    This task recalculates ``reference_count`` from the array column that
+    is now the single source of truth
+    (``SELECT count(*) FROM novel WHERE tags @> ARRAY[tag.name]``) in a
+    single correlated UPDATE — fast, exact, and independent of the
+    trigger's incremental bookkeeping.
     """
     from sqlalchemy import text, func, select
     from copixiv.db import models
 
     uow = ctx.uow
-    async with db_write():
-        async with uow.begin():
-            result = uow.session.execute(text(
-                "UPDATE tag SET reference_count = ("
-                "  SELECT COUNT(DISTINCT nt.novel_id) "
-                "  FROM novel_tag nt WHERE nt.tag_id = tag.id"
-                ")"
-            ))
-            # SQLite doesn't report rowcount reliably for correlated
-            # UPDATEs, so count tags explicitly.
-            total = uow.session.execute(
-                select(func.count()).select_from(models.Tag)
-            ).scalar() or 0
-            drifted = uow.session.execute(text(
-                "SELECT COUNT(*) FROM tag WHERE reference_count != ("
-                "  SELECT COUNT(DISTINCT nt.novel_id) "
-                "  FROM novel_tag nt WHERE nt.tag_id = tag.id)"
-            )).scalar() or 0
+
+    async def _run(uow):
+        uow.session.execute(text(
+            "UPDATE tag SET reference_count = ("
+            "  SELECT count(*) FROM novel WHERE tags @> ARRAY[tag.name]"
+            ")"
+        ))
+        # SQLAlchemy doesn't report rowcount reliably for correlated
+        # UPDATEs, so count tags explicitly.
+        total = uow.session.execute(
+            select(func.count()).select_from(models.Tag)
+        ).scalar() or 0
+        drifted = uow.session.execute(text(
+            "SELECT COUNT(*) FROM tag WHERE reference_count != ("
+            "  SELECT count(*) FROM novel WHERE tags @> ARRAY[tag.name])"
+        )).scalar() or 0
+        return total, drifted
+
+    total, drifted = await run_write_transaction(uow, _run)
 
     # The commit above (uow.begin() exit) bumps the data epoch, so the
     # count cache invalidates itself — no manual invalidate needed.

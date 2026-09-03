@@ -4,8 +4,9 @@ single-novel task.
 Owns the invariant that every novel upsert is accompanied by author/series
 placeholder rows (FK constraints) and refreshed aggregate summaries.
 
-Callers must hold ``db_write()`` and ``uow.begin()`` — this helper never
-starts or commits a transaction itself.
+Callers must wrap this in a short write transaction (e.g.
+``run_write_transaction(uow, ...)``) — this helper never starts or commits
+a transaction itself.
 """
 
 from __future__ import annotations

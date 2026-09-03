@@ -5,7 +5,9 @@ gone.  Tags live in ``novel.tags text[]`` (+ GIN), ``is_favourite`` is a
 ``novel`` column, ``is_special_follow`` is an ``author`` column, and keyword
 search runs against the application-maintained ``novel_search`` derived table
 (``to_tsvector('simple', search_text) @@ to_tsquery('simple', '<gram>')``).
-``reference_count`` is maintained by the ``sync_tag_refs`` trigger, deleted
+``reference_count`` is maintained by the statement-level ``sync_tag_refs``
+trigger (fires only on ``INSERT``/``UPDATE OF tags``/``DELETE``, aggregates
+the whole statement via transition tables), deleted
 rows cascade to ``novel_search``/``failed_novel`` via FK ``ON DELETE
 CASCADE``, and ``id = ANY($1)`` / ``tags @>`` / ``NOT (tags && ...)`` replace
 the SQLite-era ``IN``/``EXISTS`` adaptive filters and manual DELETE bookkeeping.
@@ -1002,9 +1004,10 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         # 2. Batch-fetch existing novels
         existing_map = self._fetch_existing_novels(novels)
 
-        # 3. Upsert rows (tags handled separately below)
+        # 3. Upsert rows (new rows get their tags inline; existing rows are
+        #    updated in step 4 below).
         new_ids, fts_dirty_ids = self._upsert_rows(
-            novels, existing_map, force_update,
+            novels, existing_map, force_update, novel_tags_map,
         )
 
         # 4. Set the tags array on each novel (popped in _resolve_tag_aliases),
@@ -1080,10 +1083,13 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         novels: list[dict],
         existing_map: dict[int, Any],
         force_update: list[str],
+        novel_tags_map: dict[int, set[str]] | None = None,
     ) -> tuple[list[int], list[int]]:
         """Insert new or update existing novel rows.
 
-        Returns ``(new_ids, fts_dirty_ids)``.
+        New rows receive their tag array inline (single insert, no
+        separate tag UPDATE); existing rows keep their tags unless step 4
+        detects a real change.  Returns ``(new_ids, fts_dirty_ids)``.
         """
         update_fields_set = set([
             "like", "view", "title", "text", "caption",
@@ -1127,6 +1133,9 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
                     if (getattr(existing, key, None) is None and value) or key in update_fields_set:
                         setattr(existing, key, value)
             else:
+                if novel_tags_map and nid is not None:
+                    normalized_tags = sorted(novel_tags_map.get(nid, []))
+                    filtered = {**filtered, "tags": normalized_tags}
                 new_novel = models.Novel(**filtered)
                 if "shuffle" not in filtered or not filtered["shuffle"]:
                     import random as _random
@@ -1269,15 +1278,22 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             .values([{"name": t, "reference_count": 0} for t in tag_names])
             .on_conflict_do_nothing(index_elements=["name"])
         )
-        changed: list[int] = []
-        novels = self.session.execute(
-            select(models.Novel).where(models.Novel.id.in_(novel_ids))
-        ).scalars().all()
-        for novel in novels:
-            new_tags = list(dict.fromkeys(list(novel.tags or []) + tag_names))
-            if new_tags != list(novel.tags or []):
-                novel.tags = new_tags
-                changed.append(novel.id)
+        # One set-based UPDATE for the whole batch: strip any occurrence of
+        # the new tags (dedup) then append them in sorted order.  A single
+        # SQL statement means the statement-level tag trigger fires once and
+        # aggregates the whole transition table — no per-novel tag row churn.
+        expr = models.Novel.tags
+        for t in tag_names:
+            expr = func.array_append(func.array_remove(expr, t), t)
+        changed = list(self.session.execute(
+            update(models.Novel)
+            .where(
+                models.Novel.id.in_(novel_ids),
+                ~models.Novel.tags.contains(tag_names),
+            )
+            .values(tags=expr)
+            .returning(models.Novel.id)
+        ).scalars().all())
         if changed:
             self.session.flush()
             FTSManager(self.session).update_novel_fts_index(changed)
@@ -1299,16 +1315,22 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
     ) -> int:
         if not novel_ids or not tags:
             return 0
-        tag_names = set(tags)
-        changed: list[int] = []
-        novels = self.session.execute(
-            select(models.Novel).where(models.Novel.id.in_(novel_ids))
-        ).scalars().all()
-        for novel in novels:
-            new_tags = [t for t in (novel.tags or []) if t not in tag_names]
-            if new_tags != list(novel.tags or []):
-                novel.tags = new_tags
-                changed.append(novel.id)
+        tag_names = sorted(set(tags))
+        # One set-based UPDATE: drop every occurrence of the removed tags
+        # (arrays are unique, so this is a plain per-tag array_remove chain).
+        # Single statement → statement-level trigger aggregates once.
+        expr = models.Novel.tags
+        for t in tag_names:
+            expr = func.array_remove(expr, t)
+        changed = list(self.session.execute(
+            update(models.Novel)
+            .where(
+                models.Novel.id.in_(novel_ids),
+                models.Novel.tags.overlap(tag_names),
+            )
+            .values(tags=expr)
+            .returning(models.Novel.id)
+        ).scalars().all())
         if changed:
             self.session.flush()
             FTSManager(self.session).update_novel_fts_index(changed)
