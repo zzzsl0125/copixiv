@@ -1,0 +1,57 @@
+==============================================================================
+copixiv PG 环境核查
+URL: postgresql+psycopg2://postgres@127.0.0.1:5433/copixiv
+==============================================================================
+  rows novel            236983
+  rows novel_search     236983
+  rows author           8767
+  rows series           25881
+  rows tag              73822
+  rows tag_preference   19
+  rows setting          0
+
+  -- PG 运行时设置 --
+  shared_buffers                     128MB
+  work_mem                           4MB
+  effective_cache_size               4GB
+  maintenance_work_mem               64MB
+  max_connections                    100
+  default_statistics_target          100
+  max_parallel_workers_per_gather    2
+
+  -- 索引清单（关键表） --
+  author         author_pkey                  CREATE UNIQUE INDEX author_pkey ON public.author USING btree (author_id)
+  author         ix_author_last_update        CREATE INDEX ix_author_last_update ON public.author USING btree (last_update)
+  author         ix_author_special_follow     CREATE INDEX ix_author_special_follow ON public.author USING btree (author_id) WHERE is_special_follow
+  novel          ix_novel_author_id           CREATE INDEX ix_novel_author_id ON public.novel USING btree (author_id, id)
+  novel          ix_novel_author_like         CREATE INDEX ix_novel_author_like ON public.novel USING btree (author_id, "like")
+  novel          ix_novel_create_time         CREATE INDEX ix_novel_create_time ON public.novel USING btree (create_time)
+  novel          ix_novel_favourite           CREATE INDEX ix_novel_favourite ON public.novel USING btree (id) WHERE is_favourite
+  novel          ix_novel_like_id             CREATE INDEX ix_novel_like_id ON public.novel USING btree ("like", id)
+  novel          ix_novel_like_text_id        CREATE INDEX ix_novel_like_text_id ON public.novel USING btree ("like", text, id)
+  novel          ix_novel_series_id           CREATE INDEX ix_novel_series_id ON public.novel USING btree (series_id, id)
+  novel          ix_novel_series_like         CREATE INDEX ix_novel_series_like ON public.novel USING btree (series_id, "like")
+  novel          ix_novel_shuffle_id          CREATE INDEX ix_novel_shuffle_id ON public.novel USING btree (shuffle, id)
+  novel          ix_novel_shuffle_like_text   CREATE INDEX ix_novel_shuffle_like_text ON public.novel USING btree (shuffle, "like", text)
+  novel          ix_novel_tags_gin            CREATE INDEX ix_novel_tags_gin ON public.novel USING gin (tags)
+  novel          novel_path_key               CREATE UNIQUE INDEX novel_path_key ON public.novel USING btree (path)
+  novel          novel_pkey                   CREATE UNIQUE INDEX novel_pkey ON public.novel USING btree (id)
+  novel_search   novel_search_gin             CREATE INDEX novel_search_gin ON public.novel_search USING gin (to_tsvector('simple'::regconfig, search_text))
+  novel_search   novel_search_pkey            CREATE UNIQUE INDEX novel_search_pkey ON public.novel_search USING btree (novel_id)
+  tag            tag_name_key                 CREATE UNIQUE INDEX tag_name_key ON public.tag USING btree (name)
+  tag            tag_pkey                     CREATE UNIQUE INDEX tag_pkey ON public.tag USING btree (id)
+
+  -- 统计信息/ANALYZE 状态 --
+  novel          live_tup=236983     analyze=None autoanalyze=2026-09-04 03:48:11.492455+08:00 vacuum=None autovacuum=2026-09-03 03:05:56.834286+08:00
+  novel_search   live_tup=236983     analyze=None autoanalyze=2026-08-31 23:10:04.592371+08:00 vacuum=None autovacuum=2026-08-31 23:10:03.299882+08:00
+  tag            live_tup=73822      analyze=None autoanalyze=2026-09-04 03:48:13.473562+08:00 vacuum=None autovacuum=2026-09-04 03:48:13.347996+08:00
+
+  -- blocked tags / runtime settings（影响默认查询形态） --
+  blocked tags: 4 ['BL', 'gay', '男同', '纯男性']
+  settings: (empty)
+  is_favourite novels: 71   special-follow authors: 64   novels with tags: 236893
+  -- GIN 索引使用情况（累计扫描计数，零 = 从未被使用过） --
+  ix_novel_tags_gin    scans=29 tup_read=646634
+  novel_search_gin     scans=41 tup_read=3853461
+
+check 完成。

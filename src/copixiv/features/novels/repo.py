@@ -18,6 +18,7 @@ the SQLite-era ``IN``/``EXISTS`` adaptive filters and manual DELETE bookkeeping.
 from __future__ import annotations
 
 import asyncio
+import threading
 from datetime import datetime
 from typing import Any
 
@@ -26,6 +27,7 @@ from sqlalchemy import (
     func, Select, update, delete as _delete,
     text as _text,
     literal_column, exists as _exists, tuple_ as _tuple,
+    event,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
@@ -378,7 +380,7 @@ class NovelQueryBuilder(BaseQueryBuilder):
         """
         cols: list = list(self.main_model.__table__.c)
         sf_subq = (
-            select(models.Author.is_special_follow)
+            select(func.coalesce(models.Author.is_special_follow, False))
             .where(models.Author.author_id == self.main_model.author_id)
             .scalar_subquery()
         )
@@ -531,6 +533,58 @@ class NovelQueryBuilder(BaseQueryBuilder):
 # Count-result cache (process-wide, epoch-validated).  See the original
 # design around the "filter signature + epoch invalidation" mechanism.
 _count_cache: dict[tuple, tuple[int, int]] = {}
+
+# ---------------------------------------------------------------------------
+# Write-back count recompute (single-user nicety, best-effort)
+# ---------------------------------------------------------------------------
+# Every real write commit bumps the data-version epoch, which invalidates the
+# whole count cache; the next count request for a common keyword then pays the
+# full slow query again (up to ~2.5s for phrase counts such as ``keyword:R-18``).
+# For a single-user deployment the cache key set is small, so recompute all
+# cached keys in a background daemon thread right after a dirty commit — by the
+# time the user opens batch stats the values are warm again.  Failures are
+# swallowed: this is a nicety, never a correctness path.
+_last_recompute_epoch: int = 0
+
+
+def _recompute_count_cache(engine) -> None:
+    from copixiv.db.engine import create_session_factory
+
+    try:
+        with create_session_factory(engine)() as session:
+            repo = SQLAlchemyNovelRepository(session)
+            for key in list(_count_cache):
+                try:
+                    repo._count_novels_sync(QuerySpec(
+                        conditions=list(key[0]),
+                        min_like=key[1] or None,
+                        min_text=key[2] or None,
+                        exclude_blocked_tags=key[3],
+                    ))
+                except Exception:
+                    pass  # one stale key must not abort the sweep
+    except Exception:
+        pass  # best-effort: recompute failures are invisible to the app
+
+
+@event.listens_for(Session, "after_commit")
+def _recompute_count_cache_after_write(session) -> None:
+    """Re-warm cached counts after a real (epoch-bumping) commit.
+
+    Registered here (module level) so every write path — repository, tasks,
+    scripts — gets the re-warm without touching each call site.  The epoch
+    guard keeps read-only commits (which also fire ``after_commit``) from
+    spawning threads.
+    """
+    global _last_recompute_epoch
+    epoch = current_epoch()
+    if epoch == _last_recompute_epoch or not _count_cache:
+        return
+    _last_recompute_epoch = epoch
+    threading.Thread(
+        target=_recompute_count_cache, args=(session.get_bind(),),
+        name="copixiv-count-recompute", daemon=True,
+    ).start()
 
 
 def _novel_from_orm(obj) -> Novel:

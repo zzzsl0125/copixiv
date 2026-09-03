@@ -1,0 +1,56 @@
+pg_ctl: server is running (PID: 1053)
+/home/invocation/copixiv/.venv/lib/python3.12/site-packages/pgserver/pginstall/bin/postgres "-D" "/home/invocation/copixiv/.spike/pgdata" "-k" "/home/invocation/copixiv/.spike/sock" "-p" "5433"
+waiting for server to shut down.... done
+server stopped
+pg_ctl: no server running
+waiting for server to start.... done
+server started
+pg_ctl: server is running (PID: 28753)
+/home/invocation/copixiv/.venv/lib/python3.12/site-packages/pgserver/pginstall/bin/postgres "-D" "/home/invocation/copixiv/.spike/pgdata" "-k" "/home/invocation/copixiv/.spike/sock" "-p" "5433"
+==============================================================================
+copixiv PG 冷启动实测
+URL: postgresql+psycopg2://postgres@127.0.0.1:5433/copixiv
+==============================================================================
+
+0) warm 基线（重启前）
+场景                                          min(ms)  median(ms)  
+冷-首查默认列表(500/3000)                              3.0         3.1
+冷-首查关键词恋列表                                     27.4        27.7
+冷-首查关键词R-18列表                                   5.3         5.4
+冷-首查标签R-18列表                                    3.1         3.3
+冷-首查计数默认阈值                                     56.1        56.5
+冷-首查计数关键词R-18                                2447.8      2450.7
+冷-首查翻页第2页                                       3.6         4.2
+
+-- 重启本地 PG（pg_dev stop → start） --
+stop=344ms  start(到就绪)=471ms
+
+1) 冷启动首查（PG 重启后首个全新连接池）
+场景                                          min(ms)  median(ms)  warm-median(重启后)
+冷-首查默认列表(500/3000)                             58.5         3.3
+冷-首查关键词恋列表                                     38.7        28.3
+冷-首查关键词R-18列表                                   5.4         5.4
+冷-首查标签R-18列表                                    4.4         3.2
+冷-首查计数默认阈值                                     55.9        55.4
+冷-首查计数关键词R-18                                2482.7      2464.6
+冷-首查翻页第2页                                       7.7         7.7
+
+-- 重启后 BUFFERS 证据（shared hit / read，此时已 warm） --
+  冷-首查默认列表(500/3000)                 Buffers: shared hit=123 |         Buffers: shared hit=123 |                 Buffers: shared hit=90
+  冷-首查关键词恋列表                         Buffers: shared hit=2379 |         Buffers: shared hit=2379 |               Buffers: shared hit=465
+  冷-首查关键词R-18列表                      Buffers: shared hit=243 |         Buffers: shared hit=243 |               Buffers: shared hit=33
+  冷-首查标签R-18列表                       Buffers: shared hit=123 |         Buffers: shared hit=123 |                 Buffers: shared hit=90
+  冷-首查计数默认阈值                         Buffers: shared hit=123 |         Buffers: shared hit=123 |                 Buffers: shared hit=90
+  冷-首查计数关键词R-18                      Buffers: shared hit=243 |         Buffers: shared hit=243 |               Buffers: shared hit=33
+  冷-首查翻页第2页                          Buffers: shared hit=123 |         Buffers: shared hit=123 |                 Buffers: shared hit=90
+
+-- warm 基线 vs 冷启动首查（倍率） --
+  冷-首查默认列表(500/3000)                   冷=      58.5ms  warm=        3.0  慢   19.7×
+  冷-首查关键词恋列表                           冷=      38.7ms  warm=       27.4  慢    1.4×
+  冷-首查关键词R-18列表                        冷=       5.4ms  warm=        5.3  慢    1.0×
+  冷-首查标签R-18列表                         冷=       4.4ms  warm=        3.1  慢    1.4×
+  冷-首查计数默认阈值                           冷=      55.9ms  warm=       56.1  慢    1.0×
+  冷-首查计数关键词R-18                        冷=    2482.7ms  warm=     2447.8  慢    1.0×
+  冷-首查翻页第2页                            冷=       7.7ms  warm=        3.6  慢    2.1×
+
+cold 完成（PG 已重新启动并保持运行）。

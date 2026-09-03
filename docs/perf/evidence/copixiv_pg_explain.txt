@@ -1,0 +1,212 @@
+==============================================================================
+copixiv PG EXPLAIN (ANALYZE, BUFFERS, COSTS)
+URL: postgresql+psycopg2://postgres@127.0.0.1:5433/copixiv
+==============================================================================
+
+--- 默认列表(500/3000)+like ---
+  Limit  (cost=0.42..304.28 rows=30 width=613) (actual time=0.043..0.444 rows=30 loops=1)
+    Buffers: shared hit=123
+    ->  Index Scan Backward using ix_novel_like_id on novel  (cost=0.42..519867.93 rows=51327 width=613) (actual time=0.042..0.441 rows=30 loops=1)
+          Index Cond: ("like" >= 500)
+          Filter: ((text >= 3000) AND (NOT (tags && '{纯男性,男同,gay,BL}'::text[])))
+          Buffers: shared hit=123
+          SubPlan 1
+            ->  Index Scan using author_pkey on author  (cost=0.29..8.30 rows=1 width=1) (actual time=0.007..0.007 rows=1 loops=30)
+                  Index Cond: (author_id = novel.author_id)
+                  Buffers: shared hit=90
+  Planning:
+    Buffers: shared hit=449
+  Planning Time: 1.062 ms
+  Execution Time: 0.463 ms
+
+--- 标签R-18列表 ---
+  Limit  (cost=0.42..264.07 rows=30 width=613) (actual time=0.015..0.129 rows=30 loops=1)
+    Buffers: shared hit=123
+    ->  Index Scan Backward using ix_novel_like_id on novel  (cost=0.42..1838758.49 rows=209231 width=613) (actual time=0.014..0.127 rows=30 loops=1)
+          Filter: ((tags @> '{R-18}'::text[]) AND (NOT (tags && '{纯男性,男同,gay,BL}'::text[])))
+          Buffers: shared hit=123
+          SubPlan 1
+            ->  Index Scan using author_pkey on author  (cost=0.29..8.30 rows=1 width=1) (actual time=0.002..0.002 rows=1 loops=30)
+                  Index Cond: (author_id = novel.author_id)
+                  Buffers: shared hit=90
+  Planning:
+    Buffers: shared hit=7
+  Planning Time: 0.226 ms
+  Execution Time: 0.143 ms
+
+--- 标签R-18计数 ---
+  Finalize Aggregate  (cost=25979.31..25979.32 rows=1 width=8) (actual time=104.771..107.737 rows=1 loops=1)
+    Buffers: shared hit=13614 read=10029
+    ->  Gather  (cost=25979.09..25979.30 rows=2 width=8) (actual time=104.666..107.732 rows=3 loops=1)
+          Workers Planned: 2
+          Workers Launched: 2
+          Buffers: shared hit=13614 read=10029
+          ->  Partial Aggregate  (cost=24979.09..24979.10 rows=1 width=8) (actual time=102.658..102.659 rows=1 loops=3)
+                Buffers: shared hit=13614 read=10029
+                ->  Parallel Seq Scan on novel  (cost=0.00..24761.14 rows=87180 width=0) (actual time=0.197..99.453 rows=70279 loops=3)
+                      Filter: ((tags @> '{R-18}'::text[]) AND (NOT (tags && '{纯男性,男同,gay,BL}'::text[])))
+                      Rows Removed by Filter: 8715
+                      Buffers: shared hit=13614 read=10029
+  Planning:
+    Buffers: shared hit=5 read=2
+  Planning Time: 0.257 ms
+  Execution Time: 107.757 ms
+
+--- 关键词恋列表 ---
+  Limit  (cost=0.84..692.20 rows=30 width=613) (actual time=1.214..23.456 rows=30 loops=1)
+    Buffers: shared hit=2379
+    ->  Nested Loop  (cost=0.84..459040.56 rows=19919 width=613) (actual time=1.213..23.452 rows=30 loops=1)
+          Buffers: shared hit=2379
+          ->  Index Scan Backward using ix_novel_like_id on novel  (cost=0.42..101025.66 rows=226907 width=612) (actual time=0.018..0.960 rows=456 loops=1)
+                Filter: (NOT (tags && '{纯男性,男同,gay,BL}'::text[]))
+                Buffers: shared hit=465
+          ->  Index Scan using novel_search_pkey on novel_search  (cost=0.42..0.85 rows=1 width=8) (actual time=0.049..0.049 rows=0 loops=456)
+                Index Cond: (novel_id = novel.id)
+                Filter: (to_tsvector('simple'::regconfig, search_text) @@ '''恋'''::tsquery)
+                Rows Removed by Filter: 1
+                Buffers: shared hit=1824
+          SubPlan 1
+            ->  Index Scan using author_pkey on author  (cost=0.29..8.30 rows=1 width=1) (actual time=0.002..0.002 rows=1 loops=30)
+                  Index Cond: (author_id = novel.author_id)
+                  Buffers: shared hit=90
+  Planning:
+    Buffers: shared hit=140
+  Planning Time: 0.663 ms
+  Execution Time: 23.510 ms
+
+--- 关键词恋列表(带阈值500/3000) ---
+  Limit  (cost=0.84..1349.86 rows=30 width=613) (actual time=1.169..22.921 rows=30 loops=1)
+    Buffers: shared hit=2367
+    ->  Nested Loop  (cost=0.84..202624.21 rows=4506 width=613) (actual time=1.169..22.918 rows=30 loops=1)
+          Buffers: shared hit=2367
+          ->  Index Scan Backward using ix_novel_like_id on novel  (cost=0.42..93725.51 rows=51327 width=612) (actual time=0.014..0.925 rows=453 loops=1)
+                Index Cond: ("like" >= 500)
+                Filter: ((text >= 3000) AND (NOT (tags && '{纯男性,男同,gay,BL}'::text[])))
+                Rows Removed by Filter: 3
+                Buffers: shared hit=465
+          ->  Index Scan using novel_search_pkey on novel_search  (cost=0.42..1.39 rows=1 width=8) (actual time=0.048..0.048 rows=0 loops=453)
+                Index Cond: (novel_id = novel.id)
+                Filter: (to_tsvector('simple'::regconfig, search_text) @@ '''恋'''::tsquery)
+                Rows Removed by Filter: 1
+                Buffers: shared hit=1812
+          SubPlan 1
+            ->  Index Scan using author_pkey on author  (cost=0.29..8.30 rows=1 width=1) (actual time=0.002..0.002 rows=1 loops=30)
+                  Index Cond: (author_id = novel.author_id)
+                  Buffers: shared hit=90
+  Planning:
+    Buffers: shared hit=43
+  Planning Time: 0.397 ms
+  Execution Time: 22.940 ms
+
+--- 关键词R-18列表 ---
+  Limit  (cost=0.84..295.34 rows=30 width=613) (actual time=0.076..1.672 rows=30 loops=1)
+    Buffers: shared hit=243
+    ->  Nested Loop  (cost=0.84..1903941.24 rows=193951 width=613) (actual time=0.076..1.669 rows=30 loops=1)
+          Buffers: shared hit=243
+          ->  Index Scan Backward using ix_novel_like_id on novel  (cost=0.42..101025.66 rows=226907 width=612) (actual time=0.007..0.064 rows=30 loops=1)
+                Filter: (NOT (tags && '{纯男性,男同,gay,BL}'::text[]))
+                Buffers: shared hit=33
+          ->  Index Scan using novel_search_pkey on novel_search  (cost=0.42..0.85 rows=1 width=8) (actual time=0.051..0.051 rows=1 loops=30)
+                Index Cond: (novel_id = novel.id)
+                Filter: (to_tsvector('simple'::regconfig, search_text) @@ '''r'' <-> ''龖'' <-> ''1'' <-> ''8'''::tsquery)
+                Buffers: shared hit=120
+          SubPlan 1
+            ->  Index Scan using author_pkey on author  (cost=0.29..8.30 rows=1 width=1) (actual time=0.002..0.002 rows=1 loops=30)
+                  Index Cond: (author_id = novel.author_id)
+                  Buffers: shared hit=90
+  Planning:
+    Buffers: shared hit=43
+  Planning Time: 0.425 ms
+  Execution Time: 1.689 ms
+
+--- 关键词R-18计数 ---
+  Finalize Aggregate  (cost=61098.29..61098.30 rows=1 width=8) (actual time=2506.153..2509.152 rows=1 loops=1)
+    Buffers: shared hit=6906 read=26056
+    ->  Gather  (cost=61098.07..61098.28 rows=2 width=8) (actual time=2505.672..2509.145 rows=3 loops=1)
+          Workers Planned: 2
+          Workers Launched: 2
+          Buffers: shared hit=6906 read=26056
+          ->  Partial Aggregate  (cost=60098.07..60098.08 rows=1 width=8) (actual time=2503.501..2503.503 rows=1 loops=3)
+                Buffers: shared hit=6906 read=26056
+                ->  Parallel Hash Join  (cost=35133.57..59896.04 rows=80813 width=0) (actual time=2386.128..2500.032 rows=72046 loops=3)
+                      Hash Cond: (novel.id = novel_search.novel_id)
+                      Buffers: shared hit=6906 read=26056
+                      ->  Parallel Seq Scan on novel  (cost=0.00..24514.29 rows=94545 width=8) (actual time=0.186..92.087 rows=76304 loops=3)
+                            Filter: (NOT (tags && '{纯男性,男同,gay,BL}'::text[]))
+                            Rows Removed by Filter: 2690
+                            Buffers: shared hit=6127 read=17472
+                      ->  Parallel Hash  (cost=34078.55..34078.55 rows=84402 width=8) (actual time=2385.249..2385.250 rows=74580 loops=3)
+                            Buckets: 262144  Batches: 1  Memory Usage: 10848kB
+                            Buffers: shared hit=713 read=8584
+                            ->  Parallel Bitmap Heap Scan on novel_search  (cost=3558.11..34078.55 rows=84402 width=8) (actual time=46.443..2364.630 rows=74580 loops=3)
+                                  Recheck Cond: (to_tsvector('simple'::regconfig, search_text) @@ '''r'' <-> ''龖'' <-> ''1'' <-> ''8'''::tsquery)
+                                  Rows Removed by Index Recheck: 33
+                                  Heap Blocks: exact=2753
+                                  Buffers: shared hit=713 read=8584
+                                  ->  Bitmap Index Scan on novel_search_gin  (cost=0.00..3507.47 rows=202564 width=0) (actual time=45.915..45.916 rows=225721 loops=1)
+                                        Index Cond: (to_tsvector('simple'::regconfig, search_text) @@ '''r'' <-> ''龖'' <-> ''1'' <-> ''8'''::tsquery)
+                                        Buffers: shared hit=15 read=693
+  Planning:
+    Buffers: shared hit=22
+  Planning Time: 0.313 ms
+  Execution Time: 2509.190 ms
+
+--- 关键词催眠计数 ---
+  Aggregate  (cost=12689.34..12689.35 rows=1 width=8) (actual time=653.554..653.555 rows=1 loops=1)
+    Buffers: shared hit=57037 read=10861 written=42
+    ->  Nested Loop  (cost=2169.57..12686.77 rows=1028 width=0) (actual time=5.332..652.482 rows=14417 loops=1)
+          Buffers: shared hit=57037 read=10861 written=42
+          ->  Bitmap Heap Scan on novel_search  (cost=2169.15..5438.21 rows=1074 width=8) (actual time=5.314..579.550 rows=15192 loops=1)
+                Recheck Cond: (to_tsvector('simple'::regconfig, search_text) @@ '''催'' <-> ''眠'''::tsquery)
+                Rows Removed by Index Recheck: 2
+                Heap Blocks: exact=6533
+                Buffers: shared hit=4784 read=2320
+                ->  Bitmap Index Scan on novel_search_gin  (cost=0.00..2168.88 rows=1074 width=0) (actual time=4.486..4.486 rows=15349 loops=1)
+                      Index Cond: (to_tsvector('simple'::regconfig, search_text) @@ '''催'' <-> ''眠'''::tsquery)
+                      Buffers: shared hit=511 read=14
+          ->  Index Scan using novel_pkey on novel  (cost=0.42..6.75 rows=1 width=8) (actual time=0.004..0.004 rows=1 loops=15192)
+                Index Cond: (id = novel_search.novel_id)
+                Filter: (NOT (tags && '{纯男性,男同,gay,BL}'::text[]))
+                Rows Removed by Filter: 0
+                Buffers: shared hit=52244 read=8541 written=42
+  Planning:
+    Buffers: shared hit=22
+  Planning Time: 0.280 ms
+  Execution Time: 653.616 ms
+
+--- 组合 tagNTR+关键词恋列表 ---
+  Limit  (cost=0.84..1861.68 rows=30 width=613) (actual time=1.064..37.656 rows=30 loops=1)
+    Buffers: shared hit=3592 read=1134
+    ->  Nested Loop  (cost=0.84..186208.77 rows=3002 width=613) (actual time=1.063..37.651 rows=30 loops=1)
+          Buffers: shared hit=3592 read=1134
+          ->  Index Scan Backward using ix_novel_like_id on novel  (cost=0.42..101618.11 rows=34195 width=612) (actual time=0.015..5.631 rows=565 loops=1)
+                Filter: ((tags @> '{NTR}'::text[]) AND (NOT (tags && '{纯男性,男同,gay,BL}'::text[])))
+                Rows Removed by Filter: 1782
+                Buffers: shared hit=1621 read=755
+          ->  Index Scan using novel_search_pkey on novel_search  (cost=0.42..1.74 rows=1 width=8) (actual time=0.056..0.056 rows=0 loops=565)
+                Index Cond: (novel_id = novel.id)
+                Filter: (to_tsvector('simple'::regconfig, search_text) @@ '''恋'''::tsquery)
+                Rows Removed by Filter: 1
+                Buffers: shared hit=1881 read=379
+          SubPlan 1
+            ->  Index Scan using author_pkey on author  (cost=0.29..8.30 rows=1 width=1) (actual time=0.003..0.003 rows=1 loops=30)
+                  Index Cond: (author_id = novel.author_id)
+                  Buffers: shared hit=90
+  Planning:
+    Buffers: shared hit=44
+  Planning Time: 0.416 ms
+  Execution Time: 37.677 ms
+
+--- 翻页-like 第500页 ---
+  Limit  (cost=0.42..308.18 rows=30 width=613) (actual time=0.022..0.189 rows=30 loops=1)
+    Buffers: shared hit=111 read=12
+    ->  Index Scan Backward using ix_novel_like_id on novel  (cost=0.42..491194.67 rows=47881 width=613) (actual time=0.021..0.186 rows=30 loops=1)
+          Index Cond: (("like" >= 500) AND (ROW("like", id) < ROW(1649, 21776692)))
+          Filter: ((text >= 3000) AND (NOT (tags && '{纯男性,男同,gay,BL}'::text[])))
+          Buffers: shared hit=111 read=12
+          SubPlan 1
+            ->  Index Scan using author_pkey on author  (cost=0.29..8.30 rows=1 width=1) (actual time=0.002..0.002 rows=1 loops=30)
+                  Index Cond: (author_id = novel.author_id)
+                  Buffers: shared hit=90
+  Planning Time: 0.200 ms
+  Execution Time: 0.205 ms

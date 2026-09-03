@@ -19,6 +19,7 @@ Public surface: :func:`create_app`, :func:`main`, :func:`ensure_port_free`,
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -513,6 +514,32 @@ def create_app(config_path: str | None = None):
     from copixiv.features.system import api as system
     from copixiv.pixiv.account import AccountStatus
 
+    # Cold-start mitigation: PG has no built-in pre-warm here (128MB default
+    # shared_buffers, no pg_prewarm contrib), so the first user request after a
+    # restart would pay cold-buffer page reads.  Touch the hot query shapes once
+    # (~100ms, runs in a worker thread) to pull those pages into PG buffer +
+    # OS page cache; failures are logged and non-fatal.
+    def _warm_database(session_factory) -> None:
+        from copixiv.core.services import QuerySpec
+        from copixiv.features.novels.repo import SQLAlchemyNovelRepository
+
+        with session_factory() as session:
+            repo = SQLAlchemyNovelRepository(session)
+            repo._get_novels_sync(QuerySpec(
+                order_by="like", per_page=30, min_like=500, min_text=3000))
+            repo._get_novels_sync(QuerySpec(order_by="random", per_page=30))
+            repo._get_novels_sync(QuerySpec(
+                conditions=[("keyword", "恋")], order_by="like",
+                min_like=0, min_text=0))
+            repo._count_novels_sync(QuerySpec(min_like=500, min_text=3000))
+
+    async def _warm_database_async(session_factory) -> None:
+        try:
+            await asyncio.to_thread(_warm_database, session_factory)
+            logger.info("数据库预热完成（4 个热查询形态）")
+        except Exception:
+            logger.exception("数据库预热失败（非致命，继续启动）")
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # Startup
@@ -532,6 +559,9 @@ def create_app(config_path: str | None = None):
             # call on each doesn't pay the ~2s auth cost individually.
             total = len(s.account_pool.accounts)
             logger.info(f"Authenticating {total} accounts in parallel...")
+            warm_task = asyncio.create_task(
+                _warm_database_async(s.session_factory)
+            )
             await s.account_pool.authenticate_all()
             active = sum(
                 1 for a in s.account_pool.accounts
@@ -544,6 +574,7 @@ def create_app(config_path: str | None = None):
                     "Account authentication finished: {}/{} active",
                     active, total,
                 )
+            await warm_task
 
             s.task_manager.start()
             yield
