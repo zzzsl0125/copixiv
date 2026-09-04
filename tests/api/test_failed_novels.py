@@ -102,7 +102,14 @@ class TestFailedNovelList:
         assert first["title"] == "标题B"
         assert first["failed_times"] == 1
         assert first["error_message"] == "error-2"
-        assert first["last_failed_at"].startswith("2026-08-19T20:00:00")
+        # 只断言「同一时刻」：API 返回的是带时区的 ISO 字符串，PG 会话时区
+        # 在 CI（UTC）与本地（CST）下字符串不同（12:00Z vs 20:00+08:00）。
+        parsed_at = datetime.fromisoformat(
+            first["last_failed_at"].replace("Z", "+00:00")
+        )
+        assert parsed_at == datetime(
+            2026, 8, 19, 20, 0, tzinfo=ZoneInfo("Asia/Shanghai")
+        )
         # 旧记录：标题与时间为 null
         assert body["items"][1]["title"] is None
         assert body["items"][1]["last_failed_at"] is None
