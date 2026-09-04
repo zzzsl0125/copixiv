@@ -17,6 +17,8 @@ Pixiv 小说管理器：轻松抓取、管理和导出 Pixiv 中文小说。
 
 - Python 3.12+
 - Node.js 20.19+（仅前端需要）
+- PostgreSQL（开发/测试推荐用 `scripts/pg_dev.py` 管理的自带实例：
+  `pip install ".[dev]"` 会装入 `pgserver`，端口 5433，无需额外安装）
 - Pixiv 账号（需手动获取refresh token）
 
 ### 1. 初始化
@@ -41,9 +43,14 @@ config.yaml 需先行修改，pixiv refresh_token 可留待后续在 webui 内�
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install .
+pip install .            # 运行时（含 psycopg2-binary）
+# 本地开发/测试建议：pip install ".[dev]"（含 pgserver 自带 PostgreSQL）
 python main.py
 ```
+
+> PostgreSQL：本地开发/测试执行 `python scripts/pg_dev.py start` 启动
+> 自带实例（数据目录 `.spike/`，端口 5433，与 `config.example.yaml` 一致；
+> 部署环境请自行提供 PostgreSQL 并配置 `database_url`）。
 
 ### 3. 启动前端
 
@@ -102,7 +109,7 @@ src/copixiv/
 ├── tasks/          # kernel / api / novels / batch / maintenance / history_repo
 └── features/       # accounts / authors / failures / novels / system / tags（api + repo）
 alembic/            # 数据库迁移
-database/           # SQLite 数据库
+database/           # 旧版 SQLite 源库（仅作为迁移脚本输入，新数据在 PostgreSQL）
 deploy/             # systemd 等部署文件
 frontend/           # Vue 3 前端
 scripts/            # 运维/验证脚本

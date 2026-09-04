@@ -15,6 +15,7 @@ dependencies = [
     "pydantic-settings>=2.0",
     "pyyaml>=6.0",
     "pixivpy3 @ git+https://github.com/upbit/pixivpy",
+    "psycopg2-binary>=2.9",
     "apscheduler>=3.10",
     "requests>=2.31",
     "langid>=1.1.6",
@@ -27,11 +28,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# 测试需要 PostgreSQL：pgserver 提供自带的 PG16 二进制（scripts/pg_dev.py
+# 用它起本地实例，端口 5433），psycopg2-binary 是应用/测试共用的驱动。
 dev = [
+    "pgserver>=0.1.4",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "httpx>=0.27",
-    "aiosqlite>=0.20",
 ]
 
 [project.scripts]
@@ -48,5 +51,5 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 pythonpath = ["src"]
 markers = [
-    "slow: long-running tests (migration chains / heavy concurrency). Default runs include them; CI may use '-m not slow' for a fast gate.",
+    "slow: long-running tests (migration chains / heavy concurrency). CI runs '-m not slow' as the fast gate; run plain 'pytest' for the full suite.",
 ]

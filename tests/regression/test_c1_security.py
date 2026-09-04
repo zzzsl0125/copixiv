@@ -13,17 +13,21 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
 
 from copixiv.config import AppConfig
 from copixiv.core.exceptions import DomainError
-from copixiv.db.engine import create_session_factory
-from copixiv.db.models import Base, Token
+from copixiv.db.models import Token
 from copixiv.features.accounts import api as tokens
 from copixiv.app import (
     HostValidationMiddleware, _domain_error_http_status, _normalize_host,
 )
 from copixiv.app import APIAuthMiddleware
+
+
+@pytest.fixture(autouse=True)
+def _isolated_db(clean_db):
+    """Shared PG database, emptied before each test."""
+    yield
 
 
 def _build_app(session_factory, config: AppConfig) -> FastAPI:
@@ -58,18 +62,6 @@ def _build_app(session_factory, config: AppConfig) -> FastAPI:
 
     app.include_router(tokens.router, prefix="/api/tokens", tags=["tokens"])
     return app
-
-
-@pytest.fixture
-def session_factory(tmp_path):
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'test.db'}",
-        connect_args={"check_same_thread": False},
-    )
-    # Only the tokens table is exercised here; skip the other (FTS-heavy)
-    # tables so each test keeps a fast file-backed SQLite fixture.
-    Base.metadata.create_all(bind=engine, tables=[Token.__table__])
-    return create_session_factory(engine)
 
 
 @pytest.fixture

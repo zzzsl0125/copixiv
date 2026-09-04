@@ -8,6 +8,7 @@ now ``pg_dump`` custom-format dumps named after the current ISO week (e.g.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import shutil
 import subprocess
@@ -21,12 +22,20 @@ def _pg_bin(name: str) -> str:
     """Return the path to a PostgreSQL admin binary.
 
     Prefers a binary already on ``PATH``; otherwise falls back to the
-    ``pgserver``-bundled binaries under the virtualenv (the dev-only
-    deployment used by scripts/ and the test harness).
+    ``pgserver``-bundled binaries — first in the *running* interpreter
+    (where CI installs it), then the repo-local ``.venv`` layout used by
+    the dev/test harness.
     """
     resolved = shutil.which(name)
     if resolved:
         return resolved
+    spec = importlib.util.find_spec("pgserver")
+    if spec is not None and spec.origin:
+        candidate = (
+            Path(spec.origin).resolve().parent / "pginstall" / "bin" / name
+        )
+        if candidate.exists():
+            return str(candidate)
     venv_bin = (
         Path(__file__).resolve().parent.parent.parent.parent
         / ".venv"

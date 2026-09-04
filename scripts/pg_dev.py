@@ -17,6 +17,7 @@ Port: 5433 (matches ``AppConfig.database_url`` default).  Socket dir:
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import shutil
 import subprocess
@@ -25,16 +26,32 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-VENV_PG_BIN = (
-    PROJECT_ROOT
-    / ".venv"
-    / "lib"
-    / "python3.12"
-    / "site-packages"
-    / "pgserver"
-    / "pginstall"
-    / "bin"
-)
+
+def _pg_bin_dir() -> Path:
+    """Return pgserver's bundled ``bin`` directory.
+
+    Prefers the ``pgserver`` package installed in the *running* interpreter
+    (CI installs ``pip install ".[dev]"`` into the runner interpreter, where
+    no repo-local ``.venv`` exists); falls back to the repo ``.venv`` layout
+    used by local dev.
+    """
+    spec = importlib.util.find_spec("pgserver")
+    if spec is not None and spec.origin:
+        candidate = Path(spec.origin).resolve().parent / "pginstall" / "bin"
+        if candidate.exists():
+            return candidate
+    return (
+        PROJECT_ROOT
+        / ".venv"
+        / "lib"
+        / "python3.12"
+        / "site-packages"
+        / "pgserver"
+        / "pginstall"
+        / "bin"
+    )
+
+
 PGDATA = PROJECT_ROOT / ".spike" / "pgdata"
 SOCK_DIR = PROJECT_ROOT / ".spike" / "sock"
 LOG_FILE = PROJECT_ROOT / ".spike" / "pg.log"
@@ -47,7 +64,7 @@ def _bin(name: str) -> str:
     found = shutil.which(name)
     if found:
         return found
-    candidate = VENV_PG_BIN / name
+    candidate = _pg_bin_dir() / name
     if candidate.exists():
         return str(candidate)
     return name  # let subprocess raise FileNotFoundError with a clear message

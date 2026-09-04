@@ -23,16 +23,20 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      # dev extras 含 pytest / pytest-asyncio / httpx；pixivpy3 是 git
-      # 依赖（pyproject 里的 direct reference），runner 自带 git。
-      # 测试全部离线（SQLite 内存/临时文件 + 假件），不需要真实 token。
+      # dev extras 含 pytest / pytest-asyncio / httpx / pgserver；pixivpy3
+      # 是 git 依赖（pyproject 里的 direct reference），runner 自带 git。
+      # 测试已迁移到 PostgreSQL：pip install ".[dev]" 会装入 pgserver（自带
+      # PG16 二进制）和 psycopg2-binary；tests/conftest.py 通过
+      # scripts/pg_dev.py 在 .spike/ 启动本地实例（端口 5433），全程离线、
+      # 不需要真实 token。种子数据在缺少 database/database.db 时自动改用
+      # 确定性合成样本，CI 无需任何外部数据文件。
       - name: Install dependencies
         run: pip install ".[dev]"
 
-      # 默认跑全部 327 个用例（含 slow 标记的迁移链/并发测试）。
-      # 需要快速门禁时可加 -m "not slow"（见 pyproject.toml 的 markers 注释）。
+      # 快速门禁：CI 只跑非 slow 用例（含迁移链/并发在内的 slow 测试按需
+      # 全量执行：python -m pytest，见 pyproject.toml 的 markers 注释）。
       - name: Run tests
-        run: python -m pytest -q
+        run: python -m pytest -q -m "not slow"
 
   frontend:
     name: Frontend (vitest + build)

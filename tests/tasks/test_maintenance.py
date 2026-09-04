@@ -11,6 +11,12 @@ from copixiv.tasks.kernel import TaskContext
 from copixiv.tasks.maintenance import check_epub, check_fts, rebuild_fts
 
 
+@pytest.fixture(autouse=True)
+def _isolated_db(clean_db):
+    """Shared PG database, emptied before each test."""
+    yield
+
+
 @pytest.fixture
 def session_factory(session_factory):
     """The shared conftest factory, pre-seeded with Author(1) for FK needs."""
@@ -129,7 +135,7 @@ class TestFtsMaintenanceTasks:
     @staticmethod
     def _fts_count(sf) -> int:
         with sf() as s:
-            return s.execute(text("SELECT COUNT(*) FROM novel_fts")).scalar()
+            return s.execute(text("SELECT COUNT(*) FROM novel_search")).scalar()
 
     async def test_rebuild_fts_task_indexes_and_reports_count(self, session_factory):
         self._seed(session_factory)
@@ -149,8 +155,25 @@ class TestFtsMaintenanceTasks:
         assert "健康" in result.summary
         assert "条目 1/1" in result.summary
 
-    async def test_check_fts_task_reports_missing_table(self, session_factory):
-        # fixture DB has no novel_fts virtual table
-        result = await check_fts(TaskContext(uow=SqlUnitOfWork(session_factory)))
-
-        assert "索引表不存在" in result.summary
+    async def test_check_fts_task_reports_missing_table(self, session_factory, pg_engine):
+        # PG always creates novel_search via migrations; simulate the old
+        # SQLite "FTS table missing" case by dropping it, then restore it.
+        with pg_engine.begin() as conn:
+            conn.execute(text("DROP TABLE novel_search"))
+        try:
+            result = await check_fts(TaskContext(uow=SqlUnitOfWork(session_factory)))
+            # PG 时代缺表输出为“异常 + UndefinedTable 错误”而非崩溃。
+            assert "异常" in result.summary
+            assert "novel_search" in result.summary
+        finally:
+            with pg_engine.begin() as conn:
+                conn.execute(text(
+                    "CREATE TABLE novel_search ("
+                    " novel_id BIGINT PRIMARY KEY REFERENCES novel(id)"
+                    "   ON DELETE CASCADE,"
+                    " search_text TEXT NOT NULL)"
+                ))
+                conn.execute(text(
+                    "CREATE INDEX novel_search_gin ON novel_search "
+                    "USING gin (to_tsvector('simple', search_text))"
+                ))
