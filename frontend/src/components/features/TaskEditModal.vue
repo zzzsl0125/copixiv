@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, onMounted, computed } from 'vue'
-import { taskApi } from '../../api'
-import { getApiErrorMessage } from '../../api/errors'
+import { taskApi, getApiErrorMessage } from '../../api'
 import type { ScheduledTask, TaskMethod } from '../../types'
 import { useToast } from '../../composables'
 import BaseModal from '../ui/BaseModal.vue'

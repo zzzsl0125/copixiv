@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, toRef, watch, nextTick, onMounted } from 'vue'
+import { computed, ref, toRef, nextTick, onMounted } from 'vue'
 import NovelCard, { type NovelStateChange } from '../components/features/NovelCard.vue'
 import NovelHeader from '../components/features/NovelHeader.vue'
 import LoadMore from '../components/features/LoadMore.vue'
@@ -8,50 +8,65 @@ import BatchBar from '../components/features/BatchBar.vue'
 import BatchDeleteModal from '../components/features/BatchDeleteModal.vue'
 import BatchTagModal from '../components/features/BatchTagModal.vue'
 import BatchDownloadModal from '../components/features/BatchDownloadModal.vue'
-import { useMasonryLayout } from '../composables/useMasonryLayout'
-import { tagPreferenceApi, novelApi } from '../api'
-import { getApiErrorMessage } from '../api/errors'
-import { useToast, usePagedNovelIdView } from '../composables'
+import { useMasonryLayout, useCollectionViews, useToast } from '../composables'
+import { tagPreferenceApi, getApiErrorMessage } from '../api'
 import ExclusionBar from '../components/features/ExclusionBar.vue'
 import type { Novel, NovelFilters, TagPreference, BatchScope, BatchOperationResult } from '../types'
 
-const props = defineProps<{
-  isSidebarOpen: boolean
-  filters: NovelFilters
+// ---- 组合根绑定契约（F1 收敛后的单源类型；App.vue 以 import type 复用）----
+/** 列表浏览状态：原 novels/loading/error/noMoreData/hasExcluded 五个 props 打包。 */
+export type NovelsState = {
   novels: Novel[]
   loading: boolean
   error: string | null
   noMoreData: boolean
-  // 首屏附带：当前搜索范围内是否存在被厌恶标签排除的小说
   hasExcluded: boolean
-  // ---- batch mode (state owned by App.vue) ----
-  batchMode: boolean
+}
+
+/** 批量模式状态：原 9 个 batch props 打包；App 仅首页路由注入，否则 undefined。 */
+export type BatchState = {
+  mode: boolean
   matchedCount: number
   countLoading: boolean
   selectAllLoading: boolean
   selectedCount: number
   hasSelection: boolean
   hasFilter: boolean
-  batchScope: BatchScope | null
-  isBatchSelected: (id: number) => boolean
+  scope: BatchScope | null
+  isSelected: (id: number) => boolean
+}
+
+/** 列表域命令联合：原 search/card-search/load-more/update:filters/collection-view 五事件。 */
+export type NovelsCommand =
+  | { type: 'search'; keyword?: string }
+  | { type: 'card-search'; payload: { type: string; value: string | number } }
+  | { type: 'load-more' }
+  | { type: 'update-filters'; payload: Partial<NovelFilters> }
+  | { type: 'collection-view'; payload: boolean }
+
+/** 批量域动作联合：原 batch-toggle-card/select-all/clear/clear-scope/operation-success/task-submitted 六事件。 */
+export type BatchAction =
+  | { type: 'toggle-card'; id: number }
+  | { type: 'select-all' }
+  | { type: 'clear' }
+  | { type: 'clear-scope' }
+  | { type: 'operation-success'; payload: { operation: string; result: BatchOperationResult } }
+  | { type: 'task-submitted'; payload: { operation: string; task_id: number; matched: number } }
+
+const props = defineProps<{
+  isSidebarOpen: boolean
+  filters: NovelFilters
+  novelsState: NovelsState
+  /** 批量状态：App 仅在首页路由注入（其他路由 undefined）；未注入时按关闭态防御取值。 */
+  batchState?: BatchState
 }>()
 
 const emit = defineEmits<{
   (e: 'toggle-sidebar'): void
-  (e: 'search', keyword?: string): void
-  (e: 'card-search', type: string, value: string | number): void
-  (e: 'update:filters', filters: Partial<NovelFilters>): void
-  (e: 'load-more'): void
   (e: 'logo-click'): void
-  (e: 'collection-view', active: boolean): void
   (e: 'novel-state-changed', payload: NovelStateChange): void
-  // ---- batch mode events ----
-  (e: 'batch-toggle-card', id: number): void
-  (e: 'batch-select-all'): void
-  (e: 'batch-clear'): void
-  (e: 'batch-clear-scope'): void
-  (e: 'batch-operation-success', payload: { operation: string; result: BatchOperationResult }): void
-  (e: 'batch-task-submitted', payload: { operation: string; task_id: number; matched: number }): void
+  (e: 'novels-command', command: NovelsCommand): void
+  (e: 'batch-action', action: BatchAction): void
 }>()
 
 const toast = useToast()
@@ -59,168 +74,68 @@ const columnRefs = ref<HTMLElement[]>([])
 const activeCardId = ref<number | string | null>(null)
 const tagPreferences = ref<TagPreference[]>([])
 
+// ---- 解包粗粒度状态（语义与原 16 props 逐项等价；batchState 未注入时防御取关闭态）----
+const novels = computed(() => props.novelsState.novels)
+const loading = computed(() => props.novelsState.loading)
+const error = computed(() => props.novelsState.error)
+const noMoreData = computed(() => props.novelsState.noMoreData)
+const hasExcluded = computed(() => props.novelsState.hasExcluded)
+
+const batchMode = computed(() => props.batchState?.mode ?? false)
+const matchedCount = computed(() => props.batchState?.matchedCount ?? 0)
+const countLoading = computed(() => props.batchState?.countLoading ?? false)
+const selectAllLoading = computed(() => props.batchState?.selectAllLoading ?? false)
+const selectedCount = computed(() => props.batchState?.selectedCount ?? 0)
+const hasSelection = computed(() => props.batchState?.hasSelection ?? false)
+const hasFilter = computed(() => props.batchState?.hasFilter ?? false)
+const batchScope = computed(() => props.batchState?.scope ?? null)
+const isBatchSelected = (id: number) => props.batchState?.isSelected(id) ?? false
+
 // ---- batch operation modal states ----
 const deleteOpen = ref(false)
 const tagModalOpen = ref(false)
 const tagOperation = ref<'add_tags' | 'remove_tags'>('add_tags')
 const exportOpen = ref(false)
 
-// ---- 「查看已选」/「查看被排除」views: the grid swaps to an explicit
-// id list, fetched in pages so huge lists stay smooth (infinite scroll).
-// Shared paging lives in usePagedNovelIdView; the two views are mutually
-// exclusive (批量模式优先) and exit on new searches. ----
-const selectedView = usePagedNovelIdView()
-const excludedView = usePagedNovelIdView()
-const viewingSelected = ref(false)
-const viewingExcluded = ref(false)
+// ---- 「查看已选」/「查看被排除」集合视图编排（F2 产物，编排逻辑不动，
+// 仅换取值通路：props.batchScope → batchScope、props.batchMode → batchMode 等）----
+const {
+  viewingSelected,
+  viewingExcluded,
+  selectedView,
+  displayNovels,
+  viewLoading,
+  viewLoadingMore,
+  viewHasMore,
+  viewShownCount,
+  viewTotalCount,
+  toggleViewSelected,
+  toggleViewExcluded,
+  handleViewLoadMore,
+} = useCollectionViews({
+  filters: toRef(props, 'filters'),
+  batchScope,
+  batchMode,
+  hasSelection,
+  novels,
+  onActiveChange: (active) => emit('novels-command', { type: 'collection-view', payload: active }),
+  afterLayout: () => relayout(),
+})
 
-const scopeLabel = computed(() => `已勾选的 ${props.selectedCount} 篇`)
-
-const displayNovels = computed<Novel[]>(() =>
-  viewingSelected.value
-    ? selectedView.novels.value
-    : viewingExcluded.value
-      ? excludedView.novels.value
-      : props.novels,
-)
-
-// LoadMore / 提示框用的「当前激活视图」聚合状态
-const viewLoading = computed(() =>
-  viewingSelected.value ? selectedView.loading.value : excludedView.loading.value,
-)
-const viewLoadingMore = computed(() =>
-  viewingSelected.value ? selectedView.loadingMore.value : excludedView.loadingMore.value,
-)
-const viewHasMore = computed(() =>
-  viewingSelected.value ? selectedView.hasMore.value : excludedView.hasMore.value,
-)
-const viewShownCount = computed(() =>
-  viewingSelected.value ? selectedView.novels.value.length : excludedView.novels.value.length,
-)
-const viewTotalCount = computed(() =>
-  viewingSelected.value ? selectedView.totalIds.value : excludedView.totalIds.value,
+const { columns, relayout } = useMasonryLayout<Novel>(
+  toRef(displayNovels),
+  columnRefs,
 )
 
-function resetSelectedView() {
-  viewingSelected.value = false
-  selectedView.reset()
-}
-
-function resetExcludedView() {
-  viewingExcluded.value = false
-  excludedView.reset()
-}
+const scopeLabel = computed(() => `已勾选的 ${selectedCount.value} 篇`)
 
 // 清除按钮：列表视图 → 仅清当前筛选范围；查看已选视图 → 清空全部。
 function handleBarClear() {
   if (viewingSelected.value) {
-    emit('batch-clear')
+    emit('batch-action', { type: 'clear' })
   } else {
-    emit('batch-clear-scope')
+    emit('batch-action', { type: 'clear-scope' })
   }
-}
-
-// ---- 视图的集合顺序：随机在集合视图内禁用，其余按当前排序条件取序 ----
-function scopeOrderBy(): string | undefined {
-  const o = props.filters.order_by
-  if (o === 'random') return undefined  // 集合视图不支持随机 → 保持范围/勾选顺序
-  if (o === 'id' || o === 'like' || o === 'text') return o
-  return undefined
-}
-
-async function reloadSelectedIds() {
-  const ids = props.batchScope?.novel_ids ?? []
-  if (ids.length === 0) return
-  const orderBy = props.filters.order_by
-  if (orderBy === 'id') {
-    // id 排序本地完成（id 列表本来就在内存里）
-    const dir = props.filters.order_direction === 'ASC' ? 1 : -1
-    await selectedView.start([...ids].sort((a, b) => dir * (a - b)))
-    return
-  }
-  if (orderBy === 'like' || orderBy === 'text') {
-    const result = await novelApi.sortNovelIds(
-      ids, orderBy, props.filters.order_direction,
-    )
-    await selectedView.start(result.ids)
-    return
-  }
-  await selectedView.start(ids)  // 随机/未知 → 勾选顺序
-}
-
-let excludedSeq = 0
-
-/** 按当前筛选+排序重取被排除集合并从头展示（进入视图与原地重算共用）。 */
-async function loadExcludedView() {
-  const seq = ++excludedSeq
-  try {
-    const result = await novelApi.getBlockedNovelIds({
-      keyword: props.filters.keyword.trim() || undefined,
-      min_like: props.filters.min_like,
-      min_text: props.filters.min_text,
-      order_by: scopeOrderBy(),
-      order_direction: props.filters.order_direction,
-    })
-    if (seq !== excludedSeq) return  // 已有更新的请求，丢弃本次结果
-    if (result.ids.length === 0) {
-      // 新范围没有被排除的小说 → 退回浏览列表
-      resetExcludedView()
-      await nextTick()
-      relayout()
-      return
-    }
-    await excludedView.start(result.ids)
-    window.scrollTo({ top: 0 })  // 新集合从头看起，阻断自动翻页级联
-    await nextTick()
-    relayout()
-  } catch (err: unknown) {
-    if (seq !== excludedSeq) return
-    toast.error(getApiErrorMessage(err, '加载被排除小说失败'))
-    resetExcludedView()
-    await nextTick()
-    relayout()
-  }
-}
-
-async function toggleViewSelected() {
-  if (viewingSelected.value) {
-    resetSelectedView()
-    await nextTick()
-    relayout()
-    return
-  }
-  const ids = props.batchScope?.novel_ids ?? []
-  if (ids.length === 0) return
-  resetExcludedView()  // 互斥：进入已选视图时退出被排除视图
-  viewingSelected.value = true
-  try {
-    await reloadSelectedIds()
-    window.scrollTo({ top: 0 })  // 新视图从头看起，阻断自动翻页级联
-    await nextTick()
-    relayout()
-  } catch (err: unknown) {
-    toast.error(getApiErrorMessage(err, '加载已选小说失败'))
-    resetSelectedView()
-    await nextTick()
-    relayout()
-  }
-}
-
-async function toggleViewExcluded() {
-  if (viewingExcluded.value) {
-    resetExcludedView()
-    await nextTick()
-    relayout()
-    return
-  }
-  resetSelectedView()  // 互斥：进入被排除视图时退出已选视图
-  viewingExcluded.value = true
-  await loadExcludedView()
-}
-
-function handleViewLoadMore() {
-  if (viewingSelected.value) void selectedView.loadMore()
-  else if (viewingExcluded.value) void excludedView.loadMore()
 }
 
 // 「查看已选」视图是选择集的实时投影：在此视图内取消勾选必须让卡片
@@ -228,7 +143,7 @@ function handleViewLoadMore() {
 // 出视图才真正移除。浏览列表视图不作此处理——那里仅由 App 维护选择
 // 集，卡片本就不一定属于当前筛选范围。
 function handleBatchToggleCard(id: number) {
-  if (viewingSelected.value && props.isBatchSelected(id)) {
+  if (viewingSelected.value && isBatchSelected(id)) {
     selectedView.removeId(id)
     // 当前页被摘空但仍有未加载的已选时自动补一页，否则 LoadMore 会因
     // hasData=false 整体消失，把用户卡在空白网格里。
@@ -237,79 +152,8 @@ function handleBatchToggleCard(id: number) {
     }
     void nextTick().then(relayout)
   }
-  emit('batch-toggle-card', id)
+  emit('batch-action', { type: 'toggle-card', id })
 }
-
-// Leaving batch mode (or an emptied selection) closes the selected view;
-// entering batch mode closes the excluded view (批量模式优先互斥).
-watch(() => props.batchMode, (on) => {
-  if (on) {
-    if (viewingExcluded.value) resetExcludedView()
-  } else {
-    resetSelectedView()
-  }
-  void nextTick().then(relayout)
-})
-
-watch(() => props.hasSelection, (has) => {
-  if (!has && viewingSelected.value) {
-    resetSelectedView()
-    void nextTick().then(relayout)
-  }
-})
-
-// 视图活跃状态上报给 App → 侧边栏在集合视图内禁用「随机」排序
-// immediate：组件挂载/重挂时立即上报 false，避免离开页面后残留 true
-watch([viewingSelected, viewingExcluded], ([s, e]) => {
-  emit('collection-view', s || e)
-}, { immediate: true })
-
-// 筛选条件变化 → 被排除视图原地重算（集合始终与当前范围一致）；
-// 关键词清空后该视图无展示意义（条已消失）→ 退回浏览列表。
-watch(
-  [
-    () => props.filters.keyword,
-    () => props.filters.min_like,
-    () => props.filters.min_text,
-  ],
-  () => {
-    if (!viewingExcluded.value) return
-    if (!props.filters.keyword.trim()) {
-      resetExcludedView()
-      void nextTick().then(relayout)
-      return
-    }
-    void loadExcludedView()
-  },
-)
-
-// 排序条件变化 → 两个集合视图各自按新排序重排/重取
-watch(
-  [() => props.filters.order_by, () => props.filters.order_direction],
-  ([o, d], [po, pd]) => {
-    if (o === po && d === pd) return
-    if (viewingSelected.value) {
-      reloadSelectedIds()
-        .then(async () => {
-          window.scrollTo({ top: 0 })
-          await nextTick()
-          relayout()
-        })
-        .catch((err: unknown) => {
-          toast.error(getApiErrorMessage(err, '重新排序失败'))
-          resetSelectedView()
-          void nextTick().then(relayout)
-        })
-    } else if (viewingExcluded.value) {
-      void loadExcludedView()
-    }
-  },
-)
-
-const { columns, relayout } = useMasonryLayout<Novel>(
-  toRef(displayNovels),
-  columnRefs,
-)
 
 const fetchTagPreferences = async () => {
   try {
@@ -335,27 +179,27 @@ const handleToggleActive = (id: number | string) => {
     <div class="sticky top-0 z-20">
       <NovelHeader
         :filters="props.filters"
-        @search="(keyword?: string) => emit('search', keyword)"
-        @update:filters="emit('update:filters', $event)"
+        @search="(keyword?: string) => emit('novels-command', { type: 'search', keyword })"
+        @update:filters="emit('novels-command', { type: 'update-filters', payload: $event })"
         @toggle-sidebar="emit('toggle-sidebar')"
         @logo-click="emit('logo-click')"
       />
       <ExclusionBar
-        v-if="props.filters.keyword.trim() !== '' && props.hasExcluded"
+        v-if="props.filters.keyword.trim() !== '' && hasExcluded"
         :is-viewing-excluded="viewingExcluded"
-        :interactive="!props.batchMode"
+        :interactive="!batchMode"
         @toggle-view-excluded="toggleViewExcluded"
       />
       <BatchBar
-        v-if="props.batchMode"
-        :matched-count="props.matchedCount"
-        :count-loading="props.countLoading"
-        :select-all-loading="props.selectAllLoading"
-        :selected-count="props.selectedCount"
-        :has-selection="props.hasSelection"
-        :has-filter="props.hasFilter"
+        v-if="batchMode"
+        :matched-count="matchedCount"
+        :count-loading="countLoading"
+        :select-all-loading="selectAllLoading"
+        :selected-count="selectedCount"
+        :has-selection="hasSelection"
+        :has-filter="hasFilter"
         :is-viewing-selected="viewingSelected"
-        @select-all="emit('batch-select-all')"
+        @select-all="emit('batch-action', { type: 'select-all' })"
         @clear="handleBarClear"
         @toggle-view-selected="toggleViewSelected"
         @export="exportOpen = true"
@@ -366,7 +210,7 @@ const handleToggleActive = (id: number | string) => {
     </div>
 
     <main class="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 flex-grow">
-      <div v-if="props.error" class="bg-red-50 border-l-4 border-red-400 p-4 mb-6 rounded-md">
+      <div v-if="error" class="bg-red-50 border-l-4 border-red-400 p-4 mb-6 rounded-md">
         <div class="flex">
           <div class="flex-shrink-0">
             <svg class="h-5 w-5 text-red-400" viewBox="0 0 20 20" fill="currentColor">
@@ -374,7 +218,7 @@ const handleToggleActive = (id: number | string) => {
             </svg>
           </div>
           <div class="ml-3">
-            <p class="text-sm text-red-700">{{ props.error }}</p>
+            <p class="text-sm text-red-700">{{ error }}</p>
           </div>
         </div>
       </div>
@@ -405,24 +249,24 @@ const handleToggleActive = (id: number | string) => {
             :novel="novel"
             :is-active="activeCardId === novel.id"
             :tag-preferences="tagPreferences"
-            :batch-mode="props.batchMode"
-            :batch-selected="props.isBatchSelected(novel.id)"
+            :batch-mode="batchMode"
+            :batch-selected="isBatchSelected(novel.id)"
             @toggle-active="handleToggleActive"
             @toggle-batch-select="handleBatchToggleCard"
-            @search="(type, value) => emit('card-search', type, value)"
+            @search="(type, value) => emit('novels-command', { type: 'card-search', payload: { type, value } })"
             @state-changed="emit('novel-state-changed', $event)"
           />
         </div>
       </div>
 
-      <EmptyState v-else-if="!props.loading && !viewLoading" :loading="props.loading" />
+      <EmptyState v-else-if="!loading && !viewLoading" :loading="loading" />
 
       <LoadMore
         v-if="!viewingSelected && !viewingExcluded"
-        :loading="props.loading"
-        :no-more-data="props.noMoreData"
-        :has-data="props.novels.length > 0"
-        @load-more="emit('load-more')"
+        :loading="loading"
+        :no-more-data="noMoreData"
+        :has-data="novels.length > 0"
+        @load-more="emit('novels-command', { type: 'load-more' })"
       />
       <LoadMore
         v-else
@@ -436,21 +280,21 @@ const handleToggleActive = (id: number | string) => {
     <!-- 批量操作模态框（勾选完成后借用模态框进行后续操作） -->
     <BatchDeleteModal
       :is-open="deleteOpen"
-      :scope="props.batchScope"
+      :scope="batchScope"
       :scope-label="scopeLabel"
       @close="deleteOpen = false"
-      @success="(payload) => emit('batch-operation-success', { operation: 'delete', result: payload })"
-      @task-submitted="(payload) => emit('batch-task-submitted', { operation: 'delete', ...payload })"
+      @success="(payload) => emit('batch-action', { type: 'operation-success', payload: { operation: 'delete', result: payload } })"
+      @task-submitted="(payload) => emit('batch-action', { type: 'task-submitted', payload: { operation: 'delete', ...payload } })"
       @error="toast.error"
     />
     <BatchTagModal
       :is-open="tagModalOpen"
       :operation="tagOperation"
-      :scope="props.batchScope"
+      :scope="batchScope"
       :scope-label="scopeLabel"
       @close="tagModalOpen = false"
-      @success="(payload) => emit('batch-operation-success', { operation: tagOperation, result: payload })"
-      @task-submitted="(payload) => emit('batch-task-submitted', { operation: tagOperation, ...payload })"
+      @success="(payload) => emit('batch-action', { type: 'operation-success', payload: { operation: tagOperation, result: payload } })"
+      @task-submitted="(payload) => emit('batch-action', { type: 'task-submitted', payload: { operation: tagOperation, ...payload } })"
       @error="toast.error"
     />
     <BatchDownloadModal
@@ -460,11 +304,11 @@ const handleToggleActive = (id: number | string) => {
       :order_direction="props.filters.order_direction"
       :min_like="props.filters.min_like"
       :min_text="props.filters.min_text"
-      :novel-ids="props.batchScope?.novel_ids"
+      :novel-ids="batchScope?.novel_ids"
       @close="exportOpen = false"
       @download-success="toast.success(`已开始下载：${$event}`)"
       @download-error="toast.error"
-      @task-submitted="(payload) => emit('batch-task-submitted', { operation: 'export', ...payload })"
+      @task-submitted="(payload) => emit('batch-action', { type: 'task-submitted', payload: { operation: 'export', ...payload } })"
     />
   </div>
 </template>

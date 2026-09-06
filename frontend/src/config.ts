@@ -8,3 +8,7 @@
 
 export const DEFAULT_MIN_LIKE = 500
 export const DEFAULT_MIN_TEXT = 3000
+
+/** 分页页大小：浏览列表（useNovels per_page）与「查看已选/被排除」集合视图
+ * （usePagedNovelIdView 每页切片）共用，改页大小只改这一处。 */
+export const DEFAULT_PAGE_SIZE = 30

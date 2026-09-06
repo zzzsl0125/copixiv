@@ -15,6 +15,7 @@ const taskApiMock = vi.hoisted(() => ({
 
 vi.mock('../../src/api', () => ({
   taskApi: taskApiMock,
+  getApiErrorMessage: (_e: unknown, fallback: string) => fallback,
 }))
 
 const SectionHeaderStub = {

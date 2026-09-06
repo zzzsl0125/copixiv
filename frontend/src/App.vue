@@ -6,6 +6,7 @@ import ToastContainer from './components/ui/ToastContainer.vue'
 import { useNovels, useSystem, useToast, useBatchMode } from './composables'
 import { DEFAULT_MIN_LIKE, DEFAULT_MIN_TEXT } from './config'
 import type { NovelFilters, BatchOperationResult } from './types'
+import type { NovelsState, BatchState, NovelsCommand, BatchAction } from './views/Novels.vue'
 
 const {
   novels,
@@ -53,6 +54,32 @@ const {
   clearSelection: clearBatchSelection,
   clearSelectionInScope,
 } = useBatchMode(filters)
+
+// ---- F1 粗粒度绑定：15 个散点状态收敛为两个对象（非首页路由 batch 传
+// undefined，与原 isNovelsRoute ? … : undefined 语义逐项等价）----
+const novelsState = computed<NovelsState>(() => ({
+  novels: novels.value,
+  loading: loading.value,
+  error: error.value,
+  noMoreData: noMoreData.value,
+  hasExcluded: hasExcluded.value,
+}))
+
+const batchState = computed<BatchState | undefined>(() =>
+  isNovelsRoute.value
+    ? {
+        mode: isBatchMode.value,
+        matchedCount: matchedCount.value,
+        countLoading: countLoading.value,
+        selectAllLoading: selectAllLoading.value,
+        selectedCount: selectedCount.value,
+        hasSelection: hasSelection.value,
+        hasFilter: hasFilter.value,
+        scope: batchScope.value,
+        isSelected: isCardSelected,
+      }
+    : undefined,
+)
 
 const handleToggleBatchMode = () => {
   if (isBatchMode.value) exitBatchMode()
@@ -205,6 +232,52 @@ const handleLogoClick = () => {
   handleResetToDefaults()
 }
 
+// ---- F1 薄分发层：判别联合事件路由到既有 handler（handler 本体原样保留，
+// payload 与原单事件一致；switch 按判别字段收窄）----
+const handleNovelsCommand = (command: NovelsCommand) => {
+  switch (command.type) {
+    case 'search':
+      handleSearch(command.keyword, { setOrdering: true })
+      break
+    case 'card-search':
+      handleCardSearch(command.payload.type, command.payload.value)
+      break
+    case 'load-more':
+      handleLoadMore()
+      break
+    case 'update-filters':
+      Object.assign(filters, command.payload)
+      handleSearch()
+      break
+    case 'collection-view':
+      inCollectionView.value = command.payload
+      break
+  }
+}
+
+const handleBatchAction = (action: BatchAction) => {
+  switch (action.type) {
+    case 'toggle-card':
+      toggleBatchCard(action.id)
+      break
+    case 'select-all':
+      void handleBatchSelectAll()
+      break
+    case 'clear':
+      clearBatchSelection()
+      break
+    case 'clear-scope':
+      void handleBatchClearScope()
+      break
+    case 'operation-success':
+      handleBatchOperationSuccess(action.payload)
+      break
+    case 'task-submitted':
+      handleBatchTaskSubmitted(action.payload)
+      break
+  }
+}
+
 onMounted(() => {
   if (route.path !== '/') {
     activeSection.value = null
@@ -239,34 +312,13 @@ onMounted(() => {
       <router-view
         :is-sidebar-open="isSidebarOpen"
         :filters="filters"
-        :novels="novels"
-        :loading="loading"
-        :error="error"
-        :no-more-data="noMoreData"
-        :has-excluded="hasExcluded"
-        :batch-mode="isNovelsRoute ? isBatchMode : undefined"
-        :matched-count="isNovelsRoute ? matchedCount : undefined"
-        :count-loading="isNovelsRoute ? countLoading : undefined"
-        :select-all-loading="isNovelsRoute ? selectAllLoading : undefined"
-        :selected-count="isNovelsRoute ? selectedCount : undefined"
-        :has-selection="isNovelsRoute ? hasSelection : undefined"
-        :has-filter="isNovelsRoute ? hasFilter : undefined"
-        :batch-scope="isNovelsRoute ? batchScope : undefined"
-        :is-batch-selected="isNovelsRoute ? isCardSelected : undefined"
+        :novels-state="novelsState"
+        :batch-state="batchState"
+        @novels-command="handleNovelsCommand"
+        @batch-action="handleBatchAction"
         @logo-click="handleLogoClick"
-        @load-more="handleLoadMore"
-        @search="(keyword?: string) => handleSearch(keyword, { setOrdering: true })"
-        @card-search="handleCardSearch"
-        @novel-state-changed="handleNovelStateChanged"
-        @update:filters="($event: NovelFilters) => { Object.assign(filters, $event); handleSearch(); }"
         @toggle-sidebar="isSidebarOpen = !isSidebarOpen"
-        @collection-view="(active: boolean) => (inCollectionView = active)"
-        @batch-toggle-card="toggleBatchCard"
-        @batch-select-all="handleBatchSelectAll"
-        @batch-clear="clearBatchSelection"
-        @batch-clear-scope="handleBatchClearScope"
-        @batch-operation-success="handleBatchOperationSuccess"
-        @batch-task-submitted="handleBatchTaskSubmitted"
+        @novel-state-changed="handleNovelStateChanged"
       />
     </div>
 

@@ -1,6 +1,5 @@
 import { ref, onMounted } from 'vue'
-import { tokenApi } from '../api'
-import { getApiErrorMessage } from '../api/errors'
+import { tokenApi, getApiErrorMessage } from '../api'
 import type { Token, TokenUpdate } from '../types'
 
 /** Backend masks responses as ``****`` (≤4 chars) or ``****`` + last 4 chars.

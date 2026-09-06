@@ -1,5 +1,5 @@
 import { ref, type Ref } from 'vue'
-import { getApiErrorMessage } from '../api/errors'
+import { getApiErrorMessage } from '../api'
 
 export interface PaginationResult<T> {
   items: Ref<T[]>

@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, type PropType } from 'vue'
-import { novelApi } from '../../api'
-import { getApiErrorMessage } from '../../api/errors'
+import { novelApi, getApiErrorMessage } from '../../api'
 import { downloadUrl, formatNumber } from '../../lib/utils'
 import { useToast } from '../../composables'
 import type { Novel, TagPreference } from '../../types'

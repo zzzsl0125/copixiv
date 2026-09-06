@@ -14,6 +14,7 @@ vi.mock('../../src/composables', () => ({
     loading: { value: false },
     error: { value: null },
     noMoreData: { value: false },
+    hasExcluded: { value: false },
     filters: {
       keyword: '',
       order_by: 'random',

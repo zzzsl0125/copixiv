@@ -2,7 +2,7 @@
 import { ref } from 'vue'
 import type { Token } from '../types'
 import { useTokens, useToast } from '../composables'
-import { getApiErrorMessage } from '../api/errors'
+import { getApiErrorMessage } from '../api'
 import PageHeader from '../components/features/PageHeader.vue'
 import SectionHeader from '../components/features/SectionHeader.vue'
 import DraggableTable, { type TableColumn } from '../components/features/DraggableTable.vue'

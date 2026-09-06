@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { CheckCircle, XCircle, Info, AlertTriangle } from '@lucide/vue'
-import type { Toast } from '../../composables/useToast'
+import type { Toast } from '../../composables'
 
 defineProps<{ toasts: Toast[] }>()
 </script>

@@ -1,6 +1,7 @@
 import { reactive, ref, onMounted, onUnmounted } from 'vue'
 import { novelApi } from '../api'
 import type { Novel, NovelFilters } from '../types'
+import { DEFAULT_PAGE_SIZE } from '../config'
 import { useCursorPagination } from './useCursorPagination'
 import { useSystem } from './useSystem'
 
@@ -34,13 +35,13 @@ export function useNovels() {
       min_like: filters.min_like,
       min_text: filters.min_text,
       cursor: (cursor as Record<string, unknown>) || undefined,
-      per_page: 30,
+      per_page: DEFAULT_PAGE_SIZE,
       exclude_blocked: excludeBlocked(),
     })
 
     // 仅首屏（无 cursor）更新 hasExcluded；load-more 沿用首屏值。
     if (cursor === undefined) {
-      hasExcluded.value = res.hasExcluded ?? false
+      hasExcluded.value = res.has_excluded ?? false
     }
 
     return {

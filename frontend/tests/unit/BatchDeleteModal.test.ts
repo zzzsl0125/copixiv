@@ -14,6 +14,7 @@ vi.mock('../../src/api', () => ({
     submitBatchTask: apiMock.submitBatchTask,
   },
   BATCH_MAX_NOVELS: 5000,
+  getApiErrorMessage: (_e: unknown, fallback: string) => fallback,
 }))
 
 const SCOPE: BatchScope = { mode: 'ids', novel_ids: [1, 2, 3], excluded_ids: [] }

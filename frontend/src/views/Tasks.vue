@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
-import { taskApi } from '../api'
-import { getApiErrorMessage } from '../api/errors'
+import { taskApi, getApiErrorMessage } from '../api'
 import type { ScheduledTask } from '../types'
 import { usePagination, useToast } from '../composables'
 import ScheduledTaskList from '../components/features/ScheduledTaskList.vue'

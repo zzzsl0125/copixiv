@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue'
 import { Sparkles } from '@lucide/vue'
-import { tagPreferenceApi, tagAliasApi, systemApi } from '../api'
-import { getApiErrorMessage } from '../api/errors'
+import { tagPreferenceApi, tagAliasApi, systemApi, getApiErrorMessage } from '../api'
 import { useToast, useSystem } from '../composables'
 import type { TagPreference, TagAlias } from '../types'
 import PageHeader from '../components/features/PageHeader.vue'

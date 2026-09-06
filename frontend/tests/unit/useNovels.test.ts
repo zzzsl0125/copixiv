@@ -30,7 +30,7 @@ function mountUseNovels(url = '/') {
 describe('useNovels', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    novelApiMock.getNovels.mockResolvedValue({ novels: [{ id: 1 }], cursor: null, hasExcluded: false })
+    novelApiMock.getNovels.mockResolvedValue({ novels: [{ id: 1 }], cursor: null, has_excluded: false })
     novelApiMock.countNovels.mockResolvedValue({ total: 1, excluded: 0 })
   })
 
@@ -238,7 +238,7 @@ describe('useNovels', () => {
 
   it('exposes hasExcluded from the first page response', async () => {
     novelApiMock.getNovels.mockResolvedValue({
-      novels: [{ id: 1 }], cursor: null, hasExcluded: true,
+      novels: [{ id: 1 }], cursor: null, has_excluded: true,
     })
     const state = mountUseNovels('/?keyword=猫')
 
@@ -251,10 +251,10 @@ describe('useNovels', () => {
   it('does not overwrite hasExcluded on load-more', async () => {
     novelApiMock.getNovels
       .mockResolvedValueOnce({
-        novels: [{ id: 1 }], cursor: { id: 1 }, hasExcluded: true,
+        novels: [{ id: 1 }], cursor: { id: 1 }, has_excluded: true,
       })
       .mockResolvedValueOnce({
-        novels: [{ id: 2 }], cursor: null, hasExcluded: false,
+        novels: [{ id: 2 }], cursor: null, has_excluded: false,
       })
     const state = mountUseNovels('/?keyword=猫')
 

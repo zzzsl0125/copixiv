@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, computed, onUnmounted } from 'vue'
 import BaseModal from '../ui/BaseModal.vue'
-import { novelApi } from '../../api'
-import { getApiErrorMessage } from '../../api/errors'
+import { novelApi, getApiErrorMessage } from '../../api'
 import { downloadBlob, filenameFromContentDisposition } from '../../lib/utils'
 import { useSystem } from '../../composables'
 

@@ -12,7 +12,7 @@
 | 版本 | 2.0.0（`pyproject.toml`） |
 | 后端 | Python 3.12+，FastAPI + SQLAlchemy 2.0 + APScheduler + Alembic + loguru |
 | 前端 | Vue 3 + Vite + TypeScript + Tailwind v4 + Vitest（`frontend/package.json`） |
-| 数据库 | SQLite（WAL 模式），schema 兼容 v1 |
+| 数据库 | PostgreSQL（greenfield 基线 `alembic/versions/0001_postgres_baseline.py`；BIGINT / timestamptz / JSONB / TEXT[]+GIN，详见 docs/pg-migration/） |
 | Pixiv 客户端 | pixivpy3（git 直连 `upbit/pixivpy`）+ 自定义 patch（见 MODULARITY.md `pixiv/`） |
 | 后端端口 | 9000（Vite dev proxy → 9000） |
 
@@ -41,7 +41,7 @@ app.py → features(+tasks) → core；db / pixiv / storage / notify 是适配�
 | `features/` | 按功能切片：api + repo + schemas 同置 |
 | `tasks/` | 任务注册表 + 调度内核 + 业务任务 |
 | `core/` | 纯 Python：Pydantic 实体、纯服务、域异常；无框架/无 SQLAlchemy/无 web 依赖（仅标准库工具函数） |
-| `db/` | SQLite 唯一适配：engine / uow / write_lock |
+| `db/` | PostgreSQL 唯一适配：engine / uow / write_lock（事务边界标记）/ backup / data_version |
 | `pixiv/` | pixivpy3 防腐层（唯一厂商边界） |
 | `storage/` | 文件存储 / 图片下载 / EPUB |
 | `notify/` | 通知后端 |
@@ -65,7 +65,7 @@ src/copixiv/
 
 项目根下还有 `main.py`（uvicorn 入口 shim，真实入口 `copixiv.app.py`）、
 `pyproject.toml`、`config.yaml`（模板 `config.example.yaml`）、`pixiv_token.py`、
-`alembic/`、`database/`（SQLite 文件 + 周备份）、`download/`（FileStorage 根目录）、
+`alembic/`（PG 根基线 + `legacy_sqlite/`）、`download/`（FileStorage 根目录）、
 `frontend/`（Vue 3）、`scripts/`、`docs/`、`deploy/`（systemd 等）、`tests/`。
 
 `tests/` 下分 `architecture/`（pixivpy3 白名单 AST 执法）与 `regression/`
@@ -73,12 +73,20 @@ src/copixiv/
 
 ## 4. 数据库
 
-- ORM 模型：`db/models.py`（novel / author / series / tag / novel_tag /
-  favourite / special_follow / failed_novel / search_history / task_history /
-  scheduled_tasks / tag_preferences / tag_aliases / token / setting，
-  FTS5 全文索引 novel_fts）
-- 迁移：Alembic（`alembic/versions/`），启动时由 `init_database()` 自动应用
-- 并发：WAL + 全进程写锁（`db/write_lock.db_write()`），API 写端点与后台任务共享
+- ORM 模型：`db/models.py`（novel / author / series / tag / tag_preference /
+  tag_alias / failed_novel / search_history / task_history / scheduled_task /
+  setting / token / novel_search）。PG 形态：ID 为 BIGINT、时间戳为
+  timestamptz、`task_history.result/progress` 与 `scheduled_task.params` 为
+  JSONB；标签改 `novel.tags TEXT[]`（GIN 索引），favourite / special_follow
+  布尔化进宿主表；关键字搜索走应用维护的 `novel_search` 派生表
+  （GIN `to_tsvector('simple', search_text)`，char-gram 分词）
+- 迁移：Alembic（`alembic/versions/0001_postgres_baseline.py` 为 PG 独立根基
+  线，SQLite 时代迁移移至 `alembic/legacy_sqlite/`），启动时由
+  `init_database()` 自动应用
+- 并发：PostgreSQL MVCC 多写者，`db/write_lock.db_write()` 已退化为事务边界
+  标记（不再持锁）；正确性靠多语句事务 + `ON CONFLICT` upsert + 行级锁，
+  热点行冲突由 `run_write_transaction` 指数退避重试
+  （LockNotAvailable / SQLSTATE 55P03）
 - 仓储：按功能归位（novel 读写合并进 `features/novels/repo.py`）
 
 ## 5. API
@@ -152,7 +160,7 @@ cd frontend && npm install && npm run build && npm run preview   # 前端 :4173
 | `src/copixiv/core/exceptions.py` | 域异常（无 status_code，映射在 app.py） |
 | `src/copixiv/core/draft.py` | NovelDraft 纯数据结构 + 写路径工厂（build_novel / build_from_webview / build_from_novel_info） |
 | `src/copixiv/db/uow.py` | SqlUnitOfWork（纯事务边界） |
-| `src/copixiv/db/write_lock.py` | 全进程写锁（db_write） |
+| `src/copixiv/db/write_lock.py` | 事务边界标记（db_write；PG 迁移后不再持锁） |
 | `src/copixiv/features/novels/repo.py` | novel 读写仓储 |
 | `src/copixiv/tasks/kernel.py` | 任务注册表 + 调度内核 + 上下文 |
 | `src/copixiv/pixiv/{client,patch,account,errors}.py` | Pixiv 防腐层（MODULARITY.md `pixiv/`） |

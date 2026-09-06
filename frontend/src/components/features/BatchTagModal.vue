@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import BaseModal from '../ui/BaseModal.vue'
-import { novelApi, BATCH_MAX_NOVELS } from '../../api'
-import { getApiErrorMessage } from '../../api/errors'
+import { novelApi, BATCH_MAX_NOVELS, getApiErrorMessage } from '../../api'
 import type { BatchOperation, BatchScope } from '../../types'
 
 const props = defineProps<{

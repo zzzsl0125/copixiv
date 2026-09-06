@@ -18,8 +18,8 @@ export interface ScheduledTask {
   name: string
   task: string
   cron: string
-  params?: Record<string, unknown>
-  config?: Record<string, unknown>
+  params?: Record<string, unknown> | null
+  config?: Record<string, unknown> | null
   is_enabled: boolean
   sort_index?: number
 }
@@ -28,8 +28,8 @@ export interface ScheduledTaskCreate {
   name: string
   task: string
   cron: string
-  params?: Record<string, unknown>
-  config?: Record<string, unknown>
+  params?: Record<string, unknown> | null
+  config?: Record<string, unknown> | null
   is_enabled: boolean
 }
 
@@ -37,8 +37,8 @@ export interface ScheduledTaskUpdate {
   name?: string
   task?: string
   cron?: string
-  params?: Record<string, unknown>
-  config?: Record<string, unknown>
+  params?: Record<string, unknown> | null
+  config?: Record<string, unknown> | null
   is_enabled?: boolean
 }
 

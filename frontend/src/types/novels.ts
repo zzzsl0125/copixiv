@@ -46,11 +46,11 @@ export interface NovelCountResult {
   excluded: number
 }
 
-/** /api/novels/ 响应：hasExcluded 首屏附带「范围内是否存在被厌恶标签排除的小说」 */
+/** /api/novels/ 响应：has_excluded 首屏附带「范围内是否存在被厌恶标签排除的小说」 */
 export interface NovelListResult {
   novels: Novel[]
   cursor: Record<string, unknown> | null
-  hasExcluded: boolean
+  has_excluded: boolean
 }
 
 /** Which novels a batch operation applies to (mirrors backend BatchScope). */
