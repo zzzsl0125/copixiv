@@ -12,7 +12,7 @@
 | `src/copixiv/config.py` | 配置模型与加载 |
 | `src/copixiv/deps.py` | FastAPI 依赖（get_session_factory / get_app_config / get_file_storage / get_task_manager / get_uow / get_write_uow / parse_json_param） |
 | `core/` | 纯 Python：models.py / services.py / exceptions.py / draft.py（无框架、无 SQLAlchemy、无 web 依赖；仅标准库工具函数，含 zip/路径处理） |
-| `db/` | engine / uow（纯事务边界）/ write_lock / backup / models / constants / base |
+| `db/` | engine / uow（纯事务边界）/ write_lock（事务边界标记，PG 后不再持锁）/ backup / models / constants / base / data_version |
 | `pixiv/` | pixivpy3 防腐层（唯一允许 import pixivpy3 的目录） |
 | `storage/` | file_storage / image_downloader / epub 子包 |
 | `notify/` | telegram / webhook / composite / factory |
@@ -40,14 +40,17 @@
 执法：`tests/architecture/test_vendor_whitelist.py::test_pixivpy3_vendor_whitelist`
 （AST 扫描整个 `src`，任何新模块 import pixivpy3 都会立刻失败）。
 
-### 3.2 写路径必须走全局写锁
+### 3.2 写路径必须走写事务边界（db_write）
 
 - API 写端点必须声明 `Depends(get_write_uow)`；读端点用 `get_uow`。
-- 后台任务写库走 `uow.begin()` / `db_write()`。SQLite 单写者，API 与后台任务
-  共享同一把锁。
+- 后台任务写库走 `uow.begin()` / `db_write()`。PG 迁移后 `db_write()` 是
+  **事务边界标记**（不再持全局锁——PG 为 MVCC 多写者，全局锁只会变瓶颈）；
+  正确性由「多语句事务 + `ON CONFLICT` upsert + 行级锁」保证，热点行冲突
+  经 `run_write_transaction` 指数退避重试（SQLSTATE 55P03 / LockNotAvailable）。
+  API 与后台任务共享同一套事务纪律。
 
-执法：`tests/regression/test_m6_write_lock.py`（`test_get_write_uow_holds_global_lock`
-/ `test_write_endpoints_declare_write_uow`）。
+执法：`tests/regression/test_m6_write_lock.py::test_write_endpoints_declare_write_uow`
+（钉「写端点必须声明 write uow」的接线纪律）。
 
 > 这两条是**仅剩的**测试执法边界；其余规则在 §2 与 §4，皆为约定，违反不会红。
 
