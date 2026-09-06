@@ -13,6 +13,7 @@ const {
   error,
   noMoreData,
   filters,
+  hasExcluded,
   loadNovels,
   handleSearch,
   handleLoadMore,
@@ -242,6 +243,7 @@ onMounted(() => {
         :loading="loading"
         :error="error"
         :no-more-data="noMoreData"
+        :has-excluded="hasExcluded"
         :batch-mode="isNovelsRoute ? isBatchMode : undefined"
         :matched-count="isNovelsRoute ? matchedCount : undefined"
         :count-loading="isNovelsRoute ? countLoading : undefined"

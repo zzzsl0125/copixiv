@@ -46,6 +46,10 @@ class NovelBase(BaseModel):
 class NovelListResponse(BaseModel):
     novels: list[NovelBase]
     cursor: dict | None = None
+    # 首屏响应附带「当前搜索范围内是否存在被厌恶标签排除的小说」——
+    # 前端据此决定 ExclusionBar（查看被隐藏的小说）是否显示；load-more
+    # 与无关键词浏览不计算，保持默认 False。
+    has_excluded: bool = False
 
 
 # ---------------------------------------------------------------------------

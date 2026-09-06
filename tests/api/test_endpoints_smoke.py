@@ -134,7 +134,9 @@ class TestNovelsList:
         r = client.get("/api/novels/", params={"order_by": "id", "per_page": 20})
         assert r.status_code == 200
         body = r.json()
-        assert set(body) == {"novels", "cursor"}
+        assert set(body) == {"novels", "cursor", "has_excluded"}
+        # 无关键词浏览不计算 has_excluded，保持默认 False
+        assert body["has_excluded"] is False
         assert [n["id"] for n in body["novels"]] == [2, 1]  # DESC default
         novel = body["novels"][0]
         # v1-compatible wire format: ints, not JSON booleans

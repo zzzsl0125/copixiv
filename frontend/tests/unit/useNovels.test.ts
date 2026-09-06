@@ -30,7 +30,7 @@ function mountUseNovels(url = '/') {
 describe('useNovels', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    novelApiMock.getNovels.mockResolvedValue({ novels: [{ id: 1 }], cursor: null })
+    novelApiMock.getNovels.mockResolvedValue({ novels: [{ id: 1 }], cursor: null, hasExcluded: false })
     novelApiMock.countNovels.mockResolvedValue({ total: 1, excluded: 0 })
   })
 
@@ -234,5 +234,36 @@ describe('useNovels', () => {
     await flushPromises()
 
     expect(novelApiMock.countNovels).not.toHaveBeenCalled()
+  })
+
+  it('exposes hasExcluded from the first page response', async () => {
+    novelApiMock.getNovels.mockResolvedValue({
+      novels: [{ id: 1 }], cursor: null, hasExcluded: true,
+    })
+    const state = mountUseNovels('/?keyword=猫')
+
+    await state.loadNovels()
+    await flushPromises()
+
+    expect(state.hasExcluded.value).toBe(true)
+  })
+
+  it('does not overwrite hasExcluded on load-more', async () => {
+    novelApiMock.getNovels
+      .mockResolvedValueOnce({
+        novels: [{ id: 1 }], cursor: { id: 1 }, hasExcluded: true,
+      })
+      .mockResolvedValueOnce({
+        novels: [{ id: 2 }], cursor: null, hasExcluded: false,
+      })
+    const state = mountUseNovels('/?keyword=猫')
+
+    await state.loadNovels()
+    expect(state.hasExcluded.value).toBe(true)
+
+    state.handleLoadMore() // handleLoadMore does not return the promise
+    await flushPromises()
+    // load-more 响应即使返回 false 也不覆盖首屏 true
+    expect(state.hasExcluded.value).toBe(true)
   })
 })

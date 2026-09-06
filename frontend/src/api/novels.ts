@@ -1,7 +1,8 @@
 import { apiClient, buildApiUrl } from './client'
 import type {
-  Novel, GetNovelsParams, BatchScope, BatchOperation, BatchOperationResult,
+  GetNovelsParams, BatchScope, BatchOperation, BatchOperationResult,
   NovelIdsResponse, NovelsByIdsResponse, MatchIdsResult, NovelCountResult,
+  NovelListResult,
 } from '../types'
 
 /** 同步批量操作上限（与后端 BATCH_MAX_NOVELS 一致）；超过走后台任务。 */
@@ -14,7 +15,7 @@ export const novelApi = {
       queryParams.cursor = JSON.stringify(params.cursor)
     }
     const response = await apiClient.get('/novels/', { params: queryParams })
-    return response.data as { novels: Novel[]; cursor: Record<string, unknown> | null }
+    return response.data as NovelListResult
   },
 
   async toggleFavourite(novelId: number) {

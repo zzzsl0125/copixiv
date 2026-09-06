@@ -1,4 +1,4 @@
-import { reactive, onMounted, onUnmounted } from 'vue'
+import { reactive, ref, onMounted, onUnmounted } from 'vue'
 import { novelApi } from '../api'
 import type { Novel, NovelFilters } from '../types'
 import { useCursorPagination } from './useCursorPagination'
@@ -22,6 +22,10 @@ export function useNovels() {
   const excludeBlocked = () =>
     systemConfig.value ? systemConfig.value.exclude_blocked_tag_novels : true
 
+  /** 当前搜索范围内是否存在被厌恶标签排除的小说（首屏响应附带）——
+   * 控制 ExclusionBar（查看被隐藏的小说）的显示；load-more 不覆盖。 */
+  const hasExcluded = ref(false)
+
   const fetchNovels = async (cursor?: unknown) => {
     const res = await novelApi.getNovels({
       keyword: filters.keyword.trim() || undefined,
@@ -33,6 +37,11 @@ export function useNovels() {
       per_page: 30,
       exclude_blocked: excludeBlocked(),
     })
+
+    // 仅首屏（无 cursor）更新 hasExcluded；load-more 沿用首屏值。
+    if (cursor === undefined) {
+      hasExcluded.value = res.hasExcluded ?? false
+    }
 
     return {
       items: res.novels || [],
@@ -199,6 +208,7 @@ export function useNovels() {
     cursor,
     noMoreData,
     filters,
+    hasExcluded,
     loadNovels,
     handleSearch,
     handleLoadMore,

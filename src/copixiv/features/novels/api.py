@@ -88,6 +88,14 @@ async def get_novels(
     )
     results = await SQLAlchemyNovelRepository(uow.session).get_novels(spec)
 
+    # 首屏搜索响应附带「范围内是否存在被厌恶标签排除的小说」——镜像谓词
+    # 存在性查询（~ms 级），让 ExclusionBar 只在确有被隐藏小说时显示。
+    # load-more（带 cursor）与无关键词浏览不计算，保持默认 False。
+    if conditions and cursor_dict is None:
+        results["has_excluded"] = await SQLAlchemyNovelRepository(
+            uow.session
+        ).has_excluded_novels(spec)
+
     if conditions and background_tasks:
         background_tasks.add_task(
             record_search_history, conditions,

@@ -157,6 +157,151 @@ class TestListExclusion:
         assert 1 not in ids
         assert set(ids) == {2, 3}
 
+    def test_has_excluded_true_when_scoped(
+        self, client, session_factory, tmp_path,
+    ):
+        """首屏搜索范围内有被排除小说 → has_excluded=true。"""
+        _seed_three(session_factory, tmp_path)
+        _block(client, "NTR")
+
+        r = client.get("/api/novels/", params={
+            "keyword": "tags:NTR", "order_by": "id", "per_page": 20,
+        })
+        assert r.status_code == 200
+        body = r.json()
+        assert body["has_excluded"] is True
+        # 范围内唯一的小说被排除，可见列表为空
+        assert body["novels"] == []
+
+    def test_has_excluded_false_when_none_scoped(
+        self, client, session_factory, tmp_path,
+    ):
+        """关键词搜索范围内没有被排除小说（tags:纯爱 只命中 novel 2）→ false。"""
+        _seed_three(session_factory, tmp_path)
+        _block(client, "NTR")
+
+        r = client.get("/api/novels/", params={
+            "keyword": "tags:纯爱", "order_by": "id", "per_page": 20,
+        })
+        assert r.status_code == 200
+        body = r.json()
+        assert body["has_excluded"] is False
+        assert [n["id"] for n in body["novels"]] == [2]
+
+    def test_has_excluded_false_on_browse(
+        self, client, session_factory, tmp_path,
+    ):
+        """无关键词浏览（首屏）→ has_excluded 保持默认 false。"""
+        _seed_three(session_factory, tmp_path)
+        _block(client, "NTR")
+
+        r = client.get("/api/novels/", params={
+            "order_by": "id", "per_page": 20,
+        })
+        assert r.status_code == 200
+        body = r.json()
+        assert body["has_excluded"] is False
+        assert [n["id"] for n in body["novels"]] == [3, 2]
+
+    def test_has_excluded_false_on_load_more(
+        self, client, session_factory, tmp_path,
+    ):
+        """带 cursor（load-more 形态）→ 不计算，has_excluded 保持 false。"""
+        _seed_three(session_factory, tmp_path)
+        _block(client, "NTR")
+
+        r = client.get("/api/novels/", params={
+            "keyword": "tags:NTR", "order_by": "id", "per_page": 1,
+            "cursor": '{"id": 3}',
+        })
+        assert r.status_code == 200
+        assert r.json()["has_excluded"] is False
+
+    def test_has_excluded_false_when_exclusion_off(
+        self, client, session_factory, tmp_path,
+    ):
+        """exclude_blocked=false（本次不排除）→ has_excluded 保持 false。"""
+        _seed_three(session_factory, tmp_path)
+        _block(client, "NTR")
+
+        r = client.get("/api/novels/", params={
+            "keyword": "tags:NTR", "order_by": "id", "per_page": 20,
+            "exclude_blocked": "false",
+        })
+        assert r.status_code == 200
+        body = r.json()
+        assert body["has_excluded"] is False
+        # 不排除 → 可见列表包含 novel 1
+        assert [n["id"] for n in body["novels"]] == [1]
+
+    def test_has_excluded_favourite_scope(
+        self, client, session_factory, tmp_path,
+    ):
+        """is_favourite 过滤范围：favourite 集内确有被排除小说时才 true。"""
+        _seed_three(session_factory, tmp_path)
+        _block(client, "NTR")
+        # favourite 落在可见的 novel 2 → 范围内无被排除小说
+        with session_factory() as s:
+            s.get(Novel, 2).is_favourite = True
+            s.commit()
+
+        r = client.get("/api/novels/", params={
+            "keyword": "is_favourite:true;", "order_by": "id", "per_page": 20,
+        })
+        assert r.status_code == 200
+        body = r.json()
+        assert body["has_excluded"] is False
+        assert [n["id"] for n in body["novels"]] == [2]
+
+        # favourite 转移到被排除的 novel 1 → 范围内有被排除小说
+        with session_factory() as s:
+            s.get(Novel, 2).is_favourite = False
+            s.get(Novel, 1).is_favourite = True
+            s.commit()
+
+        r = client.get("/api/novels/", params={
+            "keyword": "is_favourite:true;", "order_by": "id", "per_page": 20,
+        })
+        assert r.status_code == 200
+        body = r.json()
+        assert body["has_excluded"] is True
+        assert body["novels"] == []
+
+    def test_has_excluded_special_follow_scope(
+        self, client, session_factory, tmp_path,
+    ):
+        """is_special_follow 过滤范围（author 子查询）：同理仅在确有被排除时 true。"""
+        _seed_three(session_factory, tmp_path)
+        _block(client, "NTR")
+        # special-follow 落在可见 novel 2 的作者 → 范围内无被排除小说
+        with session_factory() as s:
+            s.get(Author, 2).is_special_follow = True
+            s.commit()
+
+        r = client.get("/api/novels/", params={
+            "keyword": "is_special_follow:true;", "order_by": "id",
+            "per_page": 20,
+        })
+        assert r.status_code == 200
+        body = r.json()
+        assert body["has_excluded"] is False
+        assert [n["id"] for n in body["novels"]] == [2]
+
+        # special-follow 转移到被排除 novel 1 的作者 → 范围内有被排除小说
+        with session_factory() as s:
+            s.get(Author, 2).is_special_follow = False
+            s.get(Author, 1).is_special_follow = True
+            s.commit()
+
+        r = client.get("/api/novels/", params={
+            "keyword": "is_special_follow:true;", "order_by": "id",
+            "per_page": 20,
+        })
+        assert r.status_code == 200
+        body = r.json()
+        assert body["has_excluded"] is True
+        assert body["novels"] == []
+
 
 class TestCountExclusion:
     def test_count_reports_total_and_excluded(

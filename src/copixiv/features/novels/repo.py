@@ -331,10 +331,37 @@ class NovelQueryBuilder(BaseQueryBuilder):
         novels that *do* carry blocked tags (the excluded set) instead of
         excluding them.
         """
+        if not self._has_scope_filters():
+            return None
+
+        stmt = select(func.count()).select_from(self.main_model)
+        return self._apply_scope_filters(stmt, count_blocked=count_blocked)
+
+    def build_existence(
+        self, *, count_blocked: bool = False,
+    ) -> Select | None:
+        """Build a ``SELECT 1 ... LIMIT 1`` mirror-predicate existence query.
+
+        Shares the exact filter conditions with :meth:`build_count` —
+        ``count_blocked=True`` looks for novels that *do* carry blocked tags
+        (the excluded set), ``False`` for visible (non-blocked) ones.  The
+        caller uses ``execute(stmt).first() is not None`` instead of an
+        aggregate COUNT, so PostgreSQL can stop at the first matching row
+        (~ms even on big scopes).  Returns None for an unfiltered scope,
+        like :meth:`build_count`.
+        """
+        if not self._has_scope_filters():
+            return None
+
+        stmt = select(literal_column("1")).select_from(self.main_model)
+        stmt = self._apply_scope_filters(stmt, count_blocked=count_blocked)
+        return stmt.limit(1)
+
+    def _has_scope_filters(self) -> bool:
+        """Whether the spec carries any filter that would narrow a scope."""
         conditions = self.spec.conditions
         tags, keywords, field_filters = self._categorize(conditions)
-
-        has_filters = bool(
+        return bool(
             tags or keywords or field_filters
             or self.spec.min_like is not None
             or self.spec.min_text is not None
@@ -342,10 +369,20 @@ class NovelQueryBuilder(BaseQueryBuilder):
             or self.restrict_ids
             or self.blocked_tag_names
         )
-        if not has_filters:
-            return None
 
-        stmt = select(func.count()).select_from(self.main_model)
+    def _apply_scope_filters(
+        self, stmt: Select, *, count_blocked: bool = False,
+    ) -> Select:
+        """Apply the shared filter conditions (tags / keyword / field
+        filters / thresholds / blocked exclusion / exclude_ids).
+
+        Shared by the count and existence queries so both stay in lock-step
+        with the list query's WHERE clauses.  ``count_blocked=True`` swaps
+        the blocked-tag exclusion for its positive form (``tags && ...``).
+        """
+        conditions = self.spec.conditions
+        tags, keywords, field_filters = self._categorize(conditions)
+
         stmt = self._join_field_filter_tables(stmt, field_filters)
         stmt = self._where_tag_filter(stmt, tags)
         stmt = self._where_fts_filter(stmt, keywords)
@@ -846,6 +883,32 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         return self._count_with_spec(
             spec, blocked_tag_names=blocked_names, count_blocked=True,
         )
+
+    async def has_excluded_novels(self, spec: QuerySpec) -> bool:
+        """Whether any novel matching *spec* carries blocked tags.
+
+        Mirror-predicate existence query (``SELECT 1 ... LIMIT 1``) instead
+        of a full COUNT — powers the ExclusionBar visibility on the first
+        page response without an extra request.
+        """
+        return await asyncio.to_thread(self._has_excluded_novels_sync, spec)
+
+    def _has_excluded_novels_sync(self, spec: QuerySpec) -> bool:
+        if not self._exclusion_active(spec.exclude_blocked_tags):
+            return False
+        for q_type, _qvalue in spec.conditions:
+            self._validate_query_field(q_type)
+
+        blocked_names = self._blocked_tag_names()
+        if not blocked_names:
+            return False
+        builder = NovelQueryBuilder(
+            self, spec, blocked_tag_names=blocked_names,
+        )
+        stmt = builder.build_existence(count_blocked=True)
+        if stmt is None:
+            return False
+        return self.session.execute(stmt).first() is not None
 
     async def list_matching_ids(self, spec: QuerySpec) -> list[int]:
         """Return every VISIBLE novel ID matching *spec*, unpaginated."""

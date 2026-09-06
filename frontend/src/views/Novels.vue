@@ -22,6 +22,8 @@ const props = defineProps<{
   loading: boolean
   error: string | null
   noMoreData: boolean
+  // 首屏附带：当前搜索范围内是否存在被厌恶标签排除的小说
+  hasExcluded: boolean
   // ---- batch mode (state owned by App.vue) ----
   batchMode: boolean
   matchedCount: number
@@ -339,7 +341,7 @@ const handleToggleActive = (id: number | string) => {
         @logo-click="emit('logo-click')"
       />
       <ExclusionBar
-        v-if="props.filters.keyword.trim() !== ''"
+        v-if="props.filters.keyword.trim() !== '' && props.hasExcluded"
         :is-viewing-excluded="viewingExcluded"
         :interactive="!props.batchMode"
         @toggle-view-excluded="toggleViewExcluded"
