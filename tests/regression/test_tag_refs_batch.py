@@ -136,6 +136,35 @@ class TestStatementLevelBatchTrigger:
 
         assert _tag_counts(session_factory) == {"A": 0, "B": 3, "C": 0}
 
+    async def test_tag_swap_between_novels_nets_to_zero(
+        self, session_factory, clean_db, _author,
+    ):
+        """A tag one novel loses while another gains it nets to zero.
+
+        Pins the net-delta computation (``HAVING SUM(delta) <> 0``) that
+        replaced the O(rows²) transition-table join: the tag table must be left
+        alone, and the other tags must still be exact.
+        """
+        with session_factory() as s:
+            s.add(Novel(id=1, title="n1", author_id=1, tags=["A", "B"]))
+            s.add(Novel(id=2, title="n2", author_id=1, tags=["C"]))
+            s.commit()
+        assert _tag_counts(session_factory) == {"A": 1, "B": 1, "C": 1}
+
+        # One statement: novel 1 loses B while novel 2 gains B.
+        with session_factory() as s:
+            s.execute(text(
+                "UPDATE novel SET tags = CASE id "
+                "WHEN 1 THEN ARRAY['A']::text[] "
+                "WHEN 2 THEN ARRAY['C','B']::text[] END "
+                "WHERE id IN (1, 2)"
+            ))
+            s.commit()
+
+        counts = _tag_counts(session_factory)
+        assert counts["B"] == 1, "one loss + one gain must net to zero"
+        assert counts["A"] == 1 and counts["C"] == 1
+
 
 class TestRebuildTagCounts:
     async def test_rebuild_tag_counts_uses_novel_tags_array(
