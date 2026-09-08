@@ -37,7 +37,7 @@ TEST_DATABASE_URL = f"postgresql+psycopg2://postgres@127.0.0.1:5433/{TEST_DB}"
 # separation from TRUNCATE matters: TRUNCATE costs ~2s per call on slow
 # filesystems, DELETE is ~30x faster with the same observable result.
 _ALL_TABLES = (
-    "novel_search", "failed_novel", "tag_preference", "tag_alias",
+    "failed_novel", "tag_preference", "tag_alias",
     "task_history", "search_history", "scheduled_task", "token",
     "setting", "novel", "tag", "series", "author",
 )
@@ -148,23 +148,22 @@ def _seed_synthetic_sample(pg_engine) -> None:
 
     Mirrors what the migration script produces: authors + novels with tags
     (tag rows/reference counts come from the statement-level triggers in
-    migrations 0001/0002) and char-gram ``novel_search`` rows, so the
-    repo-smoke assertions (pagination, R-18 exclusion, keyword:催, like-sort)
-    have the same invariants to check.
+    migrations 0001/0002).  Keyword search needs no seeding — it is an
+    expression index over ``novel`` (migration 0003), so the sample rows are
+    searchable as soon as they are inserted.
     """
     from datetime import datetime, timedelta, timezone
 
     from sqlalchemy.orm import Session
 
-    from copixiv.db.models import Author, Novel, NovelSearch
-    from copixiv.features.novels.fts import build_search_text
+    from copixiv.db.models import Author, Novel
 
     with pg_engine.begin() as conn:
         _clean_all_tables(conn)
 
     epoch = datetime(2024, 1, 1, tzinfo=timezone.utc)
     with Session(pg_engine) as s:
-        authors, novels, searches = [], [], []
+        authors, novels = [], []
         for i in range(1, 201):
             author_id = 900_000_000 + i
             author_name = f"作者{i:03d}"
@@ -187,13 +186,7 @@ def _seed_synthetic_sample(pg_engine) -> None:
                 create_time=epoch + timedelta(hours=i),
                 tags=tags, is_favourite=(i % 17 == 0),
             ))
-            searches.append(NovelSearch(
-                novel_id=i,
-                search_text=build_search_text(title, author_name, None, tags),
-            ))
         s.add_all(authors)
         s.flush()
         s.add_all(novels)
-        s.flush()
-        s.add_all(searches)
         s.commit()

@@ -4,7 +4,8 @@ These verify the three properties that the new PG foundation must guarantee:
 
 1. The ``sync_tag_refs`` trigger maintains ``tag.reference_count`` exactly
    (one count per novel per tag, no double-count on duplicate array elements).
-2. The ``novel_search`` GIN index answers char-gram phrase queries.
+2. The keyword-search expression index on ``novel`` answers char-gram phrase
+   queries.
 3. The partial indexes / GIN index exist with the right definitions.
 """
 
@@ -13,8 +14,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select, text
 
-from copixiv.db.models import Author, Novel, Tag, NovelSearch
-from copixiv.features.novels.fts import gram_tokenize
+from copixiv.db.models import Author, Novel, Tag
 
 
 @pytest.fixture
@@ -40,19 +40,17 @@ def test_trigger_reference_count(session_factory, clean_db, _author):
 
 
 def test_novel_search_gin_phrase(session_factory, clean_db, _author):
-    """The GIN index over to_tsvector('simple', search_text) answers a char-gram query."""
-    search_text = gram_tokenize("催眠の誘い 作者 系列 R-18")
+    """The expression GIN index answers a char-gram query from the row alone."""
     with session_factory() as s:
         s.add(Novel(id=10, title="催眠の誘い", author_id=1, tags=["R-18"]))
-        s.flush()
-        s.add(NovelSearch(novel_id=10, search_text=search_text))
         s.commit()
 
     with session_factory() as s:
         cnt = s.execute(
             text(
-                "SELECT count(*) FROM novel_search "
-                "WHERE to_tsvector('simple', search_text) "
+                "SELECT count(*) FROM novel WHERE "
+                "to_tsvector('simple', copixiv_novel_text("
+                "title, author_name, series_name, tags)) "
                 "@@ to_tsquery('simple', '催')"
             )
         ).scalar()
@@ -85,4 +83,6 @@ def test_partial_and_gin_indexes(pg_engine, clean_db):
         "task_history partial unique index (predicate normalized to = ANY(...))"
 
     gin = indexdef("novel_search_gin")
-    assert gin and "USING gin" in gin, "novel_search GIN index"
+    assert gin and "USING gin" in gin, "novel_search expression GIN index"
+    assert gin and "copixiv_novel_text" in gin, \
+        "search index is derived from the novel row itself"

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """PostgreSQL query-performance verification for copixiv v2 (post-migration).
 
-Successor to the SQLite-era ``benchmark_query_performance.py`` / ``bench_fts_cost.py``
-— those are dead after the SQLite → PG migration (new schema ``novel.tags text[]``,
-``novel_search`` derived table, ``QuerySpec``-based builder).  This script
-measures what the *user* actually pays for on the migrated stack:
+Successor to the SQLite-era ``benchmark_query_performance.py`` — that is dead
+after the SQLite → PG migration (new schema ``novel.tags text[]``, keyword
+search as an expression index on ``novel``, ``QuerySpec``-based builder).
+This script measures what the *user* actually pays for on the migrated stack:
 
   * ``check``  — environment/data sanity (row counts, indexes, ANALYZE state,
                  PG runtime settings, blocked-tag config).  Run this first.
@@ -183,7 +183,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     print("=" * 78)
 
     try:
-        for table in ("novel", "novel_search", "author", "series", "tag",
+        for table in ("novel", "author", "series", "tag",
                       "tag_preference", "setting"):
             row = q(text(
                 f"SELECT count(*) FROM {table}")).scalar()
@@ -207,7 +207,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         SELECT tablename, indexname, indexdef
         FROM pg_indexes
         WHERE schemaname = 'public'
-          AND tablename IN ('novel', 'novel_search', 'tag', 'author')
+          AND tablename IN ('novel', 'tag', 'author')
         ORDER BY tablename, indexname
         """
     )).fetchall()
@@ -220,7 +220,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         SELECT relname, n_live_tup, last_analyze, last_autoanalyze,
                last_vacuum, last_autovacuum
         FROM pg_stat_user_tables
-        WHERE relname IN ('novel', 'novel_search', 'tag', 'novel_tag')
+        WHERE relname IN ('novel', 'tag')
         ORDER BY relname
         """
     )).fetchall()

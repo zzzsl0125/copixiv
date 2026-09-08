@@ -75,11 +75,13 @@ src/copixiv/
 
 - ORM 模型：`db/models.py`（novel / author / series / tag / tag_preference /
   tag_alias / failed_novel / search_history / task_history / scheduled_task /
-  setting / token / novel_search）。PG 形态：ID 为 BIGINT、时间戳为
+  setting / token）。PG 形态：ID 为 BIGINT、时间戳为
   timestamptz、`task_history.result/progress` 与 `scheduled_task.params` 为
   JSONB；标签改 `novel.tags TEXT[]`（GIN 索引），favourite / special_follow
-  布尔化进宿主表；关键字搜索走应用维护的 `novel_search` 派生表
-  （GIN `to_tsvector('simple', search_text)`，char-gram 分词）
+  布尔化进宿主表；关键字搜索走 `novel` 自身的表达式索引
+  （GIN `to_tsvector('simple', copixiv_novel_text(title, author_name,
+  series_name, tags))`，char-gram 分词；函数与索引由迁移 0003 建立，
+  查询侧见 `features/novels/search.py`）
 - 迁移：Alembic（`alembic/versions/0001_postgres_baseline.py` 为 PG 独立根基
   线，SQLite 时代迁移移至 `alembic/legacy_sqlite/`），启动时由
   `init_database()` 自动应用
@@ -116,7 +118,7 @@ src/copixiv/
 - 任务清单以运行时 `/api/tasks/methods` 为准（`describe_tasks()` 从 Pydantic
   args 模型推导，无反射）
 - 内置业务任务：`tasks/novels.py`（单本/关注/作者/排行/搜索）、`tasks/batch.py`
-  （批量操作/导出）、`tasks/maintenance.py`（FTS/EPUB/系列索引等）
+  （批量操作/导出）、`tasks/maintenance.py`（搜索索引/EPUB/系列索引等）
 
 ## 7. 配置
 
@@ -162,6 +164,7 @@ cd frontend && npm install && npm run build && npm run preview   # 前端 :4173
 | `src/copixiv/db/uow.py` | SqlUnitOfWork（纯事务边界） |
 | `src/copixiv/db/write_lock.py` | 事务边界标记（db_write；PG 迁移后不再持锁） |
 | `src/copixiv/features/novels/repo.py` | novel 读写仓储 |
+| `src/copixiv/features/novels/search.py` | 关键字搜索：char-gram 查询构造 + 搜索索引运维 |
 | `src/copixiv/tasks/kernel.py` | 任务注册表 + 调度内核 + 上下文 |
 | `src/copixiv/pixiv/{client,patch,account,errors}.py` | Pixiv 防腐层（MODULARITY.md `pixiv/`） |
 | `tests/architecture/test_vendor_whitelist.py` | pixivpy3 厂商白名单执法 |

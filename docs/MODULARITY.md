@@ -17,7 +17,7 @@
 | `storage/` | file_storage / image_downloader / epub 子包 |
 | `notify/` | telegram / webhook / composite / factory |
 | `tasks/` | kernel.py（registry + context + history + executor + scheduler + manager 合并）/ history_repo / schemas / api / novels / batch / maintenance / pipeline |
-| `features/` | accounts / authors / failures / novels / system / tags（每目录 api(+schemas)+repo） |
+| `features/` | accounts / authors / failures / novels / system / tags（每目录 api(+schemas)+repo；novels 另有 ingest / search / 批量用例） |
 
 ## 2. 依赖规则（约定，无矩阵执法）
 

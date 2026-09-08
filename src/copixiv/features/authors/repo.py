@@ -105,9 +105,9 @@ class SQLAlchemyAuthorRepository(BaseRepository):
         ).scalars().all()
 
         if novel_ids:
-            # Deleting the novels cascades to novel_search / failed_novel
-            # (FK ON DELETE CASCADE) and the sync_tag_refs trigger decrements
-            # tag.reference_count automatically.
+            # Deleting the novels cascades to failed_novel's explicit cleanup
+            # below and the sync_tag_refs trigger decrements tag counts; the
+            # search index follows automatically (expression index on novel).
             self.session.execute(
                 _delete(models.Novel).where(models.Novel.id.in_(novel_ids))
             )

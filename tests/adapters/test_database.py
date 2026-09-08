@@ -1,10 +1,14 @@
-"""Database integrity / FTS / index tests for the PostgreSQL foundation.
+"""Database integrity / search-index / index tests for the PostgreSQL foundation.
 
 Post-migration rewrite of the SQLite-era module: the ``novel_tag`` /
 ``favourite`` join tables are gone (tags live in ``novel.tags text[]``,
-``is_favourite`` is a ``novel`` column), FTS is the application-maintained
-``novel_search`` derived table (no FTS5 virtual table), and the PRAGMA
-kitchen-sink is replaced by PostgreSQL-native checks.
+``is_favourite`` is a ``novel`` column), keyword search is an expression GIN
+index over ``novel`` (no FTS5 virtual table, no derived search table), and the
+PRAGMA kitchen-sink is replaced by PostgreSQL-native checks.
+
+Search behaviour (index definition, char-gram mapping, freshness) lives in
+``tests/features/test_search_index.py`` and
+``tests/regression/test_search_index_freshness.py``.
 """
 
 from datetime import datetime, timezone
@@ -14,9 +18,9 @@ from sqlalchemy import inspect, text
 from sqlalchemy.exc import IntegrityError
 
 from copixiv.db.models import (
-    Author, FailedNovel, Novel, NovelSearch, Tag, TagAlias,
+    Author, FailedNovel, Novel, Tag, TagAlias,
 )
-from copixiv.features.novels.fts import FTSManager, gram_tokenize
+from copixiv.features.novels.search import gram_tokenize
 
 
 @pytest.fixture(autouse=True)
@@ -67,14 +71,6 @@ class TestForeignKeyIntegrity:
                 s.commit()
             s.rollback()
 
-    def test_novel_search_requires_valid_novel(self, session_factory):
-        """Inserting novel_search with non-existent novel_id should fail."""
-        with session_factory() as s:
-            s.add(NovelSearch(novel_id=999, search_text="x"))
-            with pytest.raises(IntegrityError):
-                s.commit()
-            s.rollback()
-
     def test_tag_alias_requires_valid_source_tag(self, session_factory):
         with session_factory() as s:
             s.add(Tag(name="valid_tag", reference_count=0))
@@ -95,20 +91,18 @@ class TestForeignKeyIntegrity:
 
 
 class TestCascadeDelete:
-    async def test_delete_novel_cleans_novel_search_and_failed_novel(
+    async def test_delete_novel_cleans_failed_novel_ledger(
         self, session_factory,
     ):
-        """Deleting a novel through the repository drops its novel_search row
-        (FK CASCADE) and its failure-ledger row (explicit cleanup — the
-        ledger has no FK by design)."""
+        """Deleting a novel through the repository drops its failure-ledger row
+        (explicit cleanup — the ledger has no FK by design).  The search index
+        needs no cleanup: it is an expression index over ``novel``."""
         from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 
         with session_factory() as s:
             s.add(Author(author_id=1, author_name="a"))
             s.flush()
             s.add(Novel(id=1, title="T", author_id=1, path="/tmp/t.txt"))
-            s.flush()
-            s.add(NovelSearch(novel_id=1, search_text="t a g"))
             s.add(FailedNovel(
                 novel_id=1, failure_type="download", error_message="e",
                 failed_times=1, last_failed_at=datetime.now(timezone.utc),
@@ -118,7 +112,7 @@ class TestCascadeDelete:
             await SQLAlchemyNovelRepository(s).delete(1)
             s.commit()
 
-            assert s.get(NovelSearch, 1) is None
+            assert s.get(Novel, 1) is None
             assert s.get(FailedNovel, 1) is None
 
 
@@ -155,108 +149,6 @@ class TestIndexesExist:
         assert not missing, f"Missing indexes: {missing}"
 
 
-class TestNovelSearchFTS:
-    def test_batch_rebuild_is_idempotent(self, session_factory):
-        with session_factory() as s:
-            fts = FTSManager(s)
-            fts.batch_rebuild_fts()
-            s.commit()
-            fts.batch_rebuild_fts()
-            s.commit()
-
-    def test_health_check_empty_db(self, session_factory):
-        with session_factory() as s:
-            s.add(Author(author_id=1, author_name="a"))
-            s.commit()
-            fts = FTSManager(s)
-            fts.batch_rebuild_fts()
-            s.commit()
-            result = fts.check_fts_health()
-            assert result["fts_table_exists"] is True
-            assert result["is_healthy"] is True
-            assert result["novel_count"] == 0
-            assert result["fts_entry_count"] == 0
-
-    def test_health_check_with_novel(self, session_factory):
-        with session_factory() as s:
-            s.add(Author(author_id=1, author_name="auth"))
-            s.flush()
-            s.add(Novel(id=1, title="Test", author_id=1, path="/tmp/t.txt"))
-            s.commit()
-            fts = FTSManager(s)
-            fts.batch_rebuild_fts()
-            s.commit()
-            result = fts.check_fts_health()
-            assert result["is_healthy"] is True
-            assert result["novel_count"] == 1
-            assert result["fts_entry_count"] == 1
-            assert result.get("orphan_entries", 0) == 0
-
-    def test_incremental_update(self, session_factory):
-        with session_factory() as s:
-            s.add(Author(author_id=1, author_name="auth"))
-            s.flush()
-            s.add(Novel(id=1, title="Test Novel", author_id=1, path="/tmp/t.txt"))
-            s.commit()
-            fts = FTSManager(s)
-            fts.batch_rebuild_fts()
-            s.commit()
-            s.add(Novel(id=2, title="Second", author_id=1, path="/tmp/t2.txt"))
-            s.commit()
-            fts.update_novel_fts_index([2])
-            s.commit()
-            result = fts.check_fts_health()
-            assert result["fts_entry_count"] == 2
-
-    def test_keyword_matches_tag_only_text(self, session_factory):
-        """Tag-only keywords are searchable through novel_search."""
-        from copixiv.features.novels.repo import (
-            BaseQueryBuilder, fts_query_to_pg,
-        )
-
-        # The repo's tsquery phrase wrapping: bare gram → '...' single-quote phrase.
-        tsquery = fts_query_to_pg(BaseQueryBuilder._build_fts_query_string("neko"))
-        with session_factory() as s:
-            s.add(Author(author_id=1, author_name="作者"))
-            s.flush()
-            s.add(Novel(id=1, title="无标题的测试小说", author_id=1,
-                        path="/tmp/1.txt", tags=["neko", "cyberpunk2077"]))
-            s.add(Novel(id=2, title="另一篇测试小说", author_id=1,
-                        path="/tmp/2.txt", tags=["日常"]))
-            s.commit()
-            fts = FTSManager(s)
-            fts.batch_rebuild_fts()
-            s.commit()
-
-        with session_factory() as s:
-            hits = s.execute(
-                text(
-                    "SELECT novel_id FROM novel_search "
-                    "WHERE to_tsvector('simple', search_text) "
-                    "@@ to_tsquery('simple', :q)"
-                ),
-                {"q": tsquery},
-            ).scalars().all()
-            assert hits == [1]
-
-    def test_missing_search_row_detected_by_health_check(self, session_factory):
-        """A novel without a novel_search row is reported by the health check."""
-        with session_factory() as s:
-            s.add(Author(author_id=1, author_name="作者"))
-            s.flush()
-            s.add(Novel(id=1, title="标题", author_id=1, path="/tmp/1.txt"))
-            s.commit()
-            fts = FTSManager(s)
-            fts.batch_rebuild_fts()
-            s.commit()
-            # Remove just the search row → missing_entries > 0.
-            s.execute(text("DELETE FROM novel_search WHERE novel_id = 1"))
-            s.commit()
-            result = fts.check_fts_health()
-            assert result["is_healthy"] is False
-            assert result["missing_entries"] >= 1
-
-
 class TestGramTokenize:
     """Character-unigram tokeniser — the single source of truth (R1 guard)."""
 
@@ -284,44 +176,18 @@ class TestGramTokenize:
     def test_whitespace_inside_text_is_skipped(self):
         assert gram_tokenize("哈利 波特") == "哈 利 波 特"
 
-    def test_emoji_maps_to_placeholder(self):
-        assert gram_tokenize("😀😀") == "龖 龖"
+    def test_non_ascii_symbols_are_kept(self):
+        # The simple tokeniser recognises every non-ASCII character, so CJK
+        # punctuation and emoji stay addressable as themselves (only ASCII
+        # punctuation collapses to the placeholder).
+        assert gram_tokenize("😀😀") == "😀 😀"
+        assert gram_tokenize("【前】") == "【 前 】"
+        assert gram_tokenize("。，") == "。 ，"
 
-
-class TestNeedsRebuild:
-    def test_missing_search_rows_needs_rebuild(self, session_factory):
-        with session_factory() as s:
-            s.add(Author(author_id=1, author_name="a"))
-            s.flush()
-            s.add(Novel(id=1, title="T", author_id=1, path="/tmp/t.txt"))
-            s.commit()
-            assert FTSManager(s).needs_rebuild() is True
-
-    def test_matching_counts_no_rebuild(self, session_factory):
-        with session_factory() as s:
-            s.add(Author(author_id=1, author_name="a"))
-            s.flush()
-            s.add(Novel(id=1, title="T", author_id=1, path="/tmp/t.txt"))
-            s.commit()
-            fts = FTSManager(s)
-            fts.batch_rebuild_fts()
-            s.commit()
-            assert fts.needs_rebuild() is False
-
-    def test_count_mismatch_needs_rebuild(self, session_factory):
-        with session_factory() as s:
-            s.add(Author(author_id=1, author_name="a"))
-            s.flush()
-            s.add(Novel(id=1, title="T", author_id=1, path="/tmp/t.txt"))
-            s.commit()
-            fts = FTSManager(s)
-            fts.batch_rebuild_fts()
-            s.commit()
-            assert fts.needs_rebuild() is False
-            # Add a novel WITHOUT building its novel_search row → mismatch.
-            s.add(Novel(id=2, title="T2", author_id=1, path="/tmp/t2.txt"))
-            s.commit()
-            assert fts.needs_rebuild() is True
+    def test_unicode_whitespace_is_dropped(self):
+        # Whitespace is dropped on both sides (index collapse == query split).
+        assert gram_tokenize("哈利\u3000波特") == "哈 利 波 特"
+        assert gram_tokenize("a\u00a0b") == "a b"
 
 
 class TestConnectionPoolConfig:

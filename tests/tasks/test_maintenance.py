@@ -1,4 +1,4 @@
-"""Tests for the maintenance tasks (epub status sync + FTS tasks)."""
+"""Tests for the maintenance tasks (epub status sync + search-index tasks)."""
 
 from pathlib import Path
 
@@ -121,8 +121,14 @@ class TestCheckEpubStalePlaceholders:
         assert _get_status(session_factory, 5) == 1
 
 
-class TestFtsMaintenanceTasks:
-    """D1/D3: rebuild_fts + check_fts maintenance tasks."""
+class TestSearchIndexMaintenanceTasks:
+    """rebuild_fts (REINDEX) + check_fts (index health) maintenance tasks."""
+
+    _CREATE_INDEX = (
+        "CREATE INDEX novel_search_gin ON novel USING gin ("
+        "to_tsvector('simple', copixiv_novel_text("
+        "title, author_name, series_name, tags)))"
+    )
 
     @staticmethod
     def _seed(sf):
@@ -132,19 +138,13 @@ class TestFtsMaintenanceTasks:
             s.add(Novel(id=1, title="标题", author_id=1, path="/tmp/1.txt"))
             s.commit()
 
-    @staticmethod
-    def _fts_count(sf) -> int:
-        with sf() as s:
-            return s.execute(text("SELECT COUNT(*) FROM novel_search")).scalar()
-
-    async def test_rebuild_fts_task_indexes_and_reports_count(self, session_factory):
+    async def test_rebuild_fts_task_reindexes(self, session_factory):
         self._seed(session_factory)
 
         result = await rebuild_fts(TaskContext(uow=SqlUnitOfWork(session_factory)))
 
         assert "重建完成" in result.summary
-        assert "1 本" in result.summary
-        assert self._fts_count(session_factory) == 1
+        assert "novel_search_gin" in result.summary
 
     async def test_check_fts_task_reports_healthy(self, session_factory):
         self._seed(session_factory)
@@ -153,27 +153,18 @@ class TestFtsMaintenanceTasks:
         result = await check_fts(TaskContext(uow=SqlUnitOfWork(session_factory)))
 
         assert "健康" in result.summary
-        assert "条目 1/1" in result.summary
+        assert "小说 1 本" in result.summary
 
-    async def test_check_fts_task_reports_missing_table(self, session_factory, pg_engine):
-        # PG always creates novel_search via migrations; simulate the old
-        # SQLite "FTS table missing" case by dropping it, then restore it.
+    async def test_check_fts_task_reports_missing_index(
+        self, session_factory, pg_engine,
+    ):
+        # Drop the expression index, then restore it (the search index is a
+        # plain index now, so "missing" is the only unhealthy state left).
         with pg_engine.begin() as conn:
-            conn.execute(text("DROP TABLE novel_search"))
+            conn.execute(text("DROP INDEX novel_search_gin"))
         try:
             result = await check_fts(TaskContext(uow=SqlUnitOfWork(session_factory)))
-            # PG 时代缺表输出为“异常 + UndefinedTable 错误”而非崩溃。
-            assert "异常" in result.summary
-            assert "novel_search" in result.summary
+            assert "索引不存在" in result.summary
         finally:
             with pg_engine.begin() as conn:
-                conn.execute(text(
-                    "CREATE TABLE novel_search ("
-                    " novel_id BIGINT PRIMARY KEY REFERENCES novel(id)"
-                    "   ON DELETE CASCADE,"
-                    " search_text TEXT NOT NULL)"
-                ))
-                conn.execute(text(
-                    "CREATE INDEX novel_search_gin ON novel_search "
-                    "USING gin (to_tsvector('simple', search_text))"
-                ))
+                conn.execute(text(self._CREATE_INDEX))

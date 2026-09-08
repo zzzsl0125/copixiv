@@ -28,7 +28,7 @@ from copixiv.tasks.maintenance import rebuild_tag_counts
 
 _ALL_TABLES = (
     "novel, author, series, tag, tag_alias, tag_preference, "
-    "failed_novel, novel_search, scheduled_task, task_history, "
+    "failed_novel, scheduled_task, task_history, "
     "token, setting, search_history"
 )
 

@@ -3,16 +3,17 @@
 postgres-migration: the novel_tag/favourite/special_follow join tables are
 gone.  Tags live in ``novel.tags text[]`` (+ GIN), ``is_favourite`` is a
 ``novel`` column, ``is_special_follow`` is an ``author`` column, and keyword
-search runs against the application-maintained ``novel_search`` derived table
-(``to_tsvector('simple', search_text) @@ to_tsquery('simple', '<gram>')``).
+search runs against the expression GIN index on ``novel`` itself
+(``to_tsvector('simple', copixiv_novel_text(...)) @@ to_tsquery(...)`` —
+see ``copixiv.features.novels.search``).
 ``reference_count`` is maintained by the statement-level ``sync_tag_refs``
 trigger (fires only on ``INSERT``/``UPDATE OF tags``/``DELETE``, aggregates
 the whole statement via transition tables), deleted
-rows cascade to ``novel_search``/``failed_novel`` via FK ``ON DELETE
-CASCADE``, and ``id = ANY($1)`` / ``tags @>`` / ``NOT (tags && ...)`` replace
+rows cascade to ``failed_novel`` cleanup (explicit — the ledger has no FK),
+and ``id = ANY($1)`` / ``tags @>`` / ``NOT (tags && ...)`` replace
 the SQLite-era ``IN``/``EXISTS`` adaptive filters and manual DELETE bookkeeping.
 
-``FTSManager`` moves separately to ``copixiv.features.novels.fts``.
+Keyword-search query construction lives in ``copixiv.features.novels.search``.
 """
 
 from __future__ import annotations
@@ -25,8 +26,7 @@ from typing import Any
 from sqlalchemy import (
     select, select as _select,
     func, Select, update, delete as _delete,
-    text as _text,
-    literal_column, exists as _exists, tuple_ as _tuple,
+    literal_column, tuple_ as _tuple,
     event,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -49,23 +49,7 @@ from copixiv.db.base import (
 )
 from copixiv.db.data_version import current_epoch
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
-from copixiv.features.novels.fts import FTSManager, gram_tokenize
-
-
-def fts_query_to_pg(fts_query: str) -> str:
-    """Convert a char-gram FTS query string into a PostgreSQL tsquery phrase.
-
-    ``BaseQueryBuilder._build_fts_query_string`` emits whitespace-joined char
-    grams (``哈 利 波 特``), with ``&`` between AND-ed segments.  PostgreSQL's
-    phrase syntax wraps each gram phrase in **single** quotes (a
-    ``to_tsquery('simple', '<gram>')`` phrase is ``'哈 利 波 特'`` — a
-    ``<->`` adjacency phrase).  This converts the unquoted gram text into the
-    value bound to ``to_tsquery('simple', :fts_query)``.
-    """
-    if not fts_query:
-        return ""
-    phrases = [p.strip() for p in fts_query.split("&") if p.strip()]
-    return " & ".join(f"'{p}'" for p in phrases)
+from copixiv.features.novels.search import keyword_condition
 
 
 # =========================================================================
@@ -80,49 +64,6 @@ class BaseQueryBuilder:
         self.session = session
         self.main_model = main_model
         self.params: dict[str, Any] = {}
-        self._fts_query: str | None = None
-
-    @property
-    def fts_query(self) -> str | None:
-        return self._fts_query
-
-    @staticmethod
-    def _build_fts_query_string(keyword_string: str) -> str:
-        """Convert a user keyword string into a char-gram phrase query.
-
-        Char-gram semantics (see :func:`copixiv.features.novels.fts.gram_tokenize`):
-
-        * the input is split on whitespace into segments — whitespace is an
-          explicit ``AND`` (mirrors the old "space-separated tokens" UX);
-        * a segment made up entirely of non-alphanumeric characters (a
-          "pure punctuation" segment such as ``---``) carries no search
-          meaning and is dropped — matching the rule that a query that
-          collapses to nothing filters nothing;
-        * every other segment is char-grammed (``gram_tokenize``), yielding a
-          space-separated phrase — a no-space query is therefore an exact
-          contiguous-substring match (``哈利波特`` → ``哈 利 波 特``);
-        * segments are joined with ``&`` (PostgreSQL tsquery AND); if nothing
-          survives the empty contract is preserved (``""`` means "no filter").
-
-        The emitted string carries **no quote characters** — the PostgreSQL
-        phrase quoting (single quotes) is applied by :func:`fts_query_to_pg`,
-        which the caller binds to ``to_tsquery('simple', ...)``.  (The FTS5
-        double-quote form is gone.)
-        """
-        if not keyword_string.strip():
-            return ""
-
-        phrases: list[str] = []
-        for seg in keyword_string.split():
-            # Drop pure-punctuation segments (e.g. ``---``): they contain no
-            # alphanumeric character, so they cannot form a meaningful phrase.
-            if not any(ch.isalpha() or ch.isnumeric() for ch in seg):
-                continue
-            phrases.append(gram_tokenize(seg))
-
-        if not phrases:
-            return ""
-        return " & ".join(phrases)
 
     def _apply_cursor(
         self, stmt: Select, cursor: dict | None, order_by: str,
@@ -210,7 +151,7 @@ class NovelQueryBuilder(BaseQueryBuilder):
         FROM novel
         WHERE novel.tags @> ARRAY[...]                 -- tag filters (AND)
           AND NOT (novel.tags && ARRAY[blocked])       -- blocked exclusion
-          AND to_tsvector('simple', novel_search.search_text) @@ to_tsquery('simple', '...')
+          AND to_tsvector('simple', copixiv_novel_text(...)) @@ to_tsquery(...)
           AND [thresholds / author_id / series_id / cursor]
         ORDER BY ...
         LIMIT ...
@@ -218,7 +159,9 @@ class NovelQueryBuilder(BaseQueryBuilder):
     ``is_favourite`` is a direct ``novel`` column; ``is_special_follow`` comes
     from ``author``.  Tag filtering uses ``tags @> ARRAY[...]`` (all names
     present = AND); blocked exclusion uses ``NOT (tags && ...)``.  Keyword
-    search uses a correlated EXISTS over ``novel_search``.
+    search is a plain predicate against the expression index on ``novel``
+    (:func:`copixiv.features.novels.search.keyword_condition`) — no join and no
+    separate search table.
     """
 
     def __init__(
@@ -273,7 +216,14 @@ class NovelQueryBuilder(BaseQueryBuilder):
         return main, self.spec
 
     def build_ids(self) -> Select:
-        """Build an ID-only query with the same filters, without limit."""
+        """Build an ID-only query with the same filters, without limit.
+
+        Ordered by id: callers treat the result as a set (「全选匹配」bulk
+        selection), so a deterministic order is not required for correctness —
+        but an unordered ID list made the API's output depend on the table's
+        physical row order (vacuum/insert churn), which is untestable and
+        surprising for clients.  The sort is over the matched id set only.
+        """
         conditions = self.spec.conditions
         tags, keywords, field_filters = self._categorize(conditions)
 
@@ -296,7 +246,7 @@ class NovelQueryBuilder(BaseQueryBuilder):
         exclude_ids = self.spec.exclude_ids
         if exclude_ids:
             stmt = stmt.where(self.main_model.id.not_in(exclude_ids))
-        return stmt
+        return stmt.order_by(self.main_model.id)
 
     def build_ids_in_scope(
         self, novel_ids: list[int], blocked_tag_names: frozenset[str],
@@ -462,41 +412,24 @@ class NovelQueryBuilder(BaseQueryBuilder):
     def _where_fts_filter(
         self, stmt: Select, keywords: set[str],
     ) -> Select:
-        """Add keyword filter via correlated EXISTS over ``novel_search``.
+        """Add the keyword filter (char-gram phrase match).
 
-        ``novel_search.search_text = build_search_text(title, author, series, tags)``
-        is the char-gram text; ``to_tsvector('simple', search_text) @@
-        to_tsquery('simple', '<gram phrase>')`` matches it.  The ``simple``
-        tokeniser keeps the ``龖`` placeholder, so punctuation queries work.
+        The predicate is built by
+        :func:`copixiv.features.novels.search.keyword_condition`, which turns
+        the keyword into a ``tsquery`` phrase list and matches it against the
+        expression index on ``novel`` (``to_tsvector('simple',
+        copixiv_novel_text(...))``).  The index is maintained by PostgreSQL
+        from the row itself, so this method never has to think about index
+        freshness.
+
+        A keyword that collapses to nothing (e.g. pure punctuation) yields no
+        condition — "empty keyword filters nothing", not "matches nothing".
         """
         if not keywords:
             return stmt
 
-        keyword_string = " ".join(filter(None, keywords))
-        if not keyword_string.strip():
-            return stmt
-
-        fts_query = self._build_fts_query_string(keyword_string)
-        self._fts_query = fts_query
-
-        # An empty query (e.g. a keyword made entirely of punctuation, or a
-        # keyword that collapsed to nothing) means "no filter".
-        if not fts_query:
-            return stmt
-
-        pg_query = fts_query_to_pg(fts_query)
-        exists_subq = _exists(
-            select(literal_column("1"))
-            .select_from(models.NovelSearch)
-            .where(
-                models.NovelSearch.novel_id == self.main_model.id,
-                _text(
-                    "to_tsvector('simple', novel_search.search_text) "
-                    "@@ to_tsquery('simple', :fts_query)"
-                ).bindparams(fts_query=pg_query),
-            )
-        )
-        return stmt.where(exists_subq)
+        condition = keyword_condition(" ".join(filter(None, keywords)))
+        return stmt if condition is None else stmt.where(condition)
 
     # ------------------------------------------------------------------
     # Internal: field filter tables (favourite, special_follow)
@@ -1093,7 +1026,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
     async def upsert_novels(
         self, novels: list[NovelDraft], force_update: list[str] | None = None
     ) -> int:
-        """Insert or update novels, then sync tags and the ``novel_search`` index."""
+        """Insert or update novels and sync their tags."""
         return await asyncio.to_thread(
             self._upsert_novels_sync, novels, force_update,
         )
@@ -1123,12 +1056,13 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
 
         # 3. Upsert rows (new rows get their tags inline; existing rows are
         #    updated in step 4 below).
-        new_ids, fts_dirty_ids = self._upsert_rows(
+        new_ids = self._upsert_rows(
             novels, existing_map, force_update, novel_tags_map,
         )
 
-        # 4. Set the tags array on each novel (popped in _resolve_tag_aliases),
-        #    flush once, then refresh novel_search for all affected ids.
+        # 4. Set the tags array on each novel (popped in _resolve_tag_aliases)
+        #    and flush once.  The search index needs no follow-up: it is an
+        #    expression index over these columns, maintained by PostgreSQL.
         changed_ids: set[int] = set()
         for nid, tag_list in novel_tags_map.items():
             novel = existing_map.get(nid)
@@ -1140,12 +1074,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
                     novel.tags = normalized
                     changed_ids.add(nid)
         self.session.flush()
-
-        # 5. Update novel_search index
-        fts = FTSManager(self.session)
-        all_dirty = set(new_ids) | set(fts_dirty_ids) | changed_ids
-        if all_dirty:
-            fts.update_novel_fts_index(list(all_dirty))
 
         return len(new_ids)
 
@@ -1201,12 +1129,12 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         existing_map: dict[int, Any],
         force_update: list[str],
         novel_tags_map: dict[int, set[str]] | None = None,
-    ) -> tuple[list[int], list[int]]:
+    ) -> list[int]:
         """Insert new or update existing novel rows.
 
         New rows receive their tag array inline (single insert, no
         separate tag UPDATE); existing rows keep their tags unless step 4
-        detects a real change.  Returns ``(new_ids, fts_dirty_ids)``.
+        detects a real change.  Returns the ids of the inserted rows.
         """
         update_fields_set = set([
             "like", "view", "title", "text", "caption",
@@ -1215,7 +1143,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         ] + force_update)
 
         new_ids: list[int] = []
-        fts_dirty_ids: list[int] = []
 
         for novel in novels:
             filtered = {
@@ -1239,13 +1166,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
                     filtered[int_field] = int(filtered[int_field])
 
             if existing:
-                fts_fields = (C.COL_TITLE, C.COL_AUTHOR_NAME, C.COL_SERIES_NAME)
-                if nid and any(
-                    key in filtered
-                    and str(getattr(existing, key, None)) != str(filtered[key])
-                    for key in fts_fields
-                ):
-                    fts_dirty_ids.append(nid)
                 for key, value in filtered.items():
                     if (getattr(existing, key, None) is None and value) or key in update_fields_set:
                         setattr(existing, key, value)
@@ -1265,11 +1185,11 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         from copixiv.log import logger
         all_ids = [int(n["id"]) for n in novels if n.get("id")]
         logger.info(
-            f"upsert_novels: {len(new_ids)} new, {len(fts_dirty_ids)} updated "
+            f"upsert_novels: {len(new_ids)} new "
             f"(out of {len(novels)} total, {len(all_ids)} IDs queried)"
         )
 
-        return new_ids, fts_dirty_ids
+        return new_ids
 
     async def update_field(self, novel_id: int, field: str, value: Any) -> None:
         if field not in self.UPDATABLE_NOVEL_FIELDS:
@@ -1282,10 +1202,10 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         """Delete a novel row.
 
         The ``sync_tag_refs`` trigger decrements ``tag.reference_count`` from
-        the deleted row's tags; the ``novel_search`` FK ``ON DELETE CASCADE``
-        drops its search row.  The ``failed_novel`` ledger deliberately has
-        no FK (failures may be recorded for never-persisted novels), so its
-        rows for this novel are removed explicitly.
+        the deleted row's tags; the search index needs no cleanup (it is an
+        expression index over ``novel``).  The ``failed_novel`` ledger
+        deliberately has no FK (failures may be recorded for never-persisted
+        novels), so its rows for this novel are removed explicitly.
         """
         novel = self.session.get(models.Novel, novel_id)
         if novel is None:
@@ -1332,24 +1252,14 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             .values(has_epub=status)
         )
 
-    async def rebuild_fts(self) -> int:
-        """Rebuild the ``novel_search`` derived table from scratch.
-
-        Returns the number of novels indexed.  Uses ``FTSManager.batch_rebuild_fts``.
-        """
-        count = await asyncio.to_thread(
-            FTSManager(self.session).batch_rebuild_fts
-        )
-        return count
-
     # ---- batch operations ----------------------------------------------------
 
     async def delete_many(self, novel_ids: list[int]) -> list[str]:
         """Delete many novels.
 
         Returns the ``path`` of each deleted novel (best-effort file cleanup
-        is the caller's job).  Deletion cascades to ``novel_search`` /
-        ``failed_novel`` and the trigger maintains ``reference_count``.
+        is the caller's job).  The ``failed_novel`` ledger is cleaned
+        explicitly and the trigger maintains ``reference_count``.
         """
         return await asyncio.to_thread(self._delete_many_sync, novel_ids)
 
@@ -1376,9 +1286,10 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
     ) -> int:
         """Add *tags* to every listed novel.
 
-        The ``sync_tag_refs`` trigger updates ``reference_count``; changed
-        ``novel_search`` rows are refreshed (tags are a search segment).
-        Returns the number of novels that actually received at least one new tag.
+        The ``sync_tag_refs`` trigger updates ``reference_count``; the search
+        index follows automatically (it is an expression index over
+        ``novel.tags``).  Returns the number of novels that actually received
+        at least one new tag.
         """
         return await asyncio.to_thread(
             self._add_tags_to_novels_sync, novel_ids, tags,
@@ -1411,9 +1322,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             .values(tags=expr)
             .returning(models.Novel.id)
         ).scalars().all())
-        if changed:
-            self.session.flush()
-            FTSManager(self.session).update_novel_fts_index(changed)
         return len(changed)
 
     async def remove_tags_from_novels(
@@ -1448,25 +1356,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             .values(tags=expr)
             .returning(models.Novel.id)
         ).scalars().all())
-        if changed:
-            self.session.flush()
-            FTSManager(self.session).update_novel_fts_index(changed)
         return len(changed)
-
-    def rewrite_tags(self, novel_id: int, new_tags: set[str]) -> None:
-        """Replace a novel's tag set, keeping ``tag.reference_count`` exact.
-
-        The ``sync_tag_refs`` trigger maintains ``reference_count`` from the
-        new array; ``novel_search`` is refreshed (tags are a search segment).
-        """
-        novel = self.session.get(models.Novel, novel_id)
-        if novel is None:
-            return
-        normalized = sorted(set(new_tags))
-        if list(novel.tags or []) != normalized:
-            novel.tags = normalized
-            self.session.flush()
-            FTSManager(self.session).update_novel_fts_index([novel_id])
 
 
 # =========================================================================

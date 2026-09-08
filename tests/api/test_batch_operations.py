@@ -19,7 +19,6 @@ from copixiv.core.exceptions import DomainError
 from copixiv.db.models import (
     Author, Novel, Tag,
 )
-from copixiv.features.novels.fts import FTSManager, gram_tokenize
 from copixiv.features.novels import api as novels
 
 
@@ -256,24 +255,23 @@ class TestBatchTags:
         assert r.status_code == 400
         assert "标签" in r.json()["detail"]
 
-    def test_add_tags_updates_fts_index(self, client, session_factory):
+    def test_add_tags_makes_tag_keyword_searchable(
+        self, client, session_factory,
+    ):
         _seed(session_factory, 1, "标题1", str(Path("/tmp/1.txt")))
-        with session_factory() as s:
-            FTSManager(s).batch_rebuild_fts()
-            s.commit()
 
         client.post("/api/novels/batch", json={
             "operation": "add_tags",
             "scope": {"mode": "ids", "novel_ids": [1]},
             "tags": ["幻想"],
         })
-        with session_factory() as s:
-            row = s.execute(
-                __import__("sqlalchemy").text(
-                    "SELECT search_text FROM novel_search WHERE novel_id = 1"
-                )
-            ).scalar()
-        assert row is not None and gram_tokenize("幻想") in row
+        # Tags are a search segment and the index is derived from the row, so
+        # the new tag is searchable with no explicit re-index call.
+        r = client.get("/api/novels/", params={
+            "keyword": "keyword:幻想", "exclude_blocked": "false",
+        })
+        assert r.status_code == 200
+        assert [n["id"] for n in r.json()["novels"]] == [1]
 
     def test_unknown_operation_is_400(self, client, session_factory):
         _seed(session_factory, 1, "标题1", str(Path("/tmp/1.txt")))

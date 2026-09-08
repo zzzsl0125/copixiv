@@ -2,8 +2,9 @@
 
 Post-migration rewrite: the repository methods now operate on the PG
 schema — ``novel.tags text[]`` (no ``novel_tag`` join table),
-``novel.is_favourite`` boolean (no ``favourite`` table), ``novel_search``
-derived table, and ``failed_novel`` FK.  The tests use the session-scoped
+``novel.is_favourite`` boolean (no ``favourite`` table), a keyword-search
+expression index on ``novel`` (no derived search table), and
+``failed_novel``'s explicit cleanup.  The tests use the session-scoped
 PG ``session_factory`` and a per-test truncation via ``clean_db``.
 """
 

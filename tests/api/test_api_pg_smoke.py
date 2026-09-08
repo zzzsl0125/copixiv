@@ -22,8 +22,7 @@ from fastapi.testclient import TestClient
 from copixiv.app import _domain_error_http_status
 from copixiv.config import AppConfig
 from copixiv.core.exceptions import DomainError
-from copixiv.db.models import Author, Novel, NovelSearch, Tag
-from copixiv.features.novels.fts import build_search_text
+from copixiv.db.models import Author, Novel, Tag
 from copixiv.features.novels import api as novels
 from copixiv.features.novels import history_api as search_history
 from copixiv.features.tags import preferences as tag_preferences
@@ -82,9 +81,10 @@ def client(session_factory, tmp_path):
 
 
 def _seed_dataset(session_factory, extra_ids=()):
-    """Insert a deterministic dataset (title/tags/search rows + authors)."""
+    """Insert a deterministic dataset (title/tags + authors)."""
     with session_factory() as s:
         # A small corpus: some carry R-18, one title contains 催, one is fav.
+        # No search rows to seed — the index is derived from the novel row.
         rows = [
             (1, "催眠治疗", ["R-18"], 5000, 5000, True),
             (2, "普通小说", ["日常"], 1000, 3000, False),
@@ -99,11 +99,6 @@ def _seed_dataset(session_factory, extra_ids=()):
                 path=f"/tmp/{nid}.txt", like=like, text=text,
                 tags=list(tags), is_favourite=fav,
             ))
-            s.flush()
-            s.add(NovelSearch(
-                novel_id=nid,
-                search_text=build_search_text(title, f"作者{nid}", None, tags),
-            ))
         for nid in extra_ids:
             s.add(Author(author_id=nid, author_name=f"作者{nid}"))
             s.flush()
@@ -111,11 +106,6 @@ def _seed_dataset(session_factory, extra_ids=()):
                 id=nid, title=f"临时{nid}", author_id=nid,
                 author_name=f"作者{nid}", path=f"/tmp/{nid}.txt",
                 tags=["SMOKE_TAG"], is_favourite=False,
-            ))
-            s.flush()
-            s.add(NovelSearch(
-                novel_id=nid,
-                search_text=build_search_text(f"临时{nid}", f"作者{nid}", None, ["SMOKE_TAG"]),
             ))
         s.commit()
 
@@ -224,7 +214,6 @@ def test_api_pg_smoke(client, session_factory):
     assert r.json() == {"matched": 1, "affected": 1}
     with session_factory() as s:
         assert s.get(Novel, 901) is None
-        assert s.get(NovelSearch, 901) is None  # FK cascade removes the search row
         assert s.query(Tag).filter_by(name="SMOKE_TAG").one().reference_count == 2
 
     # 7. Single delete cascades cleanly.
@@ -232,7 +221,6 @@ def test_api_pg_smoke(client, session_factory):
     assert r.status_code == 204
     with session_factory() as s:
         assert s.get(Novel, 903) is None
-        assert s.get(NovelSearch, 903) is None  # FK cascade removes the search row
         assert s.query(Tag).filter_by(name="SMOKE_TAG").one().reference_count == 1
 
     # 8. Misc endpoints respond normally.

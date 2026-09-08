@@ -197,49 +197,49 @@ async def sync_empty_name(ctx: TaskContext) -> TaskResult:
 
 @register("rebuild_fts")
 async def rebuild_fts(ctx: TaskContext) -> TaskResult:
-    """Rebuild the FTS5 index from scratch.
+    """Rebuild the keyword-search index (``REINDEX``).
 
-    Use this after upgrading an existing v1 database whose ``novel_fts``
-    rows predate the tags column — a rebuild is required before keyword
-    search can hit tag-only text.
+    The index is an expression index over ``novel`` maintained by PostgreSQL
+    (migration 0003), so there is no derived data to recompute — a rebuild is
+    physical index maintenance (bloat, after a bulk load).
     """
-    uow = ctx.uow
-    count = await run_write_transaction(
-        uow, lambda uw: SQLAlchemyNovelRepository(uw.session).rebuild_fts(),
-    )
+    from copixiv.features.novels.search import reindex
 
-    return TaskResult(summary=f"FTS 索引重建完成（{count} 本小说）")
+    uow = ctx.uow
+
+    async def _reindex(uw) -> None:
+        reindex(uw.session)
+
+    await run_write_transaction(uow, _reindex)
+
+    return TaskResult(summary="搜索索引重建完成（REINDEX novel_search_gin）")
 
 
 @register("check_fts")
 async def check_fts(ctx: TaskContext) -> TaskResult:
-    """FTS5 index health check — corruption, orphans, and missing entries.
+    """Keyword-search index health check — existence and validity.
 
-    Read-only (no write transaction).  Reports the index-entry/novel counts and
-    any orphan (index row without a novel) / missing (novel without an
-    index row) entries, so ops can decide whether a ``rebuild_fts`` run
-    is needed.
+    Read-only (no write transaction).  Content drift is impossible by
+    construction (the index is derived from the ``novel`` row), so the check
+    reports whether the index exists and is valid, plus the novel count.
     """
-    from copixiv.features.novels.fts import FTSManager
+    from copixiv.features.novels.search import index_health
 
     uow = ctx.uow
 
     async with uow.begin():
-        result = FTSManager(uow.session).check_fts_health()
+        result = index_health(uow.session)
 
-    if not result["fts_table_exists"]:
-        return TaskResult(summary="FTS 检查: 索引表不存在，需运行 rebuild_fts")
-
-    parts = [f"条目 {result['fts_entry_count']}/{result['novel_count']}"]
-    if result.get("orphan_entries"):
-        parts.append(f"孤儿 {result['orphan_entries']}")
-    if result.get("missing_entries"):
-        parts.append(f"缺失 {result['missing_entries']}")
-    if result.get("error"):
-        parts.append(f"错误 {result['error']}")
+    if not result["index_exists"]:
+        return TaskResult(summary="搜索索引检查: 索引不存在，需运行 rebuild_fts")
 
     status = "健康" if result["is_healthy"] else "异常"
-    return TaskResult(summary=f"FTS 检查({status}): " + ", ".join(parts))
+    parts = [f"小说 {result['novel_count']} 本"]
+    if not result["is_valid"]:
+        parts.append("索引无效（需 rebuild_fts）")
+    if result.get("error"):
+        parts.append(f"错误 {result['error']}")
+    return TaskResult(summary=f"搜索索引检查({status}): " + ", ".join(parts))
 
 
 @register("fix_series_index")

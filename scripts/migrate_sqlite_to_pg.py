@@ -8,8 +8,9 @@ PostgreSQL target database (the greenfield schema from ``db_greenfield_design.md
 - ``novel_tag`` join table  → ``novel.tags text[]`` (per-novel unique set).
 - ``favourite`` / ``special_follow`` join tables → ``novel.is_favourite`` /
   ``author.is_special_follow`` booleans.
-- ``novel_fts`` char-gram source → ``novel_search.search_text`` (computed via
-  ``gram_tokenize`` over title + author_name + series_name + tags).
+- ``novel_fts`` → nothing to migrate: keyword search is an expression index
+  over ``novel`` maintained by PostgreSQL (migration 0003), so the migrated
+  rows are searchable as soon as they are inserted.
 - Pluraled SQLite table names → singular PG names
   (``scheduled_tasks`` → ``scheduled_task``, ``settings`` → ``setting``,
   ``tag_aliases`` → ``tag_alias``, ``tag_preferences`` → ``tag_preference``,
@@ -42,10 +43,7 @@ import sqlite3
 from psycopg2.extras import Json, execute_values
 from sqlalchemy.engine import make_url
 
-# Make copixiv importable for gram_tokenize (independent of how alembic configures src).
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-from copixiv.features.novels.fts import build_search_text, gram_tokenize
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -227,7 +225,7 @@ def _load_tags_by_novel(src) -> dict[int, list[str]]:
     return tags_by
 
 
-def migrate_novel_and_search(src, cur, author_ids: set[int], series_ids: set[int]) -> tuple[int, dict[int, str]]:
+def migrate_novel(src, cur, author_ids: set[int], series_ids: set[int]) -> int:
     tags_by = _load_tags_by_novel(src)
     q = f"""
         SELECT n.*,
@@ -238,7 +236,6 @@ def migrate_novel_and_search(src, cur, author_ids: set[int], series_ids: set[int
     """
     rows = [dict(r) for r in src.execute(q)]
     novel_rows = []
-    search_map: dict[int, str] = {}
     for r in rows:
         nid = r["id"]
         tags = sorted(tags_by.get(nid, []))
@@ -255,11 +252,6 @@ def migrate_novel_and_search(src, cur, author_ids: set[int], series_ids: set[int
             _convert_dt(r["create_time"]), r["has_epub"] or 0, r["shuffle"] or 0,
             tags, _b(r["fav"]),
         ))
-        # Single source of truth for search_text (shared with the runtime
-        # write path, ``copixiv.features.novels.fts.build_search_text``).
-        search_map[nid] = build_search_text(
-            title, author_name, series_name, tags,
-        )
 
     execute_values(
         cur,
@@ -272,17 +264,7 @@ def migrate_novel_and_search(src, cur, author_ids: set[int], series_ids: set[int
         novel_rows,
         page_size=5000,
     )
-    return len(novel_rows), search_map
-
-
-def migrate_novel_search(cur, search_map: dict[int, str]) -> int:
-    execute_values(
-        cur,
-        "INSERT INTO novel_search (novel_id, search_text) VALUES %s",
-        [(nid, txt) for nid, txt in search_map.items()],
-        page_size=5000,
-    )
-    return len(search_map)
+    return len(novel_rows)
 
 
 def migrate_failed_novel(src, cur) -> int:
@@ -446,7 +428,7 @@ def _reset_target(cur) -> None:
     cur.execute(
         """
         TRUNCATE novel, author, series, tag, tag_alias, tag_preference,
-                 failed_novel, novel_search, scheduled_task, task_history,
+                 failed_novel, scheduled_task, task_history,
                  token, setting, search_history
         RESTART IDENTITY CASCADE
         """
@@ -502,9 +484,8 @@ def main(argv: list[str]) -> int:
         # reference_count set-based below (the trigger is re-enabled before
         # commit so runtime writes are covered again).
         cur.execute("ALTER TABLE novel DISABLE TRIGGER trg_sync_tag_refs")
-        n_novel, search_map = migrate_novel_and_search(src, cur, author_ids, series_ids)
+        n_novel = migrate_novel(src, cur, author_ids, series_ids)
         counts["novel"] = n_novel
-        counts["novel_search"] = migrate_novel_search(cur, search_map)
         counts["failed_novel"] = migrate_failed_novel(src, cur)
         counts["scheduled_task"] = migrate_scheduled_task(src, cur)
         counts["task_history"] = migrate_task_history(src, cur)
@@ -540,7 +521,7 @@ def main(argv: list[str]) -> int:
         pg.close()
         src.close()
 
-    for name in ("author", "series", "novel", "novel_search", "failed_novel",
+    for name in ("author", "series", "novel", "failed_novel",
                  "tag", "tag_alias", "tag_preference", "scheduled_task",
                  "task_history", "token", "setting", "search_history"):
         print(f"  {name:<16} {counts.get(name, 0):>8} rows")

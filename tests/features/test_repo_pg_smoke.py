@@ -20,10 +20,9 @@ from sqlalchemy import func, select, text, delete as _delete
 
 from copixiv.core.services import QuerySpec, parse_search_keyword
 from copixiv.db.models import (
-    Author, Novel, NovelSearch, FailedNovel, Tag, TagPreference,
+    Author, Novel, FailedNovel, Tag, TagPreference,
 )
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
-from copixiv.features.novels.fts import build_search_text
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
 
@@ -79,11 +78,13 @@ async def test_keyword_search_single_quote_phrase(seeded_db, session_factory):
                 exclude_blocked_tags=False,
             )
         )
-    # Reference: direct to_tsvector @@ to_tsquery over novel_search.
+    # Reference: the same expression predicate evaluated straight in SQL.
     ref = _sql_scalar(
         seeded_db,
-        "SELECT count(*) FROM novel_search WHERE "
-        "to_tsvector('simple', search_text) @@ to_tsquery('simple', '催')",
+        "SELECT count(*) FROM novel WHERE "
+        "to_tsvector('simple', copixiv_novel_text("
+        "title, author_name, series_name, tags)) "
+        "@@ to_tsquery('simple', '催')",
     )
     assert ref > 0
     assert len(res["novels"]) == ref  # list is unpaged up to per_page=100
@@ -223,7 +224,7 @@ async def test_add_remove_tags_reference_count(seeded_db, session_factory):
 
 
 async def test_delete_many_cascade(seeded_db, session_factory):
-    """delete_many cascades to novel_search/failed_novel and decrements refs."""
+    """delete_many drops the rows, the failure ledger, and decrements refs."""
     tag_name = "SMOKE_CASCADE_TAG"
     author_id = 999_999_991
     new_ids = [190_000_001, 190_000_002]
@@ -236,21 +237,12 @@ async def test_delete_many_cascade(seeded_db, session_factory):
             ))
         s.flush()
         for nid in new_ids:
-            s.add(NovelSearch(
-                novel_id=nid,
-                search_text=build_search_text(f"cascade{nid}", "", None, [tag_name]),
-            ))
             s.add(FailedNovel(
                 novel_id=nid, failure_type="x", error_message="e",
                 failed_times=1, last_failed_at=datetime.now(timezone.utc),
             ))
         s.commit()
 
-        assert _sql_scalar(
-            seeded_db,
-            "SELECT count(*) FROM novel_search WHERE novel_id = ANY(:ids)",
-            {"ids": new_ids},
-        ) == 2
         assert _sql_scalar(
             seeded_db,
             "SELECT count(*) FROM failed_novel WHERE novel_id = ANY(:ids)",
@@ -264,11 +256,6 @@ async def test_delete_many_cascade(seeded_db, session_factory):
         assert _sql_scalar(
             seeded_db,
             "SELECT count(*) FROM novel WHERE id = ANY(:ids)",
-            {"ids": new_ids},
-        ) == 0
-        assert _sql_scalar(
-            seeded_db,
-            "SELECT count(*) FROM novel_search WHERE novel_id = ANY(:ids)",
             {"ids": new_ids},
         ) == 0
         assert _sql_scalar(

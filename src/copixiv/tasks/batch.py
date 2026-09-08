@@ -5,7 +5,7 @@ Registered under ``batch_operation`` / ``batch_export``.  Runs inside the
 task system (the user can close the page — the operation continues).
 
 Chunking policy — decided by benchmarking on the real 232k database
-(``scripts/bench_batch_chunks.py`` / ``scripts/bench_fts_cost.py``):
+(``scripts/bench_batch_chunks.py``):
 
 - A single whole-library delete of 232,531 rows completes in ~60s in ONE
   transaction — no SQLite variable-limit error (232k < 250k compiled

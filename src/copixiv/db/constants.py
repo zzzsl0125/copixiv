@@ -10,11 +10,8 @@ DEPRECATED and must be cleaned up in phase 2.
 
 # Table Names
 TABLE_NOVEL = "novel"
-# DEPRECATED placeholder (phase 2): the char-gram search table is now
-# ``novel_search``; old FTSManager code (``features/novels/fts.py``) still
-# references ``TABLE_NOVEL_FTS`` and must be rewritten in phase 2.
-TABLE_NOVEL_FTS = "novel_search"
-TABLE_NOVEL_SEARCH = "novel_search"
+# (No search-table constant: keyword search is an expression GIN index on
+# ``novel`` itself — migration 0003, owned by features/novels/search.py.)
 TABLE_AUTHOR = "author"
 TABLE_SERIES = "series"
 TABLE_TAG = "tag"

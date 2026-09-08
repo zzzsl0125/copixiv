@@ -29,14 +29,17 @@ def _head_revision() -> str:
 
 
 EXPECTED_TABLES = {
-    "author", "series", "novel", "novel_search", "tag", "tag_alias",
+    "author", "series", "novel", "tag", "tag_alias",
     "tag_preference", "setting", "scheduled_task", "task_history",
     "token", "failed_novel", "search_history",
 }
 
 # Tables that the greenfield schema eliminated (replaced by novel.tags /
-# novel.is_favourite etc.).
-REMOVED_TABLES = {"novel_tag", "favourite", "special_follow", "novel_fts"}
+# novel.is_favourite etc.), plus the search derived table that migration 0003
+# replaced with an expression index on ``novel``.
+REMOVED_TABLES = {
+    "novel_tag", "favourite", "special_follow", "novel_fts", "novel_search",
+}
 
 
 class TestMigrations:
@@ -108,7 +111,8 @@ def test_fresh_database_upgrades_to_head():
     engine = create_engine(url)
     try:
         insp = inspect(engine)
-        assert ({"novel", "author", "tag", "novel_search"} <= set(insp.get_table_names()))
+        assert ({"novel", "author", "tag"} <= set(insp.get_table_names()))
+        assert "novel_search" not in insp.get_table_names()
         with engine.connect() as conn:
             rev = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
         assert rev == _head_revision()

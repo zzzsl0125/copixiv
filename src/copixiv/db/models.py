@@ -171,42 +171,23 @@ class Novel(Base):
             "id",
             postgresql_where=sa_text("is_favourite"),
         ),
-    )
-
-    def __repr__(self) -> str:
-        return f"<Novel(id={self.id}, title='{self.title}')>"
-
-
-class NovelSearch(Base):
-    """Application-maintained char-gram search table (``novel_search``).
-
-    ``search_text`` is the char-gram text computed by
-    ``copixiv.features.novels.fts.gram_tokenize`` over
-    ``title + author_name + series_name + tags``.  The GIN index on
-    ``to_tsvector('simple', search_text)`` is what keyword search uses.
-    """
-
-    __tablename__ = C.TABLE_NOVEL_SEARCH
-
-    novel_id = Column(
-        BigInteger,
-        ForeignKey(f"{C.TABLE_NOVEL}.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    search_text = Column(Text, nullable=False)
-
-    novel = relationship("Novel")
-
-    __table_args__ = (
+        # Keyword search: an expression index over the row's own searchable
+        # columns.  PostgreSQL maintains it from the row being written, so it
+        # cannot drift from the data (migration 0003; the database functions
+        # ``copixiv_gram`` / ``copixiv_novel_text`` own the token stream, and
+        # ``features/novels/search.py`` mirrors the mapping for queries).
         Index(
             "novel_search_gin",
-            sa_text("to_tsvector('simple', search_text)"),
+            sa_text(
+                "to_tsvector('simple', copixiv_novel_text("
+                "title, author_name, series_name, tags))"
+            ),
             postgresql_using="gin",
         ),
     )
 
     def __repr__(self) -> str:
-        return f"<NovelSearch(novel_id={self.novel_id})>"
+        return f"<Novel(id={self.id}, title='{self.title}')>"
 
 
 class Tag(Base):
