@@ -15,10 +15,28 @@ from pydantic import BaseModel, Field, model_validator
 
 
 class EpubStatus(IntEnum):
-    """EPUB conversion status for a novel."""
+    """EPUB conversion status for a novel.
+
+    ``NO`` and ``NO_IMAGES`` are different facts, and conflating them cost
+    this project five weeks of invisible breakage (2026-09 追溯):
+
+    * ``NO`` (0) — **unclassified**.  A legacy value, and the column default.
+      It carries no claim: the row may or may not need an EPUB, and only the
+      text file can settle it.  The reconciler re-examines these rows so they
+      eventually reach a terminal state.
+    * ``NO_IMAGES`` (3) — **terminal: nothing to build**.  The body text is
+      known to contain no image placeholder, so an EPUB would add nothing.
+      The reconciler never re-reads the text of a row in this state.
+
+    Historically ``0`` meant "no images" *and* "don't look at me" at once
+    (the reconciler filtered on ``has_epub > 0``), so rows demoted by the
+    stale-image rule — or clobbered to 0 by every metadata refresh — could
+    never be repaired.  Splitting the two meanings is the point.
+    """
     NO = 0
     PENDING = 1
     DONE = 2
+    NO_IMAGES = 3
 
 
 class Novel(BaseModel):

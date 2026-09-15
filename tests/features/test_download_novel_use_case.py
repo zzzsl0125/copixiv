@@ -61,8 +61,9 @@ class FakeStorage:
 
 
 class FakeImageDownloader:
-    def __init__(self, failures=None):
+    def __init__(self, failures=None, outcomes=None):
         self._failures = failures or []
+        self._outcomes = dict(outcomes or {})
         self.processed: list[int] = []
 
     async def process_novel_assets(self, data, force=False):
@@ -71,6 +72,23 @@ class FakeImageDownloader:
 
     async def await_all(self):
         return list(self._failures)
+
+    def drain_outcomes(self, ids=None) -> dict[int, str]:
+        """Producer-reported asset outcomes (see ImageDownloader).
+
+        ``ids`` mirrors the real scoped signature: only the given novels are
+        drained, the rest stay for their own round.
+        """
+        if ids is None:
+            outcomes, self._outcomes = self._outcomes, {}
+            return outcomes
+        wanted = set(ids)
+        outcomes = {
+            nid: out for nid, out in self._outcomes.items() if nid in wanted
+        }
+        for nid in outcomes:
+            self._outcomes.pop(nid, None)
+        return outcomes
 
 
 def _webview(novel_id: int, title: str = "新小说", text: str = "正文内容"):

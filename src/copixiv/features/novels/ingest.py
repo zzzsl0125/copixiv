@@ -27,6 +27,7 @@ from copixiv.db.uow import SqlUnitOfWork
 from copixiv.db.write_lock import run_write_transaction
 
 from copixiv.core.draft import NovelDraft, NovelInfoLike, build_from_novel_info
+from copixiv.core.models import EpubStatus
 from copixiv.core.services import is_chinese, safe_get
 from copixiv.features.novels.download_novel import fetch_novel_and_assets
 from copixiv.features.novels.persist import persist_novels
@@ -363,8 +364,25 @@ async def ingest(
     # disk (no "downloaded but EPUB not ready yet" race).  Failures are
     # collected and persisted in the same transaction as the downloads.
     asset_failures: list[tuple[int, str]] = []
+    asset_outcomes: dict[int, str] = {}
     if image_downloader is not None:
         asset_failures = await image_downloader.await_all()
+        # Producer-reported outcomes: the EPUB pipeline itself says which
+        # novels it finished ("done"), did not need ("skipped") or failed
+        # ("failed").  Drained right after the gate — every worker of this
+        # round has registered by then.  "done" is what turns the draft's
+        # has_epub=1 (PENDING) into 2 (DONE) in the persist transaction,
+        # instead of waiting for the weekly reconciler (2026-09 根因:
+        # "做完不置位").
+        #
+        # Scoped to this round's ids: the ImageDownloader is application-wide
+        # and concurrent ingests (``failed_retry`` gathers several) share it,
+        # so an unscoped drain would let another round steal these outcomes —
+        # its UPDATE would then hit rows this transaction has not written yet
+        # and the DONE would be lost.
+        asset_outcomes = image_downloader.drain_outcomes(
+            d.id for d in downloaded
+        )
         if asset_failures:
             logger.warning(
                 f"ingest: {len(asset_failures)} novels failed "
@@ -394,6 +412,10 @@ async def ingest(
         if d.title:
             titles_by_id.setdefault(d.id, d.title)
 
+    done_ids = [
+        nid for nid, outcome in asset_outcomes.items() if outcome == "done"
+    ]
+
     async def _persist(uow) -> tuple[list[str], int]:
         titles, _new_author_ids, new_count = await _persist_batch(
             existing_meta, downloaded, uow,
@@ -401,6 +423,21 @@ async def ingest(
             failed_repo=FailedNovelRepository(uow.session),
             titles=titles_by_id,
         )
+        # Producer-side status write: the EPUB pipeline reports "done" only
+        # after the file is actually written, so the same transaction that
+        # upserted has_epub=1 (PENDING, from the draft) flips it to 2
+        # (DONE).  Order matters — upsert first, status second — and the
+        # single write transaction leaves no intermediate state visible.
+        # NOTE: the repository method is a coroutine (repo.py:1244) — the
+        # contract snippet omits the ``await``; without it the write is
+        # silently dropped.
+        if done_ids:
+            await SQLAlchemyNovelRepository(uow.session).update_has_epub_status(
+                done_ids, EpubStatus.DONE,
+            )
+            logger.info(
+                f"_persist: {len(done_ids)} novels marked EPUB DONE",
+            )
         if mapping:
             await writeback_author_names(mapping, uow)
         return titles, new_count

@@ -4,6 +4,7 @@ import asyncio
 import time
 
 from copixiv.core.models import Novel
+from copixiv.storage.epub.builder import EpubBuilder
 from copixiv.storage.image_downloader import ImageDownloader
 
 
@@ -125,7 +126,18 @@ class TestDownloadImageRealPath:
 
     def test_downloads_and_writes_file(self, tmp_path, monkeypatch):
         save_path = tmp_path / "img.jpg"
-        session = self.FakeSession(self.FakeResponse([b"hello", b" world"]))
+        # Real JPEG bytes: the download now verifies content (a non-image
+        # response is rejected and retried — 2026-09-16).
+        import io as _io
+
+        from PIL import Image as _Image
+
+        buf = _io.BytesIO()
+        _Image.new("RGB", (4, 4), (7, 7, 7)).save(buf, format="JPEG")
+        payload = buf.getvalue()
+        session = self.FakeSession(
+            self.FakeResponse([payload[:10], payload[10:]])
+        )
         monkeypatch.setattr(
             "copixiv.storage.image_downloader.create_image_session",
             lambda *a, **k: session,
@@ -137,12 +149,15 @@ class TestDownloadImageRealPath:
         finally:
             dl.shutdown()
 
-        assert save_path.read_bytes() == b"hello world"
+        assert save_path.read_bytes() == payload
         assert session.get_calls == 1
 
     def test_skips_existing_nonempty_file_without_network(self, tmp_path):
         save_path = tmp_path / "img.jpg"
-        save_path.write_bytes(b"already-there")
+        from PIL import Image as _Image
+
+        _Image.new("RGB", (4, 4), (5, 5, 5)).save(save_path)
+        before = save_path.read_bytes()
 
         dl = ImageDownloader(max_workers=1)
         try:
@@ -150,7 +165,8 @@ class TestDownloadImageRealPath:
         finally:
             dl.shutdown()
 
-        assert save_path.read_bytes() == b"already-there"
+        # A decodable cached file is reused as-is — no request is made.
+        assert save_path.read_bytes() == before
 
     def test_content_length_mismatch_fails_without_leaving_file(self, tmp_path, monkeypatch):
         save_path = tmp_path / "img.jpg"
@@ -170,3 +186,123 @@ class TestDownloadImageRealPath:
 
         assert not save_path.exists()
         assert list(tmp_path.glob("*.tmp")) == []
+
+
+class TestDrainOutcomes:
+    """``drain_outcomes()`` — the producer-reported outcome ledger.
+
+    It is the data source for flipping ``has_epub`` to DONE from inside the
+    persisting transaction (contract 修复1): "done" means the EPUB is on
+    disk, "skipped" means none is warranted, "failed" is already in
+    ``await_all``'s failure list.
+    """
+
+    @staticmethod
+    def _text(tmp_path, nid: int, body: str):
+        path = tmp_path / str(nid) / f"novel{nid}.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    async def test_done_after_epub_written(self, tmp_path):
+        body = "正文 [uploadedimage:1]"
+        path = self._text(tmp_path, 1, body)
+        dl = ImageDownloader(
+            max_workers=1, min_interval=0, epub_builder=EpubBuilder(),
+        )
+        try:
+            await dl.process_novel_assets(Novel(
+                id=1, title="novel1", author_id=0, path=str(path),
+                content=body,
+            ))
+            assert await dl.await_all() == []
+            assert dl.drain_outcomes() == {1: "done"}
+            assert dl.drain_outcomes() == {}      # drained: second read is empty
+        finally:
+            dl.shutdown()
+
+    async def test_done_when_valid_epub_already_exists(self, tmp_path):
+        body = "正文 [uploadedimage:1]"
+        path = self._text(tmp_path, 6, body)
+        assert EpubBuilder().create_epub(Novel(
+            id=6, title="novel6", author_id=0, path=str(path),
+        )) is True
+
+        dl = ImageDownloader(
+            max_workers=1, min_interval=0, epub_builder=EpubBuilder(),
+        )
+        try:
+            await dl.process_novel_assets(Novel(
+                id=6, title="novel6", author_id=0, path=str(path),
+                content=body, images={"1": {}},
+            ))
+            assert dl._futures == []              # short-circuit, no worker
+            assert dl.drain_outcomes() == {6: "done"}
+        finally:
+            dl.shutdown()
+
+    async def test_skipped_when_text_has_no_placeholder(self, tmp_path):
+        """``needs_epub=False``: the builder writes nothing → not DONE."""
+        path = self._text(tmp_path, 2, "纯文字正文")
+        dl = ImageDownloader(
+            max_workers=1, min_interval=0, epub_builder=EpubBuilder(),
+        )
+        try:
+            # images is non-empty, so the guard lets the worker decide from
+            # the body — the builder then returns True without writing.
+            await dl.process_novel_assets(Novel(
+                id=2, title="novel2", author_id=0, path=str(path),
+                content="纯文字正文", images={"1": {}},
+            ))
+            assert await dl.await_all() == []
+            assert dl.drain_outcomes() == {2: "skipped"}
+            assert not path.with_suffix(".epub").exists()
+        finally:
+            dl.shutdown()
+
+    async def test_skipped_when_api_payload_has_no_placeholder(self, tmp_path):
+        """Early return (no assets and no placeholder) → skipped, no submit."""
+        dl = ImageDownloader(max_workers=1)
+        try:
+            await dl.process_novel_assets(Novel(
+                id=3, title="novel3", author_id=0,
+                path=str(tmp_path / "3" / "novel3.txt"),
+                content="纯文字正文",
+            ))
+            assert dl._futures == []
+            assert dl.drain_outcomes() == {3: "skipped"}
+        finally:
+            dl.shutdown()
+
+    async def test_skipped_without_path(self):
+        dl = ImageDownloader(max_workers=1)
+        try:
+            await dl.process_novel_assets(Novel(
+                id=4, title="novel4", author_id=0, path=None,
+                content="正文 [uploadedimage:1]",
+            ))
+            assert dl.drain_outcomes() == {4: "skipped"}
+        finally:
+            dl.shutdown()
+
+    async def test_failed_when_create_epub_returns_false(self, tmp_path):
+        body = "正文 [uploadedimage:1]"
+        path = self._text(tmp_path, 5, body)
+
+        class FailingBuilder:
+            def create_epub(self, novel, needs_epub=None):
+                return False
+
+        dl = ImageDownloader(
+            max_workers=1, min_interval=0, epub_builder=FailingBuilder(),
+        )
+        try:
+            await dl.process_novel_assets(Novel(
+                id=5, title="novel5", author_id=0, path=str(path),
+                content=body,
+            ))
+            failures = await dl.await_all()
+            assert failures == [(5, "EPUB 生成失败: novel 5")]
+            assert dl.drain_outcomes() == {5: "failed"}
+        finally:
+            dl.shutdown()

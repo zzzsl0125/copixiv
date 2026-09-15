@@ -11,6 +11,7 @@ plain summary instead of incorrectly labelling results as "new novels".
 """
 
 from pathlib import Path
+import asyncio
 import time
 
 from copixiv.features.authors.resolve_names import collect_author_names, writeback_author_names
@@ -22,6 +23,7 @@ from copixiv.features.novels.repo import (
     SQLAlchemyNovelRepository,
     SQLAlchemySeriesRepository,
 )
+from copixiv.storage.epub.builder import is_valid_epub, resolve_epub_path
 from copixiv.log import logger
 
 from .kernel import TaskContext
@@ -32,14 +34,40 @@ from .kernel import register
 async def check_epub(ctx: TaskContext) -> TaskResult:
     """Synchronise ``has_epub`` status with actual files on disk.
 
-    * 1 (pending) + file exists        → 2 (completed)
-    * 2 (completed) + file gone        → 1 (pending)
-    * 1 (pending) + file missing      → 0 (downgraded) when the body text
-      no longer contains image placeholders (author removed the images)
-    * 1 (pending) + file missing      → 0 (downgraded) when the body still
-      has placeholders but no image file was ever downloaded and the last
-      attempt is stale (> 7 days) — the images are gone for good
-    * 1 (pending) + file missing      → stays pending otherwise
+    Every row is examined; ``0`` (unclassified, the legacy column default)
+    is classified into a real state instead of being skipped, which is what
+    made 3 118 demoted/legacy rows unreachable for five weeks:
+
+    * 1 (pending)   + valid file exists → 2 (completed)
+    * 1 (pending)   + valid file exists but the EPUB still contains raw
+      image placeholders → stays 1 (queued for regeneration)
+    * 1 (pending)   + valid file exists but embedded no image while the body
+      has placeholders → 1 (queued for regeneration)
+    * 2 (completed) + file gone         → 1 (pending)  [revert]
+    * 2 (completed) + file corrupt (not a zip) → 1 (pending) [revert]
+    * 0 (unclassified) + valid file + body has placeholders + the EPUB
+      actually embedded images → 2 (completed).  Heals the novels whose
+      EPUB was written but never marked, without trusting a file that was
+      written while its images were still missing.
+    * 0 (unclassified) + file missing + body has image placeholders
+      → 1 (pending): queue it for (re)generation.
+    * 1 or 0 + file missing + body has NO placeholders → 3 (no images).
+      This is the terminal "nothing to build" state.  It replaces the old
+      ``→ 0`` demotion, which reused the same value as "not yet classified"
+      and was therefore both invisible to this task and indistinguishable
+      from work still to do.
+    * any + file missing + placeholders but no image file was ever
+      downloaded and the last attempt is stale (> 7 days) → 3 (no images) —
+      the author removed the images, there is nothing left to embed.
+    * 1 (pending)   + file missing → stays pending otherwise
+
+    Cost: a ``3`` row with no file is skipped without touching the disk, and
+    a ``2`` row is skipped as soon as the file is a valid zip — so the
+    238 936-row sweep only re-reads text for rows that can still change
+    state, and ``0`` disappears after the first full pass.
+
+    The EPUB-content scans (:func:`_epub_has_placeholders`,
+    :func:`_epub_has_images`) only run for rows that need them.
     """
     from sqlalchemy import select as _select
     from copixiv.db import models
@@ -49,39 +77,37 @@ async def check_epub(ctx: TaskContext) -> TaskResult:
     async with uow.begin():
         stmt = _select(
             models.Novel.id, models.Novel.path, models.Novel.has_epub
-        ).where(models.Novel.has_epub > 0)
+        )
         rows = uow.session.execute(stmt).fetchall()
 
     if not rows:
         return TaskResult(summary="EPUB 状态检查: 无需修复")
 
+    # The sweep is file-I/O bound over every novel (238 936 rows measured in
+    # production) and takes minutes.  It must not monopolise the event loop:
+    # on 2026-09-14 a single run left every API endpoint timing out while it
+    # held the single worker thread — the dispatcher itself stalled behind
+    # it.  So the scan is chunked and offloaded to a *shared* thread pool,
+    # yielding to the event loop between chunks so HTTP requests keep being
+    # served while the sweep crawls through the disk.
     completed_ids: list[int] = []
     revert_ids: list[int] = []
-    downgrade_ids: list[int] = []
+    no_image_ids: list[int] = []
+    enable_ids: list[int] = []
     pending_ids: list[int] = []
 
-    for novel_id, path_str, has_epub_status in rows:
-        if path_str:
-            txt_path = Path(path_str)
-            epub_path = txt_path.with_suffix(".epub")
-            if epub_path.exists():
-                if has_epub_status == EpubStatus.PENDING:
-                    completed_ids.append(novel_id)
-            else:
-                if has_epub_status == EpubStatus.DONE:
-                    revert_ids.append(novel_id)
-                elif has_epub_status == EpubStatus.PENDING:
-                    if _txt_has_no_images(txt_path):
-                        downgrade_ids.append(novel_id)
-                    elif _no_images_ever_and_stale(txt_path, novel_id):
-                        downgrade_ids.append(novel_id)
-                    else:
-                        pending_ids.append(novel_id)
-        else:
-            if has_epub_status == EpubStatus.DONE:
-                revert_ids.append(novel_id)
-            elif has_epub_status == EpubStatus.PENDING:
-                pending_ids.append(novel_id)
+    for start in range(0, len(rows), _SWEEP_CHUNK):
+        chunk = rows[start:start + _SWEEP_CHUNK]
+        (
+            c_done, c_revert, c_noimg, c_enable, c_pending,
+        ) = await asyncio.to_thread(_sweep, chunk, start)
+        completed_ids += c_done
+        revert_ids += c_revert
+        no_image_ids += c_noimg
+        enable_ids += c_enable
+        pending_ids += c_pending
+        # Explicit yield: give the HTTP handlers a turn between chunks.
+        await asyncio.sleep(0)
 
     async def _apply(ids: list[int], status: EpubStatus) -> None:
         await run_write_transaction(
@@ -97,12 +123,16 @@ async def check_epub(ctx: TaskContext) -> TaskResult:
     if revert_ids:
         await _apply(revert_ids, EpubStatus.PENDING)
 
-    if downgrade_ids:
-        await _apply(downgrade_ids, EpubStatus.NO)
+    if enable_ids:
+        await _apply(enable_ids, EpubStatus.PENDING)
+
+    if no_image_ids:
+        await _apply(no_image_ids, EpubStatus.NO_IMAGES)
 
     logger.info(
         f"check_epub: completed={len(completed_ids)}, reverted={len(revert_ids)}, "
-        f"downgraded={len(downgrade_ids)}, pending={len(pending_ids)}",
+        f"enabled={len(enable_ids)}, no_images={len(no_image_ids)}, "
+        f"pending={len(pending_ids)}",
     )
 
     parts: list[str] = []
@@ -110,28 +140,224 @@ async def check_epub(ctx: TaskContext) -> TaskResult:
         parts.append(f"{len(completed_ids)} 本标记为已完成")
     if revert_ids:
         parts.append(f"{len(revert_ids)} 本回退为待处理")
-    if downgrade_ids:
-        parts.append(f"{len(downgrade_ids)} 本降级为无图")
+    if enable_ids:
+        parts.append(f"{len(enable_ids)} 本启用为待处理")
+    if no_image_ids:
+        parts.append(f"{len(no_image_ids)} 本确认为无图")
     if pending_ids:
         parts.append(f"{len(pending_ids)} 本仍待处理")
 
     return TaskResult(summary="EPUB 状态检查: " + (" ".join(parts) or "无变化"))
 
 
-def _txt_has_no_images(txt_path: Path) -> bool:
-    """True when the novel text file exists and has no image placeholders.
 
-    A missing/unreadable text file returns False — we cannot judge, so
-    the novel stays pending rather than being wrongly downgraded.
+
+def _sweep(
+    rows: list, offset: int = 0,
+) -> tuple[list[int], list[int], list[int], list[int], list[int]]:
+    """Classify *rows* against the files on disk (runs in a worker thread).
+
+    Pure file I/O + decisions — no database access, so it can be offloaded
+    with :func:`asyncio.to_thread` without touching the session.  *offset*
+    is the index of the first row within the whole table, used only so the
+    progress log reports absolute positions.  Returns
+    ``(completed, reverted, no_images, enabled, pending)`` id lists.
     """
+    completed_ids: list[int] = []
+    revert_ids: list[int] = []
+    no_image_ids: list[int] = []
+    enable_ids: list[int] = []
+    pending_ids: list[int] = []
+
+    for row_no, (novel_id, path_str, status) in enumerate(rows, 1):
+        if (offset + row_no) % 50000 == 0:
+            logger.info(f"check_epub: 已检查 {offset + row_no} 行")
+
+        if not path_str:
+            if status == EpubStatus.DONE:
+                revert_ids.append(novel_id)
+            elif status == EpubStatus.PENDING:
+                pending_ids.append(novel_id)
+            continue
+
+        txt_path = Path(path_str)
+        epub_path = resolve_epub_path(txt_path)
+        epub_ok = is_valid_epub(epub_path)
+
+        if status == EpubStatus.DONE:
+            # A file that is not a valid zip is as good as missing — two
+            # such novels were served to readers for months.
+            if not epub_ok:
+                revert_ids.append(novel_id)
+            continue
+
+        # Body scan — but a terminal row only needs it when a *readable* file
+        # appeared (the cheap zip check decides that first), and a DONE row
+        # was already handled above.  Keeps the steady-state sweep free of
+        # text I/O for the ~227 k terminal rows.
+        if status == EpubStatus.NO_IMAGES and not epub_ok:
+            continue
+
+        # The body (canonical source of truth) is read once per row.
+        # ``None`` means "cannot judge" — missing or unreadable text must
+        # never be turned into a terminal state.
+        canonical = _txt_has_images(txt_path)
+
+        if status == EpubStatus.NO_IMAGES:
+            # Terminal "nothing to build" — but a complete file may have
+            # appeared since (a rebuild, or a re-download that carried no
+            # placeholder).  A complete EPUB is the *only* promotion
+            # evidence; a bare zip is not (that is how shell/partial files
+            # got blessed as done before).
+            if epub_ok and _epub_is_complete(epub_path):
+                completed_ids.append(novel_id)
+            continue
+
+        if status == EpubStatus.PENDING:
+            if not epub_ok:
+                if canonical is False:
+                    no_image_ids.append(novel_id)
+                elif _no_images_ever_and_stale(txt_path, novel_id):
+                    no_image_ids.append(novel_id)
+                else:
+                    pending_ids.append(novel_id)
+            elif canonical is False:
+                # A file exists but the body needs nothing embedded.
+                no_image_ids.append(novel_id)
+            elif canonical is None:
+                pending_ids.append(novel_id)   # unreadable → do not judge
+            elif _epub_is_complete(epub_path):
+                completed_ids.append(novel_id)
+            else:
+                # Written while its images were missing: keep it queued so a
+                # later sweep rebuilds it instead of advertising it as done.
+                pending_ids.append(novel_id)
+            continue
+
+        # status == NO (unclassified, or any unexpected value).
+        if canonical is False:
+            no_image_ids.append(novel_id)
+        elif canonical is None:
+            continue          # unreadable text → stay unclassified
+        elif not epub_ok or not _epub_is_complete(epub_path):
+            # Missing file, or a file written before its images landed
+            # (nothing embedded) → queue it for proper (re)generation.
+            enable_ids.append(novel_id)
+        else:
+            completed_ids.append(novel_id)
+
+    return completed_ids, revert_ids, no_image_ids, enable_ids, pending_ids
+
+
+def _epub_is_complete(epub_path: Path) -> bool:
+    """True when *epub_path* is a usable book: no raw marker left, ≥1 image.
+
+    This is the single "the produced EPUB is actually finished" predicate.
+    Both the ``→ 2`` promotions (from ``1`` and from ``0``) use it, so a file
+    written while its images were missing can never be blessed as done no
+    matter which status the row happens to carry — the asymmetry that let a
+    leftover-marker EPUB be re-promoted from ``0`` to ``2`` and then never
+    re-examined.
+    """
+    return _epub_has_images(epub_path) and not _epub_has_placeholders(epub_path)
+
+
+def _txt_has_images(txt_path: Path) -> bool | None:
+    """``True`` / ``False`` for the body's placeholder state, ``None`` if unknown.
+
+    The tri-state matters: a *missing* or unreadable text file must never be
+    read as "no placeholders", because that would write the terminal
+    ``NO_IMAGES`` state on a novel that may well need an EPUB (one permission
+    or I/O hiccup would hide it forever).
+    """
+    return _scan_placeholder(txt_path)
+
+
+def _scan_placeholder(txt_path: Path) -> bool | None:
+    """Scan *txt_path* for an image placeholder without decoding it.
+
+    Returns True/False for "has placeholders"/"has none", or None when the
+    file cannot be read (missing/unreadable → the caller must not judge).
+
+    Chunked byte search: this runs over every row of the production table
+    (238 936 rows in the 2026-09 sweep), so it must not decode whole novels
+    into Python strings just to look for a marker.  ``overlap`` keeps a
+    marker that straddles a chunk boundary detectable.
+    """
+    needles = (b"[uploadedimage:", b"[pixivimage:")
+    overlap = max(len(n) for n in needles) - 1
     try:
-        text = txt_path.read_text(encoding="utf-8")
+        with open(txt_path, "rb") as fh:
+            tail = b""
+            while chunk := fh.read(1 << 20):
+                buf = tail + chunk
+                if any(n in buf for n in needles):
+                    return True
+                tail = buf[-overlap:]
     except OSError:
-        return False
-    return not has_image_placeholders(text)
+        return None
+    return False
 
 
 _STALE_DAYS = 7
+
+# Rows classified per worker-thread hop.  Small enough that the event loop
+# gets a turn (and HTTP keeps being served) several times a second, large
+# enough that the `to_thread` overhead stays negligible.
+_SWEEP_CHUNK = 4000
+
+
+def _epub_text(epub_path: Path) -> bytes | None:
+    """Concatenated XHTML members of *epub_path*, or None when unreadable."""
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(epub_path) as zf:
+            return b"".join(
+                zf.read(name)
+                for name in zf.namelist()
+                if name.endswith((".xhtml", ".html", ".htm"))
+            )
+    except (OSError, zipfile.BadZipFile, KeyError):
+        return None
+
+
+def _epub_has_placeholders(epub_path: Path) -> bool:
+    """True when the built EPUB still contains raw image placeholders.
+
+    Those novels were written while their images were missing: the marker
+    survived as literal text (216 of them in the 2026-09 audit), so the
+    EPUB is not actually finished and must not read as completed.
+    """
+    text = _epub_text(epub_path)
+    if text is None:
+        return False
+    return has_image_placeholders(text.decode("utf-8", errors="ignore"))
+
+
+def _epub_has_images(epub_path: Path) -> bool:
+    """True when the EPUB embedded at least one illustration.
+
+    Guards the promotion to ``2``: a file written from a draft whose images
+    had not landed yet is empty of pictures and must be regenerated instead
+    of being blessed as done.
+
+    Deliberately only counts the ``images/`` folder — the cover lives at
+    ``EPUB/cover.jpg`` and must not satisfy this check, or every cover-only
+    EPUB would pass as having its illustrations embedded.
+    """
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(epub_path) as zf:
+            # A real file entry, not the "images/" directory entry itself —
+            # an empty EPUB can carry the directory and nothing in it.
+            return any(
+                "images/" in info.filename and not info.is_dir()
+                for info in zf.infolist()
+            )
+    except (OSError, zipfile.BadZipFile):
+        return False
 
 
 def _no_images_ever_and_stale(txt_path: Path, novel_id: int) -> bool:
@@ -142,9 +368,11 @@ def _no_images_ever_and_stale(txt_path: Path, novel_id: int) -> bool:
     file — whose mtime tracks the last download attempt — is older than
     ``_STALE_DAYS``.  That means the images are gone for good (deleted by
     the author, or the URLs are dead); keeping such novels PENDING forever
-    just accumulates zombie rows.
+    just accumulates zombie rows.  The row goes to the terminal
+    ``NO_IMAGES`` state — never to the unclassified ``NO``, which used to
+    swallow rows into a state the reconciler could not even see.
 
-    Freshly-downloaded novels are never downgraded: their mtime is recent,
+    Freshly-downloaded novels are never abandoned: their mtime is recent,
     so they stay pending and can retry.
     """
     parent = txt_path.parent

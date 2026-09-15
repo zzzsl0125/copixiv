@@ -147,6 +147,11 @@ class Novel(Base):
     series_name = Column(Text, nullable=True)
     series_index = Column(Integer, nullable=True)
     create_time = Column(DateTime(timezone=True), nullable=True)
+    # 0 = 未分类（列默认值，迁移遗留，对账时会归类）
+    # 1 = 待处理（正文有图片占位符，EPUB 还没成）  2 = 已完成
+    # 3 = 确认无图（终态，无需 EPUB）
+    # 只有 update_has_epub_status 该写这一列（2026-09 追溯：元数据刷新
+    # 曾无条件写 0，把 22 万行"已完成"冲掉）。
     has_epub = Column(Integer, default=0, nullable=False)
     shuffle = Column(Integer, default=0, nullable=False)
     tags = Column(ARRAY(Text), nullable=False, server_default=sa_text("'{}'"))

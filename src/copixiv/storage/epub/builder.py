@@ -4,13 +4,14 @@ import html
 import io
 import os
 import re
+import zipfile
 from pathlib import Path
 
 from PIL import Image
 from ebooklib import epub
 
 from copixiv.core.draft import NovelDraft
-from copixiv.core.services import has_image_placeholders
+from copixiv.core.services import build_path, has_image_placeholders
 
 from copixiv.log import logger
 
@@ -19,12 +20,100 @@ _HAS_IMAGE_PATTERN = re.compile(
     r"\[(uploadedimage|pixivimage):([\d\-]+)\]"
 )
 
+
+def _fit_basename(path: Path, suffix: str) -> Path:
+    """``path`` with *suffix* swapped in, truncated to fit NAME_MAX.
+
+    Truncation happens on the **stem only**, in *path*'s own directory: a
+    caller may have built the path from a raw title (251-253 bytes, where the
+    transient ``.tmp`` write fails with Errno 36), and the fix must not move
+    the file — re-deriving it from ``download_dir`` gives a *relative* path
+    and would drop the EPUB outside the caller's tree entirely.
+
+    Idempotent: a basename that already fits is returned unchanged, which is
+    the case for every path that came from ``build_path``.
+    """
+    candidate = path.with_suffix(suffix)
+    raw = candidate.name.encode("utf-8")
+    if len(raw) <= _NAME_MAX_BUDGET:
+        return candidate
+    budget = _NAME_MAX_BUDGET - len(suffix.encode("utf-8"))
+    stem = path.stem.encode("utf-8")[:budget]
+    while True:
+        try:
+            stem_str = stem.decode("utf-8")     # never split a character
+            break
+        except UnicodeDecodeError:
+            stem = stem[:-1]
+    return path.with_name(f"{stem_str}{suffix}")
+
+
+def resolve_epub_path(txt_path: Path) -> Path:
+    """Where this novel's EPUB lives — same stem, else by ``_{id}`` suffix.
+
+    Truncation can make the EPUB's basename differ from the text file's (a
+    251-253 byte name loses its last characters so the ".tmp" write fits),
+    while every reader — ``check_epub``, the download API, the static mount —
+    derives the EPUB from the *stored text path*.  Falling back to a sibling
+    whose name ends in ``_{novel_id}.epub`` keeps such a novel findable
+    instead of looking like a missing file that gets queued and rebuilt on
+    every sweep.
+    """
+    direct = txt_path.with_suffix(".epub")
+    if direct.is_file():
+        return direct
+    stem = txt_path.stem
+    if "_" not in stem:
+        return direct
+    novel_id = stem.rsplit("_", 1)[1]
+    if not novel_id.isdigit():
+        return direct
+
+    # The truncated name shares a long prefix with the text stem (the tail is
+    # what got cut).  Longest common prefix first: it cannot collide with a
+    # neighbouring novel because the id digits are the last thing before the
+    # suffix.
+    for cut in range(len(stem), max(len(stem) - 40, 0), -1):
+        prefix = stem[:cut]
+        if len(prefix) < 8:
+            break
+        for candidate in sorted(txt_path.parent.glob(f"{prefix}*.epub")):
+            if candidate.is_file():
+                return candidate
+
+    # Fallback: an "_{id…}" fragment, since truncation can cut into the id
+    # itself ("…_275491.epub" for id 27549104).
+    for length in range(len(novel_id), 3, -1):
+        for candidate in sorted(
+            txt_path.parent.glob(f"*_{novel_id[:length]}*.epub")
+        ):
+            if candidate.is_file():
+                return candidate
+    return direct
+
+
+def is_valid_epub(epub_path: Path) -> bool:
+    """True when *epub_path* exists and is a readable zip container.
+
+    Deliberately weak: this answers "can it be opened as an EPUB at all",
+    not "is it complete".  A zip whose XHTML still holds raw image
+    placeholders passes here — use :func:`is_readable_epub` semantics plus a
+    content check (``check_epub`` does) before calling a novel done.
+    """
+    return epub_path.is_file() and zipfile.is_zipfile(epub_path)
+
+# Filesystem basename limit (bytes).  The write goes through a ".tmp"
+# sibling first, and ``build_path`` reserves that suffix; this constant is
+# the budget an already-built path must respect to be used as-is.
+_NAME_MAX_BUDGET = 250
+
 CSS_STYLE = """
 body { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; margin: 5%; text-align: justify; }
 h1 { text-align: center; }
 .author { text-align: center; font-style: italic; margin-bottom: 2em; }
 .illust-container { text-align: center; margin: 1em 0; }
 .illust { max-width: 100%; height: auto; }
+.illust-missing { border: 1px dashed #999; color: #777; padding: 1.5em; font-size: 0.9em; }
 .cover-container { text-align: center; height: 100%; display: flex; justify-content: center; align-items: center; }
 .cover-image { max-width: 100%; max-height: 100%; object-fit: contain; }
 """
@@ -33,15 +122,32 @@ h1 { text-align: center; }
 class EpubBuilder:
     """Creates EPUB files from downloaded novel text and images."""
 
-    def create_epub(self, novel: NovelDraft, compress_quality: int = 75) -> bool:
+    def create_epub(
+        self,
+        novel: NovelDraft,
+        compress_quality: int = 75,
+        needs_epub: bool | None = None,
+    ) -> bool:
         """Build an EPUB from the write-path *novel* draft.
 
         Typed input (docs/MODULARITY.md §M5): the builder consumes the
         write-path :class:`~copixiv.core.draft.NovelDraft`,
         never a raw dict.
 
-        Returns True if the EPUB was written successfully.
+        *needs_epub* lets the caller（the asset downloader, which holds the
+        API body）state whether the text actually contains image
+        placeholders: ``False`` skips the build entirely so a novel without
+        images never gains an empty-shell EPUB.  ``None``（default）means
+        "caller did not judge" — build unconditionally, which is what the
+        repair scripts and the regression tests rely on.
+
+        Returns True if the EPUB was written successfully.  A marker whose
+        image is missing is no longer a silent success: it degrades to a
+        visible 缺图 box (see :meth:`_replace_image_placeholders`).
         """
+        if needs_epub is False:
+            return True
+
         path_str = novel.path
         if not path_str:
             logger.error("No path provided in novel for EPUB creation")
@@ -87,6 +193,26 @@ class EpubBuilder:
             content, image_map, book, compress_quality
         )
 
+        # Output path: the text file's sibling.  The basename normally needs
+        # no work — ``build_path`` already budgeted it against NAME_MAX
+        # *including* the transient ".tmp" suffix, and it is the name the
+        # database stores, so keeping it is what makes the EPUB findable.
+        # A caller that assembled the path from a raw title instead (the
+        # repair scripts do) can sit at 251-253 bytes, where the ".tmp" write
+        # — created before ``os.replace`` — dies with Errno 36 and no EPUB is
+        # produced at all (3 novels, 2026-09-16).  That case is fixed by
+        # truncating the *basename* right here, in the caller's own directory
+        # (never by re-deriving a path from ``download_dir``, which is
+        # relative and would move the file somewhere else entirely).
+        output_path = _fit_basename(novel_path, ".epub")
+        tmp_path = output_path.with_name(output_path.name + ".tmp")
+        if len(tmp_path.name.encode("utf-8")) > _NAME_MAX_BUDGET:
+            # Written straight to its final name (no ".tmp" step) — the
+            # atomic swap needs two spare bytes the name does not have.
+            output_path = _fit_basename(novel_path, ".epub")
+            tmp_path = output_path
+            logger.warning(f"EPUB 文件名贴顶，改为直接写: {output_path.name[-60:]}")
+
         # Main page
         main_page = self._build_main_page(title, author_name, processed_content)
         book.add_item(main_page)
@@ -117,17 +243,17 @@ class EpubBuilder:
 
         # Write — atomic: build into a sibling temp file, then os.replace so
         # a crash never leaves a truncated EPUB at the final path.
-        # The output path is the text path's sibling (same basename,
-        # ".epub" suffix): ``build_path`` already budgets the title against
-        # the worst-case ".tmp" suffix, so the temp write can never exceed
-        # NAME_MAX.  The old code re-truncated the title here with the
-        # default 240-byte budget, silently diverging from the ".txt" path
-        # and overflowing on long titles (Errno 36 regression).
-        output_path = novel_path.with_suffix(".epub")
-        tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+        # ``output_path``/``tmp_path`` were fitted to NAME_MAX above.
         try:
             epub.write_epub(tmp_path, book, {})
             os.replace(tmp_path, output_path)
+            # Belt-and-braces: no internal marker may ever reach the reader.
+            # ``_replace_image_placeholders`` already degrades unresolved
+            # markers, so this only fires if a future code path bypasses it.
+            if _HAS_IMAGE_PATTERN.search(processed_content):
+                logger.error(
+                    f"EPUB 仍含未替换的图片占位符: {output_path.name}"
+                )
             logger.info(f"Made Epub: ({novel.id}){novel.title}")
             return True
         except Exception:
@@ -153,9 +279,22 @@ class EpubBuilder:
                 img.mode in ("RGBA", "LA")
                 or (img.mode == "P" and "transparency" in img.info)
             ):
-                background = Image.new("RGB", img.size, (255, 255, 255))
-                background.paste(img, mask=img.split()[-1])
+                # Convert to RGBA first and flatten there.  Using
+                # ``img.split()[-1]`` as the mask looks equivalent but is not:
+                # for a palette image whose transparency is a *colour index*
+                # PIL hands back a mask whose size/extent does not match, and
+                # ``paste`` dies with ``ValueError: bad transparency mask`` —
+                # which silently cost a real illustration on 4 novels
+                # (2026-09-16).  convert("RGBA") resolves the palette and the
+                # transparency table into a proper alpha channel.
+                rgba = img.convert("RGBA")
+                background = Image.new("RGB", rgba.size, (255, 255, 255))
+                background.paste(rgba, mask=rgba.getchannel("A"))
                 img = background
+            elif img.mode == "P":
+                # Palette without a transparency table: convert() alone keeps
+                # the palette (and PIL then refuses to save it as JPEG).
+                img = img.convert("RGB")
             elif img.mode != "RGB":
                 img = img.convert("RGB")
 
@@ -195,6 +334,16 @@ class EpubBuilder:
         book: epub.EpubBook,
         quality: int = 75,
     ) -> str:
+        """Turn every ``[uploadedimage:id]`` marker into an ``<img>`` or a note.
+
+        A marker whose image never reached the disk (download failed, or the
+        API response did not carry it) must NOT survive as raw
+        ``[uploadedimage:12345]`` text: that shipped silently as a
+        supposedly successful EPUB for 216 novels (2026-09 排查).  Such
+        markers degrade to a visible dashed placeholder box instead — the
+        reader sees an image was expected and is missing, and no internal
+        marker ever leaks into the book.
+        """
         processed: set[str] = set()
 
         # Escape the raw novel text before embedding it in XHTML — it may
@@ -208,16 +357,28 @@ class EpubBuilder:
             if img_path := image_map.get(img_id):
                 if EpubBuilder._add_image_to_epub(img_path, img_id, book, quality):
                     processed.add(img_id)
-                else:
-                    return match.group(0)
-                return (
-                    '<div class="illust-container">'
-                    f'<img src="images/{img_id}.jpg" alt="Image {img_id}" class="illust" />'
-                    '</div>'
-                )
-            return match.group(0)
+                    return (
+                        '<div class="illust-container">'
+                        f'<img src="images/{img_id}.jpg" alt="Image {img_id}"'
+                        ' class="illust" />'
+                        '</div>'
+                    )
+            logger.warning(
+                f"EPUB 图片缺失: [{match.group(1)}:{img_id}] 未下载成功"
+                " → 渲染为缺图占位框"
+            )
+            return EpubBuilder._missing_image_note(img_id)
 
         return _HAS_IMAGE_PATTERN.sub(_replace, content)
+
+    @staticmethod
+    def _missing_image_note(img_id: str) -> str:
+        """Visible placeholder for an image that could not be embedded."""
+        return (
+            '<div class="illust-container">'
+            f'<div class="illust-missing">（图片缺失 {html.escape(img_id)}）</div>'
+            '</div>'
+        )
 
     @staticmethod
     def _build_image_map(

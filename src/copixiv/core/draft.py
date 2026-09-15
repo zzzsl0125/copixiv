@@ -155,7 +155,9 @@ def build_from_webview(data: Any, download_dir: str = "download") -> NovelDraft:
     """Build a :class:`NovelDraft` from a ``webview_novel`` API response.
 
     Tolerates missing ``text`` (deleted/restricted novels may return None):
-    ``text`` falls back to 0 and ``has_epub`` to NO.
+    ``text`` falls back to 0 and ``has_epub`` to ``NO_IMAGES`` (the terminal
+    "body has no image placeholder" state — never the legacy unclassified
+    ``NO``, which would make the row look like unfinished business forever).
     """
     if not data:
         return NovelDraft(id=0, title="", author_id=0)
@@ -174,7 +176,11 @@ def build_from_webview(data: Any, download_dir: str = "download") -> NovelDraft:
         series_name=data.series_title,
         series_index=guess_series_order(data.series_navigation),
         create_time=data.cdate,
-        has_epub=EpubStatus.PENDING if has_image_placeholders(body) else EpubStatus.NO,
+        has_epub=(
+            EpubStatus.PENDING
+            if has_image_placeholders(body)
+            else EpubStatus.NO_IMAGES
+        ),
         tags=data.tags,
         content=body,
         # The webview API returns ``images``/``illusts`` as empty *lists*

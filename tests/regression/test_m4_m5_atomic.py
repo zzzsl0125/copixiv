@@ -15,6 +15,7 @@ M5 —— 资产下载并发竞态：
 """
 
 import asyncio
+import zipfile
 import builtins
 import threading
 from pathlib import Path
@@ -243,7 +244,7 @@ def test_create_epub_long_title_fits_name_max(tmp_path):
     """回归（2026-08-19）：超长标题的 EPUB 及 .epub.tmp 必须 ≤ 254 字节。
 
     旧实现用 safe_filename 默认 240 字节预算重新拼 EPUB 文件名，
-    txt（build_path 预算后）能存、epub.tmp 却超 NAME_MAX → Errno 36。
+    txt（build_path 预算后）能存、epub.tmp 却超限 → Errno 36。
     """
     title = "长" * 300
     novel_dir = tmp_path / "novel"
@@ -264,3 +265,113 @@ def test_create_epub_long_title_fits_name_max(tmp_path):
     output = novel_dir / "novel1.epub"
     assert output.exists()
     assert len(output.name.encode("utf-8")) <= 254
+
+
+# ---------------------------------------------------------------------------
+# 回归（2026-09-13）：缺图 EPUB 的静默失败
+#   - 未下载到的占位符被原样写进 XHTML（216 本），create_epub 仍返回 True
+#   - 因此 has_epub 被记成 2，读者看到 [pixivimage:123] 裸标记
+#   - 另有两个根本不是 zip 的 .epub，因"文件存在即完成"永不重建
+# ---------------------------------------------------------------------------
+
+
+def _epub_xhtml(path: Path) -> str:
+    import zipfile
+
+    with zipfile.ZipFile(path) as zf:
+        names = [n for n in zf.namelist() if n.endswith((".xhtml", ".html"))]
+        return b"".join(zf.read(n) for n in names).decode("utf-8")
+
+
+def _epub_data_with_placeholder(tmp_path, body: str):
+    novel_dir = tmp_path / "novel"
+    novel_dir.mkdir()
+    text_path = novel_dir / "novel7.txt"
+    text_path.write_text(body, encoding="utf-8")
+    return Novel(
+        id=7, title="缺图", author_name="A", author_id=0, path=str(text_path),
+    ), novel_dir
+
+
+def test_missing_image_marker_never_leaks_into_epub(tmp_path):
+    """占位符下不到图 → 渲染成缺图占位框，绝不留在正文里。"""
+    data, novel_dir = _epub_data_with_placeholder(
+        tmp_path, "正文 [uploadedimage:12345] 结尾",
+    )
+
+    assert EpubBuilder().create_epub(data) is True
+
+    xhtml = _epub_xhtml(novel_dir / "novel7.epub")
+    assert "[uploadedimage:12345]" not in xhtml
+    assert "图片缺失 12345" in xhtml
+
+
+def test_needs_epub_false_skips_build(tmp_path):
+    """正文无图（needs_epub=False）→ 不产出空壳 EPUB。"""
+    data, novel_dir = _epub_data_with_placeholder(tmp_path, "纯文字")
+
+    assert EpubBuilder().create_epub(data, needs_epub=False) is True
+    assert not (novel_dir / "novel7.epub").exists()
+
+
+def test_corrupt_epub_is_not_treated_as_done(tmp_path, monkeypatch):
+    """坏 zip 必须重做：旧守卫只看 exists()，坏文件被永久跳过。"""
+    novel_dir = tmp_path / "novel"
+    novel_dir.mkdir()
+    text_path = novel_dir / "novel9.txt"
+    text_path.write_text("正文 [uploadedimage:1]", encoding="utf-8")
+    epub = novel_dir / "novel9.epub"
+    epub.write_bytes(b"not a zip at all")
+
+    # The builder must be wired in — without it no EPUB is ever written and
+    # the test would pass for the wrong reason.
+    dl = ImageDownloader(max_workers=1, epub_builder=EpubBuilder())
+
+    def fake_download(url, save_path, session=None):
+        from PIL import Image
+
+        Image.new("RGB", (2, 2), (0, 0, 255)).save(save_path)
+        return True
+
+    monkeypatch.setattr(dl, "download_image", fake_download)
+    try:
+        # The corrupt file must NOT satisfy the "already done" guard.
+        assert asyncio.run(
+            dl.process_novel_assets(
+                Novel(
+                    id=9, title="t", author_id=0, path=str(text_path),
+                    images={"1": {"urls": {"original": "http://x/1.png"}}},
+                )
+            )
+        ) is None
+        failures = asyncio.run(dl.await_all())
+        assert failures == []
+        assert zipfile.is_zipfile(epub)          # regenerated as a real EPUB
+    finally:
+        dl.shutdown()
+
+
+def test_valid_epub_still_short_circuits(tmp_path):
+    """正常的 EPUB 依旧直接跳过，不重复下载。"""
+    novel_dir = tmp_path / "novel"
+    novel_dir.mkdir()
+    text_path = novel_dir / "novel8.txt"
+    text_path.write_text("正文", encoding="utf-8")
+    data = Novel(
+        id=8, title="t", author_id=0, path=str(text_path),
+    )
+    assert EpubBuilder().create_epub(data) is True
+
+    dl = ImageDownloader(max_workers=1)
+    try:
+        asyncio.run(
+            dl.process_novel_assets(
+                Novel(
+                    id=8, title="t", author_id=0, path=str(text_path),
+                    images={"1": {}},
+                )
+            )
+        )
+        assert dl._futures == []          # nothing submitted
+    finally:
+        dl.shutdown()

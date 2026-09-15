@@ -91,7 +91,7 @@ def test_novel_roundtrip_via_instance_dict():
     assert d["id"] == 123
     assert d["create_time"] == "2026-05-01T12:00:00+09:00"
     assert d["tags"] == ["中文"]
-    assert d["has_epub"] == EpubStatus.NO  # 正文无图片占位符
+    assert d["has_epub"] == EpubStatus.NO_IMAGES  # 正文无图片占位符 → 终态
 
 
 # M11 -------------------------------------------------------------
@@ -102,7 +102,9 @@ def test_build_from_webview_text_none_does_not_crash():
     wv.text = None
     novel = build_from_webview(wv)  # 当前实现：len(None) → TypeError
     assert novel.text == 0
-    assert novel.has_epub == EpubStatus.NO
+    # 空正文没有占位符 → 终态「无图」，不是「未分类」的 NO：
+    # 两者混用正是 3 118 行永久失明的根因（2026-09 追溯）。
+    assert novel.has_epub == EpubStatus.NO_IMAGES
 
 
 # M14 -------------------------------------------------------------
