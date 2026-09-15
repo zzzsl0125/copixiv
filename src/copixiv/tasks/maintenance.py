@@ -23,7 +23,7 @@ from copixiv.features.novels.repo import (
     SQLAlchemyNovelRepository,
     SQLAlchemySeriesRepository,
 )
-from copixiv.storage.epub.builder import is_valid_epub, resolve_epub_path
+from copixiv.storage.epub.builder import is_valid_epub
 from copixiv.log import logger
 
 from .kernel import TaskContext
@@ -68,33 +68,83 @@ async def check_epub(ctx: TaskContext) -> TaskResult:
 
     The EPUB-content scans (:func:`_epub_has_placeholders`,
     :func:`_epub_has_images`) only run for rows that need them.
+
+    **Bounded per run, resumable.**  The first full pass over production
+    measured ~10.5 ms/row — 42 minutes for 238 k rows, well past the task
+    runner's 30-minute ``TIMEOUT_SECONDS``, and the previous "scan everything,
+    then write everything" shape meant a killed run wrote *nothing* (1374 on
+    2026-09-16 died at row 100 k having never applied a single update).  Each
+    run now covers at most :data:`_MAX_ROWS_PER_RUN` rows and **applies every
+    chunk before advancing a cursor**, so a timeout simply resumes where it
+    stopped.  Once the whole table is classified, the cursor resets and later
+    sweeps are cheap (terminal rows cost a stat, not a read).
     """
     from sqlalchemy import select as _select
     from copixiv.db import models
 
     uow = ctx.uow
+    started = time.monotonic()
+    cursor = await _read_cursor(uow)
 
     async with uow.begin():
-        stmt = _select(
-            models.Novel.id, models.Novel.path, models.Novel.has_epub
-        )
-        rows = uow.session.execute(stmt).fetchall()
+        rows = uow.session.execute(
+            _select(models.Novel.id, models.Novel.path, models.Novel.has_epub)
+            .where(models.Novel.id > cursor)
+            .order_by(models.Novel.id)
+            .limit(_MAX_ROWS_PER_RUN + 1)
+        ).fetchall()
 
     if not rows:
+        if cursor:
+            await _write_cursor(uow, 0)
+            return TaskResult(summary="EPUB 状态检查: 全表巡检完成，下轮从头复查")
         return TaskResult(summary="EPUB 状态检查: 无需修复")
 
-    # The sweep is file-I/O bound over every novel (238 936 rows measured in
-    # production) and takes minutes.  It must not monopolise the event loop:
-    # on 2026-09-14 a single run left every API endpoint timing out while it
-    # held the single worker thread — the dispatcher itself stalled behind
-    # it.  So the scan is chunked and offloaded to a *shared* thread pool,
-    # yielding to the event loop between chunks so HTTP requests keep being
-    # served while the sweep crawls through the disk.
+    truncated = len(rows) > _MAX_ROWS_PER_RUN
+    rows = rows[:_MAX_ROWS_PER_RUN]
+
+    # The sweep is file-I/O bound and must not monopolise the event loop: on
+    # 2026-09-14 a single run left every API endpoint timing out while it held
+    # the single worker thread.  So the scan is chunked and offloaded to a
+    # *shared* thread pool, yielding to the event loop between chunks so HTTP
+    # requests keep being served while the sweep crawls through the disk.
     completed_ids: list[int] = []
     revert_ids: list[int] = []
     no_image_ids: list[int] = []
     enable_ids: list[int] = []
     pending_ids: list[int] = []
+    totals = {"completed": 0, "reverted": 0, "enabled": 0, "no_images": 0}
+
+    async def _apply(ids: list[int], status: EpubStatus) -> None:
+        await run_write_transaction(
+            uow,
+            lambda uw: SQLAlchemyNovelRepository(uw.session).update_has_epub_status(
+                ids, status
+            ),
+        )
+
+    async def _flush() -> None:
+        """Persist this chunk's verdicts before moving on.
+
+        Order matters: write the statuses *before* the cursor, so a crash can
+        only re-scan rows (idempotent), never skip them.
+        """
+        if completed_ids:
+            await _apply(completed_ids, EpubStatus.DONE)
+            totals["completed"] += len(completed_ids)
+            completed_ids.clear()
+        if revert_ids:
+            await _apply(revert_ids, EpubStatus.PENDING)
+            totals["reverted"] += len(revert_ids)
+            revert_ids.clear()
+        if enable_ids:
+            await _apply(enable_ids, EpubStatus.PENDING)
+            totals["enabled"] += len(enable_ids)
+            enable_ids.clear()
+        if no_image_ids:
+            await _apply(no_image_ids, EpubStatus.NO_IMAGES)
+            totals["no_images"] += len(no_image_ids)
+            no_image_ids.clear()
 
     for start in range(0, len(rows), _SWEEP_CHUNK):
         chunk = rows[start:start + _SWEEP_CHUNK]
@@ -106,50 +156,92 @@ async def check_epub(ctx: TaskContext) -> TaskResult:
         no_image_ids += c_noimg
         enable_ids += c_enable
         pending_ids += c_pending
+        await _flush()
+        await _write_cursor(uow, int(chunk[-1][0]))
         # Explicit yield: give the HTTP handlers a turn between chunks.
         await asyncio.sleep(0)
 
-    async def _apply(ids: list[int], status: EpubStatus) -> None:
-        await run_write_transaction(
-            uow,
-            lambda uw: SQLAlchemyNovelRepository(uw.session).update_has_epub_status(
-                ids, status
-            ),
-        )
-
-    if completed_ids:
-        await _apply(completed_ids, EpubStatus.DONE)
-
-    if revert_ids:
-        await _apply(revert_ids, EpubStatus.PENDING)
-
-    if enable_ids:
-        await _apply(enable_ids, EpubStatus.PENDING)
-
-    if no_image_ids:
-        await _apply(no_image_ids, EpubStatus.NO_IMAGES)
-
+    next_cursor = 0 if not truncated else await _read_cursor(uow)
     logger.info(
-        f"check_epub: completed={len(completed_ids)}, reverted={len(revert_ids)}, "
-        f"enabled={len(enable_ids)}, no_images={len(no_image_ids)}, "
-        f"pending={len(pending_ids)}",
+        f"check_epub: 本轮 {len(rows)} 行（{time.monotonic() - started:.0f}s），"
+        f"completed={totals['completed']}, reverted={totals['reverted']}, "
+        f"enabled={totals['enabled']}, no_images={totals['no_images']}, "
+        f"pending={len(pending_ids)}，游标 {cursor} → {next_cursor}"
+        f"{'，下轮继续' if truncated else '，全表完成'}"
     )
 
     parts: list[str] = []
-    if completed_ids:
-        parts.append(f"{len(completed_ids)} 本标记为已完成")
-    if revert_ids:
-        parts.append(f"{len(revert_ids)} 本回退为待处理")
-    if enable_ids:
-        parts.append(f"{len(enable_ids)} 本启用为待处理")
-    if no_image_ids:
-        parts.append(f"{len(no_image_ids)} 本确认为无图")
+    if totals["completed"]:
+        parts.append(f"{totals['completed']} 本标记为已完成")
+    if totals["reverted"]:
+        parts.append(f"{totals['reverted']} 本回退为待处理")
+    if totals["enabled"]:
+        parts.append(f"{totals['enabled']} 本启用为待处理")
+    if totals["no_images"]:
+        parts.append(f"{totals['no_images']} 本确认为无图")
     if pending_ids:
         parts.append(f"{len(pending_ids)} 本仍待处理")
+    tail = (
+        f"（本轮 {len(rows)} 行，下轮从 #{next_cursor} 继续）"
+        if truncated else f"（全表完成，本轮 {len(rows)} 行）"
+    )
+    return TaskResult(
+        summary="EPUB 状态检查: " + (" ".join(parts) or "无变化") + " " + tail
+    )
 
-    return TaskResult(summary="EPUB 状态检查: " + (" ".join(parts) or "无变化"))
+
+_CURSOR_KEY = "check_epub.cursor"
+
+# Rows classified per run.  Bounded on purpose: the measured cost is ~10.5 ms
+# per unclassified row (a full text read to look for image markers), so 60 k
+# rows ≈ 10.5 minutes worst case — a third of the 30-minute task timeout,
+# which leaves room for a slow disk.  The cursor makes the split harmless:
+# each run is a work slice, not a do-or-die full pass.
+#
+# After the one-off classification of the legacy ``0`` backlog the per-row cost
+# collapses (terminal rows cost a stat, not a read), so this cap is no longer
+# binding for routine sweeps — a full pass then finishes in a minute or two.
+_MAX_ROWS_PER_RUN = 60_000
 
 
+async def _read_cursor(uow) -> int:
+    """Where the last sweep stopped (0 on the first pass or after wrap-around)."""
+    import json
+
+    from sqlalchemy import select as _select
+    from copixiv.db import models
+
+    async with uow.begin():
+        value = uow.session.execute(
+            _select(models.Setting.value).where(
+                models.Setting.key == _CURSOR_KEY
+            )
+        ).scalar()
+    if not value:
+        return 0
+    try:
+        return int(json.loads(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+async def _write_cursor(uow, value: int) -> None:
+    """Persist the resume point (its own short transaction)."""
+    import json
+
+    from sqlalchemy import delete as _delete
+    from copixiv.db import models
+
+    payload = json.dumps(value)
+
+    async def _store(uw) -> None:
+        session = uw.session
+        session.execute(
+            _delete(models.Setting).where(models.Setting.key == _CURSOR_KEY)
+        )
+        session.add(models.Setting(key=_CURSOR_KEY, value=payload))
+
+    await run_write_transaction(uow, _store)
 
 
 def _sweep(
@@ -181,7 +273,7 @@ def _sweep(
             continue
 
         txt_path = Path(path_str)
-        epub_path = resolve_epub_path(txt_path)
+        epub_path = txt_path.with_suffix(".epub")
         epub_ok = is_valid_epub(epub_path)
 
         if status == EpubStatus.DONE:

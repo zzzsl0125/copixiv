@@ -11,7 +11,7 @@ from PIL import Image
 from ebooklib import epub
 
 from copixiv.core.draft import NovelDraft
-from copixiv.core.services import build_path, has_image_placeholders
+from copixiv.core.services import has_image_placeholders
 
 from copixiv.log import logger
 
@@ -19,77 +19,6 @@ from copixiv.log import logger
 _HAS_IMAGE_PATTERN = re.compile(
     r"\[(uploadedimage|pixivimage):([\d\-]+)\]"
 )
-
-
-def _fit_basename(path: Path, suffix: str) -> Path:
-    """``path`` with *suffix* swapped in, truncated to fit NAME_MAX.
-
-    Truncation happens on the **stem only**, in *path*'s own directory: a
-    caller may have built the path from a raw title (251-253 bytes, where the
-    transient ``.tmp`` write fails with Errno 36), and the fix must not move
-    the file — re-deriving it from ``download_dir`` gives a *relative* path
-    and would drop the EPUB outside the caller's tree entirely.
-
-    Idempotent: a basename that already fits is returned unchanged, which is
-    the case for every path that came from ``build_path``.
-    """
-    candidate = path.with_suffix(suffix)
-    raw = candidate.name.encode("utf-8")
-    if len(raw) <= _NAME_MAX_BUDGET:
-        return candidate
-    budget = _NAME_MAX_BUDGET - len(suffix.encode("utf-8"))
-    stem = path.stem.encode("utf-8")[:budget]
-    while True:
-        try:
-            stem_str = stem.decode("utf-8")     # never split a character
-            break
-        except UnicodeDecodeError:
-            stem = stem[:-1]
-    return path.with_name(f"{stem_str}{suffix}")
-
-
-def resolve_epub_path(txt_path: Path) -> Path:
-    """Where this novel's EPUB lives — same stem, else by ``_{id}`` suffix.
-
-    Truncation can make the EPUB's basename differ from the text file's (a
-    251-253 byte name loses its last characters so the ".tmp" write fits),
-    while every reader — ``check_epub``, the download API, the static mount —
-    derives the EPUB from the *stored text path*.  Falling back to a sibling
-    whose name ends in ``_{novel_id}.epub`` keeps such a novel findable
-    instead of looking like a missing file that gets queued and rebuilt on
-    every sweep.
-    """
-    direct = txt_path.with_suffix(".epub")
-    if direct.is_file():
-        return direct
-    stem = txt_path.stem
-    if "_" not in stem:
-        return direct
-    novel_id = stem.rsplit("_", 1)[1]
-    if not novel_id.isdigit():
-        return direct
-
-    # The truncated name shares a long prefix with the text stem (the tail is
-    # what got cut).  Longest common prefix first: it cannot collide with a
-    # neighbouring novel because the id digits are the last thing before the
-    # suffix.
-    for cut in range(len(stem), max(len(stem) - 40, 0), -1):
-        prefix = stem[:cut]
-        if len(prefix) < 8:
-            break
-        for candidate in sorted(txt_path.parent.glob(f"{prefix}*.epub")):
-            if candidate.is_file():
-                return candidate
-
-    # Fallback: an "_{id…}" fragment, since truncation can cut into the id
-    # itself ("…_275491.epub" for id 27549104).
-    for length in range(len(novel_id), 3, -1):
-        for candidate in sorted(
-            txt_path.parent.glob(f"*_{novel_id[:length]}*.epub")
-        ):
-            if candidate.is_file():
-                return candidate
-    return direct
 
 
 def is_valid_epub(epub_path: Path) -> bool:
@@ -101,11 +30,6 @@ def is_valid_epub(epub_path: Path) -> bool:
     content check (``check_epub`` does) before calling a novel done.
     """
     return epub_path.is_file() and zipfile.is_zipfile(epub_path)
-
-# Filesystem basename limit (bytes).  The write goes through a ".tmp"
-# sibling first, and ``build_path`` reserves that suffix; this constant is
-# the budget an already-built path must respect to be used as-is.
-_NAME_MAX_BUDGET = 250
 
 CSS_STYLE = """
 body { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; margin: 5%; text-align: justify; }
@@ -193,25 +117,13 @@ class EpubBuilder:
             content, image_map, book, compress_quality
         )
 
-        # Output path: the text file's sibling.  The basename normally needs
-        # no work — ``build_path`` already budgeted it against NAME_MAX
-        # *including* the transient ".tmp" suffix, and it is the name the
-        # database stores, so keeping it is what makes the EPUB findable.
-        # A caller that assembled the path from a raw title instead (the
-        # repair scripts do) can sit at 251-253 bytes, where the ".tmp" write
-        # — created before ``os.replace`` — dies with Errno 36 and no EPUB is
-        # produced at all (3 novels, 2026-09-16).  That case is fixed by
-        # truncating the *basename* right here, in the caller's own directory
-        # (never by re-deriving a path from ``download_dir``, which is
-        # relative and would move the file somewhere else entirely).
-        output_path = _fit_basename(novel_path, ".epub")
-        tmp_path = output_path.with_name(output_path.name + ".tmp")
-        if len(tmp_path.name.encode("utf-8")) > _NAME_MAX_BUDGET:
-            # Written straight to its final name (no ".tmp" step) — the
-            # atomic swap needs two spare bytes the name does not have.
-            output_path = _fit_basename(novel_path, ".epub")
-            tmp_path = output_path
-            logger.warning(f"EPUB 文件名贴顶，改为直接写: {output_path.name[-60:]}")
+        # Write — atomic: build into a sibling temp file, then os.replace so
+        # a crash never leaves a truncated EPUB at the final path.
+        # The output path is the text path's sibling (same basename, ".epub"
+        # suffix): ``build_path`` already budgets the title against the
+        # worst-case ".tmp" suffix, so the temp write stays within NAME_MAX.
+        output_path = novel_path.with_suffix(".epub")
+        tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
 
         # Main page
         main_page = self._build_main_page(title, author_name, processed_content)

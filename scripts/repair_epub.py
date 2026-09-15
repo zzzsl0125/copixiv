@@ -29,6 +29,7 @@ Exit code is 0 when every targeted novel was repaired (or would be, for
 ``--dry-run``), 1 when any novel failed.
 """
 
+from dataclasses import replace
 import argparse
 import asyncio
 import sys
@@ -40,7 +41,6 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 PLACEHOLDER_NEEDLES = (b"[uploadedimage:", b"[pixivimage:")
 
-from copixiv.storage.epub.builder import resolve_epub_path  # noqa: E402
 
 
 def _xhtml_has_placeholder(epub_path: Path) -> bool:
@@ -93,7 +93,7 @@ def classify(path_str: str | None) -> str:
     txt = Path(path_str)
     if not txt.exists():
         return "gone"
-    epub = resolve_epub_path(txt)
+    epub = txt.with_suffix('.epub')
     if not epub.exists():
         return "noepub" if _txt_has_placeholder(txt) else "gone"
     if not zipfile.is_zipfile(epub):
@@ -157,7 +157,7 @@ def classify_files(download_dir: Path, wanted: dict[str, list[int]]) -> int:
     if "noepub" in wanted:
         for txt in download_dir.glob("*/*.txt"):
             novel_id = _id_of(txt)
-            if novel_id is None or resolve_epub_path(txt).exists():
+            if novel_id is None or txt.with_suffix('.epub').exists():
                 continue
             n_txt += 1
             if _txt_has_placeholder(txt):
@@ -258,6 +258,20 @@ async def repair(
             if resp is not None:
                 # Online path: refresh text + assets, then rebuild.
                 draft = build_from_webview(resp, file_storage.download_dir)
+                # Anchor the draft on the file the database already points at.
+                # ``build_from_webview`` recomputes the name from the *current*
+                # title, and a title edit (appended chapter marker, truncated
+                # long name) produces a different basename — that is what
+                # forced the library to grow truncation logic it never needed.
+                # Writing the text to the stored path keeps text and EPUB
+                # stems aligned, and matching the DB path keeps the file
+                # findable.  (This supersedes the old "sync the DB path after
+                # the fact" workaround.)
+                stored = _local_txt_for(
+                    engine, novel_id, Path(file_storage.download_dir)
+                )
+                if stored is not None:
+                    draft = replace(draft, path=str(stored))
                 if draft.content:
                     file_storage.save_novel_text(
                         draft.id, draft.title, draft.content, force=True,
@@ -268,7 +282,7 @@ async def repair(
                     if nid == novel_id:
                         reason = why
                 txt = Path(draft.path) if draft.path else None
-                epub = resolve_epub_path(txt) if txt else None
+                epub = txt.with_suffix('.epub') if txt else None
                 if reason:
                     logger.error(f"{tag} 失败: {reason}")
                     failed += 1
@@ -321,7 +335,7 @@ async def repair(
                 logger.error(f"{tag} 本地重建失败")
                 failed += 1
                 continue
-            epub = resolve_epub_path(txt)
+            epub = txt.with_suffix('.epub')
             if _xhtml_has_placeholder(epub):
                 logger.warning(f"{tag} 本地重建后仍含裸标记（不该发生）")
             elif _missing_box_count(epub):

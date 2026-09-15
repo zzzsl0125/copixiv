@@ -25,7 +25,7 @@ import requests
 from copixiv.core.draft import NovelDraft
 from copixiv.core.services import has_image_placeholders
 from copixiv.pixiv.http import create_image_session, pick_image_url
-from copixiv.storage.epub.builder import is_valid_epub, resolve_epub_path
+from copixiv.storage.epub.builder import is_valid_epub
 from copixiv.log import logger
 
 # Same marker syntax the builder resolves — keep in sync with
@@ -219,7 +219,7 @@ class ImageDownloader:
         if novel.content is not None:
             needs_epub = has_image_placeholders(novel.content)
 
-        epub_path = resolve_epub_path(Path(path_str))
+        epub_path = Path(path_str).with_suffix(".epub")
         if epub_path.exists() and not force and is_valid_epub(epub_path):
             if needs_epub is False:
                 # Nothing to embed and a readable file is already there:

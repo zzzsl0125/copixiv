@@ -244,7 +244,7 @@ class TestCheckEpubTombstoneRepair:
 
         assert calls == []                      # no text read at all
         assert _get_status(session_factory, 14) == EpubStatus.NO_IMAGES
-        assert result.summary.endswith("无变化")
+        assert "无变化" in result.summary
 
     async def test_no_images_row_with_complete_file_becomes_done(
         self, session_factory, tmp_path,
@@ -282,7 +282,7 @@ class TestCheckEpubTombstoneRepair:
         result = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
 
         assert _get_status(session_factory, 17) == EpubStatus.NO_IMAGES
-        assert result.summary.endswith("无变化")
+        assert "无变化" in result.summary
 
     async def test_pending_with_image_less_epub_is_queued(
         self, session_factory, tmp_path,
@@ -501,3 +501,55 @@ class TestSearchIndexMaintenanceTasks:
         finally:
             with pg_engine.begin() as conn:
                 conn.execute(text(self._CREATE_INDEX))
+
+
+class TestCheckEpubResumableSweep:
+    """一轮有界 + 游标续跑（2026-09-16：全表 42 分钟 vs 30 分钟上限）。
+
+    旧形态「先扫全表再整批写」被超时掐掉时**一个字节都没写**（任务 1374 扫到
+    10 万行被杀，库里毫无变化）。现在按块写入 + 推进游标，超时只是少做一点。
+    """
+
+    async def test_second_run_resumes_from_cursor(
+        self, session_factory, tmp_path, monkeypatch,
+    ):
+        from copixiv.tasks import maintenance
+
+        # 3 本：前 2 本限量跑完，第 3 本留给下一轮
+        for nid in (41, 42, 43):
+            await _seed(
+                session_factory, nid, "纯文字无图", False, tmp_path,
+                status=EpubStatus.NO,
+            )
+        monkeypatch.setattr(maintenance, "_MAX_ROWS_PER_RUN", 2)
+
+        first = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
+        assert "下轮从" in first.summary
+        assert _get_status(session_factory, 41) == EpubStatus.NO_IMAGES
+        assert _get_status(session_factory, 42) == EpubStatus.NO_IMAGES
+        # 第 3 本本轮没扫到，状态未动
+        assert _get_status(session_factory, 43) == EpubStatus.NO
+
+        second = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
+        assert _get_status(session_factory, 43) == EpubStatus.NO_IMAGES
+        assert "全表完成" in second.summary
+
+    async def test_wrap_around_clears_cursor_and_reports_nothing_to_do(
+        self, session_factory, tmp_path, monkeypatch,
+    ):
+        from copixiv.tasks import maintenance
+
+        await _seed(
+            session_factory, 44, "纯文字无图", False, tmp_path,
+            status=EpubStatus.NO,
+        )
+        monkeypatch.setattr(maintenance, "_MAX_ROWS_PER_RUN", 1)
+
+        await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
+        # 游标停在表尾且非 0 → 本轮无事可做，复位并声明从头复查
+        wrap = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
+        assert "从头复查" in wrap.summary
+        # 复位后再跑：全表重扫一遍（该行已是终态，无变化）
+        third = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
+        assert "无变化" in third.summary
+        assert _get_status(session_factory, 44) == EpubStatus.NO_IMAGES
