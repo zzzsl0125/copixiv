@@ -13,6 +13,17 @@
 # This also covers cold boot: the unit is enabled, so after a reboot systemd
 # starts the backend, and ExecStartPre starts Postgres first.
 #
+# Restart policy is ``always``, deliberately NOT ``on-failure``:
+# systemd treats SIGHUP/SIGINT/SIGTERM/SIGPIPE as *clean* exits for
+# Type=simple services, and ``Restart=on-failure`` explicitly excludes those
+# four signals (systemd.service(5)).  An externally delivered SIGTERM — e.g. a
+# stray kill/pkill — therefore leaves the unit dead with ``Result=success``
+# and ``NRestarts=0``, and nothing ever brings it back.  Observed twice on this
+# host: 2026-09-10 07:04:48 and 2026-09-12 07:04:55, the latter leaving the API
+# dead for ~22h (see INCIDENT-2026-09-12-copixiv-backend-down.md).
+# ``always`` restarts on any exit; a systemd-initiated stop/restart is still
+# honoured (systemd never restarts a unit it stopped itself).
+#
 # Install (needs sudo — the checked-in copy is the source of truth):
 #   sudo cp deploy/copixiv-backend.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
@@ -24,6 +35,11 @@
 
 [Unit]
 Description=Backend of Copixiv
+# Rate limits for the Restart= loop below.  Both keys belong to [Unit]: in
+# [Service] systemd ignores them with "Unknown key name ... ignoring" (which
+# is exactly where they used to live, so the limits never applied).
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 User=invocation
@@ -34,11 +50,9 @@ WorkingDirectory=/home/invocation/copixiv/
 ExecStartPre=/home/invocation/copixiv/.venv/bin/python /home/invocation/copixiv/scripts/pg_dev.py start
 ExecStart=/home/invocation/copixiv/.venv/bin/python -u main.py
 
-Restart=on-failure
+# Covers every exit — including a clean SIGTERM exit that on-failure ignores.
+Restart=always
 RestartSec=5s
-
-StartLimitIntervalSec=60
-StartLimitBurst=3
 
 [Install]
 WantedBy=multi-user.target

@@ -19,6 +19,11 @@
 Description=Frontend of Copixiv (production: build + vite preview)
 After=network-online.target
 Wants=network-online.target
+# Rate limits for the Restart= loop below.  Both keys belong to [Unit]: in
+# [Service] systemd ignores them with "Unknown key name ... ignoring" (which
+# is exactly where they used to live, so the limits never applied).
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -41,11 +46,12 @@ TimeoutStartSec=180
 #   # If 5173 is held by an old `vite` dev process not owned by systemd:
 #   #   pkill -f "vite"   (then systemctl start copixiv-frontend)
 
-Restart=on-failure
+# ``always``, for the same reason as copixiv-backend.service: systemd counts
+# SIGTERM (and SIGHUP/SIGINT/SIGPIPE) as a *clean* exit for Type=simple, so
+# on-failure would leave a killed preview server permanently down.
+# Note the consequence: any restart re-runs ExecStartPre (npm run build).
+Restart=always
 RestartSec=5s
-
-StartLimitIntervalSec=60
-StartLimitBurst=3
 
 [Install]
 WantedBy=multi-user.target
