@@ -88,6 +88,35 @@ describe('NovelCard 移动端抽屉（下载/收藏/追更）', () => {
   })
 })
 
+describe('NovelCard 操作条第 4 个按钮：编辑（元数据编辑入口）', () => {
+  it('点击把**完整** Novel 交给父组件（初值不再请求一次）', async () => {
+    const wrapper = mountCard()
+
+    const button = wrapper.get('[data-testid="novel-edit"]')
+    expect(button.text()).toBe('编辑')
+
+    await button.trigger('click')
+    expect(wrapper.emitted('edit')).toEqual([[novel]])
+  })
+
+  it('点击不冒泡、也不切换抽屉（否则会边开弹窗边收起）', async () => {
+    const containerClicks = vi.fn()
+    const parent = document.createElement('div')
+    parent.addEventListener('click', containerClicks)
+    const wrapper = mountCard({ isActive: true }, parent)
+
+    await wrapper.get('[data-testid="novel-edit"]').trigger('click')
+
+    expect(containerClicks).not.toHaveBeenCalled()
+    expect(wrapper.emitted('toggle-active')).toBeFalsy()
+  })
+
+  it('批量模式不渲染编辑按钮（整条抽屉本来就不渲染）', () => {
+    const wrapper = mountCard({ batchMode: true, isActive: true })
+    expect(wrapper.find('[data-testid="novel-edit"]').exists()).toBe(false)
+  })
+})
+
 describe('NovelCard 小标签区（本地 / EPUB 同一区域）', () => {
   it('pixiv 书（source 缺省或 pixiv）不显示「本地」标签', () => {
     expect(mountCard().find('[data-testid="badge-local"]').exists()).toBe(false)

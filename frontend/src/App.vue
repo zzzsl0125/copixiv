@@ -6,7 +6,7 @@ import ToastContainer from './components/ui/ToastContainer.vue'
 import UploadModal from './components/features/UploadModal.vue'
 import { useNovels, useSystem, useToast, useBatchMode } from './composables'
 import { SECTIONS, resolveSection, sectionFor, type SectionId } from './config'
-import type { NovelFilters, BatchOperationResult } from './types'
+import type { Novel, NovelFilters, BatchOperationResult } from './types'
 import type { NovelsState, BatchState, NovelsCommand, BatchAction } from './views/Novels.vue'
 
 const {
@@ -260,6 +260,15 @@ const handleNovelStateChanged = (payload: { id: number; field: 'is_favourite' | 
   if (novel) novel[payload.field] = payload.value
 }
 
+/** 元数据编辑保存成功：用响应值**原地替换**主列表里的那一本。
+ *
+ * 集合视图（查看已选 / 被排除）的副本由 Novels.vue 自己 patch——两份都不
+ * 重取列表：编辑是单本操作，重取会让瀑布流跳动、还多打一次请求（§6.3）。 */
+const handleNovelUpdated = (updated: Novel) => {
+  const novel = novels.value.find(n => n.id === updated.id)
+  if (novel) Object.assign(novel, updated)
+}
+
 /** 侧边栏「阅览」一栏（我的收藏 / 特别关注 / 我的上传）→ 一次特殊搜索。
  *  签名与 Sidebar 的 `search` emit 对齐（keyword, section）；keyword 只是
  *  给 URL/历史看的展示值，真正的阈值与排序由 section 决定——故不再读它，
@@ -401,6 +410,7 @@ onMounted(() => {
         @logo-click="handleLogoClick"
         @toggle-sidebar="isSidebarOpen = !isSidebarOpen"
         @novel-state-changed="handleNovelStateChanged"
+        @novel-updated="handleNovelUpdated"
       />
     </div>
 

@@ -29,6 +29,26 @@ export interface NovelFilters {
   min_text?: number
 }
 
+/**
+ * 单本元数据编辑的可提交字段（`PATCH /api/novels/{id}`，docs/NOVEL_EDIT_DESIGN.md §5）。
+ *
+ * PATCH 三态：键不出现 = 不动；显式 `null` = 清空（`series_name` /
+ * `series_index` / `create_time`）。
+ *
+ * 服务端执法（不是静默忽略）：
+ * - `title` / `series_name` **仅本地书**可提交，pixiv 书提交 → 400；
+ * - `caption` 全局不可编辑，与 `source` / `path` / `id` / `has_epub` 等结构性
+ *   字段一样，提交即被 `extra="forbid"` 拒掉 → 422。
+ */
+export interface NovelUpdatePayload {
+  title?: string
+  author_name?: string
+  series_name?: string | null
+  series_index?: number | null
+  tags?: string[]
+  create_time?: string | null
+}
+
 export interface GetNovelsParams {
   keyword?: string
   order_by?: string

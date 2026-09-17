@@ -1,5 +1,6 @@
 import { apiClient, buildApiUrl } from './client'
 import type {
+  Novel, NovelUpdatePayload,
   GetNovelsParams, BatchScope, BatchOperation, BatchOperationResult,
   NovelIdsResponse, NovelsByIdsResponse, MatchIdsResult, NovelCountResult,
   NovelListResult,
@@ -24,6 +25,18 @@ export const novelApi = {
 
   async toggleSpecialFollow(authorId: number) {
     await apiClient.post(`/novels/author/${authorId}/follow`)
+  },
+
+  /**
+   * 编辑单本元数据（卡片「编辑」）——只提交发生变化的字段。
+   *
+   * 返回**更新后的完整对象**，调用方据此原地替换列表里的那一本（不整页重取）。
+   * 服务端会拒绝 pixiv 书的 `title` / `series_name`（400）以及 `caption` 等
+   * 不可编辑字段（422）——调用方按错误提示呈现即可。
+   */
+  async updateNovel(novelId: number, payload: NovelUpdatePayload) {
+    const response = await apiClient.patch(`/novels/${novelId}`, payload)
+    return response.data as Novel
   },
 
   /**

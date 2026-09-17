@@ -23,10 +23,12 @@ from copixiv.features.novels.schemas import (
     BatchTaskResponse,
     MatchIdsRequest,
     MatchIdsResponse,
+    NovelBase,
     NovelIdsResponse,
     NovelListResponse,
     NovelsByIdsRequest,
     NovelsByIdsResponse,
+    NovelUpdateRequest,
     SortIdsRequest,
 )
 from copixiv.db.uow import SqlUnitOfWork
@@ -46,6 +48,7 @@ from copixiv.features.novels.batch_operations import (
 )
 from copixiv.features.novels.delete_novel import DeleteNovelUseCase
 from copixiv.features.novels.get_novel_file import GetNovelFileUseCase
+from copixiv.features.novels.update_metadata import UpdateNovelMetadataUseCase
 
 router = APIRouter()
 
@@ -331,6 +334,30 @@ async def toggle_favourite(novel_id: int, uow: SqlUnitOfWork = Depends(get_write
 @router.post("/author/{author_id}/follow", status_code=204)
 async def toggle_special_follow(author_id: int, uow: SqlUnitOfWork = Depends(get_write_uow)):
     await SQLAlchemyNovelRepository(uow.session).toggle_special_follow(author_id)
+
+
+@router.patch("/{novel_id}", response_model=NovelBase)
+async def update_novel_metadata(
+    novel_id: int,
+    body: NovelUpdateRequest = Body(...),
+    uow: SqlUnitOfWork = Depends(get_write_uow),
+):
+    """编辑单本小说的元数据（卡片「编辑」按钮）—— docs/NOVEL_EDIT_DESIGN.md §5。
+
+    PATCH 三态：未提交的键不动，显式 ``null`` 清空（``series_name`` /
+    ``series_index`` / ``create_time`` / ``tags``）。只提交**发生变化的字段**
+    是前端的约定，服务端不做 diff（写同样的值也是幂等的）。
+
+    ``title`` / ``series_name`` 仅本地书可改，pixiv 书提交 → 400；``caption``
+    与结构性字段（``source`` / ``path`` / ``id`` / ``has_epub`` …）在 schema 层
+    就被 ``extra="forbid"`` 拒掉 → 422。响应是更新后的**完整**对象，前端据此
+    原地替换卡片（不整页重取）。
+    """
+    use_case = UpdateNovelMetadataUseCase(
+        SQLAlchemyNovelRepository(uow.session),
+        SQLAlchemyTagRepository(uow.session),
+    )
+    return await use_case.execute(novel_id, body.model_dump(exclude_unset=True))
 
 
 @router.get("/{novel_id}/download")

@@ -24,6 +24,8 @@ const emit = defineEmits<{
   (e: 'toggle-active', id: number | string): void
   (e: 'state-changed', payload: NovelStateChange): void
   (e: 'toggle-batch-select', id: number): void
+  /** 打开元数据编辑弹窗。带上**完整**对象：卡片手里就是初值，弹窗不必再请求。 */
+  (e: 'edit', novel: Novel): void
 }>()
 
 const toast = useToast()
@@ -129,6 +131,12 @@ const handleDownload = (e: Event) => {
   // Content-Disposition drives the download and suggested filename, so it
   // works in in-app browsers / WebViews that don't support blob: downloads.
   downloadUrl(novelApi.downloadUrl(props.novel.id, hasEpubReady.value ? 'epub' : 'txt'))
+}
+
+/** 打开元数据编辑弹窗 —— 把完整对象交给父组件（它负责模态宿主与列表回写）。 */
+const handleEdit = (e: Event) => {
+  e.stopPropagation()
+  emit('edit', props.novel)
 }
 
 const likeBorderClass = computed(() => {
@@ -259,6 +267,13 @@ const getTagClass = (tag: string) => {
             @click="handleToggleFollow"
           >
             {{ novel.is_special_follow ? '已追更' : '追更' }}
+          </button>
+          <button
+            class="flex-1 flex items-center justify-center text-xs font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors cursor-pointer"
+            data-testid="novel-edit"
+            @click="handleEdit"
+          >
+            编辑
           </button>
         </div>
       </div>

@@ -56,6 +56,40 @@ class NovelListResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# 元数据编辑（PATCH /api/novels/{novel_id}）—— docs/NOVEL_EDIT_DESIGN.md §5
+# ---------------------------------------------------------------------------
+
+class NovelUpdateRequest(BaseModel):
+    """单本元数据编辑的部分更新体。
+
+    只列**可编辑**字段。两类排除刻意不走"静默忽略"：
+
+    * ``caption`` 全局不可编辑（拍板 2026-09-18：不在界面展示也不开放编辑）；
+    * ``source`` / ``source_key`` / ``path`` / ``id`` / ``has_epub`` 是结构性事实。
+
+    它们与任何未知字段一样，提交即被 ``extra="forbid"`` 拒掉（FastAPI 的
+    请求体校验错误 → 422，与仓库既有约定一致；业务规则拒绝走
+    ``ValidationError`` → 400）。
+
+    ``title`` / ``series_name`` 能否改由 **``source`` 决定**（仅本地书），
+    这条业务规则在用例里执法并返回 400——schema 层表达不了"取决于行"的约束。
+
+    "未提交"与"显式 null"必须可区分（PATCH 三态）：调用方用
+    ``model_dump(exclude_unset=True)`` 取值——键不出现 = 不动，显式 ``null``
+    = 清空（``series_name`` / ``series_index`` / ``create_time`` 允许清空）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = None
+    author_name: str | None = None
+    series_name: str | None = None
+    series_index: int | None = None
+    tags: list[str] | None = None
+    create_time: str | None = None
+
+
+# ---------------------------------------------------------------------------
 # Batch Download
 # ---------------------------------------------------------------------------
 

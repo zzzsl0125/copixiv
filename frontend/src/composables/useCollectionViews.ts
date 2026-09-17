@@ -194,6 +194,19 @@ export function useCollectionViews(options: UseCollectionViewsOptions) {
     else if (viewingExcluded.value) void excludedView.loadMore()
   }
 
+  /** 元数据编辑保存后**原地替换**集合视图里的那一本（不重取）。
+   *
+   * 「查看已选 / 被排除」两份列表是页面自己持有的副本：主列表的更新由 App
+   * 负责（``novel-updated``），这一份只有页面能改。两边都不整页重取——编辑是
+   * 单本操作，重取会让瀑布流跳动、还多打一次列表请求（§6.3）。 */
+  function patchNovel(updated: Novel) {
+    for (const view of [selectedView, excludedView]) {
+      const list = view.novels.value
+      const index = list.findIndex((novel) => novel.id === updated.id)
+      if (index >= 0) list[index] = updated
+    }
+  }
+
   // Leaving batch mode (or an emptied selection) closes the selected view;
   // entering batch mode closes the excluded view (批量模式优先互斥).
   watch(() => batchMode.value, (on) => {
@@ -274,5 +287,6 @@ export function useCollectionViews(options: UseCollectionViewsOptions) {
     toggleViewSelected,
     toggleViewExcluded,
     handleViewLoadMore,
+    patchNovel,
   }
 }

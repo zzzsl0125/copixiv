@@ -9,6 +9,7 @@ import UploadBar from '../components/features/UploadBar.vue'
 import BatchDeleteModal from '../components/features/BatchDeleteModal.vue'
 import BatchTagModal from '../components/features/BatchTagModal.vue'
 import BatchDownloadModal from '../components/features/BatchDownloadModal.vue'
+import EditNovelModal from '../components/features/EditNovelModal.vue'
 import { useMasonryLayout, useCollectionViews, useToast } from '../composables'
 import { tagPreferenceApi, getApiErrorMessage } from '../api'
 import ExclusionBar from '../components/features/ExclusionBar.vue'
@@ -71,6 +72,8 @@ const emit = defineEmits<{
   (e: 'toggle-sidebar'): void
   (e: 'logo-click'): void
   (e: 'novel-state-changed', payload: NovelStateChange): void
+  /** 元数据编辑保存成功：主列表里的那一本由 App 原地替换（集合视图副本本页自理）。 */
+  (e: 'novel-updated', novel: Novel): void
   (e: 'novels-command', command: NovelsCommand): void
   (e: 'batch-action', action: BatchAction): void
 }>()
@@ -103,6 +106,10 @@ const tagModalOpen = ref(false)
 const tagOperation = ref<'add_tags' | 'remove_tags'>('add_tags')
 const exportOpen = ref(false)
 
+// ---- 元数据编辑：弹窗宿主放在本页（初值来自 displayNovels 里的那张卡），
+// 保存成功后本页更新集合视图副本、App 更新主列表（见 handleNovelUpdated）。
+const editingNovel = ref<Novel | null>(null)
+
 // ---- 「查看已选」/「查看被排除」集合视图编排（F2 产物，编排逻辑不动，
 // 仅换取值通路：props.batchScope → batchScope、props.batchMode → batchMode 等）----
 const {
@@ -118,6 +125,7 @@ const {
   toggleViewSelected,
   toggleViewExcluded,
   handleViewLoadMore,
+  patchNovel,
 } = useCollectionViews({
   filters: toRef(props, 'filters'),
   batchScope,
@@ -177,6 +185,18 @@ const handleToggleActive = (id: number | string) => {
   } else {
     activeCardId.value = id
   }
+}
+
+/** 编辑保存成功：卡片上的初值对象换成响应值，并同步两份副本。
+ *
+ * - 集合视图（查看已选 / 被排除）的列表是**本页**持有的副本 → patchNovel；
+ * - 主列表由 App 拥有 → 上抛 `novel-updated`（与收藏/追更的
+ *   `novel-state-changed` 同一条"原地 patch、不重取"的路）。
+ * 标题/标签变化会改卡片高度，所以补一次瀑布流重排。 */
+const handleNovelUpdated = (updated: Novel) => {
+  patchNovel(updated)
+  void nextTick().then(relayout)
+  emit('novel-updated', updated)
 }
 </script>
 
@@ -268,6 +288,7 @@ const handleToggleActive = (id: number | string) => {
             @toggle-batch-select="handleBatchToggleCard"
             @search="(type, value) => emit('novels-command', { type: 'card-search', payload: { type, value } })"
             @state-changed="emit('novel-state-changed', $event)"
+            @edit="editingNovel = $event"
           />
         </div>
       </div>
@@ -322,6 +343,17 @@ const handleToggleActive = (id: number | string) => {
       @download-success="toast.success(`已开始下载：${$event}`)"
       @download-error="toast.error"
       @task-submitted="(payload) => emit('batch-action', { type: 'task-submitted', payload: { operation: 'export', ...payload } })"
+    />
+
+    <!-- 元数据编辑（卡片底部操作条「编辑」）：宿主放在本页——初值就是
+         displayNovels 里的那张卡，保存后本页更新集合视图副本、App 更新主列表，
+         两处都原地 patch、不整页重取（§6.3）。 -->
+    <EditNovelModal
+      :is-open="editingNovel !== null"
+      :novel="editingNovel"
+      @close="editingNovel = null"
+      @updated="handleNovelUpdated"
+      @error="toast.error"
     />
   </div>
 </template>

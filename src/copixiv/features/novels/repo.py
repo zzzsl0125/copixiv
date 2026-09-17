@@ -592,9 +592,6 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
     def __init__(self, session: Session):
         super().__init__(session)
         self.VALID_NOVEL_FIELDS = {c.name for c in models.Novel.__table__.c}
-        self.UPDATABLE_NOVEL_FIELDS = list(
-            self.VALID_NOVEL_FIELDS - {C.COL_ID, C.COL_INDEX}
-        )
         self.VALID_NOVEL_QUERY_FIELDS = self.VALID_NOVEL_FIELDS | {
             C.FIELD_TAGS, C.FIELD_KEYWORD, C.FIELD_IS_FAVOURITE,
             C.FIELD_IS_SPECIAL_FOLLOW, C.ORDER_BY_NONE, C.ORDER_BY_RANDOM,
@@ -1023,9 +1020,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
     def __init__(self, session: Session):
         super().__init__(session)
         self.VALID_NOVEL_FIELDS = {c.name for c in models.Novel.__table__.c}
-        self.UPDATABLE_NOVEL_FIELDS = list(
-            self.VALID_NOVEL_FIELDS - {C.COL_ID, C.COL_INDEX}
-        )
         self.VALID_NOVEL_QUERY_FIELDS = self.VALID_NOVEL_FIELDS | {
             C.FIELD_TAGS, C.FIELD_KEYWORD, C.FIELD_IS_FAVOURITE,
             C.FIELD_IS_SPECIAL_FOLLOW, C.ORDER_BY_NONE, C.ORDER_BY_RANDOM,
@@ -1217,13 +1211,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
 
         return new_ids
 
-    async def update_field(self, novel_id: int, field: str, value: Any) -> None:
-        if field not in self.UPDATABLE_NOVEL_FIELDS:
-            raise ValueError(f"Invalid or non-updatable field: {field}")
-        novel = self.session.get(models.Novel, novel_id)
-        if novel is not None:
-            setattr(novel, field, value)
-
     async def delete(self, novel_id: int) -> None:
         """Delete a novel row.
 
@@ -1277,6 +1264,26 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             .where(models.Novel.id.in_(novel_ids))
             .values(has_epub=status)
         )
+
+    async def update_metadata(self, novel_id: int, values: dict[str, Any]) -> None:
+        """单行元数据更新 —— 卡片「编辑」的写路径（docs/NOVEL_EDIT_DESIGN.md §5）。
+
+        刻意与 ``_upsert_rows`` 分开：那条路径带"来源权威"覆盖白名单与"非空者胜"
+        规则，是**来源刷新**的语义；用户编辑若混进去，就等于让编辑器继承来源的
+        覆盖策略（前置工作 b76e8cd 刚把这两件事拆开）。
+
+        字段白名单与"仅本地书可编辑"这两条业务规则由调用方
+        （``UpdateNovelMetadataUseCase``）掌握：仓库层不重复表达业务约束，
+        只保证"setattr + flush"这一件事。``tags`` 的 ``tag`` 行与
+        ``reference_count`` 由 ``sync_tag_refs`` 语句级触发器维护，无需簿记。
+        """
+        novel = self.session.get(models.Novel, novel_id)
+        if novel is None:
+            # 用例已先行 404；这里是"读到了又被并发删掉"的兜底。
+            return
+        for field, value in values.items():
+            setattr(novel, field, value)
+        self.session.flush()
 
     # ---- batch operations ----------------------------------------------------
 
