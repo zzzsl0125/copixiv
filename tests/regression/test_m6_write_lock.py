@@ -64,6 +64,7 @@ def test_write_endpoints_declare_write_uow():
         "delete_tag_preference", "reorder_tag_preferences",
         "create_tag_alias", "delete_tag_alias",
         "clear_search_history", "delete_search_history",
+        "upload_novels",
     ):
         found = any(fn in fns for fns in write_uow_users.values())
         assert found, f"写端点 {fn} 未声明 Depends(get_write_uow)"

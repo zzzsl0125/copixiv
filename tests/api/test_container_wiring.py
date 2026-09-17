@@ -171,6 +171,7 @@ class TestRealRouterMounting:
         "/api/tag-aliases",
         "/api/search-history",
         "/api/tokens",
+        "/api/library",
     ]
 
     def test_all_routers_mounted(self, app):

@@ -577,6 +577,14 @@ def _novel_from_mapping(mapping) -> Novel:
     ct = d.get(C.COL_CREATE_TIME)
     if isinstance(ct, datetime):
         d[C.COL_CREATE_TIME] = ct.isoformat()
+    # ``is_special_follow`` comes from a scalar subquery over ``author``: a
+    # novel whose ``author_id`` is NULL (local uploads, migration orphans) or
+    # whose author row is gone makes the subquery return *no rows*, and a
+    # scalar subquery with no rows is NULL — the ``coalesce`` inside it never
+    # runs.  The domain field is a bool, so normalise here (``get_by_id``
+    # does the same with ``or False``).
+    if C.FIELD_IS_SPECIAL_FOLLOW in d:
+        d[C.FIELD_IS_SPECIAL_FOLLOW] = bool(d[C.FIELD_IS_SPECIAL_FOLLOW])
     return Novel(**d)
 
 

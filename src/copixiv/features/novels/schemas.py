@@ -35,6 +35,9 @@ class NovelBase(BaseModel):
     series_id: int | None = None
     series_name: str | None = None
     series_index: int | None = None
+    # 行来源：``'pixiv'`` 抓取 / ``'local'`` 本地 TXT 上传（docs/LIBRARY_DESIGN.md
+    # §2）——前端据此在卡片上显示「本地」徽章。
+    source: str = "pixiv"
     model_config = ConfigDict(from_attributes=True)
 
     # Coerce int columns from DB into proper types

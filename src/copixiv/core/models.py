@@ -76,6 +76,13 @@ class Novel(BaseModel):
     # ``has_epub=None`` means "don't overwrite the stored value" on a
     # metadata-only refresh; the DB column itself is never NULL in practice.
     has_epub: EpubStatus | None = None
+    # Where the row came from — ``'pixiv'`` (scraper) or ``'local'`` (a TXT
+    # uploaded through 「我的上传」, docs/LIBRARY_DESIGN.md §2).  The list
+    # response carries it so the card can show a 「本地」 badge.
+    source: str = "pixiv"
+    # Local books only: sha256 of the normalised body (the dedup key);
+    # NULL for Pixiv rows.
+    source_key: str | None = None
 
     # Transient — not persisted, popped before the DB upsert
     tags: list[str] = Field(default_factory=list)

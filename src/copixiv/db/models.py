@@ -156,6 +156,19 @@ class Novel(Base):
     shuffle = Column(Integer, default=0, nullable=False)
     tags = Column(ARRAY(Text), nullable=False, server_default=sa_text("'{}'"))
     is_favourite = Column(Boolean, default=False, nullable=False)
+    # Where the row came from — migration 0005, docs/LIBRARY_DESIGN.md §2:
+    # ``'pixiv'`` for everything the scraper wrote, ``'local'`` for a TXT the
+    # user uploaded.  A column and not a tag: tags are user assets, and a
+    # retroactive alias rewrite could merge 「本地」 away and empty the shelf.
+    source = Column(
+        Text,
+        nullable=False,
+        default="pixiv",
+        server_default=sa_text("'pixiv'"),
+    )
+    # Local books: sha256 of the normalised body (the dedup key).  NULL for
+    # Pixiv rows — hence the *partial* unique index below.
+    source_key = Column(Text, nullable=True)
 
     author_rel = relationship("Author", back_populates="novels")
     series_rel = relationship("Series", back_populates="novels")
@@ -171,6 +184,14 @@ class Novel(Base):
         Index("ix_novel_series_like", "series_id", "like"),
         Index("ix_novel_create_time", "create_time"),
         Index("ix_novel_tags_gin", "tags", postgresql_using="gin"),
+        Index("ix_novel_source", "source"),
+        Index(
+            "ux_novel_source_key",
+            "source",
+            "source_key",
+            unique=True,
+            postgresql_where=sa_text("source_key IS NOT NULL"),
+        ),
         Index(
             "ix_novel_favourite",
             "id",

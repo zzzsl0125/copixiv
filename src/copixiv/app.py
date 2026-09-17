@@ -511,6 +511,7 @@ def create_app(config_path: str | None = None):
     from copixiv.features.tags import aliases as tag_aliases
     from copixiv.features.tags import preferences as tag_preferences
     from copixiv.features.failures import api as failed_novels
+    from copixiv.features.library import api as library
     from copixiv.features.system import api as system
     from copixiv.pixiv.account import AccountStatus
 
@@ -658,6 +659,9 @@ def create_app(config_path: str | None = None):
     app.include_router(tokens.router, prefix="/api/tokens", tags=["tokens"])
     app.include_router(
         failed_novels.router, prefix="/api/failed-novels", tags=["failed-novels"],
+    )
+    app.include_router(
+        library.router, prefix="/api/library", tags=["library"],
     )
 
     return app

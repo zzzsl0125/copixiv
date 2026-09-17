@@ -41,7 +41,17 @@ COL_TITLE = "title"
 COL_AUTHOR_NAME = "author_name"
 COL_AUTHOR_ID = "author_id"
 COL_PATH = "path"
+# ``novel.source`` — where the row came from.  Value domain:
+# ``'pixiv'`` (scraper) | ``'local'`` (a TXT uploaded through
+# 「我的上传」, docs/LIBRARY_DESIGN.md §2).
 COL_SOURCE = "source"
+# ``novel.source_key`` — local books only: sha256 of the normalised body
+# (the dedup key; NULL for Pixiv rows).
+COL_SOURCE_KEY = "source_key"
+# ``tag_alias.source`` — the alias's left-hand side.  Renamed (it used to be
+# ``COL_SOURCE``) when ``novel.source`` claimed that name; it has no callers
+# in the repo, only the re-export in ``db/__init__.py``.
+COL_TAG_ALIAS_SOURCE = "source"
 COL_TEXTS = "text"
 COL_LIKES = "like"
 COL_VIEWS = "view"
