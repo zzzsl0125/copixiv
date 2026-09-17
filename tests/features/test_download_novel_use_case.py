@@ -55,9 +55,19 @@ class FakeStorage:
     def __init__(self, tmp_path):
         self.download_dir = str(tmp_path / "download")
         self.saved: list[tuple[int, str, bool]] = []
+        self.texts: dict[int, str] = {}
 
     def save_novel_text(self, novel_id, title, content, force=False):
         self.saved.append((novel_id, title, force))
+        self.texts[novel_id] = content
+
+    def read_novel_text(self, novel_id, title):
+        """Local-copy lookup for the content-change detection.
+
+        Mirrors ``FileStorage.read_novel_text``: no stored text → ``None``
+        ("nothing to compare against").
+        """
+        return self.texts.get(novel_id) or None
 
 
 class FakeImageDownloader:
@@ -131,7 +141,11 @@ class TestIngest:
         assert out.new_count == 1
         assert out.new_author_ids == {1}
         assert out.failed == []
-        assert storage.saved == [(100, "新小说", False)]
+        # force=True since 2026-09: the content-change detection already
+        # decided the on-disk bytes must be written (no local copy → write),
+        # and ``save_novel_text``'s own "file exists → skip" heuristic is not
+        # allowed to veto that decision a second time.
+        assert storage.saved == [(100, "新小说", True)]
         assert downloader.processed == [100]
 
         with session_factory() as s:

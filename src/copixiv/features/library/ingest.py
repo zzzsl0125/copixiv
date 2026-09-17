@@ -35,7 +35,6 @@ id 是用户可见的，复用会把旧引用指向另一本书）；写事务�
 from __future__ import annotations
 
 import codecs
-import hashlib
 import os
 import re
 import unicodedata
@@ -48,7 +47,7 @@ from sqlalchemy import text as sa_text
 from sqlalchemy.exc import IntegrityError
 
 from copixiv.core.models import EpubStatus
-from copixiv.core.services import safe_filename
+from copixiv.core.services import safe_filename, sha256_text
 from copixiv.db import models
 
 # ---------------------------------------------------------------------------
@@ -184,8 +183,15 @@ def normalize_text(text: str) -> str:
 
 
 def body_fingerprint(normalized: str) -> str:
-    """规范化正文的 sha256（§4-3）—— 去重键，也是将来的合并锚。"""
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    """规范化正文的 sha256（§4-3）—— 去重键，也是将来的合并锚。
+
+    与抓取路径的变更检测（``features/novels/download_novel.py``）**输入不同**：
+    这里算的是 ``normalize_text`` 之后的正文（``\\r\\n`` → ``\\n``、去首尾空白），
+    因为去重键必须让同一份内容的两种换行写法得到同一个值；那条路径算的是
+    **写盘原文**，因为它比的是磁盘上那份文件。两者共用
+    :func:`copixiv.core.services.sha256_text` 同一个哈希原语，归一化各自负责。
+    """
+    return sha256_text(normalized)
 
 
 # ---------------------------------------------------------------------------

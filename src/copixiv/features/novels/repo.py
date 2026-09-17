@@ -1068,19 +1068,23 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             novels, existing_map, force_update, novel_tags_map,
         )
 
-        # 4. Set the tags array on each novel (popped in _resolve_tag_aliases)
-        #    and flush once.  The search index needs no follow-up: it is an
-        #    expression index over these columns, maintained by PostgreSQL.
-        changed_ids: set[int] = set()
+        # 4. Merge tags into each novel (popped in _resolve_tag_aliases) and
+        #    flush once.  **只增不减**：来源送来的新标签并进去，已有的
+        #    （含用户手加的）一律保留 —— 来源删掉一个标签不再意味着库里
+        #    也删掉。边界：这只保护新增、不保护删除；用户在编辑器里删掉
+        #    "来源也有"的标签，下次刷新会回来，要彻底去掉请用 tag_alias
+        #    合并（别名会把来源侧的名字一起改写）。没有新标签时一个字都
+        #    不写，避免无谓的 UPDATE 与触发器抖动。搜索索引无需跟进：它是
+        #    novel 上的表达式索引，由 PostgreSQL 自己维护。
         for nid, tag_list in novel_tags_map.items():
             novel = existing_map.get(nid)
             if novel is None:
                 novel = self.session.get(models.Novel, nid)
-            if novel is not None:
-                normalized = sorted(set(tag_list))
-                if list(novel.tags or []) != normalized:
-                    novel.tags = normalized
-                    changed_ids.add(nid)
+            if novel is None:
+                continue
+            current = set(novel.tags or [])
+            if tag_list - current:
+                novel.tags = sorted(current | tag_list)
         self.session.flush()
 
         return len(new_ids)
@@ -1141,12 +1145,26 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         """Insert new or update existing novel rows.
 
         New rows receive their tag array inline (single insert, no
-        separate tag UPDATE); existing rows keep their tags unless step 4
-        detects a real change.  Returns the ids of the inserted rows.
+        separate tag UPDATE); existing rows only ever **gain** tags (step 4
+        unions the incoming set into the stored one — see the comment
+        there).  Returns the ids of the inserted rows.
+
+        ``update_fields_set`` is the "source-authoritative" whitelist: these
+        columns are overwritten on every refresh.  Everything else obeys the
+        ``existing is None`` rule on the line below — i.e. **filled once,
+        never overwritten** — which is how ``author_name`` / ``series_index``
+        / ``create_time`` stay stable (2026-09 拍板：``create_time`` 退出
+        无条件覆盖，改由来源补空值）。
+
+        ``has_epub`` stays listed but is only ever truthy when the caller
+        actually rewrote the text file this round (the download path sets it
+        to ``None`` otherwise → popped above → untouched): the column
+        describes the local artifact, so the EPUB producer
+        (``update_has_epub_status``) and the reconciler own it.
         """
         update_fields_set = set([
             "like", "view", "title", "text", "caption",
-            "series_name", "create_time",
+            "series_name",
             "has_epub",
         ] + force_update)
 

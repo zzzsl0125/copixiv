@@ -47,6 +47,24 @@ class FileStorage:
         )
         return path
 
+    def read_novel_text(self, novel_id: int, title: str) -> str | None:
+        """Read the stored text — ``None`` when there is no usable local copy.
+
+        Used by the refresh path's content-change detection
+        (``features/novels/download_novel.py``): missing file, unreadable
+        file, or empty content all mean "nothing to compare against", and the
+        caller then behaves exactly as before this check existed.
+        """
+        path = self.novel_text_path(novel_id, title)
+        try:
+            if not path.is_file() or path.stat().st_size == 0:
+                return None
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            logger.warning(f"读取本地正文失败，按无本地副本处理: {path}")
+            return None
+        return content or None
+
     def delete_novel_files(self, novel_path: str) -> None:
         """Delete a novel's text and EPUB files, and clean up empty directories.
 

@@ -5,6 +5,7 @@ Merged from ``domain/services/*`` (8 files + ``__init__.py`` re-exports).
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import tempfile
@@ -176,6 +177,39 @@ def has_image_placeholders(content: str | None) -> bool:
     if not content:
         return False
     return bool(re.search(_HAS_IMAGE_PATTERN, content))
+
+
+# ---------------------------------------------------------------------------
+# Content fingerprinting — pure functions (2026-09 正文变更检测).
+# ---------------------------------------------------------------------------
+#
+# Two callers, two *different* inputs — the distinction is deliberate and
+# must not be "unified" by accident:
+#
+# * local uploads (``features/library/ingest.py::body_fingerprint``) hash the
+#   **normalised** body; the value is a dedup key (``novel.source_key``,
+#   partial unique index).
+# * the refresh path (``features/novels/download_novel.py``) hashes the body
+#   **exactly as it would be written to disk**, to answer "is the file on disk
+#   still the body pixiv serves?" — a change detector, never persisted.
+
+
+def sha256_text(text: str) -> str:
+    """sha256 hex digest of *text* (UTF-8) — the single hashing primitive."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def body_unchanged(local_text: str | None, incoming: str | None) -> bool:
+    """Is the freshly fetched body identical to the local copy?
+
+    ``None`` / empty on either side → ``False`` ("no usable local body, so
+    nothing can be considered unchanged").  Comparison is over the **raw**
+    strings: no newline normalisation, no stripping — the byte-for-byte text
+    that ``FileStorage.save_novel_text`` writes is what gets hashed.
+    """
+    if not local_text or not incoming:
+        return False
+    return sha256_text(local_text) == sha256_text(incoming)
 
 
 # ---------------------------------------------------------------------------
@@ -742,6 +776,8 @@ __all__ = [
     "normalize_tag",
     "is_chinese",
     "has_image_placeholders",
+    "sha256_text",
+    "body_unchanged",
     "safe_filename",
     "build_path",
     "safe_get",
