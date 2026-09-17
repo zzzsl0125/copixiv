@@ -3,8 +3,9 @@ import { ref, computed, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import Sidebar from './components/Sidebar.vue'
 import ToastContainer from './components/ui/ToastContainer.vue'
+import UploadModal from './components/features/UploadModal.vue'
 import { useNovels, useSystem, useToast, useBatchMode } from './composables'
-import { DEFAULT_MIN_LIKE, DEFAULT_MIN_TEXT } from './config'
+import { SECTIONS, resolveSection, sectionFor, type SectionId } from './config'
 import type { NovelFilters, BatchOperationResult } from './types'
 import type { NovelsState, BatchState, NovelsCommand, BatchAction } from './views/Novels.vue'
 
@@ -22,13 +23,16 @@ const {
 } = useNovels()
 
 const { systemConfig, fetchConfig } = useSystem()
-const { toasts, success: toastSuccess, warning: toastWarning, info: toastInfo } = useToast()
+const { toasts, success: toastSuccess, warning: toastWarning, info: toastInfo, error: toastError } = useToast()
 const configLoadedAndApplied = ref(false)
 
 const isSidebarOpen = ref(false)
 const route = useRoute()
 const router = useRouter()
-const activeSection = ref<'novels' | 'favourites' | 'special_follow' | null>('novels')
+const activeSection = ref<SectionId | null>('novels')
+
+/** 上传弹窗（不新增路由：docs/LIBRARY_DESIGN.md §1 上传入口） */
+const isUploadModalOpen = ref(false)
 
 // 集合视图（查看已选/查看被排除）活跃时，侧边栏禁用「随机」排序
 const inCollectionView = ref(false)
@@ -150,31 +154,54 @@ const handleBatchTaskSubmitted = (payload: {
   clearBatchSelection()
 }
 
+/**
+ * section 状态机（docs/LIBRARY_DESIGN.md §5）：section 的全部事实——
+ * keyword / 阈值 / 默认排序——都来自 config.ts 的 SECTIONS 表，
+ * 侧边栏 emit、这里从 keyword 的反推、以及阈值三处同源。
+ */
 const syncActiveSection = () => {
-  if (filters.keyword === 'is_favourite:true;') {
-    activeSection.value = 'favourites'
-  } else if (filters.keyword === 'is_special_follow:true;') {
-    activeSection.value = 'special_follow'
-  } else if (filters.keyword) {
-    activeSection.value = null
-  } else {
-    activeSection.value = 'novels'
-  }
+  activeSection.value = resolveSection(filters.keyword)
+}
+
+/** 套用某 section 的默认排序（时间/点赞/随机会覆盖 URL 里的旧值）。 */
+const applySectionOrdering = (id: SectionId) => {
+  const section = SECTIONS[id]
+  filters.order_by = section.order_by
+  filters.order_direction = section.order_direction
+}
+
+/** 套用某个 section 的阈值与默认排序，并重取列表（入口：点击侧边栏 / 上传成功）。 */
+const applySection = (id: SectionId) => {
+  const section = SECTIONS[id]
+  activeSection.value = id
+  filters.min_like = section.min_like
+  filters.min_text = section.min_text
+  applySectionOrdering(id)
+  handleSearch(undefined, { setOrdering: false })
 }
 
 const applyConfigAndLoad = () => {
   if (configLoadedAndApplied.value) return
 
+  // URL 上已经带着一个 section 的 keyword（直达链接 / 后退前进后的刷新）
+  // 时，用该 section 的阈值与排序，别套小说列表的默认值。
+  const initialSection = resolveSection(filters.keyword)
+
   const config = systemConfig.value
   if (config) {
     const urlParams = new URLSearchParams(window.location.search)
+    // URL 显式给值就尊重 URL；否则套**该 keyword 命中的 section** 的阈值——
+    // 固定用 DEFAULT_MIN_LIKE/TEXT 会让 ?keyword=source:local; 走进「我的上传」
+    // 却因 like=0 被 `like >= 500` 过滤干净（书架恒空）。
+    const section = sectionFor(filters.keyword)
     if (!urlParams.has('min_like')) {
-      filters.min_like = DEFAULT_MIN_LIKE
+      filters.min_like = section.min_like
     }
     if (!urlParams.has('min_text')) {
-      filters.min_text = DEFAULT_MIN_TEXT
+      filters.min_text = section.min_text
     }
   }
+  if (initialSection) applySectionOrdering(initialSection)
 
   configLoadedAndApplied.value = true
   syncActiveSection()
@@ -198,6 +225,28 @@ watch(
   },
 )
 
+/**
+ * keyword 是 section 的唯一判据：任何让 keyword 变化的路径都会重新反推
+ * section，命中某 section 时顺带套上它的阈值与默认排序。
+ *
+ * 为什么不能只靠点击侧边栏时设置：
+ * - popstate（useNovels.onPopState）直接改写 filters.keyword，不经过 App；
+ * - 搜索历史选中的 `source:local;` 走 NovelHeader → NovelsCommand('search')，
+ *   只调 handleSearch、不反推 section。
+ * 这两条路径否则会「列表已是我的上传、侧边栏还高亮着小说列表」。
+ */
+watch(() => filters.keyword, (keyword) => {
+  if (!configLoadedAndApplied.value) return
+  const section = resolveSection(keyword)
+  if (section && section !== 'novels') {
+    // 直接给 filters 赋值（而非 handleSectionSearch）：keyword 已是当前值，
+    // 不会与 watch 递归；命中 section 才重取，自由搜索交给调用方已有的 handleSearch。
+    applySection(section)
+  } else {
+    activeSection.value = section
+  }
+})
+
 watch(route, (to) => {
   if (to.path !== '/') {
     activeSection.value = null
@@ -211,20 +260,48 @@ const handleNovelStateChanged = (payload: { id: number; field: 'is_favourite' | 
   if (novel) novel[payload.field] = payload.value
 }
 
-const handleSectionSearch = (keyword: string | undefined, section: 'novels' | 'favourites' | 'special_follow') => {
-  activeSection.value = section
-  handleSearch(keyword, { setOrdering: true })
+/** 侧边栏「阅览」一栏（我的收藏 / 特别关注 / 我的上传）→ 一次特殊搜索。
+ *  签名与 Sidebar 的 `search` emit 对齐（keyword, section）；keyword 只是
+ *  给 URL/历史看的展示值，真正的阈值与排序由 section 决定——故不再读它，
+ *  统一以 SECTIONS[section].keyword 回填，保证点击与 URL 直达等价。
+ *
+ *  重取只走一条路：keyword 变化时由下面的 keyword watcher 负责 applySection，
+ *  这里不再自己调一次——否则「赋值触发 watcher」+「本函数直接调用」会让每次
+ *  点击发两次列表请求（App-sections.test.ts ① 用 toHaveBeenCalledTimes(1) 钉住）。
+ *  只有 keyword 没变（在书架里再点同一项）时 watcher 不会触发，才由这里直接重取。 */
+const handleSectionSearch = (_keyword: string | undefined, section: SectionId) => {
+  const keyword = SECTIONS[section].keyword
+  if (filters.keyword === keyword) {
+    applySection(section)
+    return
+  }
+  filters.keyword = keyword
 }
 
 const handleResetToDefaults = () => {
-  filters.keyword = ''
-  filters.order_by = 'random'
-  filters.order_direction = 'DESC'
-  filters.min_like = DEFAULT_MIN_LIKE
-  filters.min_text = DEFAULT_MIN_TEXT
+  // 「重置」= 回到小说列表（novels section）的出厂状态。
+  filters.keyword = SECTIONS.novels.keyword
+  filters.min_like = SECTIONS.novels.min_like
+  filters.min_text = SECTIONS.novels.min_text
+  filters.order_by = SECTIONS.novels.order_by
+  filters.order_direction = SECTIONS.novels.order_direction
 
   activeSection.value = 'novels'
   handleSearch(undefined, { setOrdering: false })
+}
+
+// ---- 上传弹窗（我的上传）：写入成功后刷新当前 section ----
+// 打开入口只有一处：列表顶部的 UploadBar → `novels-command {type:'upload'}` →
+// handleNovelsCommand（侧边栏已不再挂上传按钮）。
+const handleUploaded = () => {
+  if (activeSection.value === 'uploads') {
+    // 已在书架：原地按表里的默认排序重取（新书排最前），不叠加 URL 历史。
+    applySection('uploads')
+  } else {
+    // 不在书架（如正在自由搜索）：不强行改关键词打断当前视图，
+    // 只交给弹窗提示「已入库」，侧边栏点「我的上传」即可看到。
+    toastInfo('已入库，可在侧边栏「我的上传」查看')
+  }
 }
 
 const handleLogoClick = () => {
@@ -251,6 +328,10 @@ const handleNovelsCommand = (command: NovelsCommand) => {
       break
     case 'collection-view':
       inCollectionView.value = command.payload
+      break
+    case 'upload':
+      // 列表顶部 UploadBar → 上传弹窗（唯一入口；侧边栏不挂上传按钮）
+      isUploadModalOpen.value = true
       break
   }
 }
@@ -314,6 +395,7 @@ onMounted(() => {
         :filters="filters"
         :novels-state="novelsState"
         :batch-state="batchState"
+        :active-section="activeSection"
         @novels-command="handleNovelsCommand"
         @batch-action="handleBatchAction"
         @logo-click="handleLogoClick"
@@ -321,6 +403,13 @@ onMounted(() => {
         @novel-state-changed="handleNovelStateChanged"
       />
     </div>
+
+    <UploadModal
+      :is-open="isUploadModalOpen"
+      @close="isUploadModalOpen = false"
+      @uploaded="handleUploaded"
+      @error="toastError"
+    />
 
     <ToastContainer :toasts="toasts" />
   </div>

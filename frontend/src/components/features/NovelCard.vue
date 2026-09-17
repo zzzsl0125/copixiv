@@ -29,6 +29,34 @@ const emit = defineEmits<{
 const toast = useToast()
 const showMobileActions = computed(() => props.isActive)
 const hasEpubReady = computed(() => props.novel.has_epub === 2)
+/** 本地 TXT 上传的书（novel.source === 'local'）。 */
+const isLocal = computed(() => props.novel.source === 'local')
+
+/** 卡片小标签：全部渲染在同一个区域（`novel-badges`）。
+ *
+ * 这里是标签的**单源**——新增一种标签只需往数组里加一项（label + 配色 + 悬浮说明），
+ * 几何样式（尺寸/圆角/字号）在模板里共用一份，不必再往模板里插 span。
+ */
+const badges = computed(() => {
+  const list: { key: string; label: string; class: string; title: string }[] = []
+  if (isLocal.value) {
+    list.push({
+      key: 'local',
+      label: '本地',
+      class: 'bg-amber-100 text-amber-800',
+      title: '本地 TXT 上传（source=local）',
+    })
+  }
+  if (hasEpubReady.value) {
+    list.push({
+      key: 'epub',
+      label: 'EPUB',
+      class: 'bg-green-100 text-green-800',
+      title: '已生成 EPUB',
+    })
+  }
+  return list
+})
 
 const handleCardClick = (e: Event) => {
   // 必须阻止冒泡：父容器用 @click="activeCardId = null" 实现「点外部收起」，
@@ -189,7 +217,20 @@ const getTagClass = (tag: string) => {
           <span class="flex items-center gap-1" title="字数">📝 {{ formatNumber(novel.text) }}</span>
           <span class="flex items-center gap-1" title="日期">📝 {{ (novel.create_time || '2016-01-01').substring(0, 10) }}</span>
         </div>
-        <span v-if="hasEpubReady" class="px-1.5 py-0.5 rounded bg-green-100 text-green-800 text-[10px] font-bold">EPUB</span>
+        <!-- 小标签区：本地 / EPUB …… 同一区域排布（数据源见 script 的 badges）；
+             位置与既有的 EPUB 徽章一致（页脚行右端），随该行一起在 hover 时让位给操作条。 -->
+        <div v-if="badges.length" class="flex items-center gap-1 shrink-0" data-testid="novel-badges">
+          <span
+            v-for="badge in badges"
+            :key="badge.key"
+            class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold"
+            :class="badge.class"
+            :title="badge.title"
+            :data-testid="`badge-${badge.key}`"
+          >
+            {{ badge.label }}
+          </span>
+        </div>
       </div>
 
       <div

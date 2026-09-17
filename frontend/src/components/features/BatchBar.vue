@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ListChecks, Download, Tags, TagX, Trash2, Eye } from '@lucide/vue'
+import { BAR_SHELL_CLASS, barContainerClass, barBtnClass } from '../../lib/ui'
 
 defineProps<{
   matchedCount: number
@@ -21,18 +22,11 @@ const emit = defineEmits<{
   (e: 'remove-tags'): void
   (e: 'delete'): void
 }>()
-
-const opBtnClass = (danger = false) => [
-  'inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
-  danger
-    ? 'text-white bg-red-500 hover:bg-red-600'
-    : 'text-gray-700 bg-gray-100 hover:bg-gray-200',
-]
 </script>
 
 <template>
-  <div class="bg-white border-b border-gray-200 shadow-sm" data-testid="batch-bar">
-    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3">
+  <div :class="BAR_SHELL_CLASS" data-testid="batch-bar">
+    <div :class="barContainerClass()">
       <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
         <!-- 模式标识 + 查看已选 -->
         <span class="inline-flex items-center gap-1.5 text-sm font-semibold text-blue-700 shrink-0">
@@ -40,7 +34,7 @@ const opBtnClass = (danger = false) => [
         </span>
         <button
           type="button"
-          class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-md transition-colors text-gray-700 bg-gray-100 hover:bg-gray-200 disabled:opacity-40 disabled:cursor-not-allowed"
+          :class="barBtnClass()"
           :disabled="!hasSelection"
           @click="emit('toggle-view-selected')"
         >
@@ -52,7 +46,7 @@ const opBtnClass = (danger = false) => [
         <button
           v-if="!isViewingSelected"
           type="button"
-          class="px-3 py-1.5 text-sm font-medium rounded-md transition-colors text-gray-700 bg-gray-100 hover:bg-gray-200 disabled:opacity-40 disabled:cursor-not-allowed"
+          :class="barBtnClass()"
           :disabled="countLoading || matchedCount === 0 || selectAllLoading"
           @click="emit('select-all')"
         >
@@ -60,7 +54,7 @@ const opBtnClass = (danger = false) => [
         </button>
         <button
           type="button"
-          class="px-3 py-1.5 text-sm font-medium rounded-md transition-colors text-gray-700 bg-gray-100 hover:bg-gray-200 disabled:opacity-40 disabled:cursor-not-allowed"
+          :class="barBtnClass()"
           :disabled="!hasSelection"
           @click="emit('clear')"
         >
@@ -69,16 +63,16 @@ const opBtnClass = (danger = false) => [
 
         <!-- 操作 -->
         <div class="ml-auto flex flex-wrap items-center gap-2">
-          <button type="button" :class="opBtnClass()" :disabled="!hasSelection" @click="emit('export')">
+          <button type="button" :class="barBtnClass()" :disabled="!hasSelection" @click="emit('export')">
             <Download class="h-4 w-4" /> 导出
           </button>
-          <button type="button" :class="opBtnClass()" :disabled="!hasSelection" @click="emit('add-tags')">
+          <button type="button" :class="barBtnClass()" :disabled="!hasSelection" @click="emit('add-tags')">
             <Tags class="h-4 w-4" /> 添加标签
           </button>
-          <button type="button" :class="opBtnClass()" :disabled="!hasSelection" @click="emit('remove-tags')">
+          <button type="button" :class="barBtnClass()" :disabled="!hasSelection" @click="emit('remove-tags')">
             <TagX class="h-4 w-4" /> 移除标签
           </button>
-          <button type="button" :class="opBtnClass(true)" :disabled="!hasSelection" @click="emit('delete')">
+          <button type="button" :class="barBtnClass('danger')" :disabled="!hasSelection" @click="emit('delete')">
             <Trash2 class="h-4 w-4" /> 删除
           </button>
         </div>

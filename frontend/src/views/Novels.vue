@@ -5,6 +5,7 @@ import NovelHeader from '../components/features/NovelHeader.vue'
 import LoadMore from '../components/features/LoadMore.vue'
 import EmptyState from '../components/ui/EmptyState.vue'
 import BatchBar from '../components/features/BatchBar.vue'
+import UploadBar from '../components/features/UploadBar.vue'
 import BatchDeleteModal from '../components/features/BatchDeleteModal.vue'
 import BatchTagModal from '../components/features/BatchTagModal.vue'
 import BatchDownloadModal from '../components/features/BatchDownloadModal.vue'
@@ -12,6 +13,7 @@ import { useMasonryLayout, useCollectionViews, useToast } from '../composables'
 import { tagPreferenceApi, getApiErrorMessage } from '../api'
 import ExclusionBar from '../components/features/ExclusionBar.vue'
 import type { Novel, NovelFilters, TagPreference, BatchScope, BatchOperationResult } from '../types'
+import type { SectionId } from '../config'
 
 // ---- 组合根绑定契约（F1 收敛后的单源类型；App.vue 以 import type 复用）----
 /** 列表浏览状态：原 novels/loading/error/noMoreData/hasExcluded 五个 props 打包。 */
@@ -41,6 +43,8 @@ export type NovelsCommand =
   | { type: 'search'; keyword?: string }
   | { type: 'card-search'; payload: { type: string; value: string | number } }
   | { type: 'load-more' }
+  /** 打开「我的上传」上传弹窗（由 UploadBar 触发，App 侧开模态）。 */
+  | { type: 'upload' }
   | { type: 'update-filters'; payload: Partial<NovelFilters> }
   | { type: 'collection-view'; payload: boolean }
 
@@ -59,6 +63,8 @@ const props = defineProps<{
   novelsState: NovelsState
   /** 批量状态：App 仅在首页路由注入（其他路由 undefined）；未注入时按关闭态防御取值。 */
   batchState?: BatchState
+  /** 当前书架 section：仅 `uploads` 会多渲染一条上传工具条（见 UploadBar）。 */
+  activeSection?: SectionId | null
 }>()
 
 const emit = defineEmits<{
@@ -206,6 +212,13 @@ const handleToggleActive = (id: number | string) => {
         @add-tags="tagOperation = 'add_tags'; tagModalOpen = true"
         @remove-tags="tagOperation = 'remove_tags'; tagModalOpen = true"
         @delete="deleteOpen = true"
+      />
+      <!-- 我的上传工具条：与批量栏互斥——两条栏抢的是同一条 sticky 槽位，
+           批量模式优先（模式栏语义更强：此时用户在操作已有书，不在收新书）。
+           空书架时这条栏就在空状态正上方，仍是最显眼的入口。 -->
+      <UploadBar
+        v-if="props.activeSection === 'uploads' && !batchMode"
+        @upload="emit('novels-command', { type: 'upload' })"
       />
     </div>
 

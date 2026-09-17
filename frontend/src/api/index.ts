@@ -1,5 +1,6 @@
 export { apiClient } from './client'
 export { novelApi, BATCH_MAX_NOVELS } from './novels'
+export { libraryApi } from './library'
 export { taskApi } from './tasks'
 export { tagPreferenceApi, tagAliasApi } from './tags'
 export { tokenApi } from './tokens'

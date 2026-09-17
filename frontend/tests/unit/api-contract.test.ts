@@ -32,6 +32,8 @@ function optionalDict(v: unknown): void {
 // Novel — GET /api/novels/ 数组项。权威：features/novels/schemas.py:NovelBase；
 // 前端 types/novels.ts:Novel（author_id 后端可 null——迁移孤儿行，前端标必填 number 更严；
 // core/models.py:Novel 的 path/content/images/illusts/cover_url/shuffle 仅领域侧，不下发）
+// source 列权威：docs/LIBRARY_DESIGN.md §2（novel.source TEXT NOT NULL DEFAULT 'pixiv'，
+// 本地书 'local' + 负 id；DSL 由 Novel.__table__.c 派生，无需白名单）
 // ---------------------------------------------------------------------------
 const sampleNovel: Novel = {
   id: 42,
@@ -50,6 +52,9 @@ const sampleNovel: Novel = {
   tags: ['图书馆', '幻想', '日常'],
   is_favourite: 1,
   is_special_follow: 0,
+  // 来源列（novel.source，迁移 0005_novel_source）：'pixiv' 缺省 / 'local' 本地 TXT 上传。
+  // 现有 pixiv 行零回填——缺省值由库给出，故前端类型可选；列表响应会带上下发。
+  source: 'pixiv',
 }
 
 describe('Novel（novels/schemas.py:NovelBase）', () => {
@@ -69,7 +74,17 @@ describe('Novel（novels/schemas.py:NovelBase）', () => {
     optionalNumber(n.series_index)
     optionalString(n.caption)
     optionalString(n.create_time)
+    optionalString(n.source)
     expect(new Date(n.create_time as string).toString()).not.toBe('Invalid Date')
+  })
+
+  it('source 区分 pixiv / local（本地书 id 为负）', () => {
+    // 后端列有 NOT NULL DEFAULT 'pixiv'，但存量响应/旧客户端兼容上前端标可选——
+    // 消费侧一律按 `source === 'local'` 判定，缺失即视为 pixiv。
+    const local: Novel = { ...sampleNovel, id: -999999999, source: 'local', like: 0, view: 0 }
+    expect(sampleNovel.source).toBe('pixiv')
+    expect(local.source).toBe('local')
+    expect(local.id).toBeLessThan(0)
   })
 })
 

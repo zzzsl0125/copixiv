@@ -87,3 +87,39 @@ describe('NovelCard 移动端抽屉（下载/收藏/追更）', () => {
     expect(wrapper.find('.translate-y-full').exists()).toBe(false)
   })
 })
+
+describe('NovelCard 小标签区（本地 / EPUB 同一区域）', () => {
+  it('pixiv 书（source 缺省或 pixiv）不显示「本地」标签', () => {
+    expect(mountCard().find('[data-testid="badge-local"]').exists()).toBe(false)
+    expect(mountCard({ novel: { ...novel, source: 'pixiv' } }).find('[data-testid="badge-local"]').exists()).toBe(false)
+  })
+
+  it('source=local 显示「本地」标签，且不影响既有布局', () => {
+    const wrapper = mountCard({ novel: { ...novel, id: -999999999, source: 'local' } })
+
+    const badge = wrapper.get('[data-testid="badge-local"]')
+    expect(badge.text()).toBe('本地')
+    // 标题 / 作者 / 标签 / 下载按钮照旧（§8-4：先显示徽章，其余不动）
+    expect(wrapper.text()).toContain('测试小说')
+    expect(wrapper.text()).toContain('测试作者')
+    expect(wrapper.text()).toContain('tag-a')
+  })
+
+  it('两个标签排在同一区域内（后续扩展只需加一条 badges 数据）', () => {
+    // has_epub=2 → EPUB 就绪；source=local → 本地
+    const wrapper = mountCard({ novel: { ...novel, source: 'local', has_epub: 2 } })
+
+    const area = wrapper.get('[data-testid="novel-badges"]')
+    expect(area.find('[data-testid="badge-local"]').exists()).toBe(true)
+    expect(area.find('[data-testid="badge-epub"]').exists()).toBe(true)
+    // 顺序稳定：本地在前、EPUB 在后
+    expect(area.text().replace(/\s+/g, '')).toBe('本地EPUB')
+  })
+
+  it('只有 EPUB 就绪时不出现标签区以外的重复标签（单源渲染）', () => {
+    const wrapper = mountCard({ novel: { ...novel, has_epub: 2 } })
+
+    expect(wrapper.findAll('[data-testid="badge-epub"]')).toHaveLength(1)
+    expect(wrapper.get('[data-testid="novel-badges"]').text().trim()).toBe('EPUB')
+  })
+})

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useRoute, useRouter } from 'vue-router'
-import { Search, Settings, ListChecks, AlertTriangle } from '@lucide/vue'
+import { Search, Settings, ListChecks, AlertTriangle, Upload } from '@lucide/vue'
+import { SECTIONS, type SectionId } from '../config'
 import type { NovelFilters } from '../types'
 
 const route = useRoute()
@@ -9,7 +10,7 @@ const router = useRouter()
 const props = defineProps<{
   isOpen: boolean
   showFilters?: boolean
-  activeSection: 'novels' | 'favourites' | 'special_follow' | null
+  activeSection: SectionId | null
   configLoadedAndApplied?: boolean
   filters: NovelFilters
   isBatchMode: boolean
@@ -19,11 +20,27 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'close'): void
-  (e: 'search', keyword: string | undefined, section: 'novels' | 'favourites' | 'special_follow'): void
+  (e: 'search', keyword: string | undefined, section: SectionId): void
   (e: 'update:filters', filters: NovelFilters): void
   (e: 'reset-to-defaults'): void
   (e: 'toggle-batch-mode'): void
 }>()
+
+/**
+ * 「阅览」一栏的按钮 = 一次特殊搜索，与「我的收藏」完全同构：
+ * 不在小说页时先跳回 '/'，再 emit(search)，最后 close。
+ * keyword 从 SECTIONS 表取（config.ts）——与 App.vue 的反推/阈值同源。
+ * `novels` 走 reset-to-defaults：它是「回到初始状态」，不是一次带关键词的搜索。
+ *
+ * 「我的上传」的上传动作**不在这里**：侧边栏只留导航入口（行内塞按钮不美观，
+ * 且与批量模式无关的模式栏应由列表页承担），上传入口在列表顶部的 UploadBar。
+ */
+const handleSectionClick = (section: SectionId) => {
+  if (route.path !== '/') router.push('/')
+  if (section === 'novels') emit('reset-to-defaults')
+  else emit('search', SECTIONS[section].keyword, section)
+  emit('close')
+}
 
 const updateFilter = (key: keyof typeof props.filters, value: unknown) => {
   const newFilters = { ...props.filters, [key]: value }
@@ -75,15 +92,26 @@ const navIconClass = 'mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500'
       <nav class="space-y-2 mb-8">
         <!-- 阅览 -->
         <h3 class="pt-1 text-sm font-semibold text-gray-500 uppercase tracking-wider mb-1">阅览</h3>
-        <a href="#" :class="navItemClass(activeSection === 'novels')" @click.prevent="() => { if(route.path !== '/') router.push('/'); $emit('reset-to-defaults'); $emit('close'); }">
+        <button type="button" :class="[navItemClass(activeSection === 'novels'), 'w-full']" data-testid="nav-novels" @click="handleSectionClick('novels')">
           <Search :class="navIconClass" /> 小说列表
-        </a>
-        <a href="#" :class="navItemClass(activeSection === 'favourites')" @click.prevent="() => { if(route.path !== '/') router.push('/'); $emit('search', 'is_favourite:true;', 'favourites'); $emit('close'); }">
+        </button>
+        <button type="button" :class="[navItemClass(activeSection === 'favourites'), 'w-full']" data-testid="nav-favourites" @click="handleSectionClick('favourites')">
           <Search :class="navIconClass" /> 我的收藏
-        </a>
-        <a href="#" :class="navItemClass(activeSection === 'special_follow')" @click.prevent="() => { if(route.path !== '/') router.push('/'); $emit('search', 'is_special_follow:true;', 'special_follow'); $emit('close'); }">
+        </button>
+        <button type="button" :class="[navItemClass(activeSection === 'special_follow'), 'w-full']" data-testid="nav-special-follow" @click="handleSectionClick('special_follow')">
           <Search :class="navIconClass" /> 特别关注
-        </a>
+        </button>
+        <!-- 「我的上传」：与「我的收藏」完全同构的一次特殊搜索（source:local;）。
+             上传动作不在这里——侧边栏只留导航入口，上传按钮在列表顶部的 UploadBar
+             （行内塞按钮不美观；且上传栏与批量栏的关系属于列表页的模式问题）。 -->
+        <button
+          type="button"
+          :class="[navItemClass(activeSection === 'uploads'), 'w-full']"
+          data-testid="nav-uploads"
+          @click="handleSectionClick('uploads')"
+        >
+          <Upload :class="navIconClass" /> 我的上传
+        </button>
 
         <!-- 配置 -->
         <h3 class="pt-4 text-sm font-semibold text-gray-500 uppercase tracking-wider mb-1">配置</h3>
@@ -110,6 +138,7 @@ const navIconClass = 'mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500'
         </router-link>
         <button
           @click="handleBatchClick"
+          data-testid="nav-batch-mode"
           class="group w-full flex items-center justify-center px-3 py-2 text-sm font-medium rounded-md transition-colors"
           :class="isBatchMode ? 'bg-blue-500 text-white' : 'text-gray-700 hover:text-gray-900 hover:bg-gray-50'"
         >
