@@ -81,7 +81,11 @@ class BatchExportArgs(BaseModel):
     naming_template: str | None = None
 
 
-@register(BATCH_TASK_NAME, args=BatchOperationArgs)
+@register(
+    BATCH_TASK_NAME,
+    description="对选中小说批量执行删除或标签增删",
+    args=BatchOperationArgs,
+)
 async def batch_operation(
     args: BatchOperationArgs, ctx: TaskContext,
 ) -> TaskResult:
@@ -192,7 +196,11 @@ EXPORT_FILE_PREFIX = "batch_export_"
 _EXPORT_MAX_AGE_SECONDS = 24 * 3600
 
 
-@register(EXPORT_TASK_NAME, args=BatchExportArgs)
+@register(
+    EXPORT_TASK_NAME,
+    description="把选中小说打包成 ZIP 导出",
+    args=BatchExportArgs,
+)
 async def batch_export(args: BatchExportArgs, ctx: TaskContext) -> TaskResult:
     """Build the export ZIP as a background task.
 

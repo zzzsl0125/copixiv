@@ -32,7 +32,7 @@ from .kernel import TaskContext
 from .kernel import register
 
 
-@register("check_epub")
+@register("check_epub", description="核对 EPUB 状态与磁盘文件是否一致")
 async def check_epub(ctx: TaskContext) -> TaskResult:
     """Synchronise ``has_epub`` status with actual files on disk.
 
@@ -489,13 +489,19 @@ def _no_images_ever_and_stale(txt_path: Path, novel_id: int) -> bool:
     return age_days > _STALE_DAYS
 
 
-@register("sync_empty_name")
+@register("sync_empty_name", description="补齐作者名为空的小说")
 async def sync_empty_name(ctx: TaskContext) -> TaskResult:
     """Fix novels whose ``author_name`` is NULL.
 
     Collects names via :func:`collect_author_names` (local ``author``
     table first, then Pixiv API) and writes them back in a short write
     transaction via :func:`writeback_author_names`.
+
+    **Disabled by default** — ``scheduled_task.is_enabled`` defaults to
+    false, so it only runs once someone enables a schedule for it.  It is
+    therefore *not* the guarantee behind "every book shows an author name"
+    (LIBRARY_DESIGN.md §3.3): that is a product promise, and what actually
+    re-resolves a pending name is a later fetch of the same work / author.
     """
     from sqlalchemy import select as _select
     from copixiv.db import models
@@ -527,7 +533,7 @@ async def sync_empty_name(ctx: TaskContext) -> TaskResult:
     )
 
 
-@register("rebuild_fts")
+@register("rebuild_fts", description="重建关键词搜索索引")
 async def rebuild_fts(ctx: TaskContext) -> TaskResult:
     """Rebuild the keyword-search index (``REINDEX``).
 
@@ -547,7 +553,7 @@ async def rebuild_fts(ctx: TaskContext) -> TaskResult:
     return TaskResult(summary="搜索索引重建完成（REINDEX novel_search_gin）")
 
 
-@register("check_fts")
+@register("check_fts", description="检查关键词搜索索引是否有效")
 async def check_fts(ctx: TaskContext) -> TaskResult:
     """Keyword-search index health check — existence and validity.
 

@@ -124,7 +124,7 @@ async def _fan_out_author_fetch(
 # ---------------------------------------------------------------------------
 
 
-@register("novel_fetch", args=NovelFetchArgs)
+@register("novel_fetch", description="抓取指定 ID 的小说", args=NovelFetchArgs)
 async def novel_fetch(args: NovelFetchArgs, ctx: TaskContext) -> TaskResult:
     """Download and persist a single novel by ID."""
     out = await ingest(
@@ -147,7 +147,11 @@ async def novel_fetch(args: NovelFetchArgs, ctx: TaskContext) -> TaskResult:
     )
 
 
-@register("novel_follow", args=NovelFollowArgs)
+@register(
+    "novel_follow",
+    description="抓取指定pixiv账号中关注的作者的新作",
+    args=NovelFollowArgs,
+)
 async def novel_follow(args: NovelFollowArgs, ctx: TaskContext) -> TaskResult:
     """Fetch new novels from followed users.
 
@@ -178,7 +182,7 @@ async def novel_follow(args: NovelFollowArgs, ctx: TaskContext) -> TaskResult:
     )
 
 
-@register("author_fetch", args=AuthorFetchArgs)
+@register("author_fetch", description="抓取指定作者的全部作品", args=AuthorFetchArgs)
 async def author_fetch(args: AuthorFetchArgs, ctx: TaskContext) -> TaskResult:
     """Fetch all novels by an author.
 
@@ -247,7 +251,11 @@ async def author_fetch(args: AuthorFetchArgs, ctx: TaskContext) -> TaskResult:
     )
 
 
-@register("author_delete", args=AuthorDeleteArgs)
+@register(
+    "author_delete",
+    description="删除指定作者及其全部小说",
+    args=AuthorDeleteArgs,
+)
 async def author_delete(args: AuthorDeleteArgs, ctx: TaskContext) -> TaskResult:
     """Delete an author and all their novels."""
     await run_write_transaction(
@@ -265,7 +273,7 @@ async def author_delete(args: AuthorDeleteArgs, ctx: TaskContext) -> TaskResult:
     return TaskResult(summary=f"已删除作者 #{args.author_id} 及其全部小说")
 
 
-@register("author_special_follow")
+@register("author_special_follow", description="抓取特别关注的作者的新作")
 async def author_special_follow(ctx: TaskContext) -> TaskResult:
     """Check for new novels from specially-followed authors."""
     async with ctx.uow.begin():
@@ -306,7 +314,11 @@ async def author_special_follow(ctx: TaskContext) -> TaskResult:
     )
 
 
-@register("novel_ranking", args=NovelRankingArgs)
+@register(
+    "novel_ranking",
+    description="逐日抓取指定日期范围的日排行榜",
+    args=NovelRankingArgs,
+)
 async def novel_ranking(args: NovelRankingArgs, ctx: TaskContext) -> TaskResult:
     """Fetch novel rankings."""
     titles: list[str] = []
@@ -327,7 +339,11 @@ async def novel_ranking(args: NovelRankingArgs, ctx: TaskContext) -> TaskResult:
     )
 
 
-@register("novel_search", args=NovelSearchArgs)
+@register(
+    "novel_search",
+    description="搜索指定关键词与时间范围的小说",
+    args=NovelSearchArgs,
+)
 async def novel_search(args: NovelSearchArgs, ctx: TaskContext) -> TaskResult:
     """Search novels by keyword over a time range.
 
@@ -363,7 +379,11 @@ class FailedRetryArgs(BaseModel):
     novel_ids: list[int]
 
 
-@register("failed_retry", args=FailedRetryArgs)
+@register(
+    "failed_retry",
+    description="重试「下载失败」清单中的小说",
+    args=FailedRetryArgs,
+)
 async def failed_retry(args: FailedRetryArgs, ctx: TaskContext) -> TaskResult:
     """Manually retry failed downloads from the 「下载失败」 ledger.
 
