@@ -171,7 +171,7 @@ async def test_batch_scope_all_matched_agrees_with_the_list(
 async def test_order_by_id_desc_puts_the_newest_upload_first(
     session_factory, tmp_path,
 ):
-    """§3.1：锚点 + 递增让「时间」按钮（``order_by='id'``）最新在最前。"""
+    """§3.1：id 是负的时间坐标，服务端按 ``abs(id)`` 排序 → 最新上传在最前。"""
     download = tmp_path / "download"
     first = _upload_local(session_factory, download, "旧.txt", "旧正文")
     second = _upload_local(session_factory, download, "新.txt", "新正文")

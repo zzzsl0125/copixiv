@@ -57,6 +57,22 @@ from copixiv.features.novels.search import keyword_condition
 # =========================================================================
 
 
+def time_axis_col(model):
+    """「按时间」排序键 = ``abs(id)``（docs/LIBRARY_DESIGN.md §3.1）。
+
+    pixiv 行的 ``id`` 就是作品号（发布序）；本地行的 ``id`` 是**负的**时间坐标
+    （``-(上传时刻的作品号位置)``，见 ``features/library/local_axis.py``）。
+    负号只是「本地」这个来源的标记，时间在**模**上 —— 所以直接把 ``id`` 当时间
+    排，本地书会整体被钉在数轴负端（DESC 恒最后 / ASC 恒最前），位置与上传时间
+    无关。取绝对值才回到同一根时间轴。
+
+    契约：**凡把 id 当时间用的排序，都要走这个表达式**。反例（故意不换）：
+    ``shuffle, id`` 的随机浏览次级键、``check_epub`` 的 ``id > cursor`` 巡检游标
+    —— 它们不是时间排序，用裸 id 才是对的。
+    """
+    return func.abs(model.id)
+
+
 class BaseQueryBuilder:
     """Shared helpers for pagination, ordering, and FTS query building."""
 
@@ -88,10 +104,16 @@ class BaseQueryBuilder:
                 > _tuple(last_shuffle, last_id)
             )
 
-        col = getattr(self.main_model, order_by, None)
+        if order_by == C.COL_ID:
+            # 时间轴：游标里存的仍是身份 id，坐标由 ``abs`` 反推 —— 游标形状
+            # 因此保持 ``{"id": N}`` 不变（§3.1）。
+            col = time_axis_col(self.main_model)
+            cursor_val = abs(int(cursor["id"]))
+        else:
+            col = getattr(self.main_model, order_by, None)
+            cursor_val = cursor.get(order_by) if col is not None else None
         if col is not None:
             descending = order_direction.upper() == "DESC"
-            cursor_val = cursor[order_by]
             cursor_id = cursor["id"]
             if descending:
                 stmt = stmt.where(
@@ -113,7 +135,10 @@ class BaseQueryBuilder:
                 self.main_model.shuffle.asc(), self.main_model.id.asc(),
             )
 
-        col = getattr(self.main_model, order_by, None)
+        if order_by == C.COL_ID:
+            col = time_axis_col(self.main_model)  # 时间轴：负数 id 取模（§3.1）
+        else:
+            col = getattr(self.main_model, order_by, None)
         if col is not None:
             if order_direction.upper() == "DESC":
                 return stmt.order_by(col.desc(), self.main_model.id.desc())
@@ -677,7 +702,11 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         if not novel_ids or order_by not in (C.COL_ID, C.COL_LIKES, C.COL_TEXTS):
             return list(novel_ids)
 
-        col = getattr(models.Novel, order_by)
+        col = (
+            time_axis_col(models.Novel)
+            if order_by == C.COL_ID
+            else getattr(models.Novel, order_by)
+        )
         descending = order_direction.upper() == "DESC"
         stmt = (
             select(models.Novel.id)

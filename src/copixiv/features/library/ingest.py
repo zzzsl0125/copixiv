@@ -9,24 +9,52 @@
 4. 去重 —— ``(source='local', source_key)`` 命中已有本地书 → 本条
    ``duplicate``，指出那本（§8-1：拒收 + 指路，不建重复行）；
 5. 文件名解析 —— 标题 / 作者，``author_name`` **必须非 NULL**（解析不出写
-   「未知作者」，§3.3：``sync_empty_name`` 扫 ``author_name IS NULL`` 再拿
-   ``author_id`` 去 Pixiv 查作者名，非 NULL 即永不进该集合）；
-6. 落库 —— ``id = -(10**9) + n``（n 越新越大，§3.1，取号走专用序列
-   ``novel_local_id_seq``）、写 ``download/local/{安全标题}_{id}.txt``
-   （原子写）、插行（``source='local'``、``has_epub=NO_IMAGES(3)``、
-   ``create_time=now``、``like=view=0``、``author_id=series_id=NULL``）。
+   「未知作者」）。这是 §3.3 产品承诺「每本书都有作者名可显示」在入库侧的落点，
+   **不外包给任务**：``sync_empty_name`` 扫的确实是 ``author_name IS NULL`` 的
+   行，但它默认禁用（``scheduled_task.is_enabled`` 列默认 false，只有手动启用
+   才跑）——预设作者是唯一会**覆盖**这一步的输入（见下一节）；
+6. 落库 —— ``id = -(坐标)``（§3.1：坐标 = 上传时刻在 pixiv 作品号轴上的位置，
+   见 :mod:`copixiv.features.library.local_axis`）、写
+   ``download/local/{安全标题}_{id}.txt``（原子写）、插行（``source='local'``、
+   ``has_epub=NO_IMAGES(3)``、``create_time=now``、``like=view=0``、
+   ``series_id=NULL``；``author_id`` 没给预设时是 NULL）。
+
+预设作者（``preset_author_id`` / ``preset_author_name``，2026-09 加）：一次上传
+的**整批书**可以挂同一位作者。三件事是刻意的，各有理由：
+
+* **预设优先于文件名解析**。文件名里的作者是用户**随手起的**（甚至只是下载站
+  的命名习惯），预设 id 是用户在界面上**明确指定**的身份；两者冲突时以明确
+  指定的为准——id 是身份、名字是它的缓存，与单本 ``PATCH``
+  （``novels/update_metadata.py::_author_columns``）和批量编辑
+  （``novels/batch_edit_metadata.py``）逐字同一套口径。所以给了 ``author_id``
+  时，这一批的 ``author_name`` **不再取** ``parse_filename`` 的结果。
+* **解析不出名字就写 ``NULL``（显式写，覆盖文件名解析值）**，既不退回文件名里
+  那个名字、也不写「未知作者」。``author_id`` 已经落库，名字只是它的缓存：退回
+  文件名里的名字会让这一行显示成"id 指向 A、名字写着 B"，是一张自相矛盾的身份
+  映射；写「未知作者」则等于用一个看起来确定的假名盖住"待解析"。``NULL`` 是
+  仓库**认可的中间态**——**别把它说成"有兜底任务"**：``sync_empty_name`` 默认
+  禁用（``scheduled_task.is_enabled`` 列默认 false，只有手动启用才跑），会把
+  名字补回来的是**再抓一次该作者 / 作品**或用户重新「同步」。
+* **重复件也应用**（用户 2026-09 拍板）。用户的动作是"把这批书挂到这位作者
+  名下"，重复件已经在库并不改变这个意图；不应用就是"用户以为挂上了、其实没
+  挂"——静默不做比报错更糟。同时保留"重复件尽量不动库"的既有精神：``author_id``
+  与解析出的名字**本来就一模一样**时一个字节都不写（值级断言据此成立）。
 
 两条硬边界（§4）：
 
-* **本地行永不进 ``_upsert_rows``**：本模块只做 INSERT，不 import 抓取路径的
-  写仓库（``novels.repo.SQLAlchemyNovelWriteRepository`` / ``upsert_novels``；
-  ``tests/architecture/test_library_isolation.py`` 用 AST 钉住）。
+* **本地行永不进 ``_upsert_rows``**：本模块只写 ``novel``（新书 INSERT；重复件
+  只改 ``author_id`` / ``author_name`` 两列）与 ``author`` 行的名字
+  （``update_author_name_sync``，与单本 / 批量编辑同一个收尾），不 import 抓取
+  路径的写仓库（``novels.repo.SQLAlchemyNovelWriteRepository`` /
+  ``upsert_novels``；``tests/architecture/test_library_isolation.py`` 用 AST
+  钉住）。
 * **失败决不写 ``failed_novel``**：``failed_retry`` 会拿 ``failed_novel.novel_id``
   去 Pixiv 请求（``tasks/novels.py:366-390``），本地书进去就是必然失败的无意义
   请求。失败只逐条出现在响应体里（§4-7）。
 
-幂等与并发：发号由专用序列 ``novel_local_id_seq`` 负责（并发安全、且**不回退**：
-id 是用户可见的，复用会把旧引用指向另一本书）；写事务另外取一次
+幂等与并发：发号由 :func:`local_axis.next_local_id` 负责 —— 坐标游标放在专用
+序列 ``novel_local_coord_seq`` 上，``nextval`` 并发安全且**不回退**（id 是用户
+可见的，复用会把旧引用指向另一本书）；写事务另外取一次
 ``pg_advisory_xact_lock`` —— 事务级咨询锁，提交/回滚即释放，职责是让
 「指纹预检 + INSERT」串行（见 :func:`_lock_local_ids`），不是全局写锁
 （postgres-migration 后 ``db_write()`` 已只是事务边界标记）。
@@ -42,24 +70,21 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy import text as sa_text
 from sqlalchemy.exc import IntegrityError
 
 from copixiv.core.models import EpubStatus
 from copixiv.core.services import safe_filename, sha256_text
 from copixiv.db import models
+from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
+from copixiv.features.library import local_axis
 
 # ---------------------------------------------------------------------------
 # 常量（值域与 §2/§3 一致）
 # ---------------------------------------------------------------------------
 
-SOURCE_LOCAL = "local"
-
-# 本地书 id 的专用序列（迁移 0005 创建：START -999999999 / INCREMENT 1）。
-# ``nextval`` 并发安全且与事务无关 —— 回滚的尝试也消耗一个号，所以 id 永不
-# 回退、永不复用（id 是用户可见的：DSL ``id:``、导出模板 ``{id}``）。
-LOCAL_ID_SEQUENCE = "novel_local_id_seq"
+SOURCE_LOCAL = local_axis.SOURCE_LOCAL
 
 # 本地书文件目录：download/local/（§3.2）。
 LOCAL_SUBDIR = "local"
@@ -329,10 +354,10 @@ def _write_text_atomic(root: Path, path: Path, content: str) -> None:
 def _lock_local_ids(session) -> None:
     """取事务级咨询锁 —— 现在只负责让「指纹预检 + INSERT」在并发下串行。
 
-    发号已经交给专用序列（``nextval`` 并发安全且不回退），所以这把锁**不再**
-    是 id 分配的一部分；它挡住的是去重竞态：两个并发上传同一份正文时，若都
-    通过了预检，后者会在 ``ux_novel_source_key`` 上撞车。PG 里一条语句报错会
-    把**整个事务**置为 aborted，而整批上传共用一个事务
+    发号不靠这把锁（``nextval`` 本身原子且不回退，见
+    :func:`local_axis.next_local_id`）；它挡住的是去重竞态：两个并发上传同一份
+    正文时，若都通过了预检，后者会在 ``ux_novel_source_key`` 上撞车。PG 里一条
+    语句报错会把**整个事务**置为 aborted，而整批上传共用一个事务
     （``Depends(get_write_uow)``），后面本来合法的文件会被一起拖死。
 
     没有改成「每个文件一个 savepoint + 靠唯一索引兜底」：那要每次上传都多开
@@ -347,14 +372,11 @@ def _lock_local_ids(session) -> None:
 
 
 def _next_local_id(session) -> int:
-    """从专用序列取下一个本地书 id（§3.1；序列由迁移 0005 创建）。
+    """下一个本地书 id（负数坐标，§3.1）—— 见 :mod:`...library.local_axis`。
 
-    ``nextval`` 与事务无关：回滚的尝试也消耗一个号 —— 这正是「id 永不复用」
-    要的语义（用户可见的 id 复用会把旧引用指向另一本书）。
+    保留这个薄壳只是为了让管线里的调用点读起来仍有「取号」这一步。
     """
-    return int(session.execute(
-        select(func.nextval(LOCAL_ID_SEQUENCE))
-    ).scalar_one())
+    return local_axis.next_local_id(session)
 
 
 def _find_local_duplicate(session, source_key: str):

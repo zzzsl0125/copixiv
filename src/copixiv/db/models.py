@@ -197,6 +197,11 @@ class Novel(Base):
             "id",
             postgresql_where=sa_text("is_favourite"),
         ),
+        # 时间轴排序键（迁移 0006，docs/LIBRARY_DESIGN.md §3.1）：pixiv 行的 id
+        # 就是作品号，本地行的 id 是**负的**坐标（上传时刻的作品号位置），所以
+        # 「按时间」= ``ORDER BY abs(id)``。``abs(id)`` 不是主键，必须自带一条
+        # 表达式索引，否则每次列表排序都要全表 top-N Sort（实测 1.3ms → 35ms）。
+        Index("ix_novel_abs_id", sa_text("abs(id)"), sa_text("id")),
         # Keyword search: an expression index over the row's own searchable
         # columns.  PostgreSQL maintains it from the row being written, so it
         # cannot drift from the data (migration 0003; the database functions

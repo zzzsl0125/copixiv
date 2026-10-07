@@ -104,9 +104,13 @@ export function useCollectionViews(options: UseCollectionViewsOptions) {
     if (ids.length === 0) return
     const orderBy = filters.value.order_by
     if (orderBy === 'id') {
-      // id 排序本地完成（id 列表本来就在内存里）
+      // id 排序本地完成（id 列表本来就在内存里）。本地书 id 是**负的时间坐标**
+      // （docs/LIBRARY_DESIGN.md §3.1），时间在模上 —— 必须取绝对值，与服务端
+      // 的 `ORDER BY abs(id)` 同一语义；裸比大小会把本地书整体排到一端。
       const dir = filters.value.order_direction === 'ASC' ? 1 : -1
-      await selectedView.start([...ids].sort((a, b) => dir * (a - b)))
+      await selectedView.start(
+        [...ids].sort((a, b) => dir * (Math.abs(a) - Math.abs(b))),
+      )
       return
     }
     if (orderBy === 'like' || orderBy === 'text') {

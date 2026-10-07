@@ -7,22 +7,29 @@
 行为测试钉住落库列值（``source`` / ``source_key`` / ``has_epub=3`` /
 ``author_name`` 非 NULL / ``path`` 在 ``download/local/`` / ``text`` /
 ``like=view=0``）、失败条目不写任何库表（尤其 ``failed_novel``）、同一份正文
-二次上传被拒、id 越新越大且**永不复用**，以及**本地行不被 pixiv 刷新路径碰**
-（§4 硬边界；AST 守卫在 ``tests/architecture/test_library_isolation.py``）。
+二次上传被拒、id 是**负的时间坐标**（§3.1：坐标 = 水位 + 1、严格递增、永不复用）、
+**预设作者**（整批共用：新书覆盖文件名作者、解析失败写 NULL、重复件也应用、
+已挂同一作者时不写）、以及**本地行不被 pixiv 刷新路径碰**（§4 硬边界；AST 守卫在
+``tests/architecture/test_library_isolation.py``）。
+
+"不写"这类断言在值级看不出来（写回同样的值，库里的值不会有任何区别），所以
+``TestPresetAuthor`` 里用 ``before_cursor_execute`` 把真正发出去的 SQL 记下来
+数一数——与 ``tests/features/test_batch_metadata_repo.py`` 同一手法。
 """
 
 from __future__ import annotations
 
 import hashlib
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, event, func, select, text
 
 from copixiv.core.draft import NovelDraft
 from copixiv.core.models import EpubStatus
-from copixiv.db.models import FailedNovel, Novel
+from copixiv.db.models import Author, FailedNovel, Novel
 from copixiv.features.library import ingest
 from copixiv.features.library.ingest import (
     DECODE_ERROR,
@@ -70,24 +77,71 @@ def _row(session_factory, novel_id: int) -> Novel | None:
         return session.get(Novel, novel_id)
 
 
+def _author(session_factory, author_id: int) -> Author | None:
+    with session_factory() as session:
+        return session.get(Author, author_id)
+
+
+@contextmanager
+def _captured(engine):
+    """记录这一段里真正发出去的 SQL（engine 级事件；用完即摘）。
+
+    "重复件已挂同一作者时不写"这种断言在值级看不出来：写回同样的值，库里的值
+    不会有任何区别。所以把语句抓下来——与
+    ``tests/features/test_batch_metadata_repo.py::_captured`` 同一手法（那边
+    还有一条提醒：后台 count 重算线程会往同一个 engine 发 SELECT，所以断言一律
+    先按"是不是我关心的那个形状"筛，而不是要求窗口里只有一条语句）。
+    """
+    seen: list[str] = []
+
+    def _before(conn, cursor, statement, parameters, context, executemany):
+        seen.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _before)
+    try:
+        yield seen
+    finally:
+        event.remove(engine, "before_cursor_execute", _before)
+
+
+def _updates(statements: list[str]) -> list[str]:
+    """窗口里发出去的 UPDATE 语句（筛掉 SELECT / INSERT / 咨询锁）。"""
+    return [s for s in statements if s.lstrip().upper().startswith("UPDATE")]
+
+
 def _all_local_ids(session_factory) -> list[int]:
+    """本地 id 按**时间轴**（``abs(id)`` 升序 = 上传先后）列出。"""
     with session_factory() as session:
         return list(session.execute(
-            select(Novel.id).where(Novel.source == "local").order_by(Novel.id)
+            select(Novel.id).where(Novel.source == "local")
+            .order_by(func.abs(Novel.id))
         ).scalars())
 
 
-def _reset_local_id_sequence(session_factory) -> None:
-    """把序列拨回出厂状态：下一次 ``nextval`` = -(10**9) + 1。
+def _reset_coord_sequence(session_factory, value: int = 1) -> None:
+    """把坐标游标拨回 *value*（下一次 ``nextval`` = value）。
 
-    序列是**跨测试共享**的（生产语义：永不回退、永不复用），所以想要确定性
-    起点的测试必须自己拨表。
+    游标是**跨测试共享**的（生产语义：只向前、永不复用），所以想让发号有确定性
+    起点的测试必须自己拨表。注意发号取 ``max(游标, 水位+1)``，所以拨到很小的值
+    之后，结果由测试自己种下的 pixiv 水位决定。
     """
     with session_factory() as session:
-        session.execute(text(
-            "SELECT setval('novel_local_id_seq', -999999999, false)"
+        session.execute(
+            text("SELECT setval('novel_local_coord_seq', :v, false)"), {"v": value}
+        )
+        session.commit()
+
+
+def _seed_pixiv_watermark(session_factory, novel_id: int) -> int:
+    """种一本 pixiv 书（只需要它的号把水位抬到 *novel_id*），返回该号。"""
+    with session_factory() as session:
+        session.add(Novel(
+            id=novel_id, title=f"pixiv 书{novel_id}",
+            author_name=f"作者{novel_id}", path=f"download/0000/{novel_id}.txt",
+            text=5000, source="pixiv",
         ))
         session.commit()
+    return novel_id
 
 
 # ---------------------------------------------------------------------------
@@ -305,32 +359,82 @@ class TestIngestCreatesLocalRow:
         assert path.read_text(encoding="utf-8") == "第一行\n第二行"
         assert not list(path.parent.glob("*.tmp"))
 
-    def test_ids_grow_with_time(self, session_factory, tmp_path):
-        """§3.1：``order_by='id'`` 倒序时最新上传必须排最前 → id 越新越大。"""
-        download = tmp_path / "download"
-        first = _ingest(session_factory, download, [("a.txt", "甲".encode())])[0]
-        second = _ingest(session_factory, download, [("b.txt", "乙".encode())])[0]
+    def test_id_is_the_negated_watermark_plus_one(self, session_factory, tmp_path):
+        """§3.1：坐标 = 水位 + 1（水位 = 已抓取的最新 pixiv 作品号）→ id = -(水位+1)。
 
-        assert first.novel_id < second.novel_id < 0
-        with session_factory() as session:
-            ids = list(session.execute(
-                select(Novel.id).where(Novel.source == "local")
-                .order_by(Novel.id.desc())
-            ).scalars())
-        assert ids == [second.novel_id, first.novel_id]
+        上限即语义：本地书落在「已知最新作品」之上，抓取追上来后新作品自然排到
+        它前面。
+        """
+        _reset_coord_sequence(session_factory)
+        watermark = _seed_pixiv_watermark(session_factory, 2_000_000)
 
-    def test_first_id_is_the_anchor(self, session_factory, tmp_path):
-        """§3.1：``id = -(10**9) + n``，n 从 1 起 → 第一本是 -999999999。"""
-        _reset_local_id_sequence(session_factory)
         result = _ingest(
             session_factory, tmp_path / "download", [("第一本.txt", "正文".encode())],
         )[0]
 
-        assert result.novel_id == -(10 ** 9) + 1
+        assert result.novel_id == -(watermark + 1)
+
+    def test_coordinates_grow_with_time(self, session_factory, tmp_path):
+        """§3.1：id = -(坐标)，坐标越新越大 → **id 越新越小**（更负）。
+
+        「时间」按钮（``order_by='id'``）靠服务端 ``ORDER BY abs(id)`` 落位，
+        所以这里连排序一起钉：最新上传必须排最前。
+        """
+        _reset_coord_sequence(session_factory)
+        _seed_pixiv_watermark(session_factory, 1_000)
+        download = tmp_path / "download"
+        first = _ingest(session_factory, download, [("a.txt", "甲".encode())])[0]
+        second = _ingest(session_factory, download, [("b.txt", "乙".encode())])[0]
+
+        assert second.novel_id < first.novel_id < 0
+        assert abs(second.novel_id) == abs(first.novel_id) + 1
+
+        with session_factory() as session:
+            ordered = list(session.execute(
+                select(Novel.id).where(Novel.source == "local")
+                .order_by(func.abs(Novel.id).desc())
+            ).scalars())
+        assert ordered == [second.novel_id, first.novel_id]
+
+    def test_batch_upload_gets_distinct_coordinates(self, session_factory, tmp_path):
+        """一次上传多个文件时水位不变 —— 发号必须有单调保底，否则第 2 个文件
+        就会拿同一个坐标、撞主键（``id = -水位`` 的朴素写法正是这样死的）。
+        """
+        _reset_coord_sequence(session_factory)
+        watermark = _seed_pixiv_watermark(session_factory, 3_000_000)
+
+        results = _ingest(session_factory, tmp_path / "download", [
+            ("甲.txt", "甲正文".encode()),
+            ("乙.txt", "乙正文".encode()),
+            ("丙.txt", "丙正文".encode()),
+        ])
+
+        assert [r.status for r in results] == [STATUS_CREATED] * 3
+        ids = [r.novel_id for r in results]
+        assert ids == [-(watermark + 1), -(watermark + 2), -(watermark + 3)]
+        assert len(set(ids)) == 3
+
+    def test_empty_pixiv_axis_uses_the_time_seed(
+        self, session_factory, tmp_path, monkeypatch,
+    ):
+        """库中一行 pixiv 都没有时按时间线性外推（否则本地书会被钉在 id 轴起点，
+        等第一次抓取落地就永远沉底）。"""
+        from copixiv.features.library import local_axis
+
+        _reset_coord_sequence(session_factory)
+        monkeypatch.setattr(local_axis, "seed_coord", lambda now=None: 12_345)
+
+        result = _ingest(
+            session_factory, tmp_path / "download", [("第一本.txt", "正文".encode())],
+        )[0]
+
+        assert result.novel_id == -12_345
 
     def test_deleted_id_is_never_reused(self, session_factory, tmp_path):
         """id 用户可见（DSL ``id:`` / 导出 ``{id}``）—— 删掉最新那本后，
-        新书必须拿**更大**的 id（专用序列发号，而非 ``max(id)`` 续号）。"""
+        新书必须拿**更大**的坐标（游标只向前，而非 ``max(坐标)`` 续号）。"""
+        _reset_coord_sequence(session_factory)
+        _seed_pixiv_watermark(session_factory, 1_000)
         download = tmp_path / "download"
         first = _ingest(session_factory, download, [("甲.txt", "甲正文".encode())])[0]
         second = _ingest(session_factory, download, [("乙.txt", "乙正文".encode())])[0]
@@ -340,7 +444,8 @@ class TestIngestCreatesLocalRow:
 
         third = _ingest(session_factory, download, [("丙.txt", "丙正文".encode())])[0]
 
-        assert third.novel_id > second.novel_id > first.novel_id
+        assert abs(third.novel_id) > abs(second.novel_id) > abs(first.novel_id)
+        assert third.novel_id < second.novel_id < first.novel_id
         assert _all_local_ids(session_factory) == [first.novel_id, third.novel_id]
 
     def test_mixed_batch_is_partial_success(self, session_factory, tmp_path):
