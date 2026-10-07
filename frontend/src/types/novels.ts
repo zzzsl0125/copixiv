@@ -171,6 +171,43 @@ export interface BatchOperationResult {
   affected: number
 }
 
+/**
+ * 批量编辑「作者」/「系列」（`POST /api/novels/batch-metadata`）。
+ *
+ * 三态与单本 `NovelUpdatePayload` 同源（键不出现 = 不改；显式 `null` = 解除关联），
+ * 但**"留空"的含义刻意不同**：单本弹窗里留空就是解除关联（"这本书"是明确的），
+ * 批量里一批书各自挂着不同的作者，空输入框不可能是它们的共同意图——所以留空
+ * = 不改，解除关联必须显式勾选，由前端把那个勾翻成 `null`。
+ *
+ * `apply: false` 是预演（只算数不写库），语义与响应形状和真执行一致。
+ */
+export interface BatchMetadataRequest {
+  scope: BatchScope
+  /** 键不出现 = 不改作者；显式 `null` = 解除关联（收尾见 `NovelUpdatePayload`）。 */
+  author_id?: number | null
+  /** 键不出现 = 不改系列；显式 `null` = 解除关联（连显示名与章节号一起清）。 */
+  series_id?: number | null
+  /** false = 预演（只算数不写库）；true = 真执行。 */
+  apply: boolean
+}
+
+/**
+ * 批量编辑作者 / 系列的响应（`apply: false/true` 同一形状；预演时 `affected = 0`）。
+ *
+ * - `matched`：选择集总数；
+ * - `applicable` / `skipped`：其中**本地书** / **pixiv 书**的数量。
+ *
+ * 只作用于本地书是服务端的执法：这两列在单本编辑里对 pixiv 书硬拒 400
+ * （"作者身份以来源为准"），批量改成"预先报数 + 跳过"。所以前端**不自己按
+ * `source` 过滤**（那是第二份真相），只把服务端给的数字摆出来。
+ */
+export interface BatchMetadataResult {
+  matched: number
+  applicable: number
+  skipped: number
+  affected: number
+}
+
 /** Matching IDs for the 「全选匹配」bulk-add action. */
 export interface NovelIdsResponse {
   ids: number[]

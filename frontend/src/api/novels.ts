@@ -3,7 +3,7 @@ import type {
   Novel, NovelUpdatePayload, AuthorLookup, SeriesLookup,
   GetNovelsParams, BatchScope, BatchOperation, BatchOperationResult,
   NovelIdsResponse, NovelsByIdsResponse, MatchIdsResult, NovelCountResult,
-  NovelListResult,
+  NovelListResult, BatchMetadataRequest, BatchMetadataResult,
 } from '../types'
 
 /** 同步批量操作上限（与后端 BATCH_MAX_NOVELS 一致）；超过走后台任务。 */
@@ -149,6 +149,20 @@ export const novelApi = {
   }) {
     const response = await apiClient.post('/novels/batch', params)
     return response.data as BatchOperationResult
+  },
+
+  /**
+   * 批量编辑「作者」/「系列」（批量栏「编辑」）——`apply: false` 先预演报数，
+   * `apply: true` 才落库；两次的响应形状相同（预演时 `affected = 0`）。
+   *
+   * 只作用于**本地书**：pixiv 书的这两列是"身份以来源为准"，服务端一律跳过，
+   * `skipped` 就是那个数（单本 PATCH 对它们硬拒 400，批量这里改成预先报数）。
+   * 请求体里**键不出现 = 不修改**，所以"留空"不能靠空串表达，解除关联必须由
+   * 调用方显式给 `null`。
+   */
+  async batchMetadata(params: BatchMetadataRequest) {
+    const response = await apiClient.post('/novels/batch-metadata', params)
+    return response.data as BatchMetadataResult
   },
 
   /** All IDs matching the filters — powers the 「全选匹配」bulk-add action. */

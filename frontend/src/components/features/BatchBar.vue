@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ListChecks, Download, Tags, TagX, Trash2, Eye } from '@lucide/vue'
+import { ListChecks, Download, Pencil, Tags, TagX, Trash2, Eye } from '@lucide/vue'
 import { BAR_SHELL_CLASS, barContainerClass, barBtnClass } from '../../lib/ui'
 
 defineProps<{
@@ -17,6 +17,7 @@ const emit = defineEmits<{
   (e: 'select-all'): void
   (e: 'clear'): void
   (e: 'toggle-view-selected'): void
+  (e: 'edit'): void
   (e: 'export'): void
   (e: 'add-tags'): void
   (e: 'remove-tags'): void
@@ -63,6 +64,15 @@ const emit = defineEmits<{
 
         <!-- 操作 -->
         <div class="ml-auto flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            :class="barBtnClass()"
+            :disabled="!hasSelection"
+            data-testid="batch-edit"
+            @click="emit('edit')"
+          >
+            <Pencil class="h-4 w-4" /> 编辑
+          </button>
           <button type="button" :class="barBtnClass()" :disabled="!hasSelection" @click="emit('export')">
             <Download class="h-4 w-4" /> 导出
           </button>

@@ -25,9 +25,9 @@ from typing import Any
 
 from sqlalchemy import (
     select, select as _select,
-    func, Select, update, delete as _delete,
+    func, or_, Select, update, delete as _delete,
     literal_column, tuple_ as _tuple,
-    event,
+    event, any_,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
@@ -1049,6 +1049,15 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
 # Write repository (upserts, deletes, tag/favourite mutations)
 # =========================================================================
 
+# ``update_metadata_many`` 允许写的列（批量元数据编辑 = 作者 / 系列两组）。
+# 白名单是**唯一所有者**：用例只负责把它们拼成 values，仓库层拒绝其余任何列
+# （``ValueError``，不是 400 —— 那是"调用方写错了代码"，不是"用户输入不合法"）。
+# 它刻意只有五列：``title`` / ``caption`` / ``tags`` / ``create_time`` 各自的
+# 批量语义都还没拍板（标签甚至有专门的 set-based 并集/差集路径），别顺手放开。
+BATCH_METADATA_COLUMNS = frozenset({
+    "author_id", "author_name", "series_id", "series_name", "series_index",
+})
+
 
 class SQLAlchemyNovelWriteRepository(BaseRepository):
     def __init__(self, session: Session):
@@ -1387,6 +1396,133 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
                 ~models.Novel.tags.contains(tag_names),
             )
             .values(tags=expr)
+            .returning(models.Novel.id)
+        ).scalars().all())
+        return len(changed)
+
+    async def filter_ids_by_source(
+        self, novel_ids: list[int], sources: set[str]
+    ) -> list[int]:
+        """把 id 列表收窄到来源属于 *sources* 的那些（批量编辑只作用于本地书）。
+
+        一条 ``SELECT id FROM novel WHERE id IN (...) AND source IN (...)``：
+        ``source`` 那一半走 ``ix_novel_source``、``id`` 那一半走主键，所以代价与
+        选择集大小同阶，不读行、不碰任何"来源权威"的写规则。
+
+        ``novel_ids`` 为空直接返回 ``[]``（空选择集里没有"属于某来源"的行）；
+        ``sources`` 为空同理——没有任何来源在集合里，匹配集必然为空，不必再问库。
+
+        结果**按 id 升序**：它是预演响应 ``applicable`` 的来源，"哪些书会被改"
+        因此是确定的（``build_ids`` 出于同一个理由排序）。调用方要的是集合语义，
+        顺序只是可复现性的保证。
+        """
+        return await asyncio.to_thread(
+            self._filter_ids_by_source_sync, novel_ids, sources,
+        )
+
+    def _filter_ids_by_source_sync(
+        self, novel_ids: list[int], sources: set[str]
+    ) -> list[int]:
+        if not novel_ids or not sources:
+            return []
+        # ``= ANY(:array)`` 而不是 ``IN (...)``：模块 docstring 那句"``id = ANY($1)``
+        # 取代 SQLite 时代的 ``IN``"就是这条惯例。批量编辑**没有** 5000 上限
+        # （``cap=None``，"全选匹配"可以是全库 20 万级），``IN`` 会把每个元素渲染成
+        # 一个绑定参数、拼出数 MB 的 SQL；``ANY`` 只传一个数组参数，代价与元素个数
+        # 线性且常数因子小得多。``sources`` 只有一两个值，照旧用 ``IN``。
+        stmt = (
+            select(models.Novel.id)
+            .where(
+                models.Novel.id == any_(novel_ids),
+                models.Novel.source.in_(sorted(sources)),
+            )
+            .order_by(models.Novel.id)
+        )
+        return list(self.session.execute(stmt).scalars().all())
+
+    async def update_metadata_many(
+        self,
+        novel_ids: list[int],
+        values: dict[str, Any],
+        *,
+        only_where_null: str | None = None,
+    ) -> int:
+        """set-based 批量元数据写：一条 UPDATE 覆盖整个 id 列表，返回实际改动的行数。
+
+        与 :meth:`update_metadata`（单行）刻意分开，理由与
+        :meth:`add_tags_to_novels` 一致：**一条语句**——行级/语句级触发器只跑
+        一次（``sync_tag_refs_batch`` 在语句级聚合整张 transition table），几百本
+        的批量编辑不会变成几百次 trigger 调用。所以这里**没有**逐行
+        ``get_by_id`` + ``setattr`` 的循环，也**绝不**走 ``_upsert_rows``
+        （那是来源刷新的写路径，带"来源权威"覆盖白名单与"非空者胜"规则，见
+        :meth:`update_metadata` 的 docstring）。
+
+        Args:
+            novel_ids: 目标行 id 列表（调用方已按来源收窄——本层不表达业务约束）。
+            values: 列名 → 值，键必须属于 :data:`BATCH_METADATA_COLUMNS`，
+                否则 ``ValueError``（调用方拼错了代码，不是用户输入错）。
+                ``None`` 表示写 ``NULL``（解除关联）。
+            only_where_null: 可选的附加条件——列名，并进 WHERE 的
+                ``col IS NULL``。它是"只补空、不覆盖已有值"的 set-based 写法
+                （批量解除作者关联时给 ``author_name IS NULL`` 的行补「未知作者」；
+                单本语义里这一步是"读这一行的现值再分支"，批量里没有那一行可读）。
+
+        Returns:
+            真正被改动的行数（``RETURNING id`` 计数，不看 ``rowcount``）。
+
+        为什么计数带"真的变了"这层收窄：WHERE 里有逐列的
+        ``IS DISTINCT FROM``（与 :meth:`SQLAlchemyAuthorRepository.
+        update_author_name` / :meth:`SQLAlchemySeriesRepository.
+        update_series_name` 同一条规则），所以重复提交同一请求第二次返回 0，
+        而不是把没变化的行也算成"改过"。用 ``RETURNING`` 而不是 ``rowcount``
+        是因为后者在"匹配到但值相同"时同样会报数，说不了真话。
+        """
+        return await asyncio.to_thread(
+            self._update_metadata_many_sync, novel_ids, values, only_where_null,
+        )
+
+    def _update_metadata_many_sync(
+        self,
+        novel_ids: list[int],
+        values: dict[str, Any],
+        only_where_null: str | None = None,
+    ) -> int:
+        if not novel_ids or not values:
+            # 空 values 拼不出合法 UPDATE（``SET`` 后面不能空），返回 0 而不是
+            # 让 PostgreSQL 报语法错：用例已先行拒掉"两个键都不提交"。
+            return 0
+        for field in values:
+            if field not in BATCH_METADATA_COLUMNS:
+                raise ValueError(f"不支持的批量元数据字段: {field}")
+        if only_where_null is not None and (
+            only_where_null not in BATCH_METADATA_COLUMNS
+            or only_where_null not in values
+        ):
+            raise ValueError(
+                f"only_where_null 必须是 values 里的批量元数据列: {only_where_null}"
+            )
+
+        # 只写"值真的会变"的行：``OR`` 组进 WHERE，整组与 id 条件相 ``AND``。
+        changed_conditions = [
+            getattr(models.Novel, field).is_distinct_from(value)
+            for field, value in values.items()
+        ]
+        conditions = [
+            # 与 ``filter_ids_by_source`` 同一条理由用 ``ANY(array)``：批量编辑无
+            # 上限，``IN`` 会为每个元素渲染一个绑定参数。
+            models.Novel.id == any_(novel_ids),
+            # 单元素时 `or_` 就渲染成那个条件本身，不必分支。
+            or_(*changed_conditions),
+        ]
+        if only_where_null is not None:
+            conditions.append(
+                getattr(models.Novel, only_where_null).is_(None)
+            )
+
+        changed = list(self.session.execute(
+            update(models.Novel)
+            .where(*conditions)
+            .values(**values)
             .returning(models.Novel.id)
         ).scalars().all())
         return len(changed)

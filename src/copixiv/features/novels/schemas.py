@@ -229,6 +229,55 @@ class BatchOperationResponse(BaseModel):
     affected: int
 
 
+class BatchMetadataRequest(BaseModel):
+    """批量编辑「作者」/「系列」（``POST /api/novels/batch-metadata``）。
+
+    与单本 ``NovelUpdateRequest`` 同一套三态：``author_id`` / ``series_id``
+    **键不出现 = 不改这个字段**（调用方用 ``model_dump(exclude_unset=True)``
+    取值，再映射到用例的 ``_UNSET``），**显式 ``null`` = 解除关联**
+    （作者保留显示名并给空名行补「未知作者」；系列连名字与章节号一起清）。
+
+    收尾语义与单本**完全一致**，唯一刻意的差异在**来源**上：pixiv 书不报 400，
+    而是被跳过并计数（``applicable`` / ``skipped``）——批量的选择集天然是混合的，
+    「全选匹配 + 挂作者」整体 400 会让功能完全不可用；"先报数再确认"里跳过的
+    数量是显式字段，所以不存在"以为成功其实没写"的静默。论证见
+    ``features/novels/batch_edit_metadata.py`` 模块 docstring。
+
+    ``extra="forbid"``：结构性字段（``source`` / ``path`` / ``id`` …）与未知字段
+    一律 422（与 PATCH 同一约定）；业务规则拒绝（空 patch / 非法 id）走用例的
+    ``ValidationError`` → 400。``true`` 不是 id（``_reject_bool_id``）→ 422。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    scope: BatchScope
+    author_id: int | None = None
+    series_id: int | None = None
+    # 预演（默认）：只算数不写库，用户先看到"几本会改、几本会跳过"再确认。
+    apply: bool = False
+
+    @field_validator("author_id", "series_id", mode="before")
+    @classmethod
+    def _reject_bool_ids(cls, value):
+        """``true`` / ``false`` 不是 id —— 规则见 :func:`_reject_bool_id`。"""
+        return _reject_bool_id(value)
+
+
+class BatchMetadataResponse(BaseModel):
+    """批量编辑的计数（预演与落库同一形状）。
+
+    ``matched`` = 调用方给的整个选择集；``applicable`` = 其中本地书（**会**被改
+    的那些）；``skipped = matched - applicable``（pixiv 书——跳过不是错误）；
+    ``affected`` = 实际被 UPDATE 改动的行数（预演恒 0，重复提交同一请求第二次
+    也是 0：WHERE 里有逐列的 ``IS DISTINCT FROM``）。
+    """
+
+    matched: int
+    applicable: int
+    skipped: int
+    affected: int
+
+
 # ---------------------------------------------------------------------------
 # Batch-mode selection helpers (search is a picking surface — the selection
 # itself is an ID set independent of the current filters)

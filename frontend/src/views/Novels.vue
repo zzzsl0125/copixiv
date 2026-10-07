@@ -8,6 +8,7 @@ import BatchBar from '../components/features/BatchBar.vue'
 import UploadBar from '../components/features/UploadBar.vue'
 import BatchDeleteModal from '../components/features/BatchDeleteModal.vue'
 import BatchTagModal from '../components/features/BatchTagModal.vue'
+import BatchEditModal from '../components/features/BatchEditModal.vue'
 import BatchDownloadModal from '../components/features/BatchDownloadModal.vue'
 import EditNovelModal from '../components/features/EditNovelModal.vue'
 import { useMasonryLayout, useCollectionViews, useToast } from '../composables'
@@ -105,6 +106,7 @@ const deleteOpen = ref(false)
 const tagModalOpen = ref(false)
 const tagOperation = ref<'add_tags' | 'remove_tags'>('add_tags')
 const exportOpen = ref(false)
+const batchEditOpen = ref(false)
 
 // ---- 元数据编辑：弹窗宿主放在本页（初值来自 displayNovels 里的那张卡），
 // 保存成功后本页更新集合视图副本、App 更新主列表（见 handleNovelUpdated）。
@@ -232,6 +234,7 @@ const handleNovelUpdated = (updated: Novel) => {
         @select-all="emit('batch-action', { type: 'select-all' })"
         @clear="handleBarClear"
         @toggle-view-selected="toggleViewSelected"
+        @edit="batchEditOpen = true"
         @export="exportOpen = true"
         @add-tags="tagOperation = 'add_tags'; tagModalOpen = true"
         @remove-tags="tagOperation = 'remove_tags'; tagModalOpen = true"
@@ -333,6 +336,16 @@ const handleNovelUpdated = (updated: Novel) => {
       @close="tagModalOpen = false"
       @success="(payload) => emit('batch-action', { type: 'operation-success', payload: { operation: tagOperation, result: payload } })"
       @task-submitted="(payload) => emit('batch-action', { type: 'task-submitted', payload: { operation: tagOperation, ...payload } })"
+      @error="toast.error"
+    />
+    <!-- 批量编辑作者 / 系列：同步操作（无后台任务），预演与执行都在弹窗内完成；
+         成功走既有 operation-success 出口（App 侧 toast + 清选择 + 原地刷新）。 -->
+    <BatchEditModal
+      :is-open="batchEditOpen"
+      :scope="batchScope"
+      :scope-label="scopeLabel"
+      @close="batchEditOpen = false"
+      @success="(payload) => emit('batch-action', { type: 'operation-success', payload: { operation: 'update_metadata', result: payload } })"
       @error="toast.error"
     />
     <BatchDownloadModal

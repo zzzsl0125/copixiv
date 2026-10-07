@@ -13,6 +13,7 @@ import { describe, it, expect } from 'vitest'
 import type {
   Novel, NovelListResult, NovelCountResult, NovelIdsResponse,
   NovelsByIdsResponse, MatchIdsResult, BatchOperationResult,
+  BatchMetadataRequest, BatchMetadataResult, BatchScope,
   TaskHistory, ScheduledTask, SystemConfig, SearchHistory,
   FailedNovel, FailedNovelListResponse, FailedNovelCountResponse,
 } from '../../src/types'
@@ -168,6 +169,44 @@ describe('批量辅助响应（novels/schemas.py）', () => {
     expect(match.matching_ids).toEqual([42])
     expect(typeof op.matched).toBe('number')
     expect(typeof op.affected).toBe('number')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 批量编辑「作者」/「系列」（POST /api/novels/batch-metadata，2026-09-22 契约，
+// 前端 types/novels.ts:BatchMetadataRequest / BatchMetadataResult，后端并行实现）。
+//
+// 字段名一字不差才有效：请求 author_id / series_id / apply，响应 matched /
+// applicable / skipped / affected。三态是"键不出现 = 不改，显式 null = 解除关联"
+// ——拼错或写成空串不会 400，只会静默不生效，所以这里按名字钉死。
+// ---------------------------------------------------------------------------
+describe('BatchMetadata（POST /api/novels/batch-metadata）', () => {
+  const scope: BatchScope = { mode: 'ids', novel_ids: [1, 2, 3], excluded_ids: [] }
+
+  it('请求体：scope + 可空的 author_id / series_id + apply（预演 false / 执行 true）', () => {
+    const preview: BatchMetadataRequest = { scope, apply: false }
+    const apply: BatchMetadataRequest = {
+      scope, author_id: 777, series_id: null, apply: true,
+    }
+    expect(preview.scope).toBe(scope)
+    expect(preview.apply).toBe(false)
+    expect(apply.apply).toBe(true)
+    expect(apply.author_id).toBe(777)
+    // 解除关联 = 显式 null（不是 undefined、不是空串）
+    expect(apply.series_id).toBeNull()
+    // 两个字段都不是必填：键不出现就是"不改"
+    expect('author_id' in preview).toBe(false)
+    expect('series_id' in preview).toBe(false)
+  })
+
+  it('响应体：matched / applicable / skipped / affected 四个 number（预演与执行同形状）', () => {
+    const preview: BatchMetadataResult = { matched: 10, applicable: 6, skipped: 4, affected: 0 }
+    const applied: BatchMetadataResult = { matched: 10, applicable: 6, skipped: 4, affected: 6 }
+    // applicable + skipped = matched：本地书可改、pixiv 书一律跳过
+    expect(preview.applicable + preview.skipped).toBe(preview.matched)
+    expect(preview.affected).toBe(0)        // 预演只算数不写库
+    expect(applied.affected).toBe(6)
+    for (const value of Object.values(applied)) expect(typeof value).toBe('number')
   })
 })
 

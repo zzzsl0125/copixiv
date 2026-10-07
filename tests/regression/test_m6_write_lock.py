@@ -132,7 +132,7 @@ def test_write_endpoints_declare_write_uow():
     # 每个写端点的签名必须包含 Depends(get_write_uow)
     for fn in (
         "toggle_favourite", "toggle_special_follow", "delete_novel",
-        "update_novel_metadata",
+        "update_novel_metadata", "batch_metadata_operation",
         "create_scheduled_task", "update_scheduled_task",
         "delete_scheduled_task", "reorder_scheduled_tasks",
         "create_token", "update_token", "delete_token", "reorder_tokens",

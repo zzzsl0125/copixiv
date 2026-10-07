@@ -19,6 +19,8 @@ from copixiv.features.novels.schemas import (
     BatchDownloadRequest,
     BatchExportRequest,
     BatchExportResponse,
+    BatchMetadataRequest,
+    BatchMetadataResponse,
     BatchOperationRequest,
     BatchOperationResponse,
     BatchTaskResponse,
@@ -44,6 +46,7 @@ from copixiv.pixiv.client import PixivClient
 from copixiv.tasks.history_repo import SQLAlchemyTaskRepository
 from .record_history import record_search_history
 from copixiv.features.novels.batch_download import BatchDownloadUseCase
+from copixiv.features.novels.batch_edit_metadata import BatchEditMetadataUseCase
 from copixiv.features.novels.batch_operations import (
     BATCH_ID_CHUNK_SIZE,
     BATCH_MAX_NOVELS,
@@ -571,6 +574,66 @@ async def batch_operation(
         )
         affected = await use_case.execute(body.operation, ids, body.tags)
     return BatchOperationResponse(matched=len(ids), affected=affected)
+
+
+@router.post("/batch-metadata", response_model=BatchMetadataResponse)
+async def batch_metadata_operation(
+    body: BatchMetadataRequest = Body(...),
+    uow: SqlUnitOfWork = Depends(get_write_uow),
+    client: PixivClient = Depends(get_pixiv_client),
+):
+    """批量编辑本地书的「作者」/「系列」—— 预演（``apply=false``，默认）或落库。
+
+    与单本 ``PATCH /{novel_id}`` 同一套三态与收尾语义（名字由 id 解析、解析失败
+    落 NULL 待补、解除关联时作者留名 / 系列连名字与章节号一起清），唯一刻意的
+    差异是**来源**：pixiv 书不报 400，而是被跳过并计数
+    （``applicable`` / ``skipped``）——批量的选择集天然混合，整体 400 会让这个
+    功能不可用。论证与写路径纪律见 ``batch_edit_metadata.py``。
+
+    ``apply=false`` 是**预演**：只算数、一个字都不写（不建占位 author / series 行、
+    不解析名字、不打网络），用户先看到「N 篇本地书将被修改、M 篇 pixiv 书跳过」
+    再确认；``apply=true`` 先算数再落库，``affected`` 是真正被改动的行数。
+
+    ``cap=None``：与 ``batch_task_operation`` 同一口径，不引入新的 5000 上限——
+    写操作是**一条** set-based UPDATE（``update_metadata_many``），天然快，
+    ``matched`` 可以任意大。作用域解析仍是唯一那条规则（``resolve_batch_scope``）；
+    来源收窄（只动本地书）由用例做，全量 id 原样交给它。
+
+    路由是**精确路径** ``/batch-metadata``，与 ``/batch`` / ``/batch-export``
+    同形：``POST /{novel_id}/...`` 那几条都要第二段路径，所以不会把
+    ``batch-metadata`` 当成 ``novel_id``（``batch-export`` 早已是同样的形状）。
+    """
+    ids = await resolve_batch_scope(
+        SQLAlchemyNovelRepository(uow.session),
+        mode=body.scope.mode,
+        novel_ids=body.scope.novel_ids,
+        keyword=body.scope.keyword,
+        min_like=body.scope.min_like,
+        min_text=body.scope.min_text,
+        excluded_ids=body.scope.excluded_ids,
+        cap=None,
+    )
+
+    # 三态映射（与 PATCH 共用一份 ``exclude_unset``）：键不出现 → 这个关键字根本
+    # 不传，用例签名里的 ``_UNSET`` 默认值生效（= 不动这个字段）；显式 ``null``
+    # → 传 ``None``（= 解除关联）。``apply`` 不进这里：它有显式默认值 False。
+    changes = body.model_dump(exclude_unset=True)
+    field_changes = {
+        name: changes[name]
+        for name in ("author_id", "series_id")
+        if name in changes
+    }
+
+    use_case = BatchEditMetadataUseCase(
+        SQLAlchemyNovelRepository(uow.session),
+        SQLAlchemyNovelRepository(uow.session),
+        SQLAlchemyTagRepository(uow.session),
+        SQLAlchemyAuthorRepository(uow.session),
+        SQLAlchemySeriesRepository(uow.session),
+        client=client,
+    )
+    counts = await use_case.execute(ids, apply=body.apply, **field_changes)
+    return BatchMetadataResponse(**counts)
 
 
 @router.delete("/{novel_id}", status_code=204)

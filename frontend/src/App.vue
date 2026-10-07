@@ -6,7 +6,7 @@ import ToastContainer from './components/ui/ToastContainer.vue'
 import UploadModal from './components/features/UploadModal.vue'
 import { useNovels, useSystem, useToast, useBatchMode } from './composables'
 import { SECTIONS, resolveSection, sectionFor, type SectionId } from './config'
-import type { Novel, NovelFilters, BatchOperationResult } from './types'
+import type { Novel, NovelFilters, BatchOperationResult, BatchMetadataResult } from './types'
 import type { NovelsState, BatchState, NovelsCommand, BatchAction } from './views/Novels.vue'
 
 const {
@@ -117,9 +117,19 @@ const handleBatchClearScope = async () => {
   }
 }
 
+/**
+ * 批量操作成功：按 operation 出 toast，然后清空选择并**原地重取**列表
+ * （筛选与 URL 不动）。
+ *
+ * `result` 对 `update_metadata` 多带 `applicable` / `skipped`（本地书 / pixiv 书
+ * 的构成），所以要按联合类型收：那两个数必须进 toast——批量编辑只作用于本地书，
+ * pixiv 书一律跳过，"选了 10 篇只改了 4 篇"不说清跳过数就会被读成丢了 6 篇。
+ * 至于改的是作者还是系列，这里拿到的是同一个响应（没有字段信息），
+ * 所以文案用一句概括的「作者/系列」。
+ */
 const handleBatchOperationSuccess = (payload: {
   operation: string
-  result: BatchOperationResult
+  result: BatchOperationResult | BatchMetadataResult
 }) => {
   const { operation, result } = payload
   if (operation === 'delete') {
@@ -128,6 +138,12 @@ const handleBatchOperationSuccess = (payload: {
     toastSuccess(`已为 ${result.affected} 篇小说添加标签`)
   } else if (operation === 'remove_tags') {
     toastSuccess(`已从 ${result.affected} 篇小说移除标签`)
+  } else if (operation === 'update_metadata') {
+    const skipped = 'skipped' in result ? result.skipped : 0
+    toastSuccess(
+      `已修改 ${result.affected} 篇的作者/系列` +
+      (skipped > 0 ? `（跳过 ${skipped} 篇 pixiv 书）` : ''),
+    )
   }
   clearBatchSelection()
   // Refresh the list in place (keep current filters & URL).
