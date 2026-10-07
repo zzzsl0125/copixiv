@@ -106,6 +106,7 @@ const SidebarStub = defineComponent({
       h('div', { 'data-testid': 'sidebar-stub' }, [
         h('button', { 'data-testid': 'side-uploads', onClick: () => emit('search', SECTIONS.uploads.keyword, 'uploads') }, '我的上传'),
         h('button', { 'data-testid': 'side-favourites', onClick: () => emit('search', SECTIONS.favourites.keyword, 'favourites') }, '我的收藏'),
+        h('button', { 'data-testid': 'side-special-follow', onClick: () => emit('search', SECTIONS.special_follow.keyword, 'special_follow') }, '特别关注'),
         h('button', { 'data-testid': 'side-reset', onClick: () => emit('reset-to-defaults') }, '重置'),
       ])
   },
@@ -226,12 +227,12 @@ describe('「我的上传」section 状态机', () => {
     expect(app.filters().min_text).toBe(20)
   })
 
-  it('② URL 直达「我的收藏」也套该 section 的阈值（不是小说列表的）', async () => {
+  it('② URL 直达「我的收藏」也套该 section 的阈值（书架态 0/0，不是小说列表的 500/3000）', async () => {
     const app = await mountApp('/', '?keyword=is_favourite%3Atrue%3B')
 
     expect(app.section()).toBe('favourites')
-    expect(app.filters().min_like).toBe(SECTIONS.favourites.min_like)
-    expect(app.filters().min_text).toBe(SECTIONS.favourites.min_text)
+    expect(app.filters().min_like).toBe(0)
+    expect(app.filters().min_text).toBe(0)
   })
 
   it('③ 点「重置」：回到小说列表（keyword 清空 + 默认阈值 + 随机排序）', async () => {
@@ -254,7 +255,9 @@ describe('「我的上传」section 状态机', () => {
     await app.wrapper.get('[data-testid="side-favourites"]').trigger('click')
     await flushPromises()
     expect(app.section()).toBe('favourites')
-    expect(app.filters().min_like).toBe(SECTIONS.favourites.min_like)
+    // 书架态一律 0/0（绝对值：表再漂一次就红）
+    expect(app.filters().min_like).toBe(0)
+    expect(app.filters().min_text).toBe(0)
 
     await app.wrapper.get('[data-testid="side-uploads"]').trigger('click')
     await flushPromises()
@@ -267,8 +270,46 @@ describe('「我的上传」section 状态机', () => {
     await flushPromises()
     expect(app.section()).toBe('favourites')
     expect(app.filters().keyword).toBe('is_favourite:true;')
-    expect(app.filters().min_like).toBe(SECTIONS.favourites.min_like)
-    expect(app.filters().min_text).toBe(SECTIONS.favourites.min_text)
+    expect(app.filters().min_like).toBe(0)
+    expect(app.filters().min_text).toBe(0)
+  })
+
+  /**
+   * 回归（32a13bb 引入、此处钉死）：书架 = 「我的清单」，点开不得带门槛。
+   * 旧链路经 useNovels.applySearchOrdering() 归零，收成 SECTIONS 表时只给
+   * uploads 写了 0——收藏/特别关注照抄 DEFAULT_MIN_*（500/3000），
+   * 「我的收藏」点开时筛选条上的「500 / 3.0k」总是亮的，特别关注还静默
+   * 藏掉 1395/4371 篇。这里用**绝对值**断言，表再漂一次就红。
+   */
+  it('⑤ 点击「我的收藏」/「特别关注」：阈值同样归零（与「我的上传」同构）', async () => {
+    const app = await mountApp('/')
+    // 首屏小说列表是浏览态：门槛生效（默认 500/3000）
+    expect(app.filters().min_like).toBe(500)
+    expect(app.filters().min_text).toBe(3000)
+
+    await app.wrapper.get('[data-testid="side-favourites"]').trigger('click')
+    await flushPromises()
+    expect(app.section()).toBe('favourites')
+    expect(app.filters().min_like).toBe(0)
+    expect(app.filters().min_text).toBe(0)
+    expect(app.filters().order_by).toBe('id')
+    expect(app.filters().order_direction).toBe('DESC')
+
+    await app.wrapper.get('[data-testid="side-special-follow"]').trigger('click')
+    await flushPromises()
+    expect(app.section()).toBe('special_follow')
+    expect(app.filters().min_like).toBe(0)
+    expect(app.filters().min_text).toBe(0)
+    expect(app.filters().order_by).toBe('id')
+    expect(app.filters().order_direction).toBe('DESC')
+  })
+
+  it('⑤ URL 直达「特别关注」：同样归零（不是小说列表的 500/3000）', async () => {
+    const app = await mountApp('/', '?keyword=is_special_follow%3Atrue%3B')
+
+    expect(app.section()).toBe('special_follow')
+    expect(app.filters().min_like).toBe(0)
+    expect(app.filters().min_text).toBe(0)
   })
 
   it('keyword 被外部改写（搜索历史回填 / 后退前进）时 section 跟着变', async () => {
@@ -279,7 +320,8 @@ describe('「我的上传」section 状态机', () => {
     app.filters().keyword = 'is_special_follow:true;'
     await flushPromises()
     expect(app.section()).toBe('special_follow')
-    expect(app.filters().min_like).toBe(SECTIONS.special_follow.min_like)
+    expect(app.filters().min_like).toBe(0)
+    expect(app.filters().min_text).toBe(0)
 
     // 自由搜索：无 section 归属（侧边栏不高亮）
     app.filters().keyword = 'author_id:42;'

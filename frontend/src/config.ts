@@ -17,9 +17,16 @@ export const DEFAULT_MIN_TEXT = 3000
  * 三处共用这一张表——任何一处再出现写死的 `'is_favourite:true;'` 之类的字面量，
  * 就意味着表被绕过了。
  *
- * 阈值为什么必须随 section 走：默认 `min_like=500 / min_text=3000`，而本地书
- * `like=0`，服务端按 `like >= min_like` 过滤（features/novels/repo.py:487-497）——
- * 「我的上传」不归零则书架恒空。
+ * 阈值为什么必须随 section 走——**书架态不设门槛，浏览态才设**：
+ * 服务端按 `like >= min_like` / `text >= min_text` 过滤（features/novels/repo.py:512-520），
+ * 而「我的收藏 / 特别关注 / 我的上传」是「我的东西」的完整清单——首屏带门槛就是
+ * 静默丢内容（本地书 `like=0`，不归零则「我的上传」恒空；特别关注曾因 500/3000
+ * 藏掉 1395/4371 篇）。`novels`（小说列表）是浏览态，门槛才有筛选意义。
+ *
+ * 回归警示：`32a13bb` 之前，点任何书架都经 `useNovels.applySearchOrdering()` 把两个
+ * 阈值归零；收成这张表时只给 uploads 写了 0，收藏/特别关注照抄了 `DEFAULT_MIN_*`，
+ * 于是"点开书架 = 500/3000"这个回归悄悄活了半年。新增 section 请先问：
+ * 它是「我的清单」还是「浏览」。
  */
 export interface SectionDef {
   /** 触发本次搜索的 DSL 关键词（`''` = 小说列表/无关键词）。 */
@@ -33,10 +40,13 @@ export interface SectionDef {
 
 export const SECTIONS = {
   novels: { keyword: '', min_like: DEFAULT_MIN_LIKE, min_text: DEFAULT_MIN_TEXT, order_by: 'random', order_direction: 'DESC' },
-  favourites: { keyword: 'is_favourite:true;', min_like: DEFAULT_MIN_LIKE, min_text: DEFAULT_MIN_TEXT, order_by: 'id', order_direction: 'DESC' },
-  special_follow: { keyword: 'is_special_follow:true;', min_like: DEFAULT_MIN_LIKE, min_text: DEFAULT_MIN_TEXT, order_by: 'id', order_direction: 'DESC' },
+  // 书架态（我的清单）：阈值 0/0，服务端 `min_like > 0` 不成立即不加条件——
+  // 点开即完整清单，门槛交给用户自己点筛选条（applySection 只是把表里的值抄进 filters）。
+  favourites: { keyword: 'is_favourite:true;', min_like: 0, min_text: 0, order_by: 'id', order_direction: 'DESC' },
+  special_follow: { keyword: 'is_special_follow:true;', min_like: 0, min_text: 0, order_by: 'id', order_direction: 'DESC' },
   // 本地书：like/view 一律 0（LIBRARY_DESIGN.md §3.3），阈值必须为 0；
-  // id 是 `-(10**9) + n` 递增（§3.1），id DESC = 最新上传在前。
+  // id 是**负的时间坐标**（§3.1），时间在模上：服务端按 `abs(id)` 排序，
+  // 所以 `order_by: 'id'` + DESC 仍是「最新上传在前」。
   uploads: { keyword: 'source:local;', min_like: 0, min_text: 0, order_by: 'id', order_direction: 'DESC' },
 } satisfies Record<string, SectionDef>
 
