@@ -87,11 +87,23 @@ class SQLAlchemyAuthorRepository(BaseRepository):
         )
 
     async def update_author_name(self, author_id: int, name: str) -> None:
-        # Only touch novel rows whose name actually changed.  The
-        # ``sync_tag_refs`` trigger is declared ``UPDATE OF tags``, so an
-        # author-name writeback must not produce any ``novel`` UPDATE that
-        # could interact with ``tag`` row locks; narrowing the predicate
-        # also keeps the write batch short (no no-op row updates).
+        """Async entry point — see :meth:`update_author_name_sync`."""
+        self.update_author_name_sync(author_id, name)
+
+    def update_author_name_sync(self, author_id: int, name: str) -> None:
+        """Write *name* to the author row **and** normalise its novel rows.
+
+        同步双胞胎：语句与谓词只有这一份（``async def`` 那一半只是既有调用点的
+        形状——它体内没有任何 await），给**同步的写路径**用：
+        ``features/library/ingest.py`` 的上传管线是同步的（SQLAlchemy 的
+        ``Session`` 本来就是同步 API），它要在写事务里做同一个收尾。
+
+        Only touch novel rows whose name actually changed.  The
+        ``sync_tag_refs`` trigger is declared ``UPDATE OF tags``, so an
+        author-name writeback must not produce any ``novel`` UPDATE that
+        could interact with ``tag`` row locks; narrowing the predicate
+        also keeps the write batch short (no no-op row updates).
+        """
         self.session.execute(
             _update(models.Novel)
             .where(

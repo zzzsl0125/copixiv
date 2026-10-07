@@ -5,6 +5,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
  * - POST /library/uploads（baseURL '/api'）；
  * - multipart 字段名是 `files`，**同一个键重复多次**（后端按 List[UploadFile] 绑定；
  *   用 files[] 或 JSON 数组序列化都会 422）；
+ * - 可选的整批预设作者是 `author_id`：给了才出现，**没给就一个键都不加**
+ *   （不预设的请求体与加这个字段之前一字不差）；
  * - 不手写 Content-Type（必须让浏览器补 boundary）；
  * - 上传不走全局 30s 超时（timeout: 0），响应直接透传 UploadResponse。
  */
@@ -86,5 +88,32 @@ describe('libraryApi.uploadFiles', () => {
     const { libraryApi } = await loadApi()
 
     await expect(libraryApi.uploadFiles([makeFile('a.txt')])).rejects.toThrow('400')
+  })
+
+  it('给了预设作者 → FormData 里带 author_id（字符串），files 字段照旧', async () => {
+    clientMock.post.mockResolvedValue({
+      data: { results: [], created: 0, duplicate: 0, failed: 0 },
+    })
+    const { libraryApi } = await loadApi()
+
+    await libraryApi.uploadFiles([makeFile('a.txt'), makeFile('b.txt')], undefined, 1234567)
+
+    const form = clientMock.post.mock.calls[0][1] as FormData
+    expect(form.get('author_id')).toBe('1234567')
+    expect((form.getAll('files') as File[]).map((f) => f.name)).toEqual(['a.txt', 'b.txt'])
+  })
+
+  it('没给预设作者（缺省或显式 null）→ 一个 author_id 都不出现', async () => {
+    clientMock.post.mockResolvedValue({
+      data: { results: [], created: 0, duplicate: 0, failed: 0 },
+    })
+    const { libraryApi } = await loadApi()
+
+    await libraryApi.uploadFiles([makeFile('a.txt')])
+    await libraryApi.uploadFiles([makeFile('b.txt')], undefined, null)
+
+    const [first, second] = clientMock.post.mock.calls
+    expect((first[1] as FormData).has('author_id')).toBe(false)
+    expect((second[1] as FormData).has('author_id')).toBe(false)
   })
 })

@@ -2,10 +2,10 @@
 import { computed, ref, watch } from 'vue'
 import { X, FileUp as FileUpIcon, CheckCircle2, AlertCircle } from '@lucide/vue'
 import BaseModal from '../ui/BaseModal.vue'
-import { libraryApi, getApiErrorMessage } from '../../api'
-import { useToast } from '../../composables'
+import { libraryApi, novelApi, getApiErrorMessage } from '../../api'
+import { formatIdLookupHint, useIdLookup, useToast } from '../../composables'
 import { UPLOAD_STATUS_LABEL, formatFileSize } from '../../types'
-import type { UploadItemResult } from '../../types'
+import type { AuthorLookup, UploadItemResult } from '../../types'
 
 const props = defineProps<{
   isOpen: boolean
@@ -32,6 +32,58 @@ const hasUploaded = ref(false)
 /** 本次提交的文件数（进度分母；提交后 files 会被结果批清空，故单独记）。 */
 const batchTotal = ref(0)
 
+/** 「预设作者」折叠区：默认收起——多数上传按文件名解析作者就够了。 */
+const presetOpen = ref(false)
+/** 整批共用的作者 ID（输入框原文）；提交后**保留**，同一批书可以分多次传。 */
+const presetAuthorId = ref('')
+
+/**
+ * 预设作者与编辑 / 批量编辑弹窗共用 `useIdLookup`（防抖 / 过期响应丢弃 /
+ * 失败不拦上传）。`currentId` 恒 `null`：上传是**新建**，没有"这本书当前挂的值"，
+ * hint 因此自然走"将按此 ID 关联 / 未查到 / ✓ 名字"那几档。
+ */
+const authorLookup = useIdLookup<AuthorLookup>({
+  input: presetAuthorId,
+  currentId: () => null,
+  fetch: (id) => novelApi.lookupAuthor(id),
+})
+
+/** 解析 hint：绿＝确认、灰＝无需动作、黄＝能传但名字待补、红＝拦住上传。 */
+const authorHint = computed(() => formatIdLookupHint({
+  entity: '作者',
+  idNumber: authorLookup.idNumber.value,
+  currentId: null,
+  // currentId 恒 null 时它只用于"当前就是它"那一档，这里到不了；给空串即可。
+  currentName: '',
+  loading: authorLookup.loading.value,
+  failed: authorLookup.failed.value,
+  found: authorLookup.result.value
+    ? {
+        name: authorLookup.result.value.author_name,
+        novelCount: authorLookup.result.value.novel_count,
+      }
+    : null,
+  emptyNote: '留空 = 按文件名解析作者',
+  // 「解绑」那一档到不了（currentId 恒 null——上传是新建，没有解绑这回事），
+  // 但共享函数要求给一句：这里给与留空同一句承诺，两档在上传里本来就是一件事。
+  unlinkNote: '留空 = 按文件名解析作者',
+}))
+
+/** 非法 ID（非数字 / `0` / 负数 / 小数）拦上传：服务端 400 / 422，本地先给红字。 */
+const presetInvalid = computed(() => authorLookup.idNumber.value === undefined)
+
+/** 交给后端的预设作者：只认合法正整数，其余（含非法）一律当"不预设"。 */
+const presetAuthor = computed(() => (
+  typeof authorLookup.idNumber.value === 'number' ? authorLookup.idNumber.value : null
+))
+
+/** 折叠按钮文案：收起时若已有预设要看得见，否则一个被收起的预设会悄悄生效。 */
+const presetToggleLabel = computed(() => {
+  if (presetOpen.value) return '− 预设作者'
+  const preset = presetAuthorId.value.trim()
+  return preset ? `预设作者：${preset}` : '+ 预设作者'
+})
+
 const summary = computed(() => ({
   created: results.value.filter((r) => r.status === 'created').length,
   duplicate: results.value.filter((r) => r.status === 'duplicate').length,
@@ -41,7 +93,7 @@ const summary = computed(() => ({
 /** 上传中「已完成/总数」：已回结果的条数 / 本次提交的文件数。 */
 const progressLabel = computed(() => `${results.value.length}/${batchTotal.value}`)
 
-const reset = () => {
+const reset = (options: { keepPreset?: boolean } = {}) => {
   files.value = []
   results.value = []
   uploading.value = false
@@ -49,6 +101,13 @@ const reset = () => {
   hasUploaded.value = false
   batchTotal.value = 0
   if (fileInputRef.value) fileInputRef.value.value = ''
+  // 预设作者跨「继续上传其他文件」保留（同一批书分多次传，不必重填）；
+  // 重新打开弹窗则是新的一批：连同折叠态一起回到默认（要清空也由用户自己动手）。
+  if (!options.keepPreset) {
+    presetOpen.value = false
+    presetAuthorId.value = ''
+    authorLookup.schedule()
+  }
 }
 
 watch(() => props.isOpen, (open) => {
@@ -78,7 +137,8 @@ const removeFile = (index: number) => {
 }
 
 const handleUpload = async () => {
-  if (uploading.value || files.value.length === 0) return
+  // 非法预设作者不发请求（服务端 400 / 422）：按钮已禁用，这里是第二道闸。
+  if (uploading.value || files.value.length === 0 || presetInvalid.value) return
   const pending = [...files.value]
   uploading.value = true
   progress.value = 0
@@ -86,7 +146,7 @@ const handleUpload = async () => {
   try {
     const res = await libraryApi.uploadFiles(pending, (percent) => {
       progress.value = percent
-    })
+    }, presetAuthor.value)
     const batch = res.results || []
     results.value = [...results.value, ...batch]
     // 后端按 filename 归并；重名文件不重复排队，未回结果的继续留在待上传列表。
@@ -117,9 +177,10 @@ const handleUpload = async () => {
   }
 }
 
-/** 「继续上传」：清掉结果与待上传列表，回到选择态（已入库的书已在列表里）。 */
+/** 「继续上传」：清掉结果与待上传列表，回到选择态（已入库的书已在列表里）。
+ *  预设作者**不清**：同一批书分多次传是很常见的走法，不必重填。 */
 const uploadMore = () => {
-  reset()
+  reset({ keepPreset: true })
   openPicker()
 }
 </script>
@@ -131,7 +192,7 @@ const uploadMore = () => {
     confirm-text="上传"
     :cancel-text="hasUploaded ? '完成' : '取消'"
     :loading="uploading"
-    :confirm-disabled="files.length === 0"
+    :confirm-disabled="files.length === 0 || presetInvalid"
     @close="$emit('close')"
     @confirm="handleUpload"
   >
@@ -164,6 +225,66 @@ const uploadMore = () => {
         <span v-if="!hasUploaded" class="self-center text-xs text-gray-500">
           已选 {{ files.length }} 个文件
         </span>
+      </div>
+
+      <!-- 预设作者（整批共用，可选）：默认收起——多数上传按文件名解析作者就够了。
+           展开后两个字段并排，与批量编辑弹窗同构（label + input + 一行 hint）；
+           作者是正整数 pixiv ID，解析 hint 走共享函数（与编辑弹窗同一套语气）。
+           系列**先不管**：只留一个置灰占位行，不给任何输入逻辑。 -->
+      <div>
+        <button
+          type="button"
+          class="text-xs text-blue-600 hover:text-blue-800"
+          :aria-expanded="presetOpen"
+          data-testid="upload-preset-toggle"
+          @click="presetOpen = !presetOpen"
+        >
+          {{ presetToggleLabel }}
+        </button>
+
+        <div v-if="presetOpen" class="mt-2 grid gap-x-3 gap-y-2 sm:grid-cols-2">
+          <div class="min-w-0">
+            <label class="block text-sm font-medium text-gray-700" for="upload-preset-author">作者 ID</label>
+            <input
+              id="upload-preset-author"
+              v-model="presetAuthorId"
+              type="text"
+              inputmode="numeric"
+              autocomplete="off"
+              placeholder="如 1234567"
+              data-testid="upload-preset-author-input"
+              class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+            />
+            <p
+              class="mt-0.5 text-xs"
+              :class="{
+                'text-gray-400': authorHint.tone === 'muted',
+                'text-green-600': authorHint.tone === 'ok',
+                'text-amber-600': authorHint.tone === 'warn',
+                'text-red-600': authorHint.tone === 'error',
+              }"
+              data-testid="upload-preset-author-hint"
+            >
+              {{ authorHint.text }}
+            </p>
+            <p v-if="presetInvalid" class="mt-0.5 text-xs text-red-600" data-testid="upload-preset-author-error">
+              作者 ID 必须是正整数
+            </p>
+          </div>
+
+          <!-- 系列：后续版本支持（占位；无 v-model、无校验，就是不接逻辑） -->
+          <div class="min-w-0" data-testid="upload-preset-series-disabled">
+            <label class="block text-sm font-medium text-gray-400" for="upload-preset-series">系列 ID</label>
+            <input
+              id="upload-preset-series"
+              type="text"
+              disabled
+              placeholder="—"
+              class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm sm:text-sm disabled:bg-gray-100 disabled:text-gray-500 disabled:cursor-not-allowed"
+            />
+            <p class="mt-0.5 text-xs text-gray-400">系列：后续版本支持</p>
+          </div>
+        </div>
       </div>
 
       <!-- 上传中：进度 + 待上传列表 -->
@@ -224,10 +345,12 @@ const uploadMore = () => {
               <template v-if="typeof item.text === 'number'"> · {{ item.text }} 字</template>
               <template v-if="typeof item.novel_id === 'number'"> · id {{ item.novel_id }}</template>
             </p>
-            <!-- 重复：指出已有那本（标题 + id），便于过去查看 -->
+            <!-- 重复：指出已有那本（标题 + id），便于过去查看；若这次预设了作者，
+                 响应会把写进去的作者名回显出来（重复件也被应用了作者）。 -->
             <p v-else-if="item.status === 'duplicate'" class="mt-0.5 text-xs text-gray-500">
               已在库中：《{{ item.title || '未知标题' }}》
               <template v-if="typeof item.novel_id === 'number'"> · id {{ item.novel_id }}</template>
+              <template v-if="item.author_name"> · 已挂作者：{{ item.author_name }}</template>
             </p>
             <p v-else class="mt-0.5 text-xs text-red-600">{{ item.error || '未知错误' }}</p>
           </li>

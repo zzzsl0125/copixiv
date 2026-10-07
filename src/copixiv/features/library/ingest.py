@@ -280,7 +280,8 @@ def parse_filename(filename: str) -> tuple[str, str]:
 
     支持 ``【作者】标题(完结).txt`` / ``[作者] 标题.txt`` / ``作者 - 标题.txt``
     / 纯 ``标题.txt``（§4-5）。**``author_name`` 永不为空**：解析不出即
-    「未知作者」——这是隔离 ``sync_empty_name`` 任务的关键（§3.3）。
+    「未知作者」——§3.3 产品承诺「每本书都有作者名可显示」在入库侧的落点，
+    不依赖任何任务（``sync_empty_name`` 默认禁用）。
     """
     stem = clean_filename(filename)
     if stem.lower().endswith(".txt"):
@@ -389,21 +390,81 @@ def _find_local_duplicate(session, source_key: str):
     ).first()
 
 
+def _apply_preset_to_duplicate(
+    session,
+    novel_id: int,
+    preset_author_id: int,
+    preset_author_name: str | None,
+) -> bool:
+    """把预设作者挂到**已在库**的那一行上；返回"这次真的写了吗"。
+
+    为什么这里允许逐条 ``session.get`` + 改字段（本仓「批量必须 set-based」那条
+    纪律的例外，取舍写清楚）：那条纪律针对的是**几百上千本**的批量编辑
+    （``novels/batch_edit_metadata.py`` 的 ④：逐行 ``get_by_id`` + ``setattr``
+    正是它要避免的形态），而这里的行集上限是"用户这次拖进上传框的文件数"，而且
+    只有其中的**重复件**才走这条分支——去重预检本来就已经按文件逐条 SELECT，
+    这一条只是把命中的那一行装成 ORM 对象改两列。名字的**跨行规范化**仍然走
+    ``update_author_name`` 那种 set-based 写法（见函数末尾），不在循环里干。
+
+    不写的情形只有一个：``author_id`` 与 ``author_name`` **本来就和要写的一模
+    一样**——「重复件尽量不动库」的既有精神（也让"已挂同一作者时不写"可断言）。
+    """
+    novel = session.get(models.Novel, novel_id)
+    if novel is None:
+        # 预检看到了、真正加载之前被并发删掉（用户在另一台设备整理书架）。
+        # 这一条仍然按 duplicate 上报（预检的事实成立），只是没有行可挂。
+        return False
+    if (
+        novel.author_id == preset_author_id
+        and novel.author_name == preset_author_name
+    ):
+        return False
+
+    novel.author_id = preset_author_id
+    novel.author_name = preset_author_name
+    # 立刻 flush：一是让紧随其后的 ``update_author_name`` 的 ``IS DISTINCT
+    # FROM`` 在同一事务里看得见这一行（与本批新书在 ``begin_nested`` 里 flush
+    # 同一形态）；二是外键违规（``preset_author_id`` 没有 author 行）在这里就
+    # 暴露，而不是拖到提交时把报错点挪到别的地方。
+    session.flush()
+    return True
+
+
 def ingest_uploads(
     session,
     download_dir: str,
     files: list[tuple[str, bytes]],
+    *,
+    preset_author_id: int | None = None,
+    preset_author_name: str | None = None,
 ) -> list[IngestResult]:
     """把一批 ``(filename, raw_bytes)`` 收进库，逐条返回结果。
 
-    调用方负责事务边界（API 侧是 ``Depends(get_write_uow)``）：本函数只
-    INSERT，不 commit / rollback。**部分成功**：一条失败不影响其余条，
-    失败条目不写任何库表（尤其不写 ``failed_novel``）。
+    调用方负责事务边界（API 侧是 ``write_uow.begin()``）：本函数只写库，
+    不 commit / rollback。**部分成功**：一条失败不影响其余条，失败条目不写任何
+    库表（尤其不写 ``failed_novel``，失败时也不会去动 ``author`` 行）。
+
+    ``preset_author_id`` / ``preset_author_name`` 可选、**整批共用**：给了 id 就
+    把这一批全部挂到它名下（覆盖文件名解析出的作者名；名字可以是 ``None``，
+    含义见模块 docstring 的「预设作者」一节）。两条前置约定：
+
+    * 名字解析**不在这里做**（可能在写事务外问一次 pixiv，见
+      ``features/library/api.py``）——本函数只消费调用方解析好的结果，所以
+      "解析只做一次"是调用方的形状，不是这里的循环；
+    * ``preset_author_id`` 的 ``author`` 占位行由调用方保证存在
+      （``author_id`` 有外键；API 侧在读事务里建、写事务里再兜一次）。
     """
     root = Path(download_dir)
     results: list[IngestResult] = []
     # 锁懒初始化：整批全是解码失败时不碰数据库。
     locked = False
+    # 这批是否真的把预设作者写进了某些行 —— 决定收尾要不要回写 author 行。
+    preset_written = False
+
+    if preset_author_id is None:
+        # 名字是 id 的派生值：没有 id 就没有"预设作者"这回事。调用方误传一个
+        # 孤零零的名字时按"没给预设"处理，免得出现"有名字没 id"的行。
+        preset_author_name = None
 
     for filename, data in files:
         name = clean_filename(filename)
@@ -427,13 +488,32 @@ def ingest_uploads(
 
         existing = _find_local_duplicate(session, source_key)
         if existing is not None:
+            existing_id = int(existing[0])
+            duplicate_author_name: str | None = None
+            if preset_author_id is not None:
+                # 应用预设（重复件也应用）。没给预设时整段不进 —— 那就是既有
+                # 形状：一个字节都不改、也不回显作者名。
+                if _apply_preset_to_duplicate(
+                    session, existing_id, preset_author_id, preset_author_name,
+                ):
+                    preset_written = True
+                # 回显这次写进去的名字（解析不出就是 None，响应里该字段不下发）
+                # —— 前端据此显示「已在库中《…》· 已挂作者：X」。
+                duplicate_author_name = preset_author_name
             results.append(IngestResult(
                 name, STATUS_DUPLICATE,
-                novel_id=int(existing[0]), title=existing[1],
+                novel_id=existing_id, title=existing[1],
+                author_name=duplicate_author_name,
             ))
             continue
 
-        title, author_name = parse_filename(name)
+        title, parsed_author_name = parse_filename(name)
+        if preset_author_id is None:
+            author_id, author_name = None, parsed_author_name
+        else:
+            # 预设作者：连名字一起显式写（``None`` 也写 —— 那是"待解析"，
+            # 见模块 docstring 的「预设作者」一节，不退回文件名解析值）。
+            author_id, author_name = preset_author_id, preset_author_name
 
         # 发号在去重预检之后：重复件不消耗号（真撞车时号会浪费一个，这是
         # 「永不复用」的必然代价）。
@@ -451,7 +531,7 @@ def ingest_uploads(
         novel = models.Novel(
             id=novel_id,
             title=title,
-            author_id=None,
+            author_id=author_id,
             author_name=author_name,
             path=str(path),
             like=0,
@@ -493,6 +573,19 @@ def ingest_uploads(
             novel_id=novel_id, title=title, author_name=author_name,
             text=len(body),
         ))
+        # 到这里这一行**真的**入库了（上面的 flush 成功），预设作者才算写进库。
+        # 放在失败分支之后：文件写失败 / 撞车的那条不写表，也就不该触发收尾。
+        preset_written = preset_written or preset_author_id is not None
+
+    # 作者行收尾（最后做一次，不是每条做一次）：``update_author_name`` 写
+    # ``author`` 行**并**用 ``IS DISTINCT FROM`` 规范化同作者的全部 novel 行
+    # （刚写的这批会命中"无变化"被跳过），是 set-based 的——放进循环里就是
+    # N 次全库范围 UPDATE。解析不出名字时**不调用**（那是"待解析"的中间态，
+    # 没有名字可写）。
+    if preset_written and preset_author_name:
+        SQLAlchemyAuthorRepository(session).update_author_name_sync(
+            preset_author_id, preset_author_name,
+        )
 
     return results
 

@@ -19,7 +19,10 @@ import type { NovelFilters } from '../../src/types'
  * 真实视图（Novels.vue）依赖较多，这里只 mock 组合式函数与 API 模块。
  */
 
-vi.mock('../../src/composables', () => ({
+// ``useIdLookup`` / ``formatIdLookupHint`` 用**真**实现：它们是弹窗里的纯逻辑
+// （防抖 / 过期响应 / hint 文案），mock 掉就等于把被测行为替换成空壳。
+vi.mock('../../src/composables', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/composables')>()),
   useToast: () => ({ success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() }),
   // BatchDownloadModal（列表页常驻的子组件）会读 useSystem
   useSystem: () => ({

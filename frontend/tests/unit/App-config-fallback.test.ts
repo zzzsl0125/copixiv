@@ -8,57 +8,63 @@ const mocks = vi.hoisted(() => ({
   fetchConfig: vi.fn(),
 }))
 
-vi.mock('../../src/composables', () => ({
-  useNovels: () => ({
-    novels: { value: [] },
-    loading: { value: false },
-    error: { value: null },
-    noMoreData: { value: false },
-    hasExcluded: { value: false },
-    filters: {
-      keyword: '',
-      order_by: 'random',
-      order_direction: 'DESC',
-      min_like: undefined,
-      min_text: undefined,
-    },
-    loadNovels: mocks.loadNovels,
-    handleSearch: vi.fn(),
-    handleLoadMore: vi.fn(),
-    handleCardSearch: vi.fn(),
-  }),
-  useSystem: () => ({
-    systemConfig: { value: null },
-    loading: { value: false },
-    error: { value: null },
-    fetchConfig: mocks.fetchConfig,
-  }),
-  useToast: () => ({
-    toasts: [],
-    show: vi.fn(),
-    success: vi.fn(),
-    error: vi.fn(),
-    info: vi.fn(),
-    warning: vi.fn(),
-  }),
-  useBatchMode: () => ({
-    isBatchMode: { value: false },
-    matchedCount: { value: 0 },
-    countLoading: { value: false },
-    selectAllLoading: { value: false },
-    selectedCount: { value: 0 },
-    hasSelection: { value: false },
-    hasFilter: { value: false },
-    scope: { value: null },
-    enter: vi.fn(),
-    exit: vi.fn(),
-    toggleCard: vi.fn(),
-    isCardSelected: vi.fn(),
-    selectAllMatched: vi.fn(),
-    clearSelection: vi.fn(),
-    clearSelectionInScope: vi.fn(),
-  }),
-}))
+// 四个组合式函数按需打桩；其余导出（`useIdLookup` / `formatIdLookupHint` ——
+// 上传弹窗的预设作者要用）保留真实现，免得每加一个消费点就要在这里补一个空壳。
+vi.mock('../../src/composables', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/composables')>()
+  return {
+    ...actual,
+    useNovels: () => ({
+      novels: { value: [] },
+      loading: { value: false },
+      error: { value: null },
+      noMoreData: { value: false },
+      hasExcluded: { value: false },
+      filters: {
+        keyword: '',
+        order_by: 'random',
+        order_direction: 'DESC',
+        min_like: undefined,
+        min_text: undefined,
+      },
+      loadNovels: mocks.loadNovels,
+      handleSearch: vi.fn(),
+      handleLoadMore: vi.fn(),
+      handleCardSearch: vi.fn(),
+    }),
+    useSystem: () => ({
+      systemConfig: { value: null },
+      loading: { value: false },
+      error: { value: null },
+      fetchConfig: mocks.fetchConfig,
+    }),
+    useToast: () => ({
+      toasts: [],
+      show: vi.fn(),
+      success: vi.fn(),
+      error: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+    }),
+    useBatchMode: () => ({
+      isBatchMode: { value: false },
+      matchedCount: { value: 0 },
+      countLoading: { value: false },
+      selectAllLoading: { value: false },
+      selectedCount: { value: 0 },
+      hasSelection: { value: false },
+      hasFilter: { value: false },
+      scope: { value: null },
+      enter: vi.fn(),
+      exit: vi.fn(),
+      toggleCard: vi.fn(),
+      isCardSelected: vi.fn(),
+      selectAllMatched: vi.fn(),
+      clearSelection: vi.fn(),
+      clearSelectionInScope: vi.fn(),
+    }),
+  }
+})
 
 describe('App bootstrap resilience', () => {
   it('loads novels even when /api/system/config fails', async () => {

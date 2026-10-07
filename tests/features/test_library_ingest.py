@@ -64,10 +64,14 @@ def _isolated_db(clean_db):
     yield
 
 
-def _ingest(session_factory, download_dir: Path, files) -> list:
-    """跑一遍上传管线（一个事务）并返回逐条结果。"""
+def _ingest(session_factory, download_dir: Path, files, **preset) -> list:
+    """跑一遍上传管线（一个事务）并返回逐条结果。
+
+    ``**preset`` 原样透传给 ``ingest_uploads`` 的 ``preset_author_id`` /
+    ``preset_author_name``（默认不带 = 旧行为）。
+    """
     with session_factory() as session:
-        results = ingest_uploads(session, str(download_dir), files)
+        results = ingest_uploads(session, str(download_dir), files, **preset)
         session.commit()
     return results
 
@@ -552,6 +556,199 @@ class TestDuplicate:
         second = _ingest(session_factory, download, [("b.txt", "甲\n乙".encode())])[0]
         assert second.status == STATUS_DUPLICATE
         assert second.novel_id == first.novel_id
+
+
+# ---------------------------------------------------------------------------
+# 预设作者（``preset_author_id`` / ``preset_author_name``）—— 整批共用的作者
+# ---------------------------------------------------------------------------
+
+PRESET_AUTHOR_ID = 555_001
+OTHER_NOVEL_ID = 4_242          # 同一位作者名下的另一本书（规范化要一起命中）
+
+
+def _seed_author(session_factory, author_id: int, name: str | None = None) -> None:
+    """种一行 ``author``（预设作者的外键目标）。
+
+    API 侧由读事务的 ``ensure_exists`` 保证它在写事务之前就位；直连管线的调用方
+    自己负责这一步——``novel.author_id`` 有外键，没有它这一条会以
+    "入库冲突"失败。
+    """
+    with session_factory() as session:
+        session.add(Author(author_id=author_id, author_name=name))
+        session.commit()
+
+
+class TestPresetAuthor:
+    def test_new_book_writes_the_preset_author_over_the_filename(
+        self, session_factory, tmp_path,
+    ):
+        """新书：id 与名字都按预设写，文件名里解析出的作者名被覆盖。"""
+        _seed_author(session_factory, PRESET_AUTHOR_ID)
+
+        results = _ingest(
+            session_factory, tmp_path / "download",
+            [("【文件名作者】我的书.txt", "正文".encode())],
+            preset_author_id=PRESET_AUTHOR_ID, preset_author_name="预设作者",
+        )
+
+        result = results[0]
+        assert result.status == STATUS_CREATED
+        assert result.author_name == "预设作者"
+        row = _row(session_factory, result.novel_id)
+        assert row.author_id == PRESET_AUTHOR_ID
+        assert row.author_name == "预设作者"
+        # 行是真入库了（不是只在响应里改了口径）
+        assert Path(row.path).read_text(encoding="utf-8") == "正文"
+        # 作者行也被收尾写上名字（update_author_name 两个都写）
+        assert _author(session_factory, PRESET_AUTHOR_ID).author_name == "预设作者"
+
+    def test_unresolved_name_is_stored_as_null(
+        self, session_factory, tmp_path, pg_engine,
+    ):
+        """解析失败 → ``author_name`` **显式**写 NULL 覆盖文件名解析值，且不写作者行。
+
+        「id 是身份、名字是缓存」：退回文件名里那个名字会让这张卡显示"id 指向
+        A、名字写着 B"；写「未知作者」则是拿一个看起来确定的假名盖住"待解析"。
+        NULL 是仓库**认可**的中间态——不是"有兜底任务"（``sync_empty_name``
+        默认禁用）。
+        """
+        _seed_author(session_factory, PRESET_AUTHOR_ID)
+
+        with _captured(pg_engine) as statements:
+            results = _ingest(
+                session_factory, tmp_path / "download",
+                [("【文件名作者】我的书.txt", "正文".encode())],
+                preset_author_id=PRESET_AUTHOR_ID, preset_author_name=None,
+            )
+
+        row = _row(session_factory, results[0].novel_id)
+        assert row.author_id == PRESET_AUTHOR_ID
+        assert row.author_name is None
+        assert _author(session_factory, PRESET_AUTHOR_ID).author_name is None
+        # 解析不出名字就不调用 update_author_name（语句级证据：一条 UPDATE 都没有）
+        assert _updates(statements) == []
+
+    def test_duplicate_applies_the_preset_author(self, session_factory, tmp_path):
+        """重复件也应用（用户拍板）：改这一行 + 规范化作者行与同作者的其它行。"""
+        download = tmp_path / "download"
+        first = _ingest(
+            session_factory, download, [("【旧作者】我的书.txt", "同一份正文".encode())],
+        )[0]
+        # 同一位作者名下的另一本 pixiv 书，名字是旧的：规范化要把它一起改掉
+        _seed_author(session_factory, PRESET_AUTHOR_ID, "旧名字")
+        with session_factory() as session:
+            session.add(Novel(
+                id=OTHER_NOVEL_ID, title="同作者的 pixiv 书",
+                author_id=PRESET_AUTHOR_ID, author_name="旧名字",
+                path=f"download/0000/{OTHER_NOVEL_ID}.txt", text=100, source="pixiv",
+            ))
+            session.commit()
+
+        second = _ingest(
+            session_factory, download, [("副本.txt", "同一份正文".encode())],
+            preset_author_id=PRESET_AUTHOR_ID, preset_author_name="预设作者",
+        )[0]
+
+        assert second.status == STATUS_DUPLICATE
+        assert second.novel_id == first.novel_id      # 既有语义不变
+        assert second.title == first.title
+        assert second.author_name == "预设作者"        # 回显这次写进去的名字
+        row = _row(session_factory, first.novel_id)
+        assert row.author_id == PRESET_AUTHOR_ID
+        assert row.author_name == "预设作者"
+        # 作者行 + 同作者的全部 novel 行一起规范化（``IS DISTINCT FROM``）
+        assert _author(session_factory, PRESET_AUTHOR_ID).author_name == "预设作者"
+        assert _row(session_factory, OTHER_NOVEL_ID).author_name == "预设作者"
+        # 重复件不建新行
+        assert _all_local_ids(session_factory) == [first.novel_id]
+
+    def test_duplicate_already_on_the_same_author_is_not_written(
+        self, session_factory, tmp_path, pg_engine,
+    ):
+        """已挂同一作者、名字也一样 → 一个字节都不写（重复件尽量不动库）。"""
+        download = tmp_path / "download"
+        _seed_author(session_factory, PRESET_AUTHOR_ID)
+        first = _ingest(
+            session_factory, download, [("我的书.txt", "同一份正文".encode())],
+            preset_author_id=PRESET_AUTHOR_ID, preset_author_name="预设作者",
+        )[0]
+
+        with _captured(pg_engine) as statements:
+            second = _ingest(
+                session_factory, download, [("副本.txt", "同一份正文".encode())],
+                preset_author_id=PRESET_AUTHOR_ID, preset_author_name="预设作者",
+            )[0]
+
+        assert second.status == STATUS_DUPLICATE
+        assert second.author_name == "预设作者"        # 回显照旧（值本来就是这个）
+        row = _row(session_factory, first.novel_id)
+        assert (row.author_id, row.author_name) == (PRESET_AUTHOR_ID, "预设作者")
+        assert _updates(statements) == []
+
+    def test_without_a_preset_a_duplicate_changes_nothing(
+        self, session_factory, tmp_path, pg_engine,
+    ):
+        """没给 ``preset_author_id`` → 与旧行为逐字一致：不改库、也不回显作者名。"""
+        download = tmp_path / "download"
+        first = _ingest(
+            session_factory, download,
+            [("【文件名作者】我的书.txt", "同一份正文".encode())],
+        )[0]
+
+        with _captured(pg_engine) as statements:
+            second = _ingest(
+                session_factory, download, [("副本.txt", "同一份正文".encode())],
+            )[0]
+
+        assert second.status == STATUS_DUPLICATE
+        assert second.novel_id == first.novel_id
+        assert second.title == first.title
+        assert second.author_name is None             # 旧行为：duplicate 不带作者名
+        row = _row(session_factory, first.novel_id)
+        assert row.author_id is None and row.author_name == "文件名作者"
+        assert _updates(statements) == []
+
+    def test_the_writeback_runs_once_per_batch(
+        self, session_factory, tmp_path, pg_engine,
+    ):
+        """一个 id 写 N 本：作者行收尾**一次**，不是每条一次。
+
+        ``update_author_name`` 的第一条语句是"该作者全部 novel 行"范围的
+        set-based UPDATE——放进循环里就是 N 次全库范围 UPDATE。
+        """
+        _seed_author(session_factory, PRESET_AUTHOR_ID)
+
+        with _captured(pg_engine) as statements:
+            results = _ingest(
+                session_factory, tmp_path / "download",
+                [
+                    ("甲.txt", "甲正文".encode()),
+                    ("乙.txt", "乙正文".encode()),
+                    ("丙.txt", "丙正文".encode()),
+                ],
+                preset_author_id=PRESET_AUTHOR_ID, preset_author_name="预设作者",
+            )
+
+        assert [r.author_name for r in results] == ["预设作者"] * 3
+        assert len(_all_local_ids(session_factory)) == 3
+        updates = _updates(statements)
+        # 恰好两条：规范化同作者 novel 行 + 写 author 行（各一次）
+        assert len(updates) == 2
+        heads = [s.lstrip().upper() for s in updates]
+        assert sum(1 for s in heads if s.startswith("UPDATE AUTHOR")) == 1
+        assert sum(1 for s in heads if s.startswith("UPDATE NOVEL")) == 1
+
+    def test_a_preset_name_without_an_id_is_ignored(self, session_factory, tmp_path):
+        """只给名字不给 id = 没给预设（名字是 id 的派生值，不能单独写）。"""
+        results = _ingest(
+            session_factory, tmp_path / "download",
+            [("【文件名作者】我的书.txt", "正文".encode())],
+            preset_author_name="预设作者",
+        )
+
+        row = _row(session_factory, results[0].novel_id)
+        assert row.author_id is None
+        assert row.author_name == "文件名作者"
 
 
 # ---------------------------------------------------------------------------

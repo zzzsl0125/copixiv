@@ -11,7 +11,7 @@ export interface UploadItemResult {
   novel_id?: number
   /** created：解析出的标题；duplicate：已在库中那本的标题。 */
   title?: string
-  /** created：解析出的作者名。 */
+  /** created：解析出的作者名；duplicate：这次应用预设作者时回显的作者名。 */
   author_name?: string
   /** created：规范化后的正文字符数。 */
   text?: number
