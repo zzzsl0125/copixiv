@@ -112,17 +112,20 @@ async def test_keyset_pagination_page2(seeded_db, session_factory):
                 cursor=page1["cursor"],
             )
         )
+        # 参照：同一个查询一次取 40 —— 两页拼起来必须**逐位相等**。
+        # （只查重复是不够的：游标取多取的那行探测行时，它会在下一页被严格
+        # 比较排除，每页静默丢一本，而「无重复」照样成立。）
+        ref = await repo.get_novels(
+            QuerySpec(order_by="like", order_direction="DESC", per_page=40)
+        )
     ids1 = {n.id for n in page1["novels"]}
     ids2 = {n.id for n in page2["novels"]}
     assert len(page1["novels"]) == 20
     assert len(page2["novels"]) == 20
     assert not (ids1 & ids2), "page 2 must not repeat page 1 rows"
-    # Reference: the 40th row by (like,id) DESC matches page2's last row.
-    ref_rows = _sql(
-        seeded_db,
-        "SELECT id, \"like\" FROM novel ORDER BY \"like\" DESC, id DESC LIMIT 40",
-    )
-    assert len(ref_rows) == 40
+    assert [n.id for n in page1["novels"]] + [n.id for n in page2["novels"]] == [
+        n.id for n in ref["novels"]
+    ], "两页合起来必须正好是前 40 本，不重不漏"
 
 
 async def test_random_browse(seeded_db, session_factory):

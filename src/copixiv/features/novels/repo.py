@@ -761,13 +761,18 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
 
         cursor_out = None
         if len(novels) > spec.per_page:
-            n = novels.pop()
+            # 多取的那一行（per_page+1）只用来判断「还有下一页」，**不能当游标**：
+            # 游标的比较是严格 ``<`` / ``>``，拿它当游标会让它自己在下一页被排除
+            # ——每翻一页静默丢一本书（2026-09 修，此前 docstring 承诺的
+            # 「no missing rows」并没有被断言覆盖）。
+            novels.pop()
+            last = novels[-1]
             if spec.order_by == "random":
-                cursor_out = {"shuffle": n.shuffle, "id": n.id}
+                cursor_out = {"shuffle": last.shuffle, "id": last.id}
             else:
                 cursor_out = {
-                    "id": n.id,
-                    spec.order_by: getattr(n, spec.order_by, None),
+                    "id": last.id,
+                    spec.order_by: getattr(last, spec.order_by, None),
                 }
 
         return {"novels": novels, "cursor": cursor_out}

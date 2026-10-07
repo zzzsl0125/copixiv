@@ -185,6 +185,72 @@ async def test_order_by_id_desc_puts_the_newest_upload_first(
 
 
 # ---------------------------------------------------------------------------
+# §3.1：本地与 pixiv 在同一根时间轴上（混合列表落位 + 跨接缝翻页）
+# ---------------------------------------------------------------------------
+
+
+async def test_mixed_list_puts_local_on_the_same_time_axis(
+    session_factory, tmp_path,
+):
+    """混合列表里本地书必须落在**水位之上**。
+
+    这是「时间」按钮曾经排不对的根因：旧的 ``id = -(10**9)+n`` 让本地书恒在
+    数轴负端（DESC 永远最后），与上传时间无关。id 换成负的时间坐标之后，
+    ``ORDER BY abs(id)`` 才把两个来源放回同一根轴。
+    """
+    _seed_pixiv_novel(session_factory, 1_000_000, like=5000, text_chars=8000)
+    _seed_pixiv_novel(session_factory, 2_000_000, like=5000, text_chars=8000)
+    local_id = _upload_local(
+        session_factory, tmp_path / "download", "本地书.txt", "本地正文",
+    )
+    assert abs(local_id) > 2_000_000  # 坐标 = 水位 + 1
+
+    with session_factory() as session:
+        repo = SQLAlchemyNovelRepository(session)
+        desc = await repo.get_novels(QuerySpec(
+            order_by="id", order_direction="DESC", min_like=0, min_text=0,
+            per_page=10,
+        ))
+        asc = await repo.get_novels(QuerySpec(
+            order_by="id", order_direction="ASC", min_like=0, min_text=0,
+            per_page=10,
+        ))
+
+    assert [n.id for n in desc["novels"]] == [local_id, 2_000_000, 1_000_000]
+    assert [n.id for n in asc["novels"]] == [1_000_000, 2_000_000, local_id]
+
+
+async def test_keyset_pagination_crosses_the_local_pixiv_seam(
+    session_factory, tmp_path,
+):
+    """跨「本地 / pixiv 接缝」翻页不重不漏。
+
+    游标里只有身份 id，坐标由 ``abs`` 反推 —— 所以游标形状没变（§3.1）。
+    """
+    for novel_id in (1_000_000, 2_000_000, 3_000_000):
+        _seed_pixiv_novel(session_factory, novel_id, like=5000, text_chars=8000)
+    local_id = _upload_local(
+        session_factory, tmp_path / "download", "本地书.txt", "本地正文",
+    )
+
+    seen: list[int] = []
+    cursor = None
+    with session_factory() as session:
+        repo = SQLAlchemyNovelRepository(session)
+        for _ in range(4):  # 页大小 2，最多两页就取完
+            page = await repo.get_novels(QuerySpec(
+                order_by="id", order_direction="DESC", min_like=0, min_text=0,
+                per_page=2, cursor=cursor,
+            ))
+            seen.extend(n.id for n in page["novels"])
+            cursor = page["cursor"]
+            if cursor is None:
+                break
+
+    assert seen == [local_id, 3_000_000, 2_000_000, 1_000_000]
+
+
+# ---------------------------------------------------------------------------
 # §7-4：巡检跑过一轮后 has_epub 仍是 3（负 id 不在 id > cursor 区间）
 # ---------------------------------------------------------------------------
 

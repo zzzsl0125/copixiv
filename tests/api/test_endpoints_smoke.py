@@ -150,26 +150,30 @@ class TestNovelsList:
         assert isinstance(novel["tags"], list)
 
     def test_cursor_pagination_roundtrip(self, client, session_factory, tmp_path):
+        """走完所有页 = 全集，且不重不漏。
+
+        游标取**本页最后一行**。早前取的是多取的那行「探测行」（id=3），而游标
+        比较是严格 ``<``，于是探测行自己在下一页被排除 —— 每翻一页静默丢一本。
+        """
         for i in range(1, 6):
             _seed_novel(session_factory, i, f"标题{i}", str(tmp_path / f"{i}.txt"))
 
-        first = client.get(
-            "/api/novels/", params={"order_by": "id", "per_page": 2},
-        ).json()
-        assert [n["id"] for n in first["novels"]] == [5, 4]
-        # Keyset cursor: {sort_value, id} — with order_by=id both keys
-        # collapse to one; the +1 probe row (id=3) is consumed as the cursor.
-        assert first["cursor"] == {"id": 3}
+        seen: list[int] = []
+        cursor = None
+        for _ in range(4):
+            body = client.get(
+                "/api/novels/",
+                params={
+                    "order_by": "id", "per_page": 2,
+                    **({"cursor": json.dumps(cursor)} if cursor else {}),
+                },
+            ).json()
+            seen.extend(n["id"] for n in body["novels"])
+            cursor = body["cursor"]
+            if cursor is None:
+                break
 
-        second = client.get(
-            "/api/novels/",
-            params={
-                "order_by": "id", "per_page": 2,
-                "cursor": json.dumps(first["cursor"]),
-            },
-        ).json()
-        assert [n["id"] for n in second["novels"]] == [2, 1]
-        assert second["cursor"] is None
+        assert seen == [5, 4, 3, 2, 1]
 
     def test_toggle_favourite_and_filter(self, client, session_factory, tmp_path):
         _seed_novel(session_factory, 1, "标题", str(tmp_path / "1.txt"))
