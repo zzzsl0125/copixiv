@@ -9,9 +9,12 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel, ConfigDict, Field, computed_field, field_validator,
+)
 
 from copixiv.core.models import EpubStatus
+from copixiv.features.novels import field_policy
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +48,21 @@ class NovelBase(BaseModel):
         lambda v: EpubStatus(v) if v is not None else EpubStatus.NO
     )
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def editable_fields(self) -> list[str]:
+        """该行可编辑的字段清单 —— 由 ``source`` 派生（前端据此置灰输入框）。
+
+        策略的唯一所有者在 ``features/novels/field_policy.py``：前端**不再**
+        自己判断来源，两端共用这一份清单，避免各写一套后悄悄漂移。列表响应与
+        PATCH 响应都带它（同一个 ``NovelBase``），前端拿到即可渲染。
+
+        为什么是 ``computed_field`` 而不是普通字段：它是 ``source`` 的纯函数、
+        不是数据库列，也不接受客户端提交；放在响应模型上等于把"能改什么"从
+        服务端下发，而不是让客户端猜。
+        """
+        return list(field_policy.editable_fields(self.source))
+
 
 class NovelListResponse(BaseModel):
     novels: list[NovelBase]
@@ -59,34 +77,103 @@ class NovelListResponse(BaseModel):
 # 元数据编辑（PATCH /api/novels/{novel_id}）—— docs/NOVEL_EDIT_DESIGN.md §5
 # ---------------------------------------------------------------------------
 
+def _reject_bool_id(value):
+    """JSON ``true`` 不能变成"1 号作者 / 1 号系列"。
+
+    Pydantic 宽松模式把 ``bool`` 收成 ``int``（``True`` → ``1``），而这两个 id
+    是**身份**：静默错配到 1 号比报错严重得多。用例层还有一道同样的防御
+    （``update_metadata.py::_author_id`` / ``_series_id``），这里拦住的是 HTTP
+    路径。单本 PATCH 与批量编辑两个请求体**共用这一份规则**（各自用
+    ``field_validator`` 挂上，不抄第二遍）。
+    """
+    if isinstance(value, bool):
+        raise ValueError("id 必须是整数")
+    return value
+
+
 class NovelUpdateRequest(BaseModel):
     """单本元数据编辑的部分更新体。
 
-    只列**可编辑**字段。两类排除刻意不走"静默忽略"：
-
-    * ``caption`` 全局不可编辑（拍板 2026-09-18：不在界面展示也不开放编辑）；
-    * ``source`` / ``source_key`` / ``path`` / ``id`` / ``has_epub`` 是结构性事实。
-
-    它们与任何未知字段一样，提交即被 ``extra="forbid"`` 拒掉（FastAPI 的
-    请求体校验错误 → 422，与仓库既有约定一致；业务规则拒绝走
+    只列**可编辑**字段。结构性事实（``source`` / ``source_key`` / ``path`` /
+    ``id`` / ``has_epub``）与任何未知字段一样，提交即被 ``extra="forbid"`` 拒掉
+    （FastAPI 的请求体校验错误 → 422，与仓库既有约定一致；业务规则拒绝走
     ``ValidationError`` → 400）。
 
-    ``title`` / ``series_name`` 能否改由 **``source`` 决定**（仅本地书），
-    这条业务规则在用例里执法并返回 400——schema 层表达不了"取决于行"的约束。
+    ``title`` / ``author_id`` / ``series_id`` / ``caption`` 能否改由 **``source``
+    决定**（仅本地书），这条业务规则在用例里执法并返回 400——schema 层表达不了
+    "取决于行"的约束。四者的**理由与清单的唯一所有者**是
+    ``features/novels/field_policy.py``，同一份策略由
+    ``NovelBase.editable_fields`` 下发给前端；pixiv 书提交它们 → 400，错配的
+    修正入口是 ``POST /api/novels/{id}/sync``（按 id 从来源重抓、恢复来源值）。
+
+    ``caption`` 自 2026-09-22 从"全局不可编辑"改成"仅本地书可编辑"：原理由
+    （来源刷新会覆盖、不在界面展示）通篇是拿 pixiv 书论证的，而本地书永不进
+    ``_upsert_rows``、上传时 ``caption`` 写死 ``None``——填进去的就是用户自己的
+    话，没有来源会来顶掉它。详见 ``field_policy.py`` 的模块 docstring。
+
+    **作者与系列都是 id 而不是名字**（2026-09-19 拍板）：``author_name`` /
+    ``series_name`` 已从可编辑集合移除，提交即 422；身份由 ``author_id`` /
+    ``series_id`` 表达，显示名是它们的解析结果
+    （``features/authors/resolve_names.py::lookup_author_profile``、
+    ``features/novels/resolve_series.py::lookup_series_profile``）。这样上传的
+    本地书才能真正挂到 pixiv 作者/系列名下——作者页、系列页、``author_id:`` /
+    ``series_id:`` 搜索全部按 id 工作，而名字只是一份可刷新的缓存。
 
     "未提交"与"显式 null"必须可区分（PATCH 三态）：调用方用
     ``model_dump(exclude_unset=True)`` 取值——键不出现 = 不动，显式 ``null``
-    = 清空（``series_name`` / ``series_index`` / ``create_time`` 允许清空）。
+    = 清空（``series_index`` / ``create_time`` / ``caption`` 允许清空；
+    ``author_id`` / ``series_id`` 显式 null = 解除关联，收尾见
+    ``update_metadata.py::_series_columns``：作者保留显示名，系列连名字与章节号
+    一起清，2026-09-22）。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     title: str | None = None
-    author_name: str | None = None
-    series_name: str | None = None
+    author_id: int | None = None
+    series_id: int | None = None
     series_index: int | None = None
     tags: list[str] | None = None
     create_time: str | None = None
+    # 仅本地书（pixiv 书的这一列是来源的展示性字段，在覆盖白名单里 → 400）。
+    caption: str | None = None
+
+    @field_validator("author_id", "series_id", mode="before")
+    @classmethod
+    def _reject_bool_ids(cls, value):
+        """``true`` / ``false`` 不是 id —— 规则见 :func:`_reject_bool_id`。"""
+        return _reject_bool_id(value)
+
+
+class AuthorLookupResponse(BaseModel):
+    """作者 ID 预览（``GET /api/novels/author/{author_id}``）。
+
+    编辑器里填完 ID 就调它，好在保存*之前*告诉用户这个名字对不对；保存路径
+    （PATCH）用同一个解析函数，所以预览与实际落库结果一致。
+
+    ``source`` 是诚实性字段：``local`` = 库里已知（离线可用）、``pixiv`` =
+    本次现查（说明网络通、作者存在）、``unknown`` = 拿不到名字。它**不影响
+    可保存性**——id 才是身份，名字只是缓存，拿不到名字照样允许挂上去。
+    """
+
+    author_id: int
+    author_name: str | None = None
+    source: Literal["local", "pixiv", "unknown"] = "unknown"
+    # 库内已有多少本挂在这个 id 下（拼错 id 的直觉校验：0 本 + 没名字 ≈ 可疑）
+    novel_count: int = 0
+
+
+class SeriesLookupResponse(BaseModel):
+    """系列 ID 预览（``GET /api/novels/series/{series_id}``）—— 与作者那份同构。
+
+    差别只在名字的来源链：``series`` 行 → 同系列的 novel 行 → pixiv
+    ``novel_series``（前两步都是本地查询，见 ``resolve_series.py``）。
+    """
+
+    series_id: int
+    series_name: str | None = None
+    source: Literal["local", "pixiv", "unknown"] = "unknown"
+    novel_count: int = 0
 
 
 # ---------------------------------------------------------------------------

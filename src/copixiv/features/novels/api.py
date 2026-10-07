@@ -8,13 +8,14 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Query, Body, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
 from copixiv.deps import (
-    get_app_config, get_file_storage, get_session_factory,
+    get_app_config, get_file_storage, get_pixiv_client, get_session_factory,
     get_task_manager, get_uow, get_write_uow, parse_json_param,
 )
 from copixiv.core.services import parse_search_keyword
 from copixiv.core.services import QuerySpec
 from copixiv.core.exceptions import NotFoundError, ValidationError
 from copixiv.features.novels.schemas import (
+    AuthorLookupResponse,
     BatchDownloadRequest,
     BatchExportRequest,
     BatchExportResponse,
@@ -29,12 +30,17 @@ from copixiv.features.novels.schemas import (
     NovelsByIdsRequest,
     NovelsByIdsResponse,
     NovelUpdateRequest,
+    SeriesLookupResponse,
     SortIdsRequest,
 )
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.db import constants as C
-from copixiv.features.novels.repo import SQLAlchemyNovelRepository
+from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
+from copixiv.features.authors.resolve_names import lookup_author_profile
+from copixiv.features.novels.repo import SQLAlchemyNovelRepository, SQLAlchemySeriesRepository
+from copixiv.features.novels.resolve_series import lookup_series_profile
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
+from copixiv.pixiv.client import PixivClient
 from copixiv.tasks.history_repo import SQLAlchemyTaskRepository
 from .record_history import record_search_history
 from copixiv.features.novels.batch_download import BatchDownloadUseCase
@@ -48,6 +54,7 @@ from copixiv.features.novels.batch_operations import (
 )
 from copixiv.features.novels.delete_novel import DeleteNovelUseCase
 from copixiv.features.novels.get_novel_file import GetNovelFileUseCase
+from copixiv.features.novels.sync_novel import SyncNovelUseCase
 from copixiv.features.novels.update_metadata import UpdateNovelMetadataUseCase
 
 router = APIRouter()
@@ -336,28 +343,127 @@ async def toggle_special_follow(author_id: int, uow: SqlUnitOfWork = Depends(get
     await SQLAlchemyNovelRepository(uow.session).toggle_special_follow(author_id)
 
 
+@router.get("/author/{author_id}", response_model=AuthorLookupResponse)
+async def lookup_author(
+    author_id: int,
+    uow: SqlUnitOfWork = Depends(get_uow),
+    client: PixivClient = Depends(get_pixiv_client),
+):
+    """作者 ID → 显示名预览（编辑器「作者」一栏的即时反馈）。
+
+    只读、不写库：本地 ``author`` 表命中就返回（零延迟、离线可用），否则问一次
+    Pixiv。``source`` 告诉前端这个名字是哪来的；``unknown`` **不是错误**——
+    id 才是身份，名字只是缓存，编辑器照样允许保存。保存后名字若为 NULL，那是
+    **仓库认可的中间态**、不是"有任务会兜底"：``sync_empty_name`` 默认禁用
+    （``scheduled_task.is_enabled`` 列默认 false），会把名字补回来的是**再抓
+    一次该作品 / 作者**或编辑器里的「同步」（见 ``update_metadata.py``）。
+
+    放在 ``/author/{author_id}`` 而不是新开 ``/api/authors`` 路由：既有的
+    ``POST /author/{author_id}/follow`` 已经在这里，作者相关的两个动作挨着更好找，
+    也不用动路由前缀的接线测试。
+    """
+    session = uow.session
+    profile = await lookup_author_profile(
+        author_id, session=session, client=client,
+    )
+    return AuthorLookupResponse(
+        author_id=profile.author_id,
+        author_name=profile.author_name,
+        source=profile.source,
+        novel_count=await SQLAlchemyAuthorRepository(session).count_novels_by_author(
+            author_id,
+        ),
+    )
+
+
+@router.get("/series/{series_id}", response_model=SeriesLookupResponse)
+async def lookup_series(
+    series_id: int,
+    uow: SqlUnitOfWork = Depends(get_uow),
+    client: PixivClient = Depends(get_pixiv_client),
+):
+    """系列 ID → 系列名预览（编辑器「系列」一栏的即时反馈）。
+
+    与作者预览同构（见 ``lookup_author``）：只读、不写库，``unknown`` **不是
+    错误**——id 才是身份，编辑器照样允许保存。名字的来源链更长一点：``series``
+    行 → 同系列的 novel 行 → pixiv ``novel_series``（前两步都是本地查询）。
+    """
+    session = uow.session
+    profile = await lookup_series_profile(
+        series_id, session=session, client=client,
+    )
+    return SeriesLookupResponse(
+        series_id=profile.series_id,
+        series_name=profile.series_name,
+        source=profile.source,
+        novel_count=await SQLAlchemySeriesRepository(session).count_novels_by_series(
+            series_id,
+        ),
+    )
+
+
 @router.patch("/{novel_id}", response_model=NovelBase)
 async def update_novel_metadata(
     novel_id: int,
     body: NovelUpdateRequest = Body(...),
     uow: SqlUnitOfWork = Depends(get_write_uow),
+    client: PixivClient = Depends(get_pixiv_client),
 ):
     """编辑单本小说的元数据（卡片「编辑」按钮）—— docs/NOVEL_EDIT_DESIGN.md §5。
 
-    PATCH 三态：未提交的键不动，显式 ``null`` 清空（``series_name`` /
-    ``series_index`` / ``create_time`` / ``tags``）。只提交**发生变化的字段**
-    是前端的约定，服务端不做 diff（写同样的值也是幂等的）。
+    PATCH 三态：未提交的键不动，显式 ``null`` 清空（``series_index`` /
+    ``create_time`` / ``tags`` / ``caption`` / ``author_id`` / ``series_id``）。
+    只提交**发生变化的字段**是前端的约定，服务端不做 diff（写同样的值也是幂等的）。
 
-    ``title`` / ``series_name`` 仅本地书可改，pixiv 书提交 → 400；``caption``
-    与结构性字段（``source`` / ``path`` / ``id`` / ``has_epub`` …）在 schema 层
-    就被 ``extra="forbid"`` 拒掉 → 422。响应是更新后的**完整**对象，前端据此
-    原地替换卡片（不整页重取）。
+    ``title`` / ``author_id`` / ``series_id`` / ``caption`` 仅本地书可改
+    （2026-09-22 起前三个收掉、``caption`` 从"全局不可编辑"改成此形；清单与
+    400 文案的唯一所有者在 ``features/novels/field_policy.py``），pixiv 书提交
+    → 400；结构性字段（``source`` / ``path`` / ``id`` / ``has_epub`` …）在 schema
+    层就被 ``extra="forbid"`` 拒掉 → 422（``author_name`` / ``series_name``
+    自 2026-09-19 起也在其中：它们是 id 的解析结果，不是可编辑值）。响应是更新后的
+    **完整**对象，前端据此原地替换卡片（不整页重取）；同一份对象里带
+    ``editable_fields``，前端据此置灰输入框。
+
+    pixiv 书那四列错配之后的出口是**同步**（``POST /{novel_id}/sync``）：按 id
+    从来源重抓一遍、恢复来源值，而不是靠手改。
+
+    ``author_id`` / ``series_id`` 是仅有的可能触发网络请求的字段（本地表没有
+    这个名字时问一次 Pixiv）。失败**不致命**：id 照写，名字留 NULL 待补。
     """
     use_case = UpdateNovelMetadataUseCase(
         SQLAlchemyNovelRepository(uow.session),
         SQLAlchemyTagRepository(uow.session),
+        SQLAlchemyAuthorRepository(uow.session),
+        SQLAlchemySeriesRepository(uow.session),
+        client=client,
     )
     return await use_case.execute(novel_id, body.model_dump(exclude_unset=True))
+
+
+@router.post("/{novel_id}/sync", response_model=NovelBase)
+async def sync_novel(
+    novel_id: int,
+    uow: SqlUnitOfWork = Depends(get_uow),
+    client: PixivClient = Depends(get_pixiv_client),
+    file_storage=Depends(get_file_storage),
+):
+    """按 id 从 pixiv 重抓这一本的元数据并落库（编辑器的「同步」）。
+
+    修的是"手改会与来源打架"那类错配：pixiv 书的 ``title`` / ``author_id`` /
+    ``series_id`` 都是只读（``field_policy.py``），错配之后的出口就是这里 ——
+    把来源值拉回来（docs/NOVEL_EDIT_DESIGN.md §4.3 的单本版）。
+
+    **无请求体**：动作的输入只有路径上的 id。响应与 PATCH 同形状（更新后的完整
+    ``NovelBase``），前端同样原地替换卡片。本地书 → 400（没有来源可恢复）；
+    pixiv 上已不存在 / 受限（webview 返回空）→ 404。
+
+    依赖用 ``Depends(get_uow)`` 而**不是** ``get_write_uow``：抓取必须在写事务
+    之外，写事务由用例里的 ``run_write_transaction`` 自己开（与
+    ``tasks/maintenance.py`` 同一种用法）——依赖注入阶段开不出"稍后再写"的
+    事务边界。
+    """
+    use_case = SyncNovelUseCase(uow, client, file_storage.download_dir)
+    return await use_case.execute(novel_id)
 
 
 @router.get("/{novel_id}/download")

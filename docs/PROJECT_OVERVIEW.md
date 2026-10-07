@@ -106,7 +106,9 @@ src/copixiv/
 
 - `app.py` 的 `create_app()` 逐模块 `include_router` 显式挂载（前缀随路由
   注册处，见 MODULARITY.md）
-- 写端点必须 `Depends(get_write_uow)`（全局写锁，见 MODULARITY.md 硬规则 §3.2）
+- 写端点必须落在写事务边界里——形态①声明 `Depends(get_write_uow)`，形态②用例自开
+  `run_write_transaction` 并登记进执法清单（见 MODULARITY.md 硬规则 §3.2 与
+  `tests/regression/test_m6_write_lock.py`）
 
 ## 6. 后台任务
 

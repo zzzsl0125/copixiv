@@ -42,7 +42,13 @@
 
 ### 3.2 写路径必须走写事务边界（db_write）
 
-- API 写端点必须声明 `Depends(get_write_uow)`；读端点用 `get_uow`。
+- API 写端点必须落在写事务边界里，**只有两种合法形态**：① 声明
+  `Depends(get_write_uow)`（请求级边界，绝大多数写端点）；② 用例自己调
+  `run_write_transaction` 开写事务——给"抓取 / 网络必须在写事务之外"的端点留的口子
+  （如 `features/novels/api.py::sync_novel`，它依赖 `get_uow`）。形态②必须登记进
+  `tests/regression/test_m6_write_lock.py::SELF_MANAGED_WRITE_ENDPOINTS`，并被
+  `test_self_managed_write_endpoints_are_declared` 证明"用例模块里确有
+  `run_write_transaction` 调用"；两种形态**互斥**。读端点用 `get_uow`。
 - 后台任务写库走 `uow.begin()` / `db_write()`。PG 迁移后 `db_write()` 是
   **事务边界标记**（不再持全局锁——PG 为 MVCC 多写者，全局锁只会变瓶颈）；
   正确性由「多语句事务 + `ON CONFLICT` upsert + 行级锁」保证，热点行冲突
@@ -50,7 +56,8 @@
   API 与后台任务共享同一套事务纪律。
 
 执法：`tests/regression/test_m6_write_lock.py::test_write_endpoints_declare_write_uow`
-（钉「写端点必须声明 write uow」的接线纪律）。
+（形态①的接线纪律）与 `::test_self_managed_write_endpoints_are_declared`
+（形态②的自管写事务必须被证明，不能只靠声明）。
 
 > 这两条是**仅剩的**测试执法边界；其余规则在 §2 与 §4，皆为约定，违反不会红。
 

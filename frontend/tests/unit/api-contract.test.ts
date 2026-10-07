@@ -30,7 +30,8 @@ function optionalDict(v: unknown): void {
 
 // ---------------------------------------------------------------------------
 // Novel — GET /api/novels/ 数组项。权威：features/novels/schemas.py:NovelBase；
-// 前端 types/novels.ts:Novel（author_id 后端可 null——迁移孤儿行，前端标必填 number 更严；
+// 前端 types/novels.ts:Novel（author_id 后端可 null——本地书上传时 author_id=NULL、
+// 迁移孤儿行同理；前端照实标 number|null，编辑器「作者 ID」写的就是它；
 // core/models.py:Novel 的 path/content/images/illusts/cover_url/shuffle 仅领域侧，不下发）
 // source 列权威：docs/LIBRARY_DESIGN.md §2（novel.source TEXT NOT NULL DEFAULT 'pixiv'，
 // 本地书 'local' + 负 id；DSL 由 Novel.__table__.c 派生，无需白名单）
@@ -55,12 +56,18 @@ const sampleNovel: Novel = {
   // 来源列（novel.source，迁移 0005_novel_source）：'pixiv' 缺省 / 'local' 本地 TXT 上传。
   // 现有 pixiv 行零回填——缺省值由库给出，故前端类型可选；列表响应会带上下发。
   source: 'pixiv',
+  // 字段策略（后端 NovelBase 新增，2026-09-22 契约）：列表项 / PATCH / POST sync
+  // 三处响应都下发，编辑器据此置灰。只有两种形态——本地书七个字段，pixiv 书不含
+  // title / author_id / series_id / caption（前三个会被来源覆盖或身份以来源为准，
+  // caption 也在来源覆盖白名单里，2026-09-22 只对本地书放开，见 field_policy.py）。
+  // 前端只读它，不再按 source 推表。
+  editable_fields: ['series_index', 'tags', 'create_time'],
 }
 
 describe('Novel（novels/schemas.py:NovelBase）', () => {
   it('主键/计数/标志位均为 number（如改类型为 string 即红）', () => {
     const n = sampleNovel
-    ;['id', 'author_id', 'like', 'view', 'text', 'has_epub', 'is_favourite', 'is_special_follow']
+    ;['id', 'like', 'view', 'text', 'has_epub', 'is_favourite', 'is_special_follow']
       .forEach((k) => expect(typeof n[k as keyof Novel]).toBe('number'))
   })
 
@@ -68,6 +75,8 @@ describe('Novel（novels/schemas.py:NovelBase）', () => {
     const n = sampleNovel
     expect(typeof n.title).toBe('string')
     expect(n.tags.every((t) => typeof t === 'string')).toBe(true)
+    // author_id 是本地书唯一的"没有作者"表达（null），不是必填 number
+    optionalNumber(n.author_id)
     optionalString(n.author_name)
     optionalNumber(n.series_id)
     optionalString(n.series_name)
@@ -85,6 +94,31 @@ describe('Novel（novels/schemas.py:NovelBase）', () => {
     expect(sampleNovel.source).toBe('pixiv')
     expect(local.source).toBe('local')
     expect(local.id).toBeLessThan(0)
+  })
+
+  it('editable_fields 是 string[]，只有两种形态（本地书全字段 / pixiv 书三个只读）', () => {
+    // 编辑器置灰、本地校验、payload 三处都读这个数组（EditNovelModal::canEdit），
+    // 所以它的取值本身就是契约：多一个字段 = 前端放行一个服务端会 400 的提交。
+    const n = sampleNovel
+    expect(Array.isArray(n.editable_fields)).toBe(true)
+    expect(n.editable_fields.every((f) => typeof f === 'string')).toBe(true)
+    expect(n.editable_fields).toEqual(['series_index', 'tags', 'create_time'])
+    expect(n.editable_fields).not.toContain('title')
+    expect(n.editable_fields).not.toContain('author_id')
+    expect(n.editable_fields).not.toContain('series_id')
+    expect(n.editable_fields).not.toContain('caption')
+
+    const local: Novel = {
+      ...sampleNovel,
+      id: -999999999,
+      source: 'local',
+      editable_fields: [
+        'title', 'author_id', 'series_id', 'series_index', 'tags', 'create_time', 'caption',
+      ],
+    }
+    expect(local.editable_fields).toEqual(
+      ['title', 'author_id', 'series_id', 'series_index', 'tags', 'create_time', 'caption'],
+    )
   })
 })
 

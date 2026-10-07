@@ -189,11 +189,15 @@ const handleToggleActive = (id: number | string) => {
 
 /** 编辑保存成功：卡片上的初值对象换成响应值，并同步两份副本。
  *
+ * - 弹窗还开着时（「同步」路径）把它手里的初值也换成响应值：弹窗的 diff 基线、
+ *   字段策略、解析 hint 读的都是 `props.novel`，不换的话同步完保存按钮会莫名
+ *   亮起来（其实一个字段都没改）。保存路径上这行是空转——随即 `close`。
  * - 集合视图（查看已选 / 被排除）的列表是**本页**持有的副本 → patchNovel；
  * - 主列表由 App 拥有 → 上抛 `novel-updated`（与收藏/追更的
  *   `novel-state-changed` 同一条"原地 patch、不重取"的路）。
  * 标题/标签变化会改卡片高度，所以补一次瀑布流重排。 */
 const handleNovelUpdated = (updated: Novel) => {
+  if (editingNovel.value?.id === updated.id) editingNovel.value = updated
   patchNovel(updated)
   void nextTick().then(relayout)
   emit('novel-updated', updated)

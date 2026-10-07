@@ -380,6 +380,27 @@ class TestNovelNamingTemplate:
         assert "#" not in result
         assert result == "12345678テスト小説"
 
+    def test_series_index_zero_is_treated_like_no_index(self):
+        """``series_index == 0`` = 无章节号（与 NULL 同义，2026-09-22 统一口径）。
+
+        来源的 ``guess_series_order`` 会算出 0，它不该渲染成看起来像"第 0 本"的
+        ``#0``——token 连同分隔符一起消失，与 None 一模一样。
+        """
+        tpl = NovelNamingTemplate("{id}#{series_index}_{title}")
+        result = tpl.resolve(_novel_dict(series_index=0))
+        assert "#" not in result
+        assert "0" not in result
+        assert result == "12345678テスト小説"
+
+    def test_zero_still_renders_for_the_other_numeric_tokens(self):
+        """``series_index`` 的特例不许扩散：``{id}`` / ``{like}`` / ``{view}`` /
+        ``{text}`` 的 0 是真实数字，照旧渲染成 ``"0"``（不是全局 falsy 判断）。"""
+        tpl = NovelNamingTemplate("{id}_{like}_{view}_{text}_{series_index}")
+        result = tpl.resolve(_novel_dict(
+            id=0, like=0, view=0, text=0, series_index=0,
+        ))
+        assert result == "0_0_0_0"
+
     def test_consecutive_slashes_collapsed(self):
         tpl = NovelNamingTemplate("{author_name}/{series_name}/{id}")
         result = tpl.resolve(_novel_dict(series_name=None))

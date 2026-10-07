@@ -8,3 +8,8 @@ export { useMasonryLayout } from './useMasonryLayout'
 export { useToast, type Toast } from './useToast'
 export { useCollectionViews, type UseCollectionViewsOptions } from './useCollectionViews'
 export { useBatchMode, type BatchMode } from './useBatchMode'
+export {
+  useIdLookup, parseIdInput, formatIdLookupHint,
+  ID_LOOKUP_DEBOUNCE_MS,
+  type IdLookup, type IdLookupHint,
+} from './useIdLookup'

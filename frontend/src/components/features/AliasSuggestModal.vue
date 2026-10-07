@@ -121,8 +121,11 @@ const toggleCandidate = (id: number) => {
         <p class="text-xs text-gray-500 mt-1">注：如果填写了此项，选项1的选择将被忽略。</p>
       </div>
     </div>
+    <!-- 次要动作：「跳过」不该和「保存并继续」并排抢注意力 —— BaseModal 把本 slot 放在
+         footer DOM 末位，row-reverse 下渲染在最左（左下角）：跳过 / 取消 / 保存并继续。
+         与「取消」的间距由 cancel 的 sm:ml-3 给，这里因此不带左边距。 -->
     <template #extra-buttons>
-      <button v-if="currentSuggestion" type="button" @click="handleSkip" class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 sm:mt-0 sm:ml-3 sm:w-auto sm:text-sm transition-colors">跳过</button>
+      <button v-if="currentSuggestion" type="button" @click="handleSkip" class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 sm:mt-0 sm:w-auto sm:text-sm transition-colors">跳过</button>
     </template>
   </BaseModal>
 </template>

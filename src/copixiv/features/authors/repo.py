@@ -51,6 +51,20 @@ class SQLAlchemyAuthorRepository(BaseRepository):
         ).fetchall()
         return {row.author_id: row.author_name for row in rows}
 
+    async def count_novels_by_author(self, author_id: int) -> int:
+        """How many novels in the library currently point at *author_id*.
+
+        Used by the editor's author-id preview: "库内已有 12 本" is how the
+        user confirms the id they typed is the author they meant (the ``author``
+        row's own ``novel_count`` is an aggregate refreshed by the ingest
+        pipeline, not a live count).  Served by ``ix_novel_author_id``.
+        """
+        return int(self.session.execute(
+            _select(func.count())
+            .select_from(models.Novel)
+            .where(models.Novel.author_id == author_id)
+        ).scalar_one())
+
     async def need_update(self, author_id: int) -> bool:
         author = self.session.get(models.Author, author_id)
         if author and author.last_update:

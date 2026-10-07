@@ -1,6 +1,6 @@
 import { apiClient, buildApiUrl } from './client'
 import type {
-  Novel, NovelUpdatePayload,
+  Novel, NovelUpdatePayload, AuthorLookup, SeriesLookup,
   GetNovelsParams, BatchScope, BatchOperation, BatchOperationResult,
   NovelIdsResponse, NovelsByIdsResponse, MatchIdsResult, NovelCountResult,
   NovelListResult,
@@ -31,12 +31,51 @@ export const novelApi = {
    * 编辑单本元数据（卡片「编辑」）——只提交发生变化的字段。
    *
    * 返回**更新后的完整对象**，调用方据此原地替换列表里的那一本（不整页重取）。
-   * 服务端会拒绝 pixiv 书的 `title` / `series_name`（400）以及 `caption` 等
-   * 不可编辑字段（422）——调用方按错误提示呈现即可。
+   * 服务端两道拒绝（调用方按错误提示呈现即可）：
+   * - 400：pixiv 书提交 `title` / `author_id` / `series_id` / `caption`（仅本地书
+   *   可编辑，理由与文案见 `field_policy.py`——title / series_id / caption 是
+   *   "来源会覆盖"，author_id 是"作者身份以来源为准"）；
+   * - 422：`series_name` / `author_name` 以及 `source` 等结构性字段压根不在
+   *   可提交集合里，`extra="forbid"` 直接拒掉。
    */
   async updateNovel(novelId: number, payload: NovelUpdatePayload) {
     const response = await apiClient.patch(`/novels/${novelId}`, payload)
     return response.data as Novel
+  },
+
+  /**
+   * 按 pixiv id 重新抓取这本小说的元数据（编辑器左下角「同步」，无请求体）。
+   *
+   * 返回与 PATCH 同形状的**完整对象**（含 `editable_fields`），调用方据此原地
+   * 替换卡片并重装弹窗初值。失败语义由服务端给：本地书 → 400（没有来源可同步）、
+   * pixiv 上已不存在 / 受限 → 404；调用方一律按错误提示呈现。
+   */
+  async syncNovel(novelId: number) {
+    const response = await apiClient.post(`/novels/${novelId}/sync`)
+    return response.data as Novel
+  },
+
+  /**
+   * 作者 ID 预览（编辑器「作者」一栏的即时反馈）。
+   *
+   * 只读、不落库：库内已知就直接返回（离线可用），否则服务端问一次 pixiv。
+   * 返回 `source: 'unknown'` **不是错误**——id 才是身份，拿不到名字照样能保存。
+   * 调用方要能接受失败（网络抖动不该让一个提示框变成报错弹窗）。
+   */
+  async lookupAuthor(authorId: number) {
+    const response = await apiClient.get(`/novels/author/${authorId}`)
+    return response.data as AuthorLookup
+  },
+
+  /**
+   * 系列 ID 预览（编辑器「系列」一栏的即时反馈）—— 与 `lookupAuthor` 同构。
+   *
+   * 名字来源链：`series` 行 → 同系列 novel 行 → pixiv；前两步都在本地库完成，
+   * 所以大多数情况下这个请求是**离线可用**的。
+   */
+  async lookupSeries(seriesId: number) {
+    const response = await apiClient.get(`/novels/series/${seriesId}`)
+    return response.data as SeriesLookup
   },
 
   /**

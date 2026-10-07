@@ -19,10 +19,16 @@ import type { Novel, NovelFilters } from '../../src/types'
 const h = vi.hoisted(() => ({
   novels: [] as Novel[],
   updateNovel: vi.fn(),
+  syncNovel: vi.fn(),
+  lookupAuthor: vi.fn(),
+  lookupSeries: vi.fn(),
   patchNovel: vi.fn(),
 }))
 
-vi.mock('../../src/composables', () => ({
+// ``useIdLookup`` / ``formatIdLookupHint`` 用**真**实现：它们是弹窗里的纯逻辑
+// （防抖 / 过期响应 / hint 文案），mock 掉就等于把被测行为替换成空壳。
+vi.mock('../../src/composables', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/composables')>()),
   useToast: () => ({ success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() }),
   useSystem: () => ({
     systemConfig: ref(null),
@@ -59,6 +65,9 @@ vi.mock('../../src/api', () => ({
   },
   novelApi: {
     updateNovel: h.updateNovel,
+    syncNovel: h.syncNovel,
+    lookupAuthor: h.lookupAuthor,
+    lookupSeries: h.lookupSeries,
     toggleFavourite: vi.fn(),
     toggleSpecialFollow: vi.fn(),
     downloadUrl: vi.fn(() => '/api/novels/1/download?format=txt'),
@@ -68,11 +77,18 @@ vi.mock('../../src/api', () => ({
 
 const FILTERS: NovelFilters = { keyword: '', order_by: 'random', order_direction: 'DESC' }
 
+// 后端下发的字段策略（Novel.editable_fields）：本地书七个字段（含 2026-09-22
+// 放开的 caption）。
+const LOCAL_EDITABLE = [
+  'title', 'author_id', 'series_id', 'series_index', 'tags', 'create_time', 'caption',
+]
+
 const LOCAL_NOVEL: Novel = {
   id: -999000001,
   title: '本地书名',
-  author_id: undefined as unknown as number,
+  author_id: null,                  // 本地书：上传时 author_id / series_id 都是 NULL
   author_name: '未知作者',
+  series_id: null,
   like: 0,
   view: 0,
   text: 1234,
@@ -83,6 +99,18 @@ const LOCAL_NOVEL: Novel = {
   is_favourite: 0,
   is_special_follow: 0,
   source: 'local',
+  editable_fields: LOCAL_EDITABLE,
+}
+
+/** pixiv 书：title / author_id / series_id 只读（title / series_id 会被来源覆盖，author_id 是身份以来源为准）。 */
+const PIXIV_NOVEL: Novel = {
+  ...LOCAL_NOVEL,
+  id: 987654,
+  title: 'pixiv 标题',
+  author_id: 555,
+  author_name: 'pixiv 作者',
+  source: 'pixiv',
+  editable_fields: ['series_index', 'tags', 'create_time'],
 }
 
 /** 模拟 App.vue::handleNovelUpdated —— 响应值原地替换主列表里的那一本。 */
@@ -111,10 +139,10 @@ function mountNovels(novel: Novel = LOCAL_NOVEL) {
 
 async function openAndSave(
   wrapper: ReturnType<typeof mountNovels>,
-  { author }: { author: string },
+  { authorId }: { authorId: string },
 ) {
   await wrapper.get('[data-testid="novel-edit"]').trigger('click')
-  await wrapper.get('[data-testid="edit-author"]').setValue(author)
+  await wrapper.get('[data-testid="edit-author-id"]').setValue(authorId)
   await wrapper.get('[data-testid="base-modal"] form').trigger('submit')
   await flushPromises()
 }
@@ -122,6 +150,14 @@ async function openAndSave(
 describe('Novels.vue 元数据编辑接线', () => {
   beforeEach(() => {
     h.updateNovel.mockReset()
+    h.syncNovel.mockReset()
+    h.lookupAuthor.mockReset()
+    h.lookupAuthor.mockResolvedValue({
+      author_id: 777, author_name: '新作者', source: 'pixiv', novel_count: 0,
+    })
+    h.lookupSeries.mockResolvedValue({
+      series_id: 888, series_name: '新系列', source: 'local', novel_count: 0,
+    })
     h.patchNovel.mockReset()
     // LoadMore 用 IntersectionObserver 做无限滚动；jsdom 没有它，这里给个空壳。
     vi.stubGlobal('IntersectionObserver', class {
@@ -139,21 +175,23 @@ describe('Novels.vue 元数据编辑接线', () => {
     await wrapper.get('[data-testid="novel-edit"]').trigger('click')
 
     expect(wrapper.find('[data-testid="base-modal"]').exists()).toBe(true)
-    expect((wrapper.get('[data-testid="edit-author"]').element as HTMLInputElement).value)
-      .toBe('未知作者')
+    // 作者一栏是 ID：本地书为空（还没挂到任何 pixiv 作者名下）
+    expect((wrapper.get('[data-testid="edit-author-id"]').element as HTMLInputElement).value)
+      .toBe('')
     expect(h.updateNovel).not.toHaveBeenCalled()
   })
 
-  it('保存后：主列表卡片显示新值、集合视图副本被 patch、弹窗关闭', async () => {
-    const updated = { ...LOCAL_NOVEL, author_name: '新作者' }
+  it('保存后：主列表卡片显示解析出的新作者、集合视图副本被 patch、弹窗关闭', async () => {
+    const updated = { ...LOCAL_NOVEL, author_id: 777, author_name: '新作者' }
     h.updateNovel.mockResolvedValue(updated)
     const wrapper = mountNovels()
 
-    await openAndSave(wrapper, { author: '新作者' })
+    await openAndSave(wrapper, { authorId: '777' })
 
     expect(h.updateNovel).toHaveBeenCalledTimes(1)
     expect(h.updateNovel.mock.calls[0][0]).toBe(LOCAL_NOVEL.id)
-    expect(h.updateNovel.mock.calls[0][1]).toEqual({ author_name: '新作者' })
+    // 只提交 id：名字由服务端解析后回写（客户端提交 author_name 会 422）
+    expect(h.updateNovel.mock.calls[0][1]).toEqual({ author_id: 777 })
     // 集合视图那两份副本：本页负责
     expect(h.patchNovel).toHaveBeenCalledWith(updated)
     // 主列表：模拟的 App 侧 patch 生效 → 卡片显示新作者
@@ -161,13 +199,54 @@ describe('Novels.vue 元数据编辑接线', () => {
     expect(wrapper.find('[data-testid="base-modal"]').exists()).toBe(false)
   })
 
-  it('pixiv 书的弹窗里标题/系列置灰（卡片对象带着 source 一路传下来）', async () => {
-    const wrapper = mountNovels({ ...LOCAL_NOVEL, id: 987654, source: 'pixiv' })
+  it('pixiv 书的弹窗里 title / author_id / series_id 置灰，并显示「同步」（本地书没有）', async () => {
+    const wrapper = mountNovels(PIXIV_NOVEL)
 
     await wrapper.get('[data-testid="novel-edit"]').trigger('click')
 
+    // 置灰看服务端下发的 editable_fields（卡片对象带着它一路传下来）
     expect(wrapper.get('[data-testid="edit-title"]').attributes('disabled')).toBeDefined()
-    expect(wrapper.get('[data-testid="edit-series"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid="edit-author-id"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid="edit-series-id"]').attributes('disabled')).toBeDefined()
     expect(wrapper.get('[data-testid="edit-source-badge"]').text()).toBe('pixiv')
+    // 同步按钮只在 pixiv 书上出现
+    expect(wrapper.find('[data-testid="edit-sync"]').exists()).toBe(true)
+  })
+
+  it('本地书：三个字段可编辑，且没有「同步」按钮（没有来源可同步）', async () => {
+    const wrapper = mountNovels(LOCAL_NOVEL)
+
+    await wrapper.get('[data-testid="novel-edit"]').trigger('click')
+
+    expect(wrapper.get('[data-testid="edit-title"]').attributes('disabled')).toBeUndefined()
+    expect(wrapper.get('[data-testid="edit-author-id"]').attributes('disabled')).toBeUndefined()
+    expect(wrapper.find('[data-testid="edit-sync"]').exists()).toBe(false)
+  })
+
+  it('「同步」把响应送回卡片与集合视图，弹窗留着并换成新初值', async () => {
+    const refreshed: Novel = {
+      ...PIXIV_NOVEL,
+      author_name: '来源新作者',
+      tags: ['来源新标签'],
+      series_index: 7,
+    }
+    h.syncNovel.mockResolvedValue(refreshed)
+    const wrapper = mountNovels(PIXIV_NOVEL)
+
+    await wrapper.get('[data-testid="novel-edit"]').trigger('click')
+    await wrapper.get('[data-testid="edit-sync"]').trigger('click')
+    await flushPromises()
+
+    expect(h.syncNovel).toHaveBeenCalledWith(987654)
+    // 集合视图副本（本页负责）与主列表（模拟的 App patch）都换成响应值
+    expect(h.patchNovel).toHaveBeenCalledWith(refreshed)
+    expect(wrapper.text()).toContain('来源新作者')
+    // 弹窗不关，且表单初值已刷新 → 与响应无差异，保存按钮回到禁用
+    expect(wrapper.find('[data-testid="base-modal"]').exists()).toBe(true)
+    expect((wrapper.get('[data-testid="edit-series-index"]').element as HTMLInputElement).value)
+      .toBe('7')
+    expect(
+      wrapper.get('[data-testid="base-modal"] button[type="submit"]').attributes('disabled'),
+    ).toBeDefined()
   })
 })

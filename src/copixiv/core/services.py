@@ -399,7 +399,8 @@ class NovelNamingTemplate:
         {text}          — novel["text"] (character count)
         {date}          — novel["create_time"] formatted as YYYY-MM-DD
         {series_name}   — novel["series_name"] (empty if no series)
-        {series_index}  — novel["series_index"] (raw number, no ``#`` prefix)
+        {series_index}  — novel["series_index"] (raw number, no ``#`` prefix;
+                          ``0`` counts as "no index", same as ``None``)
 
     ``/`` in the template defines the directory structure inside the ZIP.
 
@@ -455,6 +456,15 @@ class NovelNamingTemplate:
             value = getattr(novel, key, None)
             if key == "author_name" and not value:
                 yield key, "未知作者"
+            elif key == "series_index" and value == 0:
+                # ``0`` = 无章节号，与 None 同义（2026-09-22 统一口径：
+                # 编辑器只收正整数或空，见 update_metadata.py）。yield "" 让
+                # ``#{series_index}_`` 整个 token 连同分隔符一起消失。
+                #
+                # **只对 series_index 生效**：``{id}`` / ``{like}`` / ``{view}``
+                # / ``{text}`` 的 0 是真实数字，必须照旧渲染成 "0"——所以这里
+                # 判的是具体 token，不是全局 falsy。
+                yield key, ""
             elif value is None:
                 yield key, ""
             else:

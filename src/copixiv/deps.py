@@ -29,6 +29,19 @@ def get_file_storage(request: Request):
     return request.app.state.file_storage
 
 
+def get_pixiv_client(request: Request):
+    """The shared Pixiv client (app.state).
+
+    Endpoints that must ask Pixiv for something the local DB cannot answer
+    use this: today only the **author-id lookup** behind the metadata editor
+    (``features/authors/resolve_names.py::lookup_author_profile``).  Callers
+    must treat failure as *not fatal* — the client raises on rate limits /
+    cooling / network errors, and every caller so far degrades to "name
+    unknown" instead of failing the request.
+    """
+    return request.app.state.client
+
+
 def get_task_manager(request: Request):
     """The task-manager facade (app.state)."""
     return request.app.state.task_manager

@@ -1479,12 +1479,35 @@ class SQLAlchemySeriesRepository(BaseRepository):
             ],
         )
 
-    async def get_empty_series_ids(self) -> list[int]:
-        return list(self.session.execute(
-            _select(models.Series.series_id)
-            .where(models.Series.series_name.is_(None))
-            .distinct()
-        ).scalars().all())
+    async def update_series_name(self, series_id: int, name: str) -> None:
+        """写入 ``series`` 行的名字（编辑器的解析结果）。
+
+        刻意**不**像 ``update_author_name`` 那样顺带改写同系列的全部 novel 行：
+        作者那边需要回填 ``author_name IS NULL`` 的历史行，而系列名的规范方向是
+        反过来的——``update_summary`` 用 ``max(novel.series_name)`` 从小说行推导
+        系列行的名字。编辑器只写"本次这一本"（走 ``update_metadata`` 的 values），
+        再把这一个系列行命名，两侧就一致了。
+        """
+        self.session.execute(
+            update(models.Series)
+            .where(
+                models.Series.series_id == series_id,
+                models.Series.series_name.is_distinct_from(name),
+            )
+            .values(series_name=name)
+        )
+
+    async def count_novels_by_series(self, series_id: int) -> int:
+        """库内已有多少本挂在这个 series_id 下（预览里的"库内已有 N 本"）。
+
+        走 ``ix_novel_series_id``；``series`` 行自己的 ``novel_count`` 是抓取
+        管线刷新的聚合值，不是实时计数（与作者预览同一个理由）。
+        """
+        return int(self.session.execute(
+            _select(func.count())
+            .select_from(models.Novel)
+            .where(models.Novel.series_id == series_id)
+        ).scalar_one())
 
     async def series_with_empty_index(self) -> list[int]:
         return list(self.session.execute(

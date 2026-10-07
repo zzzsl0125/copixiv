@@ -2,6 +2,7 @@ export type {
   Novel, NovelFilters, GetNovelsParams, BatchScope, BatchOperation,
   BatchOperationResult, NovelIdsResponse, NovelsByIdsResponse,
   MatchIdsResult, NovelCountResult, NovelListResult, NovelUpdatePayload,
+  AuthorLookup, SeriesLookup,
 } from './novels'
 export type { TaskArgument, TaskMethod, ScheduledTask, ScheduledTaskCreate, ScheduledTaskUpdate, TaskHistory } from './tasks'
 export type { TagPreference, TagAlias, TagCandidate, TagAliasSuggest, TagAliasSuggestList } from './tags'
