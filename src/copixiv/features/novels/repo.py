@@ -1654,3 +1654,99 @@ class SQLAlchemySeriesRepository(BaseRepository):
             )
             .distinct()
         ).scalars().all())
+
+    # 造 NovelDraft 要用的列，与 ``tasks/maintenance.py::_draft_from_row`` 的底料
+    # 一一对应（列名 = NovelDraft 字段名）。修复任务"只改章节号"的 draft 必须以
+    # 库内现值为底：``repo._upsert_rows`` 的覆盖白名单（like / view / title /
+    # text / caption / series_name）是**无条件写入**的，draft 少哪一列就清哪一列。
+    DRAFT_COLUMNS = (
+        "id", "title", "author_id", "author_name", "path", "like", "view",
+        "text", "caption", "series_id", "series_name", "series_index", "tags",
+    )
+
+    @classmethod
+    def _draft_columns(cls) -> list:
+        return [getattr(models.Novel, name) for name in cls.DRAFT_COLUMNS]
+
+    async def novels_of_series(self, series_id: int) -> list[dict]:
+        """库内挂在该系列下的小说（全套现值列，按 ``id`` 升序）。
+
+        名册能算出权威章节号，但 ``_upsert_rows`` 只在"列是 NULL"或"列进了
+        ``force_update``"时才写，所以修复任务要先知道每行的现状：号为空的行直接
+        补，号已经是错值的行**必须**带 ``force_update`` 才写得进去。返回整行现值
+        （而不是只返回 status 列）是为了让调用方能以库内现值为底造 draft——那样
+        "只改章节号"就真的只改这一列，名册条目缺列也不会把库内数据清成 NULL。
+        """
+        return [
+            dict(row._mapping)
+            for row in self.session.execute(
+                _select(*self._draft_columns())
+                .where(models.Novel.series_id == series_id)
+                .order_by(models.Novel.id)
+            ).all()
+        ]
+
+    async def novel_columns(self, novel_id: int) -> dict | None:
+        """单行的"造 draft"现值列（孤儿分支逐本用），没有这一行则 None。"""
+        row = self.session.execute(
+            _select(*self._draft_columns()).where(models.Novel.id == novel_id)
+        ).one_or_none()
+        return dict(row._mapping) if row is not None else None
+
+    async def novels_with_orphan_index(
+        self, limit: int | None = None, after_id: int = 0,
+    ) -> list[tuple[int, str | None, int | None]]:
+        """``series_id`` 为空、``series_index`` 却还留着的"孤儿号"行。
+
+        2026-07-13 之前那版元数据刷新把 ``series_id`` 抹成 NULL、号却留下了
+        （生产实测 1,594 行，全部 create_time < 2026-07-13）。这类行
+        :meth:`series_with_empty_index` 永远扫不到——它要求 ``series_id IS NOT
+        NULL``。按 ``id`` 升序返回 ``(id, series_name, series_index)``，供修复任务
+        用游标分批推进。
+        """
+        stmt = (
+            _select(
+                models.Novel.id,
+                models.Novel.series_name,
+                models.Novel.series_index,
+            )
+            .where(
+                models.Novel.series_id.is_(None),
+                models.Novel.series_index.isnot(None),
+                models.Novel.id > after_id,
+            )
+            .order_by(models.Novel.id)
+        )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        return [
+            (int(row[0]), row[1], row[2])
+            for row in self.session.execute(stmt).all()
+        ]
+
+    async def series_with_stored_index(
+        self, after_id: int = 0, limit: int | None = None,
+    ) -> list[int]:
+        """至少有一本带号的系列（``fix_series_index`` 全量复查模式的候选）。
+
+        与 :meth:`series_with_empty_index` 互补：那边是"有缺号"的系列（1,179 个），
+        这边是"号齐全"的系列（25,069 个），并集 = 库里全部 26,248 个系列，且
+        互不重叠。全量复查靠它把"号是错值、但一本缺号的都没有"的系列也捞出来
+        ——旧任务只扫缺号系列，这类系列的错值（生产实测约 9,780 行）永远没人管。
+
+        单本系列**也在内**：单本系列的号同样可能是错的（名册才是权威，库里只有
+        一本不代表 pixiv 只有一本）。按 ``series_id`` 升序（游标推进）。
+        """
+        stmt = (
+            _select(models.Novel.series_id)
+            .where(
+                models.Novel.series_id.isnot(None),
+                models.Novel.series_id > after_id,
+            )
+            .group_by(models.Novel.series_id)
+            .having(func.count(models.Novel.series_index) > 0)
+            .order_by(models.Novel.series_id)
+        )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        return [int(sid) for sid in self.session.execute(stmt).scalars().all()]
