@@ -1,0 +1,65 @@
+# copixiv 单单元部署：**一个 service 同时托管后端（:9000）与前端（:5173）**。
+#
+# 为什么需要一个脚本：systemd 的一个 service 只能有一个主进程，而 copixiv 的
+# 生产形态是两个 —— FastAPI 后端 main.py，加上 vite preview 提供的静态前端
+# （后端不托管 frontend/dist，只对小说文件用 FileResponse）。scripts/serve_all.sh
+# 把两者绑在一个单元里做最小监督；停止时的进程组清理由 KillMode=control-group
+# 负责，所以 npm/vite 派生孙进程也不会留孤儿。
+#
+# 与旧的 deploy/copixiv-backend.service + deploy/copixiv-frontend.service 的关系：
+# 那是同一套东西的**拆分版**。本文件是**合并版**，二选一，不要同时启用
+# （会抢 9000 / 5173 端口）。
+#
+# 安装（需要 sudo）：
+#   sudo cp deploy/copixiv.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   # 先腾出端口：停掉手工进程，或停掉旧的拆分单元
+#   sudo systemctl disable --now copixiv-backend copixiv-frontend 2>/dev/null
+#   pkill -f "python -u main.py"; pkill -f "vite preview"
+#   sudo systemctl enable --now copixiv
+#
+# 本文件的路径是按 **新机 192.168.196.2** 写的（仓库在 /home/invocation/项目/copixiv）。
+# 换机器/换路径时只需替换前缀：
+#   sed -e 's#/home/invocation/项目/copixiv#<新仓库绝对路径>#g' deploy/copixiv.service \
+#     | sudo tee /etc/systemd/system/copixiv.service
+#
+# 调试：
+#   journalctl -xeu copixiv.service -n 80 --no-pager
+#   .venv/bin/python scripts/pg_dev.py status     # 数据库健康
+#   ss -tlnp | grep -E ':(9000|5173)'             # 两个监听端口
+
+[Unit]
+Description=Copixiv (backend + frontend, single unit)
+After=network-online.target
+Wants=network-online.target
+# 重启限流：60 秒内最多 3 次，超过则停止尝试并标记 failed。
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=invocation
+Group=invocation
+WorkingDirectory=/home/invocation/项目/copixiv
+
+# 1) 先确保自带的 PostgreSQL 实例在跑（幂等：已在运行则立即返回 0）
+ExecStartPre=/home/invocation/项目/copixiv/.venv/bin/python /home/invocation/项目/copixiv/scripts/pg_dev.py start
+# 2) 每次启动重建前端产物，保证 dist 与源码一致
+#    （不需要可删掉此行；构建失败会让单元启动失败，这是有意的）
+ExecStartPre=/bin/bash -c 'cd /home/invocation/项目/copixiv/frontend && /usr/bin/npm run build'
+
+ExecStart=/home/invocation/项目/copixiv/scripts/serve_all.sh
+
+# 覆盖一切退出，**包括被外部 SIGTERM 打死的"干净退出"**——systemd 对 Type=simple
+# 把 SIGHUP/SIGINT/SIGTERM/SIGPIPE 视为 clean exit，而 Restart=on-failure 明确
+# 排除这四种信号，于是被杀一次后单元会永远躺着不重启（本机 2026-09-10 / 09-12
+# 两次事故的根因，见 INCIDENT-2026-09-12-copixiv-backend-down.md）。
+Restart=always
+RestartSec=5s
+
+# 停止时向整个 cgroup 发 SIGTERM：后端、vite，以及 npm/vite 可能派生的子进程。
+KillMode=control-group
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
