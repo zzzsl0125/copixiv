@@ -9,6 +9,11 @@ description = "Pixiv novel downloader and manager (v2 rewrite)"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
+    # 运行时依赖，不是测试专用：copixiv/notify/factory.py 在模块顶层
+    # import telegram/webhook，而两者都 `import httpx`。build_notifiers()
+    # 在应用装配阶段就会被调用，所以只装 `pip install .`（不含 [dev]）时
+    # 缺 httpx 会直接 ImportError，服务起不来。
+    "httpx>=0.27",
     "uvicorn[standard]>=0.30",
     "sqlalchemy>=2.0",
     "pydantic>=2.0",
@@ -34,7 +39,6 @@ dev = [
     "pgserver>=0.1.4",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
-    "httpx>=0.27",
 ]
 
 [project.scripts]
