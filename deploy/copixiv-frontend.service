@@ -29,7 +29,7 @@ StartLimitBurst=3
 Type=simple
 User=invocation
 Group=invocation
-WorkingDirectory=/home/invocation/copixiv/frontend/
+WorkingDirectory=/home/invocation/project/copixiv/frontend/
 # Rebuild the bundle on every start so dist/ always matches the tree.
 # Remove this line if you build manually.
 ExecStartPre=/usr/bin/npm run build

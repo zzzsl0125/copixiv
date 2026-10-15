@@ -44,11 +44,11 @@ StartLimitBurst=3
 [Service]
 User=invocation
 Group=invocation
-WorkingDirectory=/home/invocation/copixiv/
+WorkingDirectory=/home/invocation/project/copixiv/
 # Ensure the local PostgreSQL (pgserver) instance is running before the app
 # boots.  Idempotent: returns 0 immediately when the server is already up.
-ExecStartPre=/home/invocation/copixiv/.venv/bin/python /home/invocation/copixiv/scripts/pg_dev.py start
-ExecStart=/home/invocation/copixiv/.venv/bin/python -u main.py
+ExecStartPre=/home/invocation/project/copixiv/.venv/bin/python /home/invocation/project/copixiv/scripts/pg_dev.py start
+ExecStart=/home/invocation/project/copixiv/.venv/bin/python -u main.py
 
 # Covers every exit — including a clean SIGTERM exit that on-failure ignores.
 Restart=always

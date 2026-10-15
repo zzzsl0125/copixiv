@@ -71,6 +71,13 @@ def _bin(name: str) -> str:
 
 
 def _pg_ctl(*args: str) -> int:
+    """Run ``pg_ctl`` against this instance's data dir.
+
+    Deliberately no ``-k``: ``pg_ctl`` has no such option (it belongs to
+    ``postgres`` itself — the socket dir is passed through ``-o`` below), and
+    ``pg_ctl status`` locates the server via ``postmaster.pid`` + ``/proc``
+    rather than through the socket.
+    """
     cmd = [_bin("pg_ctl"), "-D", str(PGDATA), *args]
     return subprocess.run(cmd).returncode
 
@@ -102,6 +109,30 @@ def _ensure_dirs() -> None:
     PGDATA.mkdir(parents=True, exist_ok=True)
 
 
+def _server_answers() -> bool:
+    """Can the server actually be reached over its socket?
+
+    The liveness probe that does NOT depend on ``/proc``: ``pg_ctl status``
+    reads ``postmaster.pid`` and then checks that the PID is alive, which fails
+    inside a container / PID namespace (``--unshare-pid``) that cannot see the
+    postmaster even though the server is up and serving.  A real connection
+    settles the question for both cases.
+    """
+    rc = subprocess.run(
+        [
+            _bin("psql"),
+            "-h", str(SOCK_DIR),
+            "-p", str(PORT),
+            "-U", DB_USER,
+            "-d", "postgres",
+            "-tAc", "SELECT 1",
+        ],
+        capture_output=True,
+        text=True,
+    ).returncode
+    return rc == 0
+
+
 def _server_opts() -> list[str]:
     # The socket directory (-k) MUST be under .spike/ (sandbox constraint).
     return ["-k", str(SOCK_DIR), "-p", str(PORT)]
@@ -120,18 +151,28 @@ def cmd_start() -> int:
     if rc == 0:
         print("postgres already running.")
         return 0
-    subprocess.run(
-        [
-            _bin("pg_ctl"),
-            "-D", str(PGDATA),
-            "-o", " ".join(_server_opts()),
-            "-l", str(LOG_FILE),
-            "-w",
-            "start",
-        ]
+    # ``-o`` passes the server options (socket dir, port); ``-w`` waits for the
+    # readiness signal.  The start result is NOT swallowed in the normal case
+    # (this runs as the systemd unit's ``ExecStartPre``, where a non-zero exit
+    # aborts the unit instead of letting it come up without a database).
+    rc = _pg_ctl(
+        "-o", " ".join(_server_opts()),
+        "-l", str(LOG_FILE),
+        "-w",
+        "start",
     )
-    _pg_ctl("status")
-    return 0
+    if rc == 0:
+        return 0
+    # A non-zero start is not proof of failure: ``pg_ctl status`` cannot verify
+    # liveness when this runs inside a PID namespace that cannot see the
+    # postmaster (``/proc/<pid>`` missing → status exits 3 for a healthy
+    # server), and ``start`` then fails with "another server might be running".
+    # Fall back to asking the server itself before declaring failure.
+    if _server_answers():
+        print("postgres already running (pg_ctl could not verify it).")
+        return 0
+    print(f"pg_ctl start failed (rc={rc})", file=sys.stderr)
+    return rc
 
 
 def cmd_stop() -> int:

@@ -18,9 +18,9 @@
 #   pkill -f "python -u main.py"; pkill -f "vite preview"
 #   sudo systemctl enable --now copixiv
 #
-# 本文件的路径是按 **新机 192.168.196.2** 写的（仓库在 /home/invocation/项目/copixiv）。
+# 本文件的路径是按 **新机 192.168.196.2** 写的（仓库在 /home/invocation/project/copixiv）。
 # 换机器/换路径时只需替换前缀：
-#   sed -e 's#/home/invocation/项目/copixiv#<新仓库绝对路径>#g' deploy/copixiv.service \
+#   sed -e 's#/home/invocation/project/copixiv#<新仓库绝对路径>#g' deploy/copixiv.service \
 #     | sudo tee /etc/systemd/system/copixiv.service
 #
 # 调试：
@@ -40,15 +40,15 @@ StartLimitBurst=3
 Type=simple
 User=invocation
 Group=invocation
-WorkingDirectory=/home/invocation/项目/copixiv
+WorkingDirectory=/home/invocation/project/copixiv
 
 # 1) 先确保自带的 PostgreSQL 实例在跑（幂等：已在运行则立即返回 0）
-ExecStartPre=/home/invocation/项目/copixiv/.venv/bin/python /home/invocation/项目/copixiv/scripts/pg_dev.py start
+ExecStartPre=/home/invocation/project/copixiv/.venv/bin/python /home/invocation/project/copixiv/scripts/pg_dev.py start
 # 2) 每次启动重建前端产物，保证 dist 与源码一致
 #    （不需要可删掉此行；构建失败会让单元启动失败，这是有意的）
-ExecStartPre=/bin/bash -c 'cd /home/invocation/项目/copixiv/frontend && /usr/bin/npm run build'
+ExecStartPre=/bin/bash -c 'cd /home/invocation/project/copixiv/frontend && /usr/bin/npm run build'
 
-ExecStart=/home/invocation/项目/copixiv/scripts/serve_all.sh
+ExecStart=/home/invocation/project/copixiv/scripts/serve_all.sh
 
 # 覆盖一切退出，**包括被外部 SIGTERM 打死的"干净退出"**——systemd 对 Type=simple
 # 把 SIGHUP/SIGINT/SIGTERM/SIGPIPE 视为 clean exit，而 Restart=on-failure 明确
