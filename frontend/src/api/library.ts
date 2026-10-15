@@ -3,9 +3,10 @@ import type { UploadResponse } from '../types'
 
 export const libraryApi = {
   /**
-   * 批量上传本地 TXT（我的上传）。multipart/form-data，字段名固定 `files`
+   * 批量上传本地书籍（我的上传）。multipart/form-data，字段名固定 `files`
    * ——同一个字段重复多次承载多文件（后端按 `List[UploadFile]` 绑定）。
-   * 部分成功也是 200，逐条结果在响应体里；无文件是 400。
+   * 收 .txt 与 .epub（同一批可混），逐条结果在响应体里；部分成功也是 200，
+   * 无文件是 400。
    * 不手动设置 Content-Type：让浏览器带上含 boundary 的 multipart 头。
    *
    * `authorId`（可选）＝ 这一批书共用的预设作者（正整数 pixiv 作者 id）。

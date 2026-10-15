@@ -32,7 +32,7 @@ const emit = defineEmits<{
             data-testid="uploads-bar-upload"
             @click="emit('upload')"
           >
-            <Plus class="h-4 w-4" /> 上传 TXT
+            <Plus class="h-4 w-4" /> 上传书籍
           </button>
         </div>
       </div>

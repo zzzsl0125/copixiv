@@ -13,7 +13,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'close'): void
-  /** 上传成功（至少一条 created）——调用方刷新列表 / 重新加载当前 section。 */
+  /** 入库成功（至少一条 created）或补挂了 EPUB —— 调用方刷新列表 / 重新加载当前 section。 */
   (e: 'uploaded', summary: { created: number; duplicate: number; failed: number }): void
   (e: 'error', message: string): void
 }>()
@@ -159,12 +159,23 @@ const handleUpload = async () => {
       duplicate: batch.filter((r) => r.status === 'duplicate').length,
       failed: batch.filter((r) => r.status === 'failed').length,
     }
+    // 重复件补挂 EPUB（§4.1）：书本来就在库里，只是这次把原件补了上去——
+    // 列表里的 EPUB 徽章会变，所以它也是一种"改了库"的信号。不算进 emit 的
+    // 三态计数（那是契约字段），只用来决定文案与要不要刷新。
+    const attached = batch.filter((r) => r.epub_attached).length
     if (counts.created > 0) {
       toast.success(`已入库 ${counts.created} 本`)
+    }
+    if (counts.duplicate > 0) {
+      toast.info(attached > 0
+        ? `${counts.duplicate} 个文件已在库中，其中 ${attached} 个补挂了 EPUB`
+        : `${counts.duplicate} 个文件已在库中（同一份正文）`)
+    }
+    if (counts.failed > 0) toast.warning(`${counts.failed} 个文件上传失败，详见结果列表`)
+    // 有入库、或补挂了 EPUB，都要让调用方刷新列表（否则 EPUB 徽章要等手动刷新）。
+    if (counts.created > 0 || attached > 0) {
       emit('uploaded', counts)
     }
-    if (counts.duplicate > 0) toast.info(`${counts.duplicate} 个文件已在库中（同一份正文）`)
-    if (counts.failed > 0) toast.warning(`${counts.failed} 个文件上传失败，详见结果列表`)
     // 部分成功也要能刷新列表：只要有一本入库就足够。
     if (counts.created === 0 && counts.duplicate === 0 && counts.failed === 0) {
       toast.warning('后端没有返回任何上传结果')
@@ -188,7 +199,7 @@ const uploadMore = () => {
 <template>
   <BaseModal
     :is-open="isOpen"
-    title="📚 上传本地 TXT"
+    title="📚 上传本地书籍"
     confirm-text="上传"
     :cancel-text="hasUploaded ? '完成' : '取消'"
     :loading="uploading"
@@ -198,14 +209,15 @@ const uploadMore = () => {
   >
     <div class="text-sm text-gray-700 space-y-3">
       <p class="text-xs text-gray-500">
-        支持多选，仅收 <b>.txt</b>（编码自动识别：UTF-8 / GB18030 / Big5 / UTF-16）。
-        文件会复制入库，正文相同的书不会重复收录。
+        支持多选，收 <b>.txt</b> 与 <b>.epub</b>。TXT 编码自动识别
+        （UTF-8 / GB18030 / Big5 / UTF-16）；EPUB 自动提取正文与标题 / 作者，
+        <b>原件一并保留</b>。文件会复制入库，正文相同的书不会重复收录。
       </p>
 
       <input
         ref="fileInputRef"
         type="file"
-        accept=".txt"
+        accept=".txt,.epub"
         multiple
         class="hidden"
         data-testid="upload-file-input"
@@ -346,11 +358,13 @@ const uploadMore = () => {
               <template v-if="typeof item.novel_id === 'number'"> · id {{ item.novel_id }}</template>
             </p>
             <!-- 重复：指出已有那本（标题 + id），便于过去查看；若这次预设了作者，
-                 响应会把写进去的作者名回显出来（重复件也被应用了作者）。 -->
+                 响应会把写进去的作者名回显出来（重复件也被应用了作者）；若这次
+                 传的是 EPUB 且补挂成功，再补一句（原件已进库，徽章会亮）。 -->
             <p v-else-if="item.status === 'duplicate'" class="mt-0.5 text-xs text-gray-500">
               已在库中：《{{ item.title || '未知标题' }}》
               <template v-if="typeof item.novel_id === 'number'"> · id {{ item.novel_id }}</template>
               <template v-if="item.author_name"> · 已挂作者：{{ item.author_name }}</template>
+              <template v-if="item.epub_attached"> · 已补挂 EPUB</template>
             </p>
             <p v-else class="mt-0.5 text-xs text-red-600">{{ item.error || '未知错误' }}</p>
           </li>

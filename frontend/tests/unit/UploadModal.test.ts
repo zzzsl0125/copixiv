@@ -104,10 +104,16 @@ describe('UploadModal 选择与移除', () => {
     expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeDefined()
   })
 
-  it('文件输入限定 .txt 且支持多选', () => {
+  it('文件输入限定 .txt / .epub 且支持多选', () => {
     const input = mountModal().get('[data-testid="upload-file-input"]')
-    expect(input.attributes('accept')).toBe('.txt')
+    expect(input.attributes('accept')).toBe('.txt,.epub')
     expect(input.attributes('multiple')).toBeDefined()
+  })
+
+  it('标题与说明都覆盖 EPUB（不再写着"仅收 .txt"）', () => {
+    const wrapper = mountModal()
+    expect(wrapper.text()).toContain('上传本地书籍')
+    expect(wrapper.text()).toContain('.epub')
   })
 
   it('选中的文件出现在待上传列表（文件名 + 大小），可逐个移除', async () => {
@@ -197,6 +203,42 @@ describe('UploadModal 上传', () => {
     // 全部文件都已回结果 → 待上传列表清空，不会重复提交
     expect(wrapper.find('[data-testid="upload-file-list"]').exists()).toBe(false)
     expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeDefined()
+  })
+
+  it('EPUB 补挂重复件也 emit uploaded，并渲染「已补挂 EPUB」', async () => {
+    apiMock.uploadFiles.mockResolvedValue({
+      results: [
+        { filename: 'dup.epub', status: 'duplicate', novel_id: -1, title: '已有那本', epub_attached: true },
+      ],
+      created: 0,
+      duplicate: 1,
+      failed: 0,
+    })
+    const wrapper = mountModal()
+    await pickFiles(wrapper, [makeFile('dup.epub')])
+
+    await submit(wrapper)
+
+    // 没有 created，但补挂了原件 → 仍要刷新列表（否则 EPUB 徽章不亮）
+    expect(wrapper.emitted('uploaded')).toEqual([[{ created: 0, duplicate: 1, failed: 0 }]])
+    expect(wrapper.get('[data-testid="upload-result-list"]').text()).toContain('已补挂 EPUB')
+    expect(toastMock.info).toHaveBeenCalledWith('1 个文件已在库中，其中 1 个补挂了 EPUB')
+  })
+
+  it('纯重复（没补挂）不 emit uploaded —— 旧行为逐字不变', async () => {
+    apiMock.uploadFiles.mockResolvedValue({
+      results: [{ filename: 'dup.txt', status: 'duplicate', novel_id: -2, title: '已有那本' }],
+      created: 0,
+      duplicate: 1,
+      failed: 0,
+    })
+    const wrapper = mountModal()
+    await pickFiles(wrapper, [makeFile('dup.txt')])
+
+    await submit(wrapper)
+
+    expect(wrapper.emitted('uploaded')).toBeUndefined()
+    expect(toastMock.info).toHaveBeenCalledWith('1 个文件已在库中（同一份正文）')
   })
 
   it('全部失败（无 created）不 emit uploaded，只在结果里逐条报告', async () => {

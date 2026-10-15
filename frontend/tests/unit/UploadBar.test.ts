@@ -19,7 +19,7 @@ describe('UploadBar', () => {
     expect(bar.classes()).toContain('border-b')
 
     const btn = wrapper.get('[data-testid="uploads-bar-upload"]')
-    expect(btn.text()).toContain('上传 TXT')
+    expect(btn.text()).toContain('上传书籍')
     // 主按钮态来自同一份共享样式（含禁用态与图标间距）
     expect(btn.classes()).toEqual(expect.arrayContaining(barBtnClass('primary').split(' ')))
   })
@@ -36,7 +36,7 @@ describe('UploadBar', () => {
     const wrapper = mount(UploadBar)
 
     expect(wrapper.text()).toContain('我的上传')
-    expect(wrapper.text()).toContain('上传 TXT')
+    expect(wrapper.text()).toContain('上传书籍')
     // 说明文案（"本地 TXT 收进书库；重复上传会被拒收…"）已按要求移除
     expect(wrapper.text()).not.toContain('拒收')
     expect(wrapper.text()).not.toContain('收进书库')

@@ -26,7 +26,7 @@ export interface Novel {
   tags: string[]
   is_favourite: number
   is_special_follow: number
-  /** 来源：'pixiv'（缺省）/ 'local'（本地 TXT 上传，id 为负）。见 LIBRARY_DESIGN.md §2 */
+  /** 来源：'pixiv'（缺省）/ 'local'（本地上传的 TXT / EPUB，id 为负）。见 LIBRARY_DESIGN.md §2 */
   source?: string
   /**
    * **服务端下发的字段策略**：这本书允许 PATCH 提交哪些字段（后端 `NovelBase`

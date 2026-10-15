@@ -1,5 +1,6 @@
-/** 本地 TXT 上传（我的上传）领域类型。权威：docs/LIBRARY_DESIGN.md §4
- *  后端端点 POST /api/library/uploads（multipart，字段名 `files` 重复多次）。 */
+/** 本地书籍上传（我的上传）领域类型。权威：docs/LIBRARY_DESIGN.md §4/§4.1
+ *  后端端点 POST /api/library/uploads（multipart，字段名 `files` 重复多次）。
+ *  收 .txt 与 .epub：TXT 解码入库，EPUB 抽正文 + 保留原件。 */
 
 /** 逐条上传结果：created=已入库 / duplicate=正文 sha256 命中已有本地书 / failed=本条失败。 */
 export type UploadItemStatus = 'created' | 'duplicate' | 'failed'
@@ -17,6 +18,9 @@ export interface UploadItemResult {
   text?: number
   /** failed：失败原因（如「无法识别编码…」）。 */
   error?: string
+  /** duplicate：这次上传的 EPUB 原件被补挂到了那本此前没有 EPUB 的本地书上
+   *  （§4.1）。只有真的补挂了才下发 true。 */
+  epub_attached?: boolean
 }
 
 /** 批量上传响应：部分成功也是 200；无文件是 400。 */

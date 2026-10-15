@@ -31,7 +31,7 @@ const emit = defineEmits<{
 const toast = useToast()
 const showMobileActions = computed(() => props.isActive)
 const hasEpubReady = computed(() => props.novel.has_epub === 2)
-/** 本地 TXT 上传的书（novel.source === 'local'）。 */
+/** 本地上传的书（novel.source === 'local'，TXT / EPUB 都是）。 */
 const isLocal = computed(() => props.novel.source === 'local')
 
 /** 卡片小标签：全部渲染在同一个区域（`novel-badges`）。
@@ -46,7 +46,7 @@ const badges = computed(() => {
       key: 'local',
       label: '本地',
       class: 'bg-amber-100 text-amber-800',
-      title: '本地 TXT 上传（source=local）',
+      title: '本地上传（source=local）',
     })
   }
   if (hasEpubReady.value) {
