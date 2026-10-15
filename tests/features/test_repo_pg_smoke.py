@@ -69,8 +69,8 @@ async def test_tags_filter(seeded_db, session_factory):
     ) > 0
 
 
-async def test_keyword_search_single_quote_phrase(seeded_db, session_factory):
-    """Keyword search hits and the SQL uses a single-quote phrase (tsquery)."""
+async def test_keyword_search_substring(seeded_db, session_factory):
+    """Keyword search hits and the SQL is a substring match on search_lower."""
     with session_factory() as s:
         res = await _repo(s).get_novels(
             QuerySpec(
@@ -78,13 +78,10 @@ async def test_keyword_search_single_quote_phrase(seeded_db, session_factory):
                 exclude_blocked_tags=False,
             )
         )
-    # Reference: the same expression predicate evaluated straight in SQL.
+    # Reference: the same predicate evaluated straight in SQL.
     ref = _sql_scalar(
         seeded_db,
-        "SELECT count(*) FROM novel WHERE "
-        "to_tsvector('simple', copixiv_novel_text("
-        "title, author_name, series_name, tags)) "
-        "@@ to_tsquery('simple', '催')",
+        "SELECT count(*) FROM novel WHERE search_lower LIKE '%催%'",
     )
     assert ref > 0
     assert len(res["novels"]) == ref  # list is unpaged up to per_page=100
@@ -140,7 +137,12 @@ async def test_random_browse(seeded_db, session_factory):
 
 
 async def test_count_novels_list_consistency_and_excluded(seeded_db, session_factory):
-    """count_novels matches list length; blocked-tag exclusion is exact."""
+    """count_novels matches list length; blocked-tag exclusion is exact.
+
+    计数现在是有界的（``NovelCount``），但样本（200 本）远小于
+    ``COUNT_CAP``，所以这里的值仍然精确、``truncated`` 为假 —— 有界语义本身
+    由 ``tests/features/test_novel_count_cap.py`` 覆盖。
+    """
     with session_factory() as s:
         repo = _repo(s)
         trepo = SQLAlchemyTagRepository(s)
@@ -148,8 +150,9 @@ async def test_count_novels_list_consistency_and_excluded(seeded_db, session_fac
 
         total = await repo.count_novels(QuerySpec(exclude_blocked_tags=False))
         ids = await repo.list_matching_ids(QuerySpec(exclude_blocked_tags=False))
-        assert total == len(ids)
-        assert total > 0
+        assert total.truncated is False
+        assert total.value == len(ids)
+        assert total.value > 0
 
         # Block R-18 and verify excluded + visible == total.
         await trepo.create_preference(
@@ -159,8 +162,9 @@ async def test_count_novels_list_consistency_and_excluded(seeded_db, session_fac
         try:
             visible = await repo.count_novels(QuerySpec())
             excluded = await repo.count_excluded_novels(QuerySpec())
-            assert visible + excluded == total
-            assert excluded > 0
+            assert visible.truncated is False and excluded.truncated is False
+            assert visible.value + excluded.value == total.value
+            assert excluded.value > 0
             # A novel carrying blocked tag is not visible.
             blocked_id = _sql_scalar(
                 seeded_db,

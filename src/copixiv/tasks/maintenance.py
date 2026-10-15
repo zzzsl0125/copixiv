@@ -538,9 +538,10 @@ async def sync_empty_name(ctx: TaskContext) -> TaskResult:
 async def rebuild_fts(ctx: TaskContext) -> TaskResult:
     """Rebuild the keyword-search index (``REINDEX``).
 
-    The index is an expression index over ``novel`` maintained by PostgreSQL
-    (migration 0003), so there is no derived data to recompute — a rebuild is
-    physical index maintenance (bloat, after a bulk load).
+    The index is a ``pg_bigm`` GIN index over the generated column
+    ``novel.search_lower`` (migration 0007), maintained by PostgreSQL, so
+    there is no derived data to recompute — a rebuild is physical index
+    maintenance (bloat, after a bulk load).
     """
     from copixiv.features.novels.search import reindex
 
@@ -551,7 +552,7 @@ async def rebuild_fts(ctx: TaskContext) -> TaskResult:
 
     await run_write_transaction(uow, _reindex)
 
-    return TaskResult(summary="搜索索引重建完成（REINDEX novel_search_gin）")
+    return TaskResult(summary="搜索索引重建完成（REINDEX novel_search_bigm）")
 
 
 @register("check_fts", description="检查关键词搜索索引是否有效")
@@ -559,8 +560,9 @@ async def check_fts(ctx: TaskContext) -> TaskResult:
     """Keyword-search index health check — existence and validity.
 
     Read-only (no write transaction).  Content drift is impossible by
-    construction (the index is derived from the ``novel`` row), so the check
-    reports whether the index exists and is valid, plus the novel count.
+    construction (``novel.search_lower`` is a generated column, so the index
+    is derived from the row), so the check reports whether the index exists
+    and is valid, plus the novel count.
     """
     from copixiv.features.novels.search import index_health
 

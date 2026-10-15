@@ -2,12 +2,14 @@
 
 Post-migration rewrite of the SQLite-era module: the ``novel_tag`` /
 ``favourite`` join tables are gone (tags live in ``novel.tags text[]``,
-``is_favourite`` is a ``novel`` column), keyword search is an expression GIN
-index over ``novel`` (no FTS5 virtual table, no derived search table), and the
-PRAGMA kitchen-sink is replaced by PostgreSQL-native checks.
+``is_favourite`` is a ``novel`` column), keyword search is a ``pg_bigm`` GIN
+index over the generated ``novel.search_lower`` column (no FTS5 virtual table,
+no derived search table, no char-gram expression index), and the PRAGMA
+kitchen-sink is replaced by PostgreSQL-native checks.
 
-Search behaviour (index definition, char-gram mapping, freshness) lives in
-``tests/features/test_search_index.py`` and
+Search behaviour (index definition, predicate construction, case folding,
+freshness) lives in ``tests/features/test_search_index.py``,
+``tests/adapters/test_query_builder.py`` and
 ``tests/regression/test_search_index_freshness.py``.
 """
 
@@ -20,7 +22,6 @@ from sqlalchemy.exc import IntegrityError
 from copixiv.db.models import (
     Author, FailedNovel, Novel, Tag, TagAlias,
 )
-from copixiv.features.novels.search import gram_tokenize
 
 
 @pytest.fixture(autouse=True)
@@ -96,7 +97,7 @@ class TestCascadeDelete:
     ):
         """Deleting a novel through the repository drops its failure-ledger row
         (explicit cleanup — the ledger has no FK by design).  The search index
-        needs no cleanup: it is an expression index over ``novel``."""
+        needs no cleanup: it covers the generated ``search_lower`` column."""
         from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 
         with session_factory() as s:
@@ -135,8 +136,11 @@ class TestIndexesExist:
         "ix_tag_alias_target",
         "ix_search_history_type_timestamp",
         "ux_task_history_running",
-        "novel_search_gin",
+        "novel_search_bigm",
         "ix_failed_novel_last_failed_at",
+        # migration 0008 — tag alias suggestion path
+        "tag_search_bigm",
+        "tag_reference_count_id_idx",
     }
 
     def test_all_expected_indexes_exist(self, pg_engine):
@@ -149,45 +153,114 @@ class TestIndexesExist:
         assert not missing, f"Missing indexes: {missing}"
 
 
-class TestGramTokenize:
-    """Character-unigram tokeniser — the single source of truth (R1 guard)."""
+class TestTagSearchLowerColumn:
+    """``tag.search_lower`` — the generated column the suggestion path uses."""
 
-    def test_empty_string(self):
-        assert gram_tokenize("") == ""
+    def test_column_is_a_stored_generated_column(self, pg_engine):
+        with pg_engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT is_generated, generation_expression "
+                    "FROM information_schema.columns "
+                    "WHERE table_name='tag' AND column_name='search_lower'"
+                )
+            ).first()
+        assert row is not None, "tag.search_lower must exist (migration 0008)"
+        assert row[0] == "ALWAYS"
+        # Unlike novel's copixiv_search_text (which wraps the STABLE
+        # concat_ws / array_to_string), lower(text) is catalogued IMMUTABLE —
+        # so the expression is inlined, with no wrapper function.
+        assert row[1] == "lower(name)"
 
-    def test_pure_whitespace(self):
-        assert gram_tokenize("   ") == ""
-        assert gram_tokenize(" \t\n  ") == ""
+    def test_generated_column_follows_the_name(self, session_factory):
+        with session_factory() as s:
+            s.add(Tag(name="BanG_Dream!", reference_count=0))
+            s.commit()
+            value = s.execute(
+                text("SELECT search_lower FROM tag WHERE name=:n"),
+                {"n": "BanG_Dream!"},
+            ).scalar()
+        assert value == "bang_dream!"
 
-    def test_pure_punctuation_maps_to_placeholder(self):
-        assert gram_tokenize("---") == "龖 龖 龖"
-        assert gram_tokenize("...") == "龖 龖 龖"
 
-    def test_cjk_chars_kept(self):
-        assert gram_tokenize("普通文本") == "普 通 文 本"
+class TestSearchLowerColumn:
+    """The generated search-text column the pg_bigm index covers."""
 
-    def test_latin_alphanumeric_kept_case_preserved(self):
-        assert gram_tokenize("Harry") == "H a r r y"
-        assert gram_tokenize("hello123") == "h e l l o 1 2 3"
+    def test_column_is_a_stored_generated_column(self, pg_engine):
+        with pg_engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT is_generated, generation_expression "
+                    "FROM information_schema.columns "
+                    "WHERE table_name='novel' AND column_name='search_lower'"
+                )
+            ).first()
+        assert row is not None, "novel.search_lower must exist (migration 0007)"
+        assert row[0] == "ALWAYS"
+        # The assembly lives in an IMMUTABLE SQL function (a STORED generated
+        # column cannot call the STABLE concat_ws / array_to_string directly).
+        assert "copixiv_search_text" in row[1]
 
-    def test_punctuation_maps_to_placeholder(self):
-        assert gram_tokenize("R-18") == "R 龖 1 8"
+    def test_assembly_function_lowercases_all_four_fields(self, session_factory):
+        """``copixiv_search_text`` = ``lower(concat_ws(' ', parts))``."""
+        with session_factory() as s:
+            value = s.execute(
+                text(
+                    "SELECT copixiv_search_text("
+                    ":title, :author, :series, :tags)"
+                ),
+                {
+                    "title": "Title", "author": "AuthorName",
+                    "series": "Series 1", "tags": ["TagA", "TagB"],
+                },
+            ).scalar()
+        assert value == "title authorname series 1 taga tagb"
 
-    def test_whitespace_inside_text_is_skipped(self):
-        assert gram_tokenize("哈利 波特") == "哈 利 波 特"
+    def test_assembly_function_returns_empty_for_empty_parts(self, session_factory):
+        """All fields empty → ``''`` (``concat_ws`` skips NULLs) — never NULL."""
+        with session_factory() as s:
+            for args in (
+                {"title": "", "author": "", "series": "", "tags": []},
+                {"title": "", "author": None, "series": None, "tags": []},
+            ):
+                value = s.execute(
+                    text(
+                        "SELECT copixiv_search_text("
+                        ":title, :author, :series, :tags)"
+                    ),
+                    args,
+                ).scalar()
+                assert value == ""
 
-    def test_non_ascii_symbols_are_kept(self):
-        # The simple tokeniser recognises every non-ASCII character, so CJK
-        # punctuation and emoji stay addressable as themselves (only ASCII
-        # punctuation collapses to the placeholder).
-        assert gram_tokenize("😀😀") == "😀 😀"
-        assert gram_tokenize("【前】") == "【 前 】"
-        assert gram_tokenize("。，") == "。 ，"
+    def test_generation_matches_the_four_search_fields(self, session_factory):
+        """title / author / series / tags, space-joined and lowercased."""
+        with session_factory() as s:
+            s.add(Author(author_id=1, author_name="AuthorName"))
+            s.flush()
+            s.add(Novel(
+                id=1, title="Title", author_id=1, author_name="AuthorName",
+                series_name="Series 1", tags=["TagA", "TagB"],
+            ))
+            s.commit()
+            value = s.execute(
+                text("SELECT search_lower FROM novel WHERE id=1")
+            ).scalar()
+        assert value == "title authorname series 1 taga tagb"
 
-    def test_unicode_whitespace_is_dropped(self):
-        # Whitespace is dropped on both sides (index collapse == query split).
-        assert gram_tokenize("哈利\u3000波特") == "哈 利 波 特"
-        assert gram_tokenize("a\u00a0b") == "a b"
+    def test_empty_optional_fields_do_not_add_separators(self, session_factory):
+        """``nullif(...,'')`` keeps empty fields from shifting bigram positions."""
+        with session_factory() as s:
+            s.add(Author(author_id=1, author_name="a"))
+            s.flush()
+            s.add(Novel(
+                id=2, title="OnlyTitle", author_id=1, author_name="",
+                series_name=None, tags=[],
+            ))
+            s.commit()
+            value = s.execute(
+                text("SELECT search_lower FROM novel WHERE id=2")
+            ).scalar()
+        assert value == "onlytitle"
 
 
 class TestConnectionPoolConfig:

@@ -4,8 +4,8 @@ These verify the three properties that the new PG foundation must guarantee:
 
 1. The ``sync_tag_refs`` trigger maintains ``tag.reference_count`` exactly
    (one count per novel per tag, no double-count on duplicate array elements).
-2. The keyword-search expression index on ``novel`` answers char-gram phrase
-   queries.
+2. The keyword-search ``pg_bigm`` GIN index on the generated ``search_lower``
+   column answers substring predicates.
 3. The partial indexes / GIN index exist with the right definitions.
 """
 
@@ -39,8 +39,8 @@ def test_trigger_reference_count(session_factory, clean_db, _author):
     assert rc["中文"] == 2, "each distinct novel must contribute one count"
 
 
-def test_novel_search_gin_phrase(session_factory, clean_db, _author):
-    """The expression GIN index answers a char-gram query from the row alone."""
+def test_novel_search_bigm_substring(session_factory, clean_db, _author):
+    """The bigram GIN index answers a substring query from the row alone."""
     with session_factory() as s:
         s.add(Novel(id=10, title="催眠の誘い", author_id=1, tags=["R-18"]))
         s.commit()
@@ -49,13 +49,11 @@ def test_novel_search_gin_phrase(session_factory, clean_db, _author):
         cnt = s.execute(
             text(
                 "SELECT count(*) FROM novel WHERE "
-                "to_tsvector('simple', copixiv_novel_text("
-                "title, author_name, series_name, tags)) "
-                "@@ to_tsquery('simple', '催')"
+                "search_lower LIKE '%催%'"
             )
         ).scalar()
 
-    assert cnt >= 1, "gram phrase query should hit the inserted row"
+    assert cnt >= 1, "substring query should hit the inserted row"
 
 
 def test_partial_and_gin_indexes(pg_engine, clean_db):
@@ -82,7 +80,9 @@ def test_partial_and_gin_indexes(pg_engine, clean_db):
     assert running and "WHERE" in running and "status" in running, \
         "task_history partial unique index (predicate normalized to = ANY(...))"
 
-    gin = indexdef("novel_search_gin")
-    assert gin and "USING gin" in gin, "novel_search expression GIN index"
-    assert gin and "copixiv_novel_text" in gin, \
-        "search index is derived from the novel row itself"
+    gin = indexdef("novel_search_bigm")
+    assert gin and "USING gin" in gin, "novel_search bigram GIN index"
+    assert gin and "gin_bigm_ops" in gin, \
+        "search index uses the pg_bigm bigram opclass on search_lower"
+    assert gin and "search_lower" in gin, \
+        "search index is derived from the novel row itself (generated column)"

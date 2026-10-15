@@ -8,10 +8,12 @@ that runs after every webview download (the download draft is built with
 indexed without its author name and stayed unsearchable by author until a
 manual rebuild.
 
-The index is now an expression index over ``novel`` (migration 0003), so
-PostgreSQL derives it from the row being written.  These tests pin that
-guarantee at the places where the old design broke: they never call an index
-refresh helper, and every write path below must nevertheless be searchable.
+The index is now a ``pg_bigm`` GIN index over the generated column
+``novel.search_lower`` (migration 0007 — the same "PostgreSQL derives it from
+the row" guarantee migration 0003 introduced), so PostgreSQL maintains it from
+the row being written.  These tests pin that guarantee at the places where the
+old design broke: they never call an index refresh helper, and every write path
+below must nevertheless be searchable.
 """
 
 import pytest

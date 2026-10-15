@@ -468,9 +468,8 @@ class TestSearchIndexMaintenanceTasks:
     """rebuild_fts (REINDEX) + check_fts (index health) maintenance tasks."""
 
     _CREATE_INDEX = (
-        "CREATE INDEX novel_search_gin ON novel USING gin ("
-        "to_tsvector('simple', copixiv_novel_text("
-        "title, author_name, series_name, tags)))"
+        "CREATE INDEX novel_search_bigm ON novel "
+        "USING gin (search_lower gin_bigm_ops)"
     )
 
     @staticmethod
@@ -487,7 +486,7 @@ class TestSearchIndexMaintenanceTasks:
         result = await rebuild_fts(TaskContext(uow=SqlUnitOfWork(session_factory)))
 
         assert "重建完成" in result.summary
-        assert "novel_search_gin" in result.summary
+        assert "novel_search_bigm" in result.summary
 
     async def test_check_fts_task_reports_healthy(self, session_factory):
         self._seed(session_factory)
@@ -501,10 +500,10 @@ class TestSearchIndexMaintenanceTasks:
     async def test_check_fts_task_reports_missing_index(
         self, session_factory, pg_engine,
     ):
-        # Drop the expression index, then restore it (the search index is a
-        # plain index now, so "missing" is the only unhealthy state left).
+        # Drop the bigram GIN index, then restore it (the search column is a
+        # generated column, so "missing" is the only unhealthy state left).
         with pg_engine.begin() as conn:
-            conn.execute(text("DROP INDEX novel_search_gin"))
+            conn.execute(text("DROP INDEX novel_search_bigm"))
         try:
             result = await check_fts(TaskContext(uow=SqlUnitOfWork(session_factory)))
             assert "索引不存在" in result.summary

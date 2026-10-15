@@ -26,6 +26,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Column,
+    Computed,
     DateTime,
     Float,
     ForeignKey,
@@ -170,6 +171,28 @@ class Novel(Base):
     # Local books: sha256 of the normalised body (the dedup key).  NULL for
     # Pixiv rows — hence the *partial* unique index below.
     source_key = Column(Text, nullable=True)
+    # Keyword search text — the four searchable fields assembled exactly like
+    # the old ``copixiv_novel_text(title, author_name, series_name, tags)``
+    # (space-joined, empty fields skipped via ``nullif``), then lowercased.
+    # PostgreSQL generates it from the row being written (migration 0007), so
+    # the ``pg_bigm`` GIN index below cannot drift from the data; the query
+    # side (``features/novels/search.py``) matches it with one ``LIKE`` per
+    # whitespace-separated keyword segment.  Case folding on the query side
+    # must use SQL ``lower()`` too — the database runs with the ``C`` locale,
+    # where Python's ``str.lower()`` folds characters this does not.
+    #
+    # The assembly lives in the IMMUTABLE SQL function ``copixiv_search_text``
+    # (created by migration 0007) rather than inline: a STORED generated column
+    # requires an immutable expression, and ``concat_ws`` /
+    # ``array_to_string`` are catalogued ``STABLE``.  Keep this metadata
+    # expression in step with that function.
+    search_lower = Column(
+        Text,
+        Computed(
+            "copixiv_search_text(title, author_name, series_name, tags)",
+            persisted=True,
+        ),
+    )
 
     author_rel = relationship("Author", back_populates="novels")
     series_rel = relationship("Series", back_populates="novels")
@@ -203,18 +226,17 @@ class Novel(Base):
         # 「按时间」= ``ORDER BY abs(id)``。``abs(id)`` 不是主键，必须自带一条
         # 表达式索引，否则每次列表排序都要全表 top-N Sort（实测 1.3ms → 35ms）。
         Index("ix_novel_abs_id", sa_text("abs(id)"), sa_text("id")),
-        # Keyword search: an expression index over the row's own searchable
-        # columns.  PostgreSQL maintains it from the row being written, so it
-        # cannot drift from the data (migration 0003; the database functions
-        # ``copixiv_gram`` / ``copixiv_novel_text`` own the token stream, and
-        # ``features/novels/search.py`` mirrors the mapping for queries).
+        # Keyword search: a ``pg_bigm`` bigram GIN index over the generated
+        # ``search_lower`` column (migration 0007).  The column is generated
+        # by PostgreSQL from the row being written, so the index cannot drift
+        # from the data, and the query side builds real substring predicates
+        # (one ``LIKE`` per keyword segment) — see
+        # ``features/novels/search.py``.
         Index(
-            "novel_search_gin",
-            sa_text(
-                "to_tsvector('simple', copixiv_novel_text("
-                "title, author_name, series_name, tags))"
-            ),
+            "novel_search_bigm",
+            "search_lower",
             postgresql_using="gin",
+            postgresql_ops={"search_lower": "gin_bigm_ops"},
         ),
     )
 
@@ -228,6 +250,33 @@ class Tag(Base):
     id = Column(BigInteger, Identity(), primary_key=True)
     name = Column(Text, nullable=False, unique=True)
     reference_count = Column(Integer, nullable=False, default=0)
+
+    # ``lower(name)`` is catalogued IMMUTABLE, so — unlike ``novel.search_lower``
+    # (which needs the ``copixiv_search_text`` wrapper for the STABLE
+    # ``concat_ws`` / ``array_to_string``) — the generated column is inlined.
+    # Keep this expression in step with migration 0008.
+    search_lower = Column(
+        Text,
+        Computed("lower(name)", persisted=True),
+    )
+
+    __table_args__ = (
+        # 标签别名建议的两条索引（迁移 0008）：pg_bigm GIN 回答「哪些标签名字
+        # 相似」（真子串语义），``(reference_count DESC, id DESC)`` btree 回答
+        # 「取最热的 N 个」与 keyset 分页续扫 —— GIN 不提供顺序，缺了它就只能
+        # 对整表 Seq Scan + Sort（见 features/tags/repo.py）。
+        Index(
+            "tag_search_bigm",
+            "search_lower",
+            postgresql_using="gin",
+            postgresql_ops={"search_lower": "gin_bigm_ops"},
+        ),
+        Index(
+            "tag_reference_count_id_idx",
+            sa_text("reference_count DESC"),
+            sa_text("id DESC"),
+        ),
+    )
 
     def __repr__(self) -> str:
         return f"<Tag(name='{self.name}')>"
