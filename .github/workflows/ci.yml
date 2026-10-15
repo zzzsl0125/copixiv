@@ -33,6 +33,15 @@ jobs:
       - name: Install dependencies
         run: pip install ".[dev]"
 
+      # pgserver 的 wheel 只带 plpgsql 与 vector，**不含 pg_bigm**（0.1.4 实测），
+      # 而迁移 0007 起关键词搜索底座就是 pg_bigm 的 bigram GIN 索引。不先编进去，
+      # `CREATE EXTENSION pg_bigm` 会在建库迁移时就失败 —— tests/adapters/
+      # test_migrations.py 的 fresh-DB 用例与 conftest 的建库一起挂。
+      # 脚本幂等（已装则跳过），需要 gcc / make / git：runner 自带，
+      # 且从源码构建（固定到提交 SHA），不需要网络上的预编译产物。
+      - name: Build pg_bigm extension into pgserver's PostgreSQL
+        run: bash scripts/build_pg_bigm.sh
+
       # 快速门禁：CI 只跑非 slow 用例（含迁移链/并发在内的 slow 测试按需
       # 全量执行：python -m pytest，见 pyproject.toml 的 markers 注释）。
       - name: Run tests

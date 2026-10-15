@@ -138,7 +138,94 @@ def _server_opts() -> list[str]:
     return ["-k", str(SOCK_DIR), "-p", str(PORT)]
 
 
+def _pg_bigm_available() -> bool:
+    """Is the ``pg_bigm`` extension actually installed on this server?
+
+    Migration 0007 made ``pg_bigm`` a hard dependency of the schema (the keyword
+    search index is ``USING gin (search_lower gin_bigm_ops)``), but **pgserver's
+    wheel ships only plpgsql + vector** — so a fresh environment (CI, a new
+    machine, or a ``pip install -U pgserver`` that replaces ``pginstall``) has
+    the extension catalogue row but no ``pg_bigm.so``.  Without a check the first
+    symptom is an opaque "could not access file \"$libdir/pg_bigm\"" from deep
+    inside the migration chain.
+
+    Two probes were rejected before this one, both measured on this machine:
+
+    * ``pg_available_extensions`` still reports the extension after the ``.so``
+      is deleted — the server caches the extension directory listing, so it
+      cannot see files added or removed after start-up;
+    * ``CREATE EXTENSION pg_bigm`` in a rolled-back transaction *is* accurate
+      (it failed with "could not access file" while the listing lied), but it
+      needs a writable database and leaves a real error path behind.
+
+    ``pg_stat_file`` on the two files the loader actually needs is accurate,
+    read-only, and one round trip.  Paths come from ``pg_config`` on this side
+    so no assumption is made about the server's layout.
+    """
+    out = subprocess.run(
+        [_bin("pg_config"), "--pkglibdir", "--sharedir"],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        return False
+    paths = out.stdout.split()
+    if len(paths) != 2:
+        return False
+    pkglibdir, sharedir = paths
+    # NB: the query goes in over stdin, not via ``-c``.  ``psql -c`` does NOT
+    # interpolate ``:'var'`` (it sends the string verbatim, which is a syntax
+    # error at the colon); only the stdin/file path substitutes variables.
+    probe = subprocess.run(
+        [
+            _bin("psql"),
+            "-h", str(SOCK_DIR),
+            "-p", str(PORT),
+            "-U", DB_USER,
+            "-d", "postgres",
+            "-X", "-tA",
+            "-v", f"lib={pkglibdir}/pg_bigm.so",
+            "-v", f"ctl={sharedir}/extension/pg_bigm.control",
+        ],
+        input=(
+            "SELECT (pg_stat_file(:'lib')).size > 0"
+            "   AND (pg_stat_file(:'ctl')).size > 0;\n"
+        ),
+        capture_output=True,
+        text=True,
+    )
+    return probe.returncode == 0 and probe.stdout.strip() == "t"
+
+
+def _warn_if_pg_bigm_missing() -> None:
+    """Print a fix-it hint when pg_bigm is missing.  Never fails the start.
+
+    The server is genuinely up and usable for everything except the search
+    index, so refusing to start would be worse than a loud warning — but the
+    migration would fail a moment later anyway, so the hint must come first.
+    """
+    if _pg_bigm_available():
+        return
+    print(
+        "!! pg_bigm 扩展不可用：关键词搜索索引（迁移 0007 起）依赖它，"
+        "建库迁移会失败。\n"
+        "   修：bash scripts/build_pg_bigm.sh"
+        "（把 pg_bigm 编进 pgserver 自带的 PostgreSQL；幂等）\n"
+        "   系统 PG 请装发行版的 pg_bigm 包"
+        "（Arch: postgresql-pg-bigm / Debian: postgresql-16-pg-bigm）。",
+        file=sys.stderr,
+    )
+
+
 def cmd_start() -> int:
+    rc = _start()
+    # 无论走哪条路径（已在运行 / 本次启动 / 回退确认），服务已经可用；扩展是否
+    # 齐备是另一件事，而且照样要让启动成功 —— 只提示。
+    if rc == 0:
+        _warn_if_pg_bigm_missing()
+    return rc
+
+
+def _start() -> int:
     _ensure_dirs()
     # initdb if this is a fresh data dir (no PG_VERSION marker).
     if not (PGDATA / "PG_VERSION").exists():
