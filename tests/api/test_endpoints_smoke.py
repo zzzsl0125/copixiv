@@ -194,7 +194,30 @@ class TestNovelsList:
         _seed_novel(session_factory, 1, "标题", str(tmp_path / "1.txt"))
         r = client.get("/api/novels/count")
         assert r.status_code == 200
-        assert r.json() == {"total": 1, "excluded": 0}
+        assert r.json() == {
+            "total": 1, "excluded": 0,
+            "truncated": False, "excluded_truncated": False,
+        }
+
+    def test_count_over_cap_is_flagged(
+        self, client, session_factory, tmp_path, monkeypatch,
+    ):
+        """命中数 > COUNT_CAP：total 封顶为 cap、truncated=true（下界）。
+
+        老客户端读到的 ``total`` 仍是数字（语义从「精确」变成「至少」），
+        新客户端看 ``truncated`` 决定显示 ``N+``。
+        """
+        from copixiv.features.novels import repo as repo_module
+        monkeypatch.setattr(repo_module, "COUNT_CAP", 2)
+        for i in (1, 2, 3):
+            _seed_novel(session_factory, i, f"标题{i}", str(tmp_path / f"{i}.txt"))
+
+        r = client.get("/api/novels/count")
+        assert r.status_code == 200
+        assert r.json() == {
+            "total": 2, "excluded": 0,
+            "truncated": True, "excluded_truncated": False,
+        }
 
     def test_unknown_condition_type_is_400(self, client):
         """A typo in a condition type must be loud, not an empty result."""
@@ -570,6 +593,47 @@ class TestTagAliasEndpoints:
             "source": "NTR", "target": "NTR",
         })
         assert r.status_code == 400
+
+    def test_suggest_cursor_resumes_and_wildcards_are_literal(
+        self, client, session_factory,
+    ):
+        """Wire contract of ``/suggest``: opaque integer cursor + literal ``%``.
+
+        The frontend assigns ``next_offset`` to a ref and sends it straight
+        back (``AliasSuggestModal.vue``), so it must stay an integer that
+        round-trips; the old offset walked a non-deterministic ordering and
+        overlapped between pages.  ``%高中生`` is a real tag: unescaped it
+        matched every row and the response offered the globally hottest tags
+        as its "similar" ones.
+        """
+        with session_factory() as s:
+            s.add(Tag(name="%高中生", reference_count=999))
+            for i in range(12):
+                s.add(Tag(name=f"cursor-{i:02d}", reference_count=1))
+            s.commit()
+
+        r = client.get("/api/tag-aliases/suggest", params={"limit": 2})
+        assert r.status_code == 200
+        first = r.json()
+        assert set(first) == {"items", "next_offset"}
+        assert isinstance(first["next_offset"], int)
+        assert first["next_offset"] > 0
+        assert len(first["items"]) == 2
+        # No suggestion for %高中生: nothing contains it literally.
+        assert "%高中生" not in {i["target"]["name"] for i in first["items"]}
+
+        r = client.get("/api/tag-aliases/suggest", params={
+            "limit": 2, "offset": first["next_offset"],
+        })
+        assert r.status_code == 200
+        second = r.json()
+        first_ids = {i["target"]["id"] for i in first["items"]}
+        second_ids = {i["target"]["id"] for i in second["items"]}
+        assert first_ids.isdisjoint(second_ids), "second page repeated a target"
+
+        r = client.get("/api/tag-aliases/suggest", params={"target_tag": "%高中生"})
+        assert r.status_code == 200
+        assert r.json() == {"items": [], "next_offset": 0}
 
     def test_delete_missing_maps_to_404(self, client):
         r = client.delete("/api/tag-aliases/999")

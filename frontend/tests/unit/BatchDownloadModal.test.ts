@@ -97,6 +97,15 @@ describe('BatchDownloadModal (选多少下多少 — no download-count decision)
     expect(downloadBlobMock).toHaveBeenCalledWith(ZIP_BLOB, 'test.zip')
   })
 
+  it('capped count is shown as a floor (≥ N)，不当精确值', async () => {
+    const wrapper = mountModal()
+    apiMock.countNovels.mockResolvedValue({ total: 5000, truncated: true })
+    await wrapper.setProps({ isOpen: true })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('≥ 5000 篇')
+  })
+
   it('ids-mode selection sends exactly the selected count as limit', async () => {
     const wrapper = mountModal()
     await wrapper.setProps({

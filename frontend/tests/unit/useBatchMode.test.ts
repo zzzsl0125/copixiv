@@ -123,6 +123,16 @@ describe('useBatchMode', () => {
     )
   })
 
+  it('surfaces the server cap flag (matchedTruncated) for the matched count', async () => {
+    novelApiMock.countNovels.mockResolvedValue({ total: 5000, truncated: true })
+    const state = mountUseBatchMode(defaultFilters())
+    state.enter()
+    await flushPromises()
+
+    expect(state.matchedCount.value).toBe(5000)
+    expect(state.matchedTruncated.value).toBe(true)
+  })
+
   it('selectAllMatched unions the matched ids into the selection', async () => {
     const state = mountUseBatchMode({ ...defaultFilters(), keyword: 'R-18' })
     state.enter()

@@ -38,29 +38,12 @@ def _isolated_db(clean_db):
     yield
 
 
-@pytest.fixture(autouse=True)
-def _quiet_count_recompute():
-    """清掉进程级 count 缓存，让引擎级语句捕获不受后台重算线程干扰。
-
-    ``repo._recompute_count_cache_after_write`` 会在**任何**写提交后起一个后台
-    线程重算缓存里的 count（它发的是 ``SELECT count(*) FROM novel``）。语句级
-    断言不该被这种无关噪声影响，所以这里把缓存清空——没有缓存键，那个线程根本
-    不会起。
-    """
-    from copixiv.features.novels import repo as repo_module
-
-    repo_module._count_cache.clear()
-    yield
-    repo_module._count_cache.clear()
-
-
 @contextmanager
 def _captured(engine):
     """记录这一段里真正发出去的 SQL（engine 级事件；用完即摘）。
 
-    注意后台的 ``copixiv-count-recompute`` 线程会往同一个 engine 上发 SELECT，
-    所以断言一律先按"这条语句是不是我关心的那个形状"筛一遍，而不是要求捕获窗口
-    里**总共**只有一条语句。
+    断言一律先按"这条语句是不是我关心的那个形状"筛一遍，而不是要求捕获窗口
+    里**总共**只有一条语句（同一 engine 上还有别的会话/连接在动）。
     """
     seen: list[str] = []
 

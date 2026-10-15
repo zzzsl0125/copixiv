@@ -20,6 +20,8 @@ export function useBatchMode(filters: NovelFilters) {
   const isBatchMode = ref(false)
   const selectedIds = ref<Set<number>>(new Set())
   const matchedCount = ref(0)
+  /** matchedCount 是不是下界（服务端计数有界，见 NovelCountResult）。 */
+  const matchedTruncated = ref(false)
   const countLoading = ref(false)
   const selectAllLoading = ref(false)
 
@@ -54,8 +56,12 @@ export function useBatchMode(filters: NovelFilters) {
       })
       if (seq !== countSeq) return
       matchedCount.value = result.total
+      matchedTruncated.value = result.truncated ?? false
     } catch {
-      if (seq === countSeq) matchedCount.value = 0
+      if (seq === countSeq) {
+        matchedCount.value = 0
+        matchedTruncated.value = false
+      }
     } finally {
       if (seq === countSeq) countLoading.value = false
     }
@@ -158,6 +164,7 @@ export function useBatchMode(filters: NovelFilters) {
     isBatchMode,
     selectedIds,
     matchedCount,
+    matchedTruncated,
     countLoading,
     selectAllLoading,
     hasFilter,

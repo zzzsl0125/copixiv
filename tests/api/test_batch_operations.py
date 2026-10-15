@@ -180,6 +180,28 @@ class TestBatchDelete:
         assert r.status_code == 400
         assert "上限" in r.json()["detail"]
 
+    def test_scope_over_truncated_count_is_400(
+        self, client, session_factory, monkeypatch, tmp_path,
+    ):
+        """计数被上限截断时也必须拒绝 —— 截断值恰好等于批量上限时最容易漏。
+
+        这里把计数上限压到 2（批量上限保持默认 5000），命中 3 本：计数返回
+        ``NovelCount(2, truncated=True)``。「看 value 是否 > cap」会放行，
+        真实匹配数却超过批量上限 —— 所以判断必须带上 ``truncated``。
+        """
+        from copixiv.features.novels import repo as repo_module
+        monkeypatch.setattr(repo_module, "COUNT_CAP", 2)
+        for i in range(1, 4):
+            _seed(session_factory, i, f"标题{i}", str(tmp_path / f"{i}.txt"))
+
+        r = client.post("/api/novels/batch", json={
+            "operation": "delete",
+            "scope": {"mode": "all_matched"},
+        })
+        assert r.status_code == 400
+        assert "上限" in r.json()["detail"]
+        assert "2+" in r.json()["detail"]
+
 
 # ---------------------------------------------------------------------------
 # POST /api/novels/batch — tags
@@ -366,7 +388,10 @@ class TestCountExcluded:
             "excluded_ids": [2, 3],
         })
         assert r.status_code == 200
-        assert r.json() == {"total": 1, "excluded": 0}
+        assert r.json() == {
+            "total": 1, "excluded": 0,
+            "truncated": False, "excluded_truncated": False,
+        }
 
 
 # ---------------------------------------------------------------------------

@@ -76,6 +76,7 @@ const NOVELS_STATE = {
 const BATCH_OFF = {
   mode: false,
   matchedCount: 0,
+  matchedTruncated: false,
   countLoading: false,
   selectAllLoading: false,
   selectedCount: 0,

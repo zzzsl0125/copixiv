@@ -126,7 +126,8 @@ describe('Novel（novels/schemas.py:NovelBase）', () => {
 // ---------------------------------------------------------------------------
 // 列表 / 计数 / 批量响应容器。权威：novels/schemas.py:NovelListResponse / NovelIdsResponse /
 // NovelsByIdsResponse / MatchIdsResponse / BatchOperationResponse；GET /api/novels/count →
-// novels/api.py:count_novels（{total, excluded}）；前端 types/novels.ts 同名类型
+// novels/api.py:count_novels（{total, excluded, truncated, excluded_truncated}）；
+// 前端 types/novels.ts 同名类型
 // ---------------------------------------------------------------------------
 describe('NovelListResult（schemas.py:NovelListResponse）', () => {
   // 已对齐线上字段名 has_excluded（snake_case，schemas.py L52 / api.py L95）。
@@ -149,6 +150,21 @@ describe('NovelCountResult（GET /api/novels/count）', () => {
     const count: NovelCountResult = { total: 5, excluded: 2 }
     expect(typeof count.total).toBe('number')
     expect(typeof count.excluded).toBe('number')
+  })
+
+  // 服务端计数有界（后端 repo.COUNT_CAP = BATCH_MAX_NOVELS）：截断时 total
+  // 只是下界，必须靠 truncated 判断「显示 N 还是 N+」。
+  it('truncated / excluded_truncated 标出下界（缺席=精确，兼容旧后端）', () => {
+    const capped: NovelCountResult = {
+      total: 5000, excluded: 12,
+      truncated: true, excluded_truncated: false,
+    }
+    expect(capped.total).toBe(5000)
+    expect(capped.truncated).toBe(true)
+    expect(capped.excluded_truncated).toBe(false)
+
+    const old: NovelCountResult = { total: 5, excluded: 0 }
+    expect(old.truncated ?? false).toBe(false)
   })
 })
 

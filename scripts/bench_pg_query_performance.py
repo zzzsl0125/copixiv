@@ -52,7 +52,6 @@ if str(ROOT / "src") not in sys.path:
 from copixiv.core.services import QuerySpec, parse_search_keyword  # noqa: E402
 from copixiv.db import models  # noqa: E402
 from copixiv.db.engine import create_database_engine  # noqa: E402
-from copixiv.features.novels import repo as novels_repo_module  # noqa: E402
 from copixiv.features.novels.repo import (  # noqa: E402
     SQLAlchemyNovelReadRepository,
     SQLAlchemyNovelRepository,
@@ -98,9 +97,9 @@ def make_session(url: str) -> tuple[object, Session]:
 def bench(fn, n: int = 5, timeout: float = 30.0, session=None):
     """Return (min_ms, median_ms, samples_ms).
 
-    Clears the count cache before each sample so every count scenario pays
-    full SQL cost (the in-process epoch cache would otherwise turn repeats
-    into O(1) dict hits and the benchmark would measure nothing).
+    Every sample pays full SQL cost: the process-level count cache is gone
+    (counting is bounded by ``repo.COUNT_CAP`` instead), so repeats hit the
+    database every time and there is nothing left to clear per sample.
 
     A timed-out sample records ``None``; if *session* is given the aborted
     transaction is rolled back so subsequent samples on the same session stay
@@ -108,7 +107,6 @@ def bench(fn, n: int = 5, timeout: float = 30.0, session=None):
     """
     samples: list[float | None] = []
     for _ in range(n):
-        novels_repo_module._count_cache.clear()
         t = time.perf_counter()
         try:
             run_with_timeout(fn, timeout)
@@ -403,20 +401,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
     print_table("A. 当前列表查询（warm）", list_rows)
 
     count_rows = bench_counts(session, n)
-    print_table("B. 当前计数查询（warm，每样本绕过进程内 count 缓存）", count_rows)
-
-    # count-cache hit cost (what repeat requests pay after the first)
-    cached_rows: list[tuple[str, float, float]] = []
-    s = spec(queries="keyword:恋", min_like=0, min_text=0)
-    repo._count_novels_sync(s)  # populate cache
-    for _ in range(n):
-        t = time.perf_counter()
-        repo._count_novels_sync(s)
-        cached_rows.append(((time.perf_counter() - t) * 1000, 0, 0))
-    print_table("B8. 计数-关键词恋（缓存命中对照）",
-                [("计数-关键词恋 cache-hit",
-                  min(c[0] for c in cached_rows),
-                  statistics.median(c[0] for c in cached_rows))])
+    print_table("B. 当前计数查询（warm，有界计数 COUNT_CAP）", count_rows)
 
     # tag suggestion (the search-box autocomplete path, old bench C6)
     import asyncio
@@ -469,7 +454,10 @@ def _stmt_to_sql(session: Session, s: QuerySpec, depth: int | None = None,
                  count: bool = False) -> str:
     """Render the repo's real query SQL with literal binds.
 
-    * ``count=True`` renders the COUNT(*) form (``build_count``).
+    * ``count=True`` renders the **exact** COUNT(*) form (``build_count``) —
+      production uses the bounded form (``build_count_bounded`` /
+      ``repo.COUNT_CAP``); this is the same-predicate reference for the
+      exact-vs-bounded comparison.
     * The blocked-tag exclusion is read from the DB (same as the repo request
       path) so the plan matches what ``bench`` actually measures.
     * If *depth* is given, first fast-forward a keyset cursor to that page so
@@ -602,7 +590,6 @@ def cmd_cold(args: argparse.Namespace) -> int:
         kwargs = {k: v for k, v in kwargs.items() if k != "depth"}
         s = spec(**kwargs)
         is_count = label.startswith("冷-首查计数")
-        novels_repo_module._count_cache.clear()
         t = time.perf_counter()
         try:
             if is_count:

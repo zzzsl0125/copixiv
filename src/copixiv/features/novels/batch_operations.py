@@ -56,6 +56,10 @@ async def resolve_batch_scope(
     Raises:
         ValidationError: Empty scope, or scope larger than *cap*.
         NotFoundError: Filter-matched scope contains no novels.
+
+    The ``all_matched`` size check reads a **bounded** count
+    (``repo.COUNT_CAP``): it answers "is the scope over the cap?", not
+    "how many novels are there?".
     """
     if cap is _DEFAULT_CAP:
         cap = BATCH_MAX_NOVELS
@@ -82,9 +86,17 @@ async def resolve_batch_scope(
                 min_text=min_text,
             )
         )
-        if matched > cap:
+        # 计数是有界的（``repo.COUNT_CAP``）：``truncated`` 说明真实匹配数超过
+        # 计数上限，此时按「超过 *cap*」处理 —— 上限取值只会 ≤ COUNT_CAP，所以
+        # 截断必然是超限；只比 value 会让「恰好等于 cap 的截断值」漏过检查，
+        # 把超限选择放进同步批量操作。
+        if matched.truncated or matched.value > cap:
+            shown = (
+                f"{matched.value}+" if matched.truncated
+                else str(matched.value)
+            )
             raise ValidationError(
-                f"当前筛选匹配 {matched} 篇，超过单次批量操作上限 "
+                f"当前筛选匹配 {shown} 篇，超过单次批量操作上限 "
                 f"{cap} 篇，请先缩小筛选范围"
             )
 

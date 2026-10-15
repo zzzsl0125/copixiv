@@ -85,6 +85,7 @@ function mountNovels() {
       batchState: {
         mode: true,
         matchedCount: 3,
+        matchedTruncated: false,
         countLoading: false,
         selectAllLoading: false,
         selectedCount: 3,

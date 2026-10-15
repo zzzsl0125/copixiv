@@ -313,9 +313,9 @@ class TestCountExclusion:
         # default is excluded=0 because the ExclusionBar is now a lazy
         # "查看被隐藏的小说" action backed by /blocked-ids.
         r = client.get("/api/novels/count")
-        assert r.json() == {"total": 2, "excluded": 0}
+        assert r.json() == {"total": 2, "excluded": 0, "truncated": False, "excluded_truncated": False}
         r = client.get("/api/novels/count", params={"with_excluded": "true"})
-        assert r.json() == {"total": 2, "excluded": 1}
+        assert r.json() == {"total": 2, "excluded": 1, "truncated": False, "excluded_truncated": False}
 
     def test_count_with_filters_excluded_scoped(
         self, client, session_factory, tmp_path,
@@ -324,10 +324,10 @@ class TestCountExclusion:
         _block(client, "NTR")
         # min_like=20 filters out the blocked novel anyway → excluded 0.
         r = client.get("/api/novels/count", params={"min_like": 20, "with_excluded": "true"})
-        assert r.json() == {"total": 2, "excluded": 0}
+        assert r.json() == {"total": 2, "excluded": 0, "truncated": False, "excluded_truncated": False}
         # min_like=5 keeps the blocked novel in scope (like=10) → excluded 1.
         r = client.get("/api/novels/count", params={"min_like": 5, "with_excluded": "true"})
-        assert r.json() == {"total": 2, "excluded": 1}
+        assert r.json() == {"total": 2, "excluded": 1, "truncated": False, "excluded_truncated": False}
 
     def test_count_override_false(self, client, session_factory, tmp_path):
         _seed_three(session_factory, tmp_path)
@@ -335,7 +335,7 @@ class TestCountExclusion:
         r = client.get("/api/novels/count", params={
             "exclude_blocked": "false",
         })
-        assert r.json() == {"total": 3, "excluded": 0}
+        assert r.json() == {"total": 3, "excluded": 0, "truncated": False, "excluded_truncated": False}
 
 
 class TestIdsExclusion:

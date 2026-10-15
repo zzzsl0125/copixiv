@@ -31,6 +31,8 @@ export type NovelsState = {
 export type BatchState = {
   mode: boolean
   matchedCount: number
+  /** matchedCount 是下界（服务端计数有界）—— 展示成 `N+`。 */
+  matchedTruncated: boolean
   countLoading: boolean
   selectAllLoading: boolean
   selectedCount: number
@@ -93,6 +95,7 @@ const hasExcluded = computed(() => props.novelsState.hasExcluded)
 
 const batchMode = computed(() => props.batchState?.mode ?? false)
 const matchedCount = computed(() => props.batchState?.matchedCount ?? 0)
+const matchedTruncated = computed(() => props.batchState?.matchedTruncated ?? false)
 const countLoading = computed(() => props.batchState?.countLoading ?? false)
 const selectAllLoading = computed(() => props.batchState?.selectAllLoading ?? false)
 const selectedCount = computed(() => props.batchState?.selectedCount ?? 0)
@@ -225,6 +228,7 @@ const handleNovelUpdated = (updated: Novel) => {
       <BatchBar
         v-if="batchMode"
         :matched-count="matchedCount"
+        :matched-truncated="matchedTruncated"
         :count-loading="countLoading"
         :select-all-loading="selectAllLoading"
         :selected-count="selectedCount"

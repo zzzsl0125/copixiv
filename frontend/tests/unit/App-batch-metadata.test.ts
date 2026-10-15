@@ -64,6 +64,7 @@ vi.mock('../../src/composables', () => ({
   useBatchMode: () => ({
     isBatchMode: { value: true },
     matchedCount: { value: 10 },
+    matchedTruncated: { value: false },
     countLoading: { value: false },
     selectAllLoading: { value: false },
     selectedCount: { value: 10 },

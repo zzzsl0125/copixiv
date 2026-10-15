@@ -39,7 +39,11 @@ from copixiv.db.uow import SqlUnitOfWork
 from copixiv.db import constants as C
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 from copixiv.features.authors.resolve_names import lookup_author_profile
-from copixiv.features.novels.repo import SQLAlchemyNovelRepository, SQLAlchemySeriesRepository
+from copixiv.features.novels.repo import (
+    NovelCount,
+    SQLAlchemyNovelRepository,
+    SQLAlchemySeriesRepository,
+)
 from copixiv.features.novels.resolve_series import lookup_series_profile
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
 from copixiv.pixiv.client import PixivClient
@@ -128,6 +132,14 @@ async def count_novels(
     exclude_blocked: bool | None = Query(None),
     with_excluded: bool = Query(False),
 ):
+    """匹配数（**有界**）+ 被厌恶标签隐藏数 + 两个截断标志。
+
+    计数由 ``repo.COUNT_CAP`` 封顶（见 :class:`NovelCount`）：``total`` 保持
+    老客户端的读法不变，但被截断时它只是下界 —— ``truncated: true`` 表示真实
+    匹配数 > ``total``（调用方应显示 ``total+`` / ``≥ total``）。``excluded``
+    同理，标志为 ``excluded_truncated``。两个标志恒在响应里，值只可能是
+    布尔，不会缺席。
+    """
     conditions = parse_search_keyword(keyword) if keyword else None
     spec = QuerySpec(
         conditions=conditions or [],
@@ -143,10 +155,15 @@ async def count_novels(
     # keyword bitmap scan repeats), and since the ExclusionBar switched to
     # a lazy "查看被隐藏的小说" action (which fetches /blocked-ids), no
     # caller needs it eagerly.  Pass ``with_excluded=true`` to opt in.
-    excluded = 0
+    excluded = NovelCount(0)
     if with_excluded and exclude_blocked is not False:
         excluded = await SQLAlchemyNovelRepository(uow.session).count_excluded_novels(spec)
-    return {"total": total, "excluded": excluded}
+    return {
+        "total": total.value,
+        "excluded": excluded.value,
+        "truncated": total.truncated,
+        "excluded_truncated": excluded.truncated,
+    }
 
 
 @router.get("/ids", response_model=NovelIdsResponse)
@@ -162,6 +179,9 @@ async def get_matching_novel_ids(
     No size cap: the selection itself may be any size (operations beyond
     the sync cap run as background tasks).  ``truncated`` is kept for wire
     compatibility and is always false here.
+
+    ``total`` 直接取 ID 列表长度（精确、免费），**不**再打一次有界计数：
+    有界计数的值会与这里完整返回的 ID 数不一致。
     """
     conditions = parse_search_keyword(keyword) if keyword else None
     spec = QuerySpec(
@@ -170,9 +190,8 @@ async def get_matching_novel_ids(
         min_text=min_text,
         exclude_blocked_tags=exclude_blocked,
     )
-    total = await SQLAlchemyNovelRepository(uow.session).count_novels(spec)
     ids = await SQLAlchemyNovelRepository(uow.session).list_matching_ids(spec)
-    return NovelIdsResponse(ids=ids, total=total, truncated=False)
+    return NovelIdsResponse(ids=ids, total=len(ids), truncated=False)
 
 
 @router.get("/blocked-ids", response_model=NovelIdsResponse)

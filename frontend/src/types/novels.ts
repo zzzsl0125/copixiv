@@ -141,10 +141,21 @@ export interface GetNovelsParams {
   exclude_blocked?: boolean
 }
 
-/** /api/novels/count 响应：total 可见数，excluded 被厌恶标签隐藏数 */
+/**
+ * /api/novels/count 响应：total 可见数，excluded 被厌恶标签隐藏数。
+ *
+ * 服务端计数**有界**（后端 `repo.COUNT_CAP`，与同步批量操作上限
+ * `BATCH_MAX_NOVELS` 同值）：命中数超过上限时 `total` 只是下界，
+ * `truncated` 为 true，展示必须是 `5000+` / `≥ 5000`，不能当成精确值。
+ * 两个标志在旧后端上缺席（undefined）—— 缺席即「精确」，与老行为一致。
+ */
 export interface NovelCountResult {
   total: number
   excluded: number
+  /** true = 真实匹配数 > total（total 是下界） */
+  truncated?: boolean
+  /** true = 被隐藏数 > excluded（excluded 是下界） */
+  excluded_truncated?: boolean
 }
 
 /** /api/novels/ 响应：has_excluded 首屏附带「范围内是否存在被厌恶标签排除的小说」 */

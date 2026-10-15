@@ -30,6 +30,8 @@ const EXPORT_TASK_THRESHOLD = 1000
 const loading = ref(false)
 const countLoading = ref(false)
 const totalCount = ref(0)
+/** totalCount 是不是下界（服务端计数有界）→ 展示成 `≥ N`。 */
+const totalTruncated = ref(false)
 const formatMode = ref<'txt' | 'prefer_epub'>('txt')
 const { systemConfig } = useSystem()
 
@@ -152,6 +154,7 @@ const orderByDisplay = computed(() => {
 watch(() => props.isOpen, async (open) => {
   if (!open) return
   totalCount.value = 0
+  totalTruncated.value = false
   formatMode.value = 'txt'
   zipName.value = defaultZipName()
   namingTemplate.value = systemConfig.value?.batch_download_naming || ''
@@ -168,6 +171,7 @@ watch(() => props.isOpen, async (open) => {
       min_text: props.min_text,
     })
     totalCount.value = result.total
+    totalTruncated.value = result.truncated ?? false
     zipName.value = defaultZipName()
     schedulePreview()
   } catch (err: unknown) {
@@ -265,7 +269,7 @@ async function handleConfirm() {
     <div class="flex items-center gap-2 text-sm">
       <span class="font-medium text-gray-700">本地匹配：</span>
       <span v-if="countLoading" class="text-gray-400">正在统计…</span>
-      <span v-else class="text-lg font-bold" :class="totalCount > 0 ? 'text-blue-600' : 'text-gray-400'">{{ totalCount > 0 ? `${totalCount} 篇` : '无匹配结果' }}</span>
+      <span v-else class="text-lg font-bold" :class="totalCount > 0 ? 'text-blue-600' : 'text-gray-400'">{{ totalCount > 0 ? `${totalTruncated ? '≥ ' : ''}${totalCount} 篇` : '无匹配结果' }}</span>
     </div>
     <p v-if="useTaskExport" class="text-xs bg-blue-50 border border-blue-200 text-blue-700 rounded-md px-3 py-2">
       选择超过 {{ EXPORT_TASK_THRESHOLD }} 篇，将作为后台任务打包——提交后可关闭页面，进度与下载入口在「任务管理」页。

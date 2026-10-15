@@ -3,8 +3,8 @@
 postgres-migration: the novel_tag/favourite/special_follow join tables are
 gone.  Tags live in ``novel.tags text[]`` (+ GIN), ``is_favourite`` is a
 ``novel`` column, ``is_special_follow`` is an ``author`` column, and keyword
-search runs against the expression GIN index on ``novel`` itself
-(``to_tsvector('simple', copixiv_novel_text(...)) @@ to_tsquery(...)`` —
+search runs against the ``pg_bigm`` GIN index on the generated column
+``novel.search_lower`` (``search_lower LIKE lower(:pN) ...`` — migration 0007;
 see ``copixiv.features.novels.search``).
 ``reference_count`` is maintained by the statement-level ``sync_tag_refs``
 trigger (fires only on ``INSERT``/``UPDATE OF tags``/``DELETE``, aggregates
@@ -19,7 +19,7 @@ Keyword-search query construction lives in ``copixiv.features.novels.search``.
 from __future__ import annotations
 
 import asyncio
-import threading
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -27,7 +27,7 @@ from sqlalchemy import (
     select, select as _select,
     func, or_, Select, update, delete as _delete,
     literal_column, tuple_ as _tuple,
-    event, any_,
+    any_,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
@@ -47,7 +47,6 @@ from copixiv.db.base import (
     model_to_dict,
     update_summary,
 )
-from copixiv.db.data_version import current_epoch
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
 from copixiv.features.novels.search import keyword_condition
 
@@ -176,7 +175,7 @@ class NovelQueryBuilder(BaseQueryBuilder):
         FROM novel
         WHERE novel.tags @> ARRAY[...]                 -- tag filters (AND)
           AND NOT (novel.tags && ARRAY[blocked])       -- blocked exclusion
-          AND to_tsvector('simple', copixiv_novel_text(...)) @@ to_tsquery(...)
+          AND novel.search_lower LIKE lower(:pN) ...   -- keyword (per segment)
           AND [thresholds / author_id / series_id / cursor]
         ORDER BY ...
         LIMIT ...
@@ -184,8 +183,9 @@ class NovelQueryBuilder(BaseQueryBuilder):
     ``is_favourite`` is a direct ``novel`` column; ``is_special_follow`` comes
     from ``author``.  Tag filtering uses ``tags @> ARRAY[...]`` (all names
     present = AND); blocked exclusion uses ``NOT (tags && ...)``.  Keyword
-    search is a plain predicate against the expression index on ``novel``
-    (:func:`copixiv.features.novels.search.keyword_condition`) — no join and no
+    search is a per-segment substring match against the generated column
+    ``novel.search_lower`` (``pg_bigm`` GIN index, migration 0007;
+    :func:`copixiv.features.novels.search.keyword_condition`) — no join and no
     separate search table.
     """
 
@@ -299,18 +299,39 @@ class NovelQueryBuilder(BaseQueryBuilder):
     def build_count(
         self, *, count_blocked: bool = False,
     ) -> Select | None:
-        """Build a COUNT(*) query with the same filters, without limit.
+        """Build an exact COUNT(*) query with the same filters, without limit.
 
-        Returns None when there are no filters (caller can use a cheap
-        ``SELECT COUNT(*) FROM novel``).  ``count_blocked=True`` counts the
-        novels that *do* carry blocked tags (the excluded set) instead of
-        excluding them.
+        生产路径不用它（有界计数走 :meth:`build_count_bounded`）；保留是因为
+        基准/EXPLAIN 需要「精确 vs 有界」的同谓词对照（见
+        ``scripts/bench_pg_query_performance.py``）。Returns None when there
+        are no filters (caller can use a cheap ``SELECT COUNT(*) FROM novel``).
+        ``count_blocked=True`` counts the novels that *do* carry blocked tags
+        (the excluded set) instead of excluding them.
         """
         if not self._has_scope_filters():
             return None
 
         stmt = select(func.count()).select_from(self.main_model)
         return self._apply_scope_filters(stmt, count_blocked=count_blocked)
+
+    def build_count_bounded(
+        self, cap: int, *, count_blocked: bool = False,
+    ) -> Select:
+        """Build a bounded COUNT: ``SELECT count(*) FROM (SELECT 1 … LIMIT cap+1) x``.
+
+        与 :meth:`build_count` 共享同一套 WHERE（:meth:`_apply_scope_filters`），
+        只差两处：
+
+        * **恒返回语句** —— 无过滤 = 全库，同样走有界子查询。PG 凑够 ``cap+1``
+          行就停，比精确 ``count(*) FROM novel`` 的全表扫描（24 万行 ~56ms）
+          还便宜，并且让「精确/有界」只有一个代码路径。
+        * 内层 ``LIMIT cap+1``：取 ``cap+1`` 是为了区分「恰好 cap」与「超过
+          cap」—— 外层结果 > cap ⇒ 真实值 > cap（返回值取 cap 并标 truncated，
+          见 :meth:`SQLAlchemyNovelReadRepository._count_with_spec`）。
+        """
+        inner = select(literal_column("1")).select_from(self.main_model)
+        inner = self._apply_scope_filters(inner, count_blocked=count_blocked)
+        return select(func.count()).select_from(inner.limit(cap + 1).subquery())
 
     def build_existence(
         self, *, count_blocked: bool = False,
@@ -431,21 +452,21 @@ class NovelQueryBuilder(BaseQueryBuilder):
         return stmt.where(self.main_model.tags.contains(list(tag_names)))
 
     # ------------------------------------------------------------------
-    # Internal: FTS / keyword filter — to_tsvector @@ to_tsquery
+    # Internal: keyword filter — search_lower LIKE (pg_bigm GIN)
     # ------------------------------------------------------------------
 
     def _where_fts_filter(
         self, stmt: Select, keywords: set[str],
     ) -> Select:
-        """Add the keyword filter (char-gram phrase match).
+        """Add the keyword filter (per-segment substring match).
 
         The predicate is built by
         :func:`copixiv.features.novels.search.keyword_condition`, which turns
-        the keyword into a ``tsquery`` phrase list and matches it against the
-        expression index on ``novel`` (``to_tsvector('simple',
-        copixiv_novel_text(...))``).  The index is maintained by PostgreSQL
-        from the row itself, so this method never has to think about index
-        freshness.
+        the keyword into one ``search_lower LIKE lower(:pN)`` per whitespace
+        segment (AND-ed) and matches it against the ``pg_bigm`` GIN index on
+        the generated column ``novel.search_lower`` (migration 0007).  The
+        column is maintained by PostgreSQL from the row itself, so this method
+        never has to think about index freshness.
 
         A keyword that collapses to nothing (e.g. pure punctuation) yields no
         condition — "empty keyword filters nothing", not "matches nothing".
@@ -525,61 +546,33 @@ class NovelQueryBuilder(BaseQueryBuilder):
 # =========================================================================
 
 
-# Count-result cache (process-wide, epoch-validated).  See the original
-# design around the "filter signature + epoch invalidation" mechanism.
-_count_cache: dict[tuple, tuple[int, int]] = {}
-
-# ---------------------------------------------------------------------------
-# Write-back count recompute (single-user nicety, best-effort)
-# ---------------------------------------------------------------------------
-# Every real write commit bumps the data-version epoch, which invalidates the
-# whole count cache; the next count request for a common keyword then pays the
-# full slow query again (up to ~2.5s for phrase counts such as ``keyword:R-18``).
-# For a single-user deployment the cache key set is small, so recompute all
-# cached keys in a background daemon thread right after a dirty commit — by the
-# time the user opens batch stats the values are warm again.  Failures are
-# swallowed: this is a nicety, never a correctness path.
-_last_recompute_epoch: int = 0
+# 计数上限：`GET /api/novels/count` 只需要区分「到没到上限」，不需要知道 20 万
+# 与 1500 万的区别 —— 这个数在前端只有三种用途：判断有没有匹配、判断是否超过
+# 同步批量操作上限、显示「≥ N 篇」。所以精确 COUNT 换成有界计数
+# ``SELECT count(*) FROM (SELECT 1 FROM novel WHERE <filters> LIMIT cap+1) x``：
+# PostgreSQL 凑够 cap+1 行就停，大命中集（R-18 类）从秒级降到百毫秒级，而且
+# **快是由构造保证的**，不靠索引恰好合适。
+#
+# 必须与同步批量操作上限 ``batch_operations.BATCH_MAX_NOVELS`` 同值（超过这个
+# 数的计数只表达「超过」）。两处都是字面量而不是 import：``batch_operations``
+# 已经 import 本模块，反向 import 会成环；相等关系由
+# ``tests/features/test_novel_count_cap.py::test_count_cap_matches_batch_cap``
+# 钉死，改单边会红。
+COUNT_CAP = 5000
 
 
-def _recompute_count_cache(engine) -> None:
-    from copixiv.db.engine import create_session_factory
+@dataclass(frozen=True)
+class NovelCount:
+    """有界计数结果：``value`` 加上「它是不是下界」。
 
-    try:
-        with create_session_factory(engine)() as session:
-            repo = SQLAlchemyNovelRepository(session)
-            for key in list(_count_cache):
-                try:
-                    repo._count_novels_sync(QuerySpec(
-                        conditions=list(key[0]),
-                        min_like=key[1] or None,
-                        min_text=key[2] or None,
-                        exclude_blocked_tags=key[3],
-                    ))
-                except Exception:
-                    pass  # one stale key must not abort the sweep
-    except Exception:
-        pass  # best-effort: recompute failures are invisible to the app
-
-
-@event.listens_for(Session, "after_commit")
-def _recompute_count_cache_after_write(session) -> None:
-    """Re-warm cached counts after a real (epoch-bumping) commit.
-
-    Registered here (module level) so every write path — repository, tasks,
-    scripts — gets the re-warm without touching each call site.  The epoch
-    guard keeps read-only commits (which also fire ``after_commit``) from
-    spawning threads.
+    ``truncated=True`` 表示真实匹配数 **大于** ``value``（此时 ``value`` 恒为
+    :data:`COUNT_CAP`）——「至少这么多」。忽略该标志拿到的仍是
+    ``min(真实值, COUNT_CAP)`` 这个合理数字，而不是 ``cap+1`` 之类的哨兵值，
+    所以忘标标志也不会让调用方看到荒谬的数；但要「是否超限」的判断，必须看它。
     """
-    global _last_recompute_epoch
-    epoch = current_epoch()
-    if epoch == _last_recompute_epoch or not _count_cache:
-        return
-    _last_recompute_epoch = epoch
-    threading.Thread(
-        target=_recompute_count_cache, args=(session.get_bind(),),
-        name="copixiv-count-recompute", daemon=True,
-    ).start()
+
+    value: int
+    truncated: bool = False
 
 
 def _novel_from_orm(obj) -> Novel:
@@ -777,11 +770,15 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
 
         return {"novels": novels, "cursor": cursor_out}
 
-    async def count_novels(self, spec: QuerySpec) -> int:
-        """Count VISIBLE novels matching *spec* (runs in a worker thread)."""
+    async def count_novels(self, spec: QuerySpec) -> NovelCount:
+        """Count VISIBLE novels matching *spec* (bounded, worker thread).
+
+        返回 :class:`NovelCount` 而不是裸 int：调用方要能区分「精确值」与
+        「≥ COUNT_CAP 的下界」（前者可直接展示，后者只能显示 ``N+``）。
+        """
         return await asyncio.to_thread(self._count_novels_sync, spec)
 
-    def _count_novels_sync(self, spec: QuerySpec) -> int:
+    def _count_novels_sync(self, spec: QuerySpec) -> NovelCount:
         for q_type, _qvalue in spec.conditions:
             self._validate_query_field(q_type)
 
@@ -790,31 +787,6 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
             if self._exclusion_active(spec.exclude_blocked_tags)
             else frozenset()
         )
-
-        cache_key = None
-        if not spec.exclude_ids:
-            cache_key = (
-                tuple(sorted(spec.conditions)),
-                spec.min_like or 0,
-                spec.min_text or 0,
-                spec.exclude_blocked_tags,
-                frozenset(blocked_names),
-            )
-            hit = _count_cache.get(cache_key)
-            if hit is not None:
-                cached_epoch, val = hit
-                if cached_epoch == current_epoch():
-                    return val
-
-        result = self._compute_count(spec, blocked_names)
-
-        if cache_key is not None:
-            _count_cache[cache_key] = (current_epoch(), result)
-        return result
-
-    def _compute_count(
-        self, spec: QuerySpec, blocked_names: frozenset[str],
-    ) -> int:
         return self._count_with_spec(spec, blocked_tag_names=blocked_names)
 
     def _count_with_spec(
@@ -824,34 +796,38 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         restrict_ids: list[int] | None = None,
         blocked_tag_names: frozenset[str] = frozenset(),
         count_blocked: bool = False,
-    ) -> int:
+    ) -> NovelCount:
+        """有界计数：``min(真实匹配数, COUNT_CAP)`` + 是否被截断。
+
+        单条 SQL，内层多取一行（``LIMIT cap+1``）：外层 > cap 说明真实值超过
+        上限，返回值封顶并标 ``truncated``。
+        """
         builder = NovelQueryBuilder(
             self, spec,
             restrict_ids=restrict_ids,
             blocked_tag_names=blocked_tag_names,
         )
-        count_stmt = builder.build_count(count_blocked=count_blocked)
-        if count_stmt is None:
-            result = self.session.execute(
-                select(func.count()).select_from(models.Novel)
-            )
-        else:
-            result = self.session.execute(count_stmt)
-        return result.scalar()
+        stmt = builder.build_count_bounded(
+            COUNT_CAP, count_blocked=count_blocked,
+        )
+        matched = int(self.session.execute(stmt).scalar() or 0)
+        if matched > COUNT_CAP:
+            return NovelCount(COUNT_CAP, truncated=True)
+        return NovelCount(matched)
 
-    async def count_excluded_novels(self, spec: QuerySpec) -> int:
-        """Count novels matching *spec* that carry blocked tags."""
+    async def count_excluded_novels(self, spec: QuerySpec) -> NovelCount:
+        """Count novels matching *spec* that carry blocked tags (同样有界)."""
         return await asyncio.to_thread(self._count_excluded_novels_sync, spec)
 
-    def _count_excluded_novels_sync(self, spec: QuerySpec) -> int:
+    def _count_excluded_novels_sync(self, spec: QuerySpec) -> NovelCount:
         if not self._exclusion_active(spec.exclude_blocked_tags):
-            return 0
+            return NovelCount(0)
         for q_type, _qvalue in spec.conditions:
             self._validate_query_field(q_type)
 
         blocked_names = self._blocked_tag_names()
         if not blocked_names:
-            return 0
+            return NovelCount(0)
         return self._count_with_spec(
             spec, blocked_tag_names=blocked_names, count_blocked=True,
         )

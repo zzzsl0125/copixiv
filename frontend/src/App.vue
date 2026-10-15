@@ -44,6 +44,7 @@ const isNovelsRoute = computed(() => route.path === '/')
 const {
   isBatchMode,
   matchedCount,
+  matchedTruncated,
   countLoading,
   selectAllLoading,
   selectedCount,
@@ -74,6 +75,7 @@ const batchState = computed<BatchState | undefined>(() =>
     ? {
         mode: isBatchMode.value,
         matchedCount: matchedCount.value,
+        matchedTruncated: matchedTruncated.value,
         countLoading: countLoading.value,
         selectAllLoading: selectAllLoading.value,
         selectedCount: selectedCount.value,

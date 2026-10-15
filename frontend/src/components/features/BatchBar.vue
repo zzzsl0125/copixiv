@@ -4,6 +4,8 @@ import { BAR_SHELL_CLASS, barContainerClass, barBtnClass } from '../../lib/ui'
 
 defineProps<{
   matchedCount: number
+  /** matchedCount 是下界（服务端计数有界）→ 显示成 `N+`，不能当精确值。 */
+  matchedTruncated: boolean
   countLoading: boolean
   selectedCount: number
   hasSelection: boolean
@@ -51,7 +53,7 @@ const emit = defineEmits<{
           :disabled="countLoading || matchedCount === 0 || selectAllLoading"
           @click="emit('select-all')"
         >
-          {{ selectAllLoading ? '全选中…' : `全选匹配 (${matchedCount})` }}
+          {{ selectAllLoading ? '全选中…' : `全选匹配 (${matchedCount}${matchedTruncated ? '+' : ''})` }}
         </button>
         <button
           type="button"

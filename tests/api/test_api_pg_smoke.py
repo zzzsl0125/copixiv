@@ -142,7 +142,11 @@ def test_api_pg_smoke(client, session_factory):
     r = client.get("/api/novels/count", params={"exclude_blocked": "false"})
     assert r.status_code == 200
     count = r.json()
-    assert set(count) == {"total", "excluded"}
+    assert set(count) == {
+        "total", "excluded", "truncated", "excluded_truncated",
+    }
+    # 样本远小于 COUNT_CAP ⇒ 计数精确、无截断标志。
+    assert count["truncated"] is False and count["excluded_truncated"] is False
     assert count["total"] == len(_all_visible(client))
 
     # 4. ids / sort-ids / match-ids / by-ids consistency.

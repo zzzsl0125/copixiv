@@ -10,6 +10,7 @@ import BatchBar from '../../src/components/features/BatchBar.vue'
 
 function mountBar(props: Partial<{
   matchedCount: number
+  matchedTruncated: boolean
   countLoading: boolean
   selectedCount: number
   hasSelection: boolean
@@ -20,6 +21,7 @@ function mountBar(props: Partial<{
   return mount(BatchBar, {
     props: {
       matchedCount: 10,
+      matchedTruncated: false,
       countLoading: false,
       selectedCount: 3,
       hasSelection: true,
@@ -41,6 +43,18 @@ describe('BatchBar「编辑」按钮', () => {
     await button.trigger('click')
 
     expect(wrapper.emitted('edit')).toHaveLength(1)
+  })
+
+  it('计数被上限截断时显示 N+（下界，不是精确值）', () => {
+    const wrapper = mountBar({ matchedCount: 5000, matchedTruncated: true })
+
+    expect(wrapper.text()).toContain('全选匹配 (5000+)')
+  })
+
+  it('计数精确时不加 +', () => {
+    const wrapper = mountBar({ matchedCount: 12, matchedTruncated: false })
+
+    expect(wrapper.text()).toContain('全选匹配 (12)')
   })
 
   it('没有选择时禁用（与其他操作按钮同一套规则）', async () => {
