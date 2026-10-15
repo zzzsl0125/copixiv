@@ -6,14 +6,160 @@ name ↔ id translation internally.
 """
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, NamedTuple
 
-from sqlalchemy import select, update as _update, func
+from sqlalchemy import select, text as _text, update as _update, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from copixiv.db import models
 from copixiv.db.base import BaseRepository
+
+# 相似标签的 LIKE 模式与关键字搜索共用**同一个**转义器（``\`` / ``%`` / ``_``）：
+# 直接 import，不在这里抄第二份实现。这条 tags → novels.search 的边指向叶子模块
+# （``novels/search.py`` 只 import sqlalchemy / 标准库，不 import 任何 feature
+# 模块），运行期不成环；另一条方向（``novels/repo.py`` 等 → 本模块）是既有的。
+from copixiv.features.novels.search import escape_like
+
+
+# =========================================================================
+# suggest_aliases — SQL 底座（迁移 0008：tag.search_lower + pg_bigm GIN）
+# =========================================================================
+
+# 每个 target 的候选数上限（= 旧实现 `_find_similar_tags` 里的 LIMIT 50）。
+_MAX_CANDIDATES = 50
+
+# 单次调用「检视」多少个 target —— 有界性的唯一来源。旧实现是 while 循环
+# 「一直取页、直到凑满 limit 个真有候选的 target」，实测最坏 15s / 1,505 条
+# page 查询；新实现固定检视 4×limit 个 target（下限 20、上限 200）。API 把
+# limit 限制在 ≤50，所以单次调用最多 200 个 target，与 tag 表大小无关。
+_SCAN_FACTOR = 4
+_SCAN_FLOOR = 20
+_SCAN_CAP = 200
+
+
+class _SuggestTarget(NamedTuple):
+    """``_make_suggest_item`` 需要的 target 三元组（与 ORM ``Tag`` 同形）。"""
+
+    id: int
+    name: str
+    reference_count: int
+
+
+def _scan_limit(limit: int) -> int:
+    """单次调用最多检视多少个 target（4×limit，clamp 到 20–200）。"""
+    return min(max(limit * _SCAN_FACTOR, _SCAN_FLOOR), _SCAN_CAP)
+
+
+def _like_patterns(name: str) -> tuple[str, str]:
+    """``(前缀模式, 子串模式)`` —— 两个都经共享的 :func:`escape_like` 转义。
+
+    前缀分支用**首字符**（与原实现 ``name ILIKE 'X%'`` 同义），子串分支用
+    完整名字。转义是必须的：库里真有叫 ``%高中生`` 的 tag，不转义时
+    ``LIKE '%高中生%'`` 会匹配全表 75,186 行。名字为空时返回 ``("", "")``，
+    ``LIKE ''`` 不匹配任何行（旧实现同样对空名字返回空候选）。
+    """
+    if not name:
+        return "", ""
+    return f"{escape_like(name[0])}%", f"%{escape_like(name)}%"
+
+
+def _candidate_dict(row) -> dict:
+    """候选行的对外形状 —— 与旧 ``_find_similar_tags`` 的 dict 逐字段一致。"""
+    return {
+        "id": row.id,
+        "name": row.name,
+        "reference_count": row.reference_count,
+    }
+
+
+# 通用模式第一步：keyset 分页取 target（代价有界 = LIMIT :scan，走
+# ``tag_reference_count_id_idx`` 这条 (reference_count DESC, id DESC) btree）。
+# 过滤（``rc > 0`` / 已在别名映射里）全部在 SQL 里、早于候选上限；旧实现是先取
+# ``LIMIT 50`` 再在 Python 里丢，于是一页建议可能整页变空。
+# ``:cursor`` = 上一次的 ``next_offset``（0 = 从头）；游标行不存在时
+# ``cursor_found`` 为 false，调用方据此收尾而不是从头再来（否则重复吐建议）。
+_PAGE_SQL = _text(
+    """
+    WITH cur AS (
+        SELECT reference_count AS rc, id AS cid FROM tag WHERE id = :cursor
+    )
+    SELECT t.id, t.name, t.reference_count,
+           (cur.cid IS NOT NULL) AS cursor_found
+    FROM tag t
+    LEFT JOIN cur ON TRUE
+    WHERE t.reference_count > 0
+      AND (cur.cid IS NULL OR (t.reference_count, t.id) < (cur.rc, cur.cid))
+      AND NOT EXISTS (SELECT 1 FROM tag_alias a WHERE a.source = t.id)
+      AND NOT EXISTS (SELECT 1 FROM tag_alias a WHERE a.target = t.id)
+    ORDER BY t.reference_count DESC, t.id DESC
+    LIMIT :scan
+    """
+)
+
+# 通用模式第二步：一条语句给整页 target 各算一份候选（替代 N+1 循环）。
+# ``WITH cand AS MATERIALIZED`` 是**有意的计划钉子**：不加它，规划器会在
+# 「顺序扫 tag_reference_count_id_idx + Filter」（前缀很热的 target 要扫掉
+# 2.8 万行，实测 8.8ms/个）与「GIN bitmap + top-N Sort」之间按估算摇摆。
+# MATERIALIZED 先物化每个 target 的匹配集（GIN bitmap），再取最热的 50 个 ——
+# 实测 0.24–1.2ms/个，计划形状稳定、无 Seq Scan on tag。
+_EXPAND_SQL = _text(
+    """
+    SELECT p.id AS target_id, c.id, c.name, c.reference_count
+    FROM unnest(
+             CAST(:ids AS bigint[]), CAST(:pfx AS text[]), CAST(:sub AS text[])
+         ) WITH ORDINALITY AS p(id, pfx, sub, ord)
+    CROSS JOIN LATERAL (
+        WITH cand AS MATERIALIZED (
+            SELECT t2.id, t2.name, t2.reference_count
+            FROM tag t2
+            WHERE t2.id <> p.id
+              AND NOT EXISTS (SELECT 1 FROM tag_alias a WHERE a.source = t2.id)
+              AND NOT EXISTS (SELECT 1 FROM tag_alias a WHERE a.target = t2.id)
+              AND (t2.search_lower LIKE lower(p.pfx) ESCAPE '\\'
+                   OR t2.search_lower LIKE lower(p.sub) ESCAPE '\\')
+        )
+        SELECT cand.id, cand.name, cand.reference_count
+        FROM cand
+        ORDER BY cand.reference_count DESC, cand.id DESC
+        LIMIT :ncand
+    ) c
+    ORDER BY p.ord, c.reference_count DESC, c.id DESC
+    """
+)
+
+# ``target_tag=`` 模式：一条语句做「查名字 + 排除已别名 + 各候选」。模式参数由
+# Python 侧用共享 escaper 转义（这里的名字来自用户输入）。
+_TARGET_SQL = _text(
+    """
+    WITH tgt AS (
+        SELECT t.id, t.name, t.reference_count
+        FROM tag t
+        WHERE t.name = :name
+          AND NOT EXISTS (SELECT 1 FROM tag_alias a WHERE a.source = t.id)
+          AND NOT EXISTS (SELECT 1 FROM tag_alias a WHERE a.target = t.id)
+    )
+    SELECT tgt.id AS target_id, tgt.name AS target_name,
+           tgt.reference_count AS target_reference_count,
+           c.id, c.name, c.reference_count
+    FROM tgt
+    CROSS JOIN LATERAL (
+        WITH cand AS MATERIALIZED (
+            SELECT t2.id, t2.name, t2.reference_count
+            FROM tag t2
+            WHERE t2.id <> tgt.id
+              AND NOT EXISTS (SELECT 1 FROM tag_alias a WHERE a.source = t2.id)
+              AND NOT EXISTS (SELECT 1 FROM tag_alias a WHERE a.target = t2.id)
+              AND (t2.search_lower LIKE lower(:pfx) ESCAPE '\\'
+                   OR t2.search_lower LIKE lower(:sub) ESCAPE '\\')
+        )
+        SELECT cand.id, cand.name, cand.reference_count
+        FROM cand
+        ORDER BY cand.reference_count DESC, cand.id DESC
+        LIMIT :ncand
+    ) c
+    """
+)
 
 
 class SQLAlchemyTagRepository(BaseRepository):
@@ -168,95 +314,123 @@ class SQLAlchemyTagRepository(BaseRepository):
         self.session.delete(alias)
         return True
 
+    # ------------------------------------------------------------------
+    # suggest_aliases — 候选探测（查询底座：迁移 0008）
+    # ------------------------------------------------------------------
+    #
+    # 旧实现是 N+1：先按 ``reference_count`` 分页取一批 target，再给**每个**
+    # target 单独发一条
+    #     name ILIKE 'X%' OR name ILIKE '%name%' ORDER BY reference_count DESC LIMIT 50
+    # 实测 limit=5 → 7 条语句 / 99–125ms，limit=50 → 51 条 / 927ms，每条都是
+    # ``tag`` 全表 Seq Scan + top-N Sort（``ILIKE`` 用不上 ``tag_name_key``
+    # 这条 btree）。现在换成：
+    #
+    # * ``search_lower LIKE lower(:p) ESCAPE '\'`` —— 迁移 0008 的 STORED 生成列
+    #   ``tag.search_lower = lower(name)`` + pg_bigm GIN 索引 ``tag_search_bigm``；
+    #   模式一律经 :func:`escape_like` 转义（``%高中生`` 因此只匹配它自己，
+    #   ``BanG_Dream!`` 不会命中 ``BangGdream!``）。两侧的大小写都由数据库的
+    #   ``lower()`` 折叠（与 novels 搜索同一套理由，见 ``novels/search.py``）。
+    # * 排序键固定为 ``(reference_count DESC, id DESC)`` —— 只按 reference_count
+    #   排序在 39,400 个 ``rc=1`` 的并列值上不是全序，分页必然重叠/漏行。
+    # * 候选按 target 用一条 ``CROSS JOIN LATERAL`` 集合语句算完（不再 N+1），
+    #   且单条语句的输入 target 数有硬上限（见 :func:`_scan_limit`）。
+
     async def suggest_aliases(
         self, limit: int = 5, offset: int = 0, target_tag: str | None = None
     ) -> dict:
         """Suggest alias mappings by finding tags with similar names.
 
-        Tags are ranked by ``reference_count`` descending.  For each tag,
-        candidates with similar names are found via SQL ILIKE queries
-        (same-first-character prefix or substring containment).  Tags
-        already participating in any alias mapping are excluded.
+        排序键是 ``(reference_count DESC, id DESC)``；``id`` 这个决胜键让顺序
+        成为全序（只按 ``reference_count`` 有 447 个并列值 / 其中 39,400 个
+        tag 挤在 ``rc=1``）。一个 tag 的候选 = 首字符相同（忽略大小写）**或**
+        名字里包含它的完整名字；两个模式都经 :func:`escape_like` 转义，由
+        生成列 ``tag.search_lower`` 上的 pg_bigm GIN 索引回答（迁移 0008）。
 
-        Mirrors the v1 ``TagAliasRepository.get_suggestions`` algorithm.
+        ``offset`` 是**游标**而不是行偏移：把上一次返回的 ``next_offset`` 原样
+        传回来即可续扫。游标携带「本页最后一个被检视的 target」的 ``tag.id``
+        （凑满 limit 时 = 产出第 limit 条 item 的那个 target；否则 = 扫描窗口里
+        最后一个 target），下一页从 ``(reference_count, id) < 该行`` 继续；
+        ``0`` 表示从头开始，游标行已不存在（被删 / ``rc`` 归零）时按「已扫完」
+        收尾 —— 不从头再来，否则会重复吐出已经给过的建议。
+
+        单次调用的工作量上限 = 检视 ``4×limit`` 个 target（下限 20、上限 200；
+        API 把 limit 限制在 ≤50，所以实际不超过 200），与 ``tag`` 表大小无关。
+        已在别名映射里的 tag 在 SQL 里先过滤，早于候选上限 —— 旧实现是先取
+        ``LIMIT 50`` 再在 Python 里丢，会让一整页建议变空。
+
+        ``target_tag=`` 模式只指名一个 target，没有「页」可续，所以**有意忽略
+        ``offset``**，最多返回一条 item，``next_offset`` 恒为 0。
         """
-        # -- tag IDs already used in aliases -----------------------------------
-        alias_rows = self.session.execute(
-            select(models.TagAlias.source, models.TagAlias.target)
-        ).all()
-        excluded_ids: set[int] = set()
-        for src_id, tgt_id in alias_rows:
-            excluded_ids.add(src_id)
-            excluded_ids.add(tgt_id)
-
-        # -- target-tag mode --------------------------------------------------
         if target_tag:
-            tag = self.session.execute(
-                select(models.Tag).where(models.Tag.name == target_tag)
-            ).scalar_one_or_none()
-            if not tag or tag.id in excluded_ids:
+            patterns = _like_patterns(target_tag)
+            rows = self.session.execute(
+                _TARGET_SQL,
+                {
+                    "name": target_tag,
+                    "pfx": patterns[0],
+                    "sub": patterns[1],
+                    "ncand": _MAX_CANDIDATES,
+                },
+            ).all()
+            if not rows:
+                # 标签不存在 / 已在别名映射里 / 没有候选 —— 与原实现的三个空分支
+                # 同形（都返回空 items + next_offset 0）。
                 return {"items": [], "next_offset": 0}
-            candidates = self._find_similar_tags(tag, excluded_ids)
-            item = self._make_suggest_item(tag, candidates)
-            return {"items": [item] if candidates else [], "next_offset": 0}
-
-        # -- general mode: paginate through tags by reference_count ------------
-        results: list[dict] = []
-        current_offset = offset
-
-        while len(results) < limit:
-            tags = self.session.execute(
-                select(models.Tag)
-                .order_by(models.Tag.reference_count.desc())
-                .offset(current_offset).limit(50)
-            ).scalars().all()
-            if not tags:
-                break
-
-            for tag in tags:
-                current_offset += 1
-                if tag.id in excluded_ids or tag.reference_count == 0:
-                    continue
-
-                candidates = self._find_similar_tags(tag, excluded_ids)
-                if candidates:
-                    results.append(self._make_suggest_item(tag, candidates))
-                    if len(results) >= limit:
-                        break
-
-        return {"items": results, "next_offset": current_offset}
-
-    # ------------------------------------------------------------------
-    # suggest helpers
-    # ------------------------------------------------------------------
-
-    def _find_similar_tags(self, tag, excluded_ids: set[int]) -> list[dict]:
-        """Return up to 50 tags whose names are similar to *tag*.
-
-        Candidates match when they share the same first character (prefix)
-        or contain *tag.name* as a substring.  Tags whose IDs appear in
-        *excluded_ids* are filtered out.
-        """
-        first_char = tag.name[0] if tag.name else ""
-        if not first_char:
-            return []
-
-        candidates = self.session.execute(
-            select(models.Tag)
-            .where(
-                models.Tag.name.ilike(f"{first_char}%")
-                | models.Tag.name.ilike(f"%{tag.name}%")
+            row = rows[0]
+            target = _SuggestTarget(
+                row.target_id, row.target_name, row.target_reference_count
             )
-            .where(models.Tag.id != tag.id)
-            .order_by(models.Tag.reference_count.desc())
-            .limit(50)
-        ).scalars().all()
+            candidates = [_candidate_dict(r) for r in rows]
+            return {
+                "items": [self._make_suggest_item(target, candidates)],
+                "next_offset": 0,
+            }
 
-        return [
-            {"id": c.id, "name": c.name, "reference_count": c.reference_count}
-            for c in candidates
-            if c.id not in excluded_ids
-        ]
+        if limit <= 0:
+            return {"items": [], "next_offset": offset}
+
+        cursor = int(offset or 0)
+        scan = _scan_limit(limit)
+        page = self.session.execute(
+            _PAGE_SQL, {"cursor": cursor, "scan": scan}
+        ).all()
+        if not page:
+            return {"items": [], "next_offset": 0}
+        if cursor and not page[0].cursor_found:
+            # 游标行已不在 tag 里（行被删）：没有诚实的续扫点。
+            return {"items": [], "next_offset": 0}
+
+        patterns = [_like_patterns(row.name) for row in page]
+        rows = self.session.execute(
+            _EXPAND_SQL,
+            {
+                "ids": [row.id for row in page],
+                "pfx": [pfx for pfx, _ in patterns],
+                "sub": [sub for _, sub in patterns],
+                "ncand": _MAX_CANDIDATES,
+            },
+        ).all()
+        candidates: dict[int, list[dict]] = {}
+        for row in rows:
+            candidates.setdefault(row.target_id, []).append(_candidate_dict(row))
+
+        items: list[dict] = []
+        for row in page:
+            row_candidates = candidates.get(row.id)
+            if not row_candidates:
+                continue
+            items.append(self._make_suggest_item(row, row_candidates))
+            if len(items) >= limit:
+                # 停在产出第 limit 条 item 的 target 上：它之后的 target 还没被
+                # 消费，正好是下一页的续扫点（不重不漏）。
+                return {"items": items, "next_offset": row.id}
+
+        # 窗口内没凑满 limit：窗口满（= 还有更多行）就把游标推到窗口末尾，
+        # 窗口没满说明表已扫完（0 = 结束）。
+        return {
+            "items": items,
+            "next_offset": page[-1].id if len(page) >= scan else 0,
+        }
 
     @staticmethod
     def _make_suggest_item(tag, candidates) -> dict:

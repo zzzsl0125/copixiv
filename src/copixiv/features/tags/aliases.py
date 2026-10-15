@@ -53,6 +53,13 @@ async def suggest_tag_aliases(
     target_tag: str | None = Query(None),
     uow: SqlUnitOfWork = Depends(get_uow),
 ):
+    """相似标签建议。
+
+    ``offset`` 是**游标**（不是行偏移）：把上一次响应里的 ``next_offset`` 原样
+    传回来续扫即可（字段名保留 ``offset`` / ``next_offset`` 是为了不动前端契约，
+    前端只把它当不透明整数回传）。``target_tag=`` 模式只指名一个 target，
+    没有「页」可续，因此忽略 ``offset`` 且 ``next_offset`` 恒为 0。
+    """
     return await SQLAlchemyTagRepository(uow.session).suggest_aliases(limit=limit, offset=offset, target_tag=target_tag)
 
 

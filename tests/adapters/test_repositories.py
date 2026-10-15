@@ -13,6 +13,7 @@ import json
 from datetime import datetime, timezone
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from copixiv.db.models import (
@@ -20,7 +21,8 @@ from copixiv.db.models import (
 )
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
-from copixiv.features.tags.repo import SQLAlchemyTagRepository
+from copixiv.features.tags import repo as tag_repo
+from copixiv.features.tags.repo import SQLAlchemyTagRepository, _like_patterns
 
 
 @pytest.fixture(autouse=True)
@@ -205,6 +207,173 @@ class TestSQLAlchemyTagRepository:
             targets = {item["target"]["name"] for item in result["items"]}
             assert "Fate/Grand Order" in targets or "Fate Grand Order" in targets
             assert "NTR" in targets or "ntr" in targets
+
+    def test_suggest_aliases_treats_wildcards_as_literals(self, session_factory):
+        """``_`` / ``%`` inside a tag name are literals, never LIKE wildcards.
+
+        The old probe built ``'%BanG_Dream!%'`` verbatim, so the ``_`` matched
+        any single character (``xbangGdream!`` came back as "similar" although
+        it does not contain the name) and ``%高中生`` — a tag that really
+        exists — matched all 75,186 other tags, surfacing the globally hottest
+        ones as its candidates.
+        """
+        with session_factory() as s:
+            for name, rc in [
+                ("BanG_Dream!", 100),
+                ("bang_dream!", 90),
+                ("zzBanG_Dream!zz", 80),
+                ("xbangGdream!", 70),   # only the `_` wildcard could match this
+                ("Xbanggdream!", 60),   # …or ignoring it entirely
+                ("%高中生", 50),
+                ("xx%高中生yy", 40),     # the only tag containing it literally
+                ("催眠", 1000),         # globally hottest — must stay out
+            ]:
+                s.add(Tag(name=name, reference_count=rc))
+            s.commit()
+            repo = SQLAlchemyTagRepository(s)
+
+            item = asyncio.run(
+                repo.suggest_aliases(target_tag="BanG_Dream!")
+            )["items"][0]
+            names = {c["name"] for c in item["candidates"]}
+            assert "bang_dream!" in names          # literal substring
+            assert "zzBanG_Dream!zz" in names      # literal substring, other 1st char
+            assert "xbangGdream!" not in names
+            assert "Xbanggdream!" not in names
+
+            item = asyncio.run(
+                repo.suggest_aliases(target_tag="%高中生")
+            )["items"][0]
+            names = {c["name"] for c in item["candidates"]}
+            assert names == {"xx%高中生yy"}
+            assert "催眠" not in names
+
+    def test_suggest_aliases_cursor_resumes_without_overlap_or_gaps(
+        self, session_factory,
+    ):
+        """Consecutive pages over **tied** ``reference_count`` values.
+
+        Production shape: 39,400 tags sit at ``rc=1``, so ordering by
+        ``reference_count`` alone is not a total order — which is why
+        consecutive ``OFFSET`` pages used to overlap (measured offset
+        450∩500={901}) and leak (13,748 tags never examined).  ``next_offset``
+        is now a cursor over ``(reference_count DESC, id DESC)``.
+        """
+        with session_factory() as s:
+            for i in range(40):
+                s.add(Tag(name=f"tie-{i:02d}", reference_count=1))
+            s.commit()
+            repo = SQLAlchemyTagRepository(s)
+
+            seen: list[int] = []
+            cursor = 0
+            for _ in range(20):  # 40 tags / limit 5 → 8 pages (+ the empty tail page)
+                page = asyncio.run(repo.suggest_aliases(limit=5, offset=cursor))
+                seen.extend(item["target"]["id"] for item in page["items"])
+                cursor = page["next_offset"]
+                if cursor == 0:
+                    break
+
+            expected = list(s.execute(
+                select(Tag.id).where(Tag.name.like("tie-%")).order_by(Tag.id.desc())
+            ).scalars())
+            assert cursor == 0, "cursor must reach the end of the table"
+            assert seen == expected, "pages overlap or skip targets"
+            assert len(seen) == len(set(seen)) == 40
+
+    def test_suggest_aliases_excludes_aliased_tags_before_candidate_limit(
+        self, session_factory,
+    ):
+        """Alias-excluded tags are dropped in SQL, i.e. *before* ``LIMIT 50``.
+
+        The old probe took the 50 hottest matches and only then filtered the
+        excluded ones in Python, so a target whose hottest 50 matches were all
+        aliased came back with zero candidates even though more matches
+        existed (the extra ones are reachable only past the limit).
+        """
+        with session_factory() as s:
+            s.add(Tag(name="q-target", reference_count=5))
+            s.add(Tag(name="q-dummy", reference_count=0))
+            for i in range(60):
+                s.add(Tag(name=f"q-filler-{i:02d}", reference_count=1000 - i))
+            s.commit()
+            target_id = s.execute(
+                select(Tag.id).where(Tag.name == "q-target")
+            ).scalar_one()
+            dummy_id = s.execute(
+                select(Tag.id).where(Tag.name == "q-dummy")
+            ).scalar_one()
+            fillers = list(s.execute(
+                select(Tag).where(Tag.name.like("q-filler-%"))
+            ).scalars())
+            # Alias away the 50 hottest matches (rc 1000 … 951).
+            for filler in sorted(fillers, key=lambda t: -t.reference_count)[:50]:
+                s.add(TagAlias(source=filler.id, target=dummy_id))
+            s.commit()
+
+            result = asyncio.run(
+                SQLAlchemyTagRepository(s).suggest_aliases(target_tag="q-target")
+            )
+            assert len(result["items"]) == 1
+            assert [c["name"] for c in result["items"][0]["candidates"]] == [
+                f"q-filler-{i:02d}" for i in range(50, 60)
+            ]
+            assert target_id not in {
+                c["id"] for c in result["items"][0]["candidates"]
+            }
+
+    def test_suggest_aliases_target_mode_ignores_offset(self, session_factory):
+        """``target_tag=`` names one target: no page to resume, ``offset`` moot."""
+        with session_factory() as s:
+            for i in range(6):
+                s.add(Tag(name=f"m-tag-{i}", reference_count=10 - i))
+            s.commit()
+            repo = SQLAlchemyTagRepository(s)
+
+            first = asyncio.run(repo.suggest_aliases(target_tag="m-tag-0", offset=0))
+            late = asyncio.run(
+                repo.suggest_aliases(target_tag="m-tag-0", offset=99999)
+            )
+            assert first == late
+            assert first["next_offset"] == 0
+            assert [i["target"]["name"] for i in first["items"]] == ["m-tag-0"]
+
+            # A tag that already participates in an alias mapping has no
+            # suggestion — unchanged early-return behaviour.
+            ids = {t.name: t.id for t in s.execute(select(Tag)).scalars()}
+            s.add(TagAlias(source=ids["m-tag-1"], target=ids["m-tag-0"]))
+            s.commit()
+            for name in ("m-tag-0", "m-tag-1"):
+                assert asyncio.run(
+                    repo.suggest_aliases(target_tag=name)
+                ) == {"items": [], "next_offset": 0}
+            assert asyncio.run(
+                repo.suggest_aliases(target_tag="does-not-exist")
+            ) == {"items": [], "next_offset": 0}
+
+
+class TestTagSuggestPatterns:
+    """``_like_patterns`` + the SQL shape the bigram index needs (no DB)."""
+
+    def test_patterns_are_escaped(self):
+        assert _like_patterns("%高中生") == ("\\%%", "%\\%高中生%")
+        assert _like_patterns("BanG_Dream!") == ("B%", "%BanG\\_Dream!%")
+        assert _like_patterns("R-18") == ("R%", "%R-18%")
+        assert _like_patterns("") == ("", "")
+
+    def test_candidate_sql_uses_search_lower_and_escape(self):
+        r"""The predicate must stay on the generated column, with ``ESCAPE``.
+
+        ``tag.search_lower`` is what migration 0008's ``tag_search_bigm`` GIN
+        index covers, and the escaper's ``\`` only means anything next to
+        ``ESCAPE '\\'`` — switching back to ``tag.name ILIKE`` silently
+        reintroduces the full table scan and the wildcard bug.
+        """
+        for stmt in (tag_repo._EXPAND_SQL, tag_repo._TARGET_SQL):
+            sql = str(stmt)
+            assert "search_lower LIKE lower(" in sql
+            assert "ESCAPE '\\'" in sql
+            assert "name ILIKE" not in sql
 
 
 @pytest.mark.slow
