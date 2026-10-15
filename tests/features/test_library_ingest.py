@@ -49,6 +49,13 @@ from copixiv.features.library.ingest import (
     suspicious_ratio,
 )
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
+from copixiv.storage import atomic
+from copixiv.storage.epub.reader import (
+    EPUB_EMPTY_ERROR,
+    EPUB_INVALID_ERROR,
+)
+from copixiv.storage.file_storage import FileStorage
+from tests.epub_samples import build_epub
 
 # 所有候选编码都失败的字节流：UTF-8 / GB18030 / Big5 结构性非法，UTF-16 缺 BOM。
 UNDECODABLE = b"\xff\x00\xff\x00\xff"
@@ -68,10 +75,12 @@ def _ingest(session_factory, download_dir: Path, files, **preset) -> list:
     """跑一遍上传管线（一个事务）并返回逐条结果。
 
     ``**preset`` 原样透传给 ``ingest_uploads`` 的 ``preset_author_id`` /
-    ``preset_author_name``（默认不带 = 旧行为）。
+    ``preset_author_name``（默认不带 = 旧行为）。落盘路径由 ``FileStorage``
+    决定，测试只给它一个 ``tmp_path`` 下的根。
     """
+    storage = FileStorage(download_dir=str(download_dir))
     with session_factory() as session:
-        results = ingest_uploads(session, str(download_dir), files, **preset)
+        results = ingest_uploads(session, storage, files, **preset)
         session.commit()
     return results
 
@@ -795,13 +804,13 @@ class TestConcurrentUploads:
     def _upload_concurrently(session_factory, download, first, second):
         barrier = threading.Barrier(2)
         results: dict[str, list] = {}
+        # FileStorage 无状态，两个线程共用同一实例即可。
+        storage = FileStorage(download_dir=str(download))
 
         def worker(label: str, name: str, body: bytes) -> None:
             barrier.wait(timeout=30)
             with session_factory() as session:
-                outcome = ingest_uploads(
-                    session, str(download), [(name, body)],
-                )
+                outcome = ingest_uploads(session, storage, [(name, body)])
                 session.commit()
             results[label] = outcome
 
@@ -841,3 +850,203 @@ class TestConcurrentUploads:
         assert duplicate.status == STATUS_DUPLICATE
         assert duplicate.novel_id == created.novel_id
         assert len(_all_local_ids(session_factory)) == 1
+
+
+# ---------------------------------------------------------------------------
+# §4.1：EPUB 上传（抽正文 + 存原件 + 元数据优先 + 重复件补挂）
+# ---------------------------------------------------------------------------
+
+
+class TestEpubUpload:
+    def test_stores_extracted_text_and_the_original_epub(
+        self, session_factory, tmp_path,
+    ):
+        """一本 EPUB 入库 = 正文写 .txt（喂 FTS/字数）+ **原件**写同级 .epub。"""
+        download = tmp_path / "download"
+        data = build_epub(
+            title="我的書名", author="某作者",
+            chapters=(("第一段。", "第二段。"),),
+        )
+
+        result = _ingest(session_factory, download, [("随便起的名字.epub", data)])[0]
+
+        assert result.status == STATUS_CREATED
+        assert result.title == "我的書名"          # dc:title 优先于文件名
+        assert result.author_name == "某作者"      # dc:creator 优先于文件名
+        assert result.text == len("第一段。\n第二段。")
+
+        row = _row(session_factory, result.novel_id)
+        assert row.source == "local"
+        # 原件已落盘 → 终态是 DONE，不是 TXT 路径的 NO_IMAGES。
+        assert row.has_epub == EpubStatus.DONE == 2
+        assert row.source_key == body_fingerprint("第一段。\n第二段。")
+
+        text_path = Path(row.path)
+        assert text_path.parent == download / "local"
+        assert text_path.suffix == ".txt"
+        assert text_path.read_text(encoding="utf-8") == "第一段。\n第二段。"
+        epub_path = text_path.with_suffix(".epub")
+        assert epub_path.is_file()
+        assert epub_path.read_bytes() == data      # 逐字节原样
+        assert not list(text_path.parent.glob("*.tmp"))
+
+    def test_filename_metadata_falls_back_when_the_epub_has_none(
+        self, session_factory, tmp_path,
+    ):
+        data = build_epub(title=None, author=None)
+
+        result = _ingest(
+            session_factory, tmp_path / "download",
+            [("【文件名作者】文件名标题.epub", data)],
+        )[0]
+
+        assert result.title == "文件名标题"
+        assert result.author_name == "文件名作者"
+
+    def test_epub_metadata_yields_to_a_preset_author_id(
+        self, session_factory, tmp_path,
+    ):
+        """预设作者是显式身份，压过 ``dc:creator``；标题仍取 ``dc:title``。"""
+        _seed_author(session_factory, PRESET_AUTHOR_ID, "预设作者名")
+        data = build_epub(title="内嵌标题", author="内嵌作者")
+
+        result = _ingest(
+            session_factory, tmp_path / "download", [("x.epub", data)],
+            preset_author_id=PRESET_AUTHOR_ID,
+            preset_author_name="预设作者名",
+        )[0]
+
+        assert result.title == "内嵌标题"
+        assert result.author_name == "预设作者名"
+        row = _row(session_factory, result.novel_id)
+        assert row.author_id == PRESET_AUTHOR_ID
+        assert row.author_name == "预设作者名"
+
+    def test_mixed_batch_of_txt_and_epub(self, session_factory, tmp_path):
+        results = _ingest(session_factory, tmp_path / "download", [
+            ("a.txt", "纯文本正文".encode()),
+            ("b.epub", build_epub(chapters=(("EPUB 正文",),))),
+        ])
+
+        assert [r.status for r in results] == [STATUS_CREATED, STATUS_CREATED]
+        first, second = (_row(session_factory, r.novel_id) for r in results)
+        assert first.has_epub == EpubStatus.NO_IMAGES
+        assert second.has_epub == EpubStatus.DONE
+
+    def test_invalid_epub_fails_without_writing_anything(
+        self, session_factory, tmp_path,
+    ):
+        download = tmp_path / "download"
+
+        result = _ingest(session_factory, download, [("坏书.epub", b"just text")])[0]
+
+        assert result.status == STATUS_FAILED
+        assert result.error == EPUB_INVALID_ERROR
+        with session_factory() as session:
+            assert session.execute(
+                select(func.count()).select_from(Novel)
+            ).scalar() == 0
+            assert session.execute(
+                select(func.count()).select_from(FailedNovel)
+            ).scalar() == 0
+        local = download / "local"
+        assert not local.exists() or not list(local.iterdir())
+
+    def test_epub_without_body_text_fails_with_the_empty_error(
+        self, session_factory, tmp_path,
+    ):
+        result = _ingest(
+            session_factory, tmp_path / "download",
+            [("空.epub", build_epub(chapters=(("",),)))],
+        )[0]
+
+        assert result.status == STATUS_FAILED
+        assert result.error == EPUB_EMPTY_ERROR
+
+    def test_epub_write_failure_removes_the_half_written_text(
+        self, session_factory, tmp_path, monkeypatch,
+    ):
+        """正文先落盘、原件再写失败 —— 不能留下"没有原件的孤儿 txt"。"""
+        real_write = atomic.write_atomic
+
+        def flaky(path, data, *, root=None):
+            if path.suffix == ".epub":
+                raise OSError("disk full")
+            return real_write(path, data, root=root)
+
+        # 打 ``atomic.write_atomic`` 而不是 ingest 自己：两条写路径（正文 shell
+        # 与原件）都汇到这一个函数，正文那条仍要放行。
+        monkeypatch.setattr(atomic, "write_atomic", flaky)
+
+        result = _ingest(
+            session_factory, tmp_path / "download", [("x.epub", build_epub())],
+        )[0]
+
+        assert result.status == STATUS_FAILED
+        assert "写入文件失败" in result.error
+        local = tmp_path / "download" / "local"
+        assert not local.exists() or not list(local.iterdir())
+
+
+class TestEpubAttachOnDuplicate:
+    def test_epub_upload_attaches_to_an_existing_txt_row(
+        self, session_factory, tmp_path,
+    ):
+        download = tmp_path / "download"
+        body = "同一份正文"
+        first = _ingest(session_factory, download, [("先传.txt", body.encode())])[0]
+        assert _row(session_factory, first.novel_id).has_epub == EpubStatus.NO_IMAGES
+        epub = build_epub(chapters=((body,),))
+
+        second = _ingest(session_factory, download, [("后传.epub", epub)])[0]
+
+        assert second.status == STATUS_DUPLICATE
+        assert second.novel_id == first.novel_id
+        assert second.epub_attached is True
+        row = _row(session_factory, first.novel_id)
+        assert row.has_epub == EpubStatus.DONE
+        assert Path(row.path).with_suffix(".epub").read_bytes() == epub
+
+    def test_a_txt_duplicate_never_reports_an_attach(self, session_factory, tmp_path):
+        download = tmp_path / "download"
+        _ingest(session_factory, download, [("a.txt", "同一份正文".encode())])
+
+        second = _ingest(
+            session_factory, download, [("b.txt", "同一份正文".encode())],
+        )[0]
+
+        assert second.status == STATUS_DUPLICATE
+        assert second.epub_attached is None
+
+    def test_attaching_twice_does_not_rewrite_the_stored_original(
+        self, session_factory, tmp_path,
+    ):
+        download = tmp_path / "download"
+        body = "同一份正文"
+        _ingest(session_factory, download, [("先传.txt", body.encode())])
+        epub = build_epub(chapters=((body,),))
+        first = _ingest(session_factory, download, [("one.epub", epub)])[0]
+        epub_path = Path(_row(session_factory, first.novel_id).path).with_suffix(".epub")
+
+        # 篡改盘上原件：第二次命中去重时不该覆盖它（"重复件尽量不动库"）。
+        epub_path.write_bytes(b"sentinel")
+        second = _ingest(session_factory, download, [("two.epub", epub)])[0]
+
+        assert second.status == STATUS_DUPLICATE
+        assert second.epub_attached is None
+        assert epub_path.read_bytes() == b"sentinel"
+
+    def test_a_missing_original_is_re_attached(self, session_factory, tmp_path):
+        """``has_epub=2`` 但盘上文件没了（用户手滑删了）——再传一次能补回来。"""
+        download = tmp_path / "download"
+        body = "同一份正文"
+        _ingest(session_factory, download, [("先传.txt", body.encode())])
+        epub = build_epub(chapters=((body,),))
+        first = _ingest(session_factory, download, [("one.epub", epub)])[0]
+        epub_path = Path(_row(session_factory, first.novel_id).path).with_suffix(".epub")
+        epub_path.unlink()
+
+        second = _ingest(session_factory, download, [("two.epub", epub)])[0]
+
+        assert second.epub_attached is True
+        assert epub_path.read_bytes() == epub

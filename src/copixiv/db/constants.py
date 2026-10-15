@@ -42,7 +42,7 @@ COL_AUTHOR_NAME = "author_name"
 COL_AUTHOR_ID = "author_id"
 COL_PATH = "path"
 # ``novel.source`` — where the row came from.  Value domain:
-# ``'pixiv'`` (scraper) | ``'local'`` (a TXT uploaded through
+# ``'pixiv'`` (scraper) | ``'local'`` (a TXT / EPUB uploaded through
 # 「我的上传」, docs/LIBRARY_DESIGN.md §2).
 COL_SOURCE = "source"
 # ``novel.source_key`` — local books only: sha256 of the normalised body

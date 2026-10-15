@@ -28,6 +28,7 @@ from sqlalchemy.exc import IntegrityError
 from copixiv.app import _domain_error_http_status
 from copixiv.config import AppConfig
 from copixiv.core.exceptions import DomainError, ValidationError
+from copixiv.core.models import EpubStatus
 from copixiv.db.models import Author, FailedNovel, Novel
 from copixiv.deps import get_session_factory, get_uow, get_write_uow
 from copixiv.features.library import api as library
@@ -39,6 +40,7 @@ from copixiv.features.library.ingest import (
 from copixiv.features.novels import api as novels
 from copixiv.features.novels.update_metadata import _author_id
 from copixiv.storage.file_storage import FileStorage
+from tests.epub_samples import build_epub
 
 # 四种候选编码（utf-16 必须带 BOM）全部失败的字节流。
 UNDECODABLE = b"\xff\x00\xff\x00\xff"
@@ -565,3 +567,93 @@ def test_a_fully_failed_batch_writes_no_novel_and_no_author_name(
     assert author is not None and author.author_name is None
     # 解析照旧做了一次，而且在写事务之外（见上面那条语句级证明）
     assert pixiv.calls == [REMOTE_AUTHOR_ID]
+
+
+# ---------------------------------------------------------------------------
+# §4.1：EPUB 上传的线上契约
+# ---------------------------------------------------------------------------
+
+
+def test_epub_upload_returns_created_and_writes_both_files(
+    client, session_factory, download_dir,
+):
+    data = build_epub(
+        title="内嵌标题", author="内嵌作者",
+        chapters=(("第一段。", "第二段。"),),
+    )
+
+    response = _upload(client, [("文件名.epub", data)])
+
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["created"], body["duplicate"], body["failed"]) == (1, 0, 0)
+    item = body["results"][0]
+    # created 的键集与 TXT 路径一致：epub_attached 只在补挂时为 true 才下发。
+    assert set(item) == {
+        "filename", "status", "novel_id", "title", "author_name", "text",
+    }
+    assert item["filename"] == "文件名.epub"
+    assert item["title"] == "内嵌标题"
+    assert item["author_name"] == "内嵌作者"
+    assert item["text"] == len("第一段。\n第二段。")
+
+    row = _local_rows(session_factory)[0]
+    assert row.id == item["novel_id"]
+    assert row.has_epub == EpubStatus.DONE
+    text_path = Path(row.path)
+    assert text_path.read_text(encoding="utf-8") == "第一段。\n第二段。"
+    assert text_path.with_suffix(".epub").read_bytes() == data
+
+
+def test_duplicate_epub_reports_the_attach_flag(client, session_factory):
+    """先传 TXT、再传同正文的 EPUB → duplicate + ``epub_attached: true``。"""
+    first = _upload(
+        client, [("先传.txt", "同一份正文".encode("utf-8"))],
+    ).json()["results"][0]
+    epub = build_epub(chapters=(("同一份正文",),))
+
+    item = _upload(client, [("后传.epub", epub)]).json()["results"][0]
+
+    assert item["status"] == "duplicate"
+    assert item["novel_id"] == first["novel_id"]
+    assert item["epub_attached"] is True
+    assert "text" not in item
+    row = _local_rows(session_factory)[0]
+    assert row.has_epub == EpubStatus.DONE
+    assert Path(row.path).with_suffix(".epub").read_bytes() == epub
+
+
+def test_a_txt_duplicate_keeps_the_old_response_shape(client, session_factory):
+    """TXT 重复件不冒出 ``epub_attached`` —— 旧响应形状逐字不变。"""
+    _upload(client, [("先传.txt", "同一份正文".encode("utf-8"))])
+
+    item = _upload(
+        client, [("后传.txt", "同一份正文".encode("utf-8"))],
+    ).json()["results"][0]
+
+    assert set(item) == {"filename", "status", "novel_id", "title"}
+
+
+def test_invalid_epub_is_a_per_item_failure(client, session_factory):
+    response = _upload(client, [("坏书.epub", b"definitely not an epub")])
+
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["created"], body["duplicate"], body["failed"]) == (0, 0, 1)
+    assert body["results"][0]["status"] == "failed"
+    assert body["results"][0]["error"] == "不是有效的 EPUB 文件"
+    with session_factory() as session:
+        assert session.execute(select(Novel)).first() is None
+        assert session.execute(select(FailedNovel)).first() is None
+
+
+def test_epub_creator_is_overridden_by_the_preset_author(client, session_factory):
+    _seed_author(session_factory, AUTHOR_ID, "本地作者")
+    data = build_epub(title="内嵌标题", author="内嵌作者")
+
+    item = _upload(client, [("x.epub", data)], author_id=AUTHOR_ID).json()["results"][0]
+
+    assert item["title"] == "内嵌标题"
+    assert item["author_name"] == "本地作者"
+    row = _local_rows(session_factory)[0]
+    assert (row.author_id, row.author_name) == (AUTHOR_ID, "本地作者")

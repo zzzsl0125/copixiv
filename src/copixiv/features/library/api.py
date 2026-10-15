@@ -4,6 +4,10 @@ multipart，字段名 ``files``（可重复，承载多文件）；可选表单�
 （**整批共用**：一次上传的这批书挂同一位作者）。写端点必须声明
 ``Depends(get_write_uow)``（``tests/regression/test_m6_write_lock.py`` 执法）。
 
+收 **TXT 与 EPUB** 两种本地文件（同一批可以混着来）：分派与解析在
+``ingest.py`` / ``storage.epub.reader``，本端点对格式无感知——
+多文件时按文件逐个分派，TXT 走解码管线、EPUB 走抽取管线（§4.1）。
+
 **写事务纪律（本端点的形状由它决定）：名字解析必须在写事务之前完成。**
 ``ingest_uploads`` 一进去就拿事务级咨询锁（``pg_advisory_xact_lock``，
 ``ingest.py::_lock_local_ids``），而作者名解析可能要问一次 pixiv
@@ -91,10 +95,11 @@ async def upload_novels(
     write_uow: SqlUnitOfWork = Depends(get_write_uow),
     client: PixivClient | None = Depends(get_pixiv_client),
 ) -> UploadResponse:
-    """把本地 TXT 收进库（「我的上传」）。
+    """把本地 TXT / EPUB 收进库（「我的上传」）。
 
     整个写入是一个写事务：id 分配 + 指纹去重 + 落库都在里面，
-    ``ingest_uploads`` 只写库、逐条给出结果。
+    ``ingest_uploads`` 只写库、逐条给出结果。每个文件按后缀 / 内容分派：
+    TXT 解码入库、EPUB 抽正文 + 存原件（§4.1）。
 
     ``author_id`` 可选、**整批共用**：给了就把这批书挂到这位 pixiv 作者名下
     （新书直接写 id；已在库的重复件也应用——用户拍板），名字由 id 解析出来
@@ -107,7 +112,7 @@ async def upload_novels(
     ——咨询锁与一个开着的事务被慢对端攥着。失败不致命：名字是缓存，id 是身份。
     """
     if not files:
-        raise ValidationError("请选择要上传的 TXT 文件")
+        raise ValidationError("请选择要上传的 TXT / EPUB 文件")
 
     payloads = [
         (upload.filename or "未命名.txt", await upload.read())
@@ -143,7 +148,7 @@ async def upload_novels(
             )
         results = ingest_uploads(
             write_uow.session,
-            file_storage.download_dir,
+            file_storage,
             payloads,
             preset_author_id=preset_author_id,
             preset_author_name=preset_author_name,

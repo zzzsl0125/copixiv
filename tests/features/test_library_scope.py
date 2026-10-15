@@ -24,6 +24,7 @@ from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.library.ingest import ingest_uploads
 from copixiv.features.novels.batch_operations import resolve_batch_scope
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
+from copixiv.storage.file_storage import FileStorage
 from copixiv.tasks.kernel import TaskContext
 from copixiv.tasks.maintenance import check_epub
 
@@ -48,7 +49,9 @@ def _upload_local(
 ) -> int:
     with session_factory() as session:
         result = ingest_uploads(
-            session, str(download_dir), [(name, body.encode("utf-8"))],
+            session,
+            FileStorage(download_dir=str(download_dir)),
+            [(name, body.encode("utf-8"))],
         )[0]
         session.commit()
     return result.novel_id

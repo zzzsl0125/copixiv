@@ -1,22 +1,35 @@
-"""本地 TXT 入库管线 — 「我的上传」的写路径（docs/LIBRARY_DESIGN.md §4）。
+"""本地书籍入库管线 — 「我的上传」的写路径（docs/LIBRARY_DESIGN.md §4）。
 
 这条管线的形状是**契约**（§1-4），每一步都对应设计文档的一节：
 
-1. 解码 —— UTF-8（含 BOM）→ UTF-16（**显式 BOM 门控**）→ GB18030 / Big5
-   **评分择一**（可疑字符占比 >2% 判失败），全失败即单条失败；
+1. 解码 / 读取 —— **TXT**：UTF-8（含 BOM）→ UTF-16（**显式 BOM 门控**）→
+   GB18030 / Big5 **评分择一**（可疑字符占比 >2% 判失败），全失败即单条失败；
+   **EPUB**（§4.1）：按内容/后缀分派给 :mod:`copixiv.storage.epub.reader`，抽出
+   正文与 ``dc:title`` / ``dc:creator``，读不出来（坏容器 / 无正文）同样单条
+   失败。两条路在 :func:`parse_upload` 里汇成一个 :class:`ParsedUpload`，
+   之后整条管线**对格式无感知**；
 2. 规范化 —— ``\\r\\n`` → ``\\n``、去首尾空白，字符数写 ``novel.text``；
-3. 指纹 —— 规范化正文的 sha256 写 ``novel.source_key``（去重键）；
+3. 指纹 —— 规范化正文的 sha256 写 ``novel.source_key``（去重键）—— **两种格式
+   共用同一套指纹**，所以"同一份正文的 TXT 与 EPUB"仍然互相命中（§4.1）；
 4. 去重 —— ``(source='local', source_key)`` 命中已有本地书 → 本条
-   ``duplicate``，指出那本（§8-1：拒收 + 指路，不建重复行）；
+   ``duplicate``，指出那本（§8-1：**不建重复行**、指路已有那本；但"整批预设
+   作者"与"EPUB 补挂"仍会写库，各自回显一个可选字段）；
+   **EPUB 够格就补挂**（§4.1）：命中行还没有 EPUB 原件时，把这次的原件写到
+   它的 ``.epub`` 兄弟路径并置 ``has_epub=DONE``，响应多一个
+   ``epub_attached`` 标记；
 5. 文件名解析 —— 标题 / 作者，``author_name`` **必须非 NULL**（解析不出写
    「未知作者」）。这是 §3.3 产品承诺「每本书都有作者名可显示」在入库侧的落点，
    **不外包给任务**：``sync_empty_name`` 扫的确实是 ``author_name IS NULL`` 的
    行，但它默认禁用（``scheduled_task.is_enabled`` 列默认 false，只有手动启用
-   才跑）——预设作者是唯一会**覆盖**这一步的输入（见下一节）；
+   才跑）——预设作者是唯一会**覆盖**这一步的输入（见下一节）。EPUB 元数据优先
+   于文件名解析（``dc:title`` / ``dc:creator``），缺失才回落（
+   :func:`resolve_metadata`）；
 6. 落库 —— ``id = -(坐标)``（§3.1：坐标 = 上传时刻在 pixiv 作品号轴上的位置，
    见 :mod:`copixiv.features.library.local_axis`）、写
-   ``download/local/{安全标题}_{id}.txt``（原子写）、插行（``source='local'``、
-   ``has_epub=NO_IMAGES(3)``、``create_time=now``、``like=view=0``、
+   ``download/local/{安全标题}_{id}.txt``（原子写）；EPUB 再把**原件**写到同级
+   的 ``{…}_{id}.epub``（读路径拿 ``path`` 换后缀就能取到，下游零改动）。
+   插行（``source='local'``、``has_epub=NO_IMAGES(3)``（TXT）/ ``DONE(2)``
+   （EPUB，原件已在盘上）、``create_time=now``、``like=view=0``、
    ``series_id=NULL``；``author_id`` 没给预设时是 NULL）。
 
 预设作者（``preset_author_id`` / ``preset_author_name``，2026-09 加）：一次上传
@@ -63,22 +76,27 @@
 from __future__ import annotations
 
 import codecs
-import os
 import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from sqlalchemy import select
 from sqlalchemy import text as sa_text
 from sqlalchemy.exc import IntegrityError
 
+from copixiv.core import formats
 from copixiv.core.models import EpubStatus
-from copixiv.core.services import safe_filename, sha256_text
+from copixiv.core.services import sha256_text
 from copixiv.db import models
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 from copixiv.features.library import local_axis
+from copixiv.log import logger
+from copixiv.storage import atomic
+from copixiv.storage.epub import reader
+from copixiv.storage.file_storage import FileStorage
 
 # ---------------------------------------------------------------------------
 # 常量（值域与 §2/§3 一致）
@@ -86,16 +104,14 @@ from copixiv.features.library import local_axis
 
 SOURCE_LOCAL = local_axis.SOURCE_LOCAL
 
-# 本地书文件目录：download/local/（§3.2）。
-LOCAL_SUBDIR = "local"
-
 UNKNOWN_AUTHOR = "未知作者"
 DECODE_ERROR = "无法识别编码（尝试 UTF-8 / GB18030 / Big5 / UTF-16）"
 EMPTY_ERROR = "文件内容为空"
 
-STATUS_CREATED = "created"
-STATUS_DUPLICATE = "duplicate"
-STATUS_FAILED = "failed"
+UploadStatus = Literal["created", "duplicate", "failed"]
+STATUS_CREATED: UploadStatus = "created"
+STATUS_DUPLICATE: UploadStatus = "duplicate"
+STATUS_FAILED: UploadStatus = "failed"
 
 # 咨询锁 key（事务级，hash 成 int4）。发号已经交给序列，这把锁现在的职责
 # 只剩「指纹预检 + INSERT」的串行化 —— 见 :func:`_lock_local_ids`。
@@ -202,6 +218,58 @@ def decode_txt(data: bytes) -> str:
     return best[0]
 
 
+# ---------------------------------------------------------------------------
+# 1b. 分派与统一解析 —— TXT / EPUB 在这里汇成一个形状，之后的管线格式无关
+# ---------------------------------------------------------------------------
+
+class UploadUnreadable(ValueError):
+    """本文件读不出可用正文（TXT 解码失败 / EPUB 读失败）—— 单条 ``failed``。
+
+    存在的意义是让循环只写一个 ``except``：两条路的失败原因都已经是一句
+    给用户看的中文，循环不需要（也不该）知道它是编码问题还是容器问题。
+    """
+
+
+@dataclass(frozen=True)
+class ParsedUpload:
+    """一个上传文件解析后的形状 —— 管线其余部分只认它。
+
+    ``body`` **未规范化**（调用方走 :func:`normalize_text`，与指纹口径一致）；
+    ``original`` 是 EPUB 原件字节（TXT 为 ``None``），"是不是 EPUB"从此只有
+    这一个判据，不必再回看文件名。
+    """
+
+    body: str
+    title: str | None = None
+    author_name: str | None = None
+    original: bytes | None = None
+
+
+def parse_upload(name: str, data: bytes) -> ParsedUpload:
+    """把 ``(文件名, 字节)`` 读成 :class:`ParsedUpload`；失败抛
+    :class:`UploadUnreadable`。
+
+    分派判据是**内容 + 后缀**（:func:`copixiv.storage.epub.reader.looks_like_epub`）：
+    改名的 EPUB 也能读，``.txt`` 不可能同时是那种 zip，所以不误伤。
+    """
+    if reader.looks_like_epub(name, data):
+        try:
+            content = reader.read_epub(data)
+        except reader.EpubReadError as exc:
+            raise UploadUnreadable(str(exc)) from exc
+        return ParsedUpload(
+            body=content.body,
+            title=content.title,
+            author_name=content.author_name,
+            original=data,
+        )
+
+    try:
+        return ParsedUpload(body=decode_txt(data))
+    except TextDecodeError as exc:
+        raise UploadUnreadable(DECODE_ERROR) from exc
+
+
 def normalize_text(text: str) -> str:
     """规范化：``\\r\\n`` → ``\\n``，去首尾空白（§4-2）。"""
     return text.replace("\r\n", "\n").strip()
@@ -279,13 +347,18 @@ def parse_filename(filename: str) -> tuple[str, str]:
     """从文件名解析 ``(title, author_name)``。
 
     支持 ``【作者】标题(完结).txt`` / ``[作者] 标题.txt`` / ``作者 - 标题.txt``
-    / 纯 ``标题.txt``（§4-5）。**``author_name`` 永不为空**：解析不出即
-    「未知作者」——§3.3 产品承诺「每本书都有作者名可显示」在入库侧的落点，
-    不依赖任何任务（``sync_empty_name`` 默认禁用）。
+    / 纯 ``标题.txt``（§4-5；``.epub`` 后缀同样先剥掉）。**``author_name``
+    永不为空**：解析不出即「未知作者」——§3.3 产品承诺「每本书都有作者名可
+    显示」在入库侧的落点，不依赖任何任务（``sync_empty_name`` 默认禁用）。
+    EPUB 上传时它只是**兜底**：``dc:title`` / ``dc:creator`` 才是首选来源
+    （见 :func:`resolve_metadata`）。
     """
     stem = clean_filename(filename)
-    if stem.lower().endswith(".txt"):
-        stem = stem[:-4]
+    lower = stem.lower()
+    for suffix in (".txt", ".epub"):
+        if lower.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
     stem = stem.strip()
 
     author = ""
@@ -302,54 +375,47 @@ def parse_filename(filename: str) -> tuple[str, str]:
     return title, (author.strip() or UNKNOWN_AUTHOR)
 
 
+def resolve_metadata(filename: str, parsed: ParsedUpload) -> tuple[str, str]:
+    """``(title, author_name)`` —— EPUB 元数据优先，文件名解析兜底（§4.1）。
+
+    * 标题：``dc:title`` > 文件名解析 > 文件名本体；
+    * 作者：``dc:creator`` > 文件名解析 > 「未知作者」。
+
+    TXT 的 :class:`ParsedUpload` 两个元数据字段是 ``None``，于是自然走文件名
+    解析——两种格式共用这一个函数，不再需要"epub_meta 是不是 None"的分支。
+
+    为什么不在这里处理预设作者：预设是**整批**的显式输入、且要覆盖这里解出来
+    的作者名，属于调用方（``ingest_uploads``）的循环里那一步，不是"来源优先级"
+    的一档。名字为空的 ``dc:creator``（或压根没有）按"没给"处理，落到文件名。
+    """
+    title, author_name = parse_filename(filename)
+    return (
+        (parsed.title or "").strip() or title,
+        (parsed.author_name or "").strip() or author_name,
+    )
+
+
 # ---------------------------------------------------------------------------
 # 6. id / 路径 / 落库
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class IngestResult:
-    """逐条上传结果（响应契约见 §4 / ``features/library/schemas.py``）。"""
+    """逐条上传结果（响应契约见 §4 / ``features/library/schemas.py``）。
+
+    ``epub_attached`` 只在**重复件补挂 EPUB** 时置 ``True``（§4.1）：正文指纹
+    命中已有本地书、而来的是 EPUB 且那一行还没有 EPUB 时，把原件挂上去并置
+    ``has_epub=DONE``。其余情形保持 ``None``（响应里不下发）。
+    """
 
     filename: str
-    status: str
+    status: UploadStatus
     novel_id: int | None = None
     title: str | None = None
     author_name: str | None = None
     text: int | None = None
     error: str | None = None
-
-
-def local_novel_path(download_dir: str, title: str, novel_id: int) -> Path:
-    """``{download_dir}/local/{安全标题}_{id}.txt``（§3.2）。
-
-    标题按 ``NAME_MAX`` 截断，连 ``.tmp`` 临时后缀一起留出余量 —— 与
-    ``core/services.py::build_path`` 同一套算式（本地书自己拼路径，不走
-    ``build_path``：它按 id 分片，负数会被塞进 ``0000/``，而 §3.2 要求的
-    是 ``local/``）。
-    """
-    reserved = len(f"_{novel_id}.epub.tmp") + 1
-    filename = f"{safe_filename(title, max_length=254 - reserved)}_{novel_id}.txt"
-    return Path(download_dir) / LOCAL_SUBDIR / filename
-
-
-def _write_text_atomic(root: Path, path: Path, content: str) -> None:
-    """临时文件 + ``os.replace`` 原子写；目录必须落在 download 根内（§3.2）。"""
-    resolved_root = root.resolve()
-    parent = path.parent
-    parent.mkdir(parents=True, exist_ok=True)
-    if not parent.resolve().is_relative_to(resolved_root):
-        raise OSError(f"路径落在 download 根之外：{path}")
-
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    try:
-        tmp_path.write_text(content, encoding="utf-8")
-        os.replace(tmp_path, path)
-    except BaseException:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
+    epub_attached: bool | None = None
 
 
 def _lock_local_ids(session) -> None:
@@ -392,27 +458,27 @@ def _find_local_duplicate(session, source_key: str):
 
 def _apply_preset_to_duplicate(
     session,
-    novel_id: int,
+    novel: models.Novel | None,
     preset_author_id: int,
     preset_author_name: str | None,
 ) -> bool:
     """把预设作者挂到**已在库**的那一行上；返回"这次真的写了吗"。
 
-    为什么这里允许逐条 ``session.get`` + 改字段（本仓「批量必须 set-based」那条
-    纪律的例外，取舍写清楚）：那条纪律针对的是**几百上千本**的批量编辑
+    为什么这里允许逐条改字段（本仓「批量必须 set-based」那条纪律的例外，取舍
+    写清楚）：那条纪律针对的是**几百上千本**的批量编辑
     （``novels/batch_edit_metadata.py`` 的 ④：逐行 ``get_by_id`` + ``setattr``
     正是它要避免的形态），而这里的行集上限是"用户这次拖进上传框的文件数"，而且
     只有其中的**重复件**才走这条分支——去重预检本来就已经按文件逐条 SELECT，
-    这一条只是把命中的那一行装成 ORM 对象改两列。名字的**跨行规范化**仍然走
+    这一条只是给命中的那一行改两列。名字的**跨行规范化**仍然走
     ``update_author_name`` 那种 set-based 写法（见函数末尾），不在循环里干。
+
+    ``novel`` 为 ``None``（预检看到、加载前被并发删掉）时返回 ``False``——
+    这一条仍按 ``duplicate`` 上报（预检的事实成立），只是没有行可挂。
 
     不写的情形只有一个：``author_id`` 与 ``author_name`` **本来就和要写的一模
     一样**——「重复件尽量不动库」的既有精神（也让"已挂同一作者时不写"可断言）。
     """
-    novel = session.get(models.Novel, novel_id)
     if novel is None:
-        # 预检看到了、真正加载之前被并发删掉（用户在另一台设备整理书架）。
-        # 这一条仍然按 duplicate 上报（预检的事实成立），只是没有行可挂。
         return False
     if (
         novel.author_id == preset_author_id
@@ -430,9 +496,53 @@ def _apply_preset_to_duplicate(
     return True
 
 
+def _attach_epub_to_existing(
+    session, novel: models.Novel | None, root: Path, epub_bytes: bytes,
+) -> bool:
+    """把上传的 EPUB 原件补挂到**已在库**的本地书上；返回"这次真的挂了吗"。
+
+    §4.1 的"够格就补挂"：正文指纹命中意味着这本书已经在库里（多半是以前传的
+    TXT）；如果它还没有 EPUB，就把这次的原件写到它的 ``.epub`` 兄弟路径并置
+    ``has_epub=DONE``——用户因此能把更完整的原件补进已有条目，而不是被
+    ``duplicate`` 挡在门外。
+
+    不挂的三种情形，逐条都有理由：
+
+    * 那一行已经不在了（预检看到后被并发删掉）——没有行可挂；
+    * 已经是 ``DONE`` **且文件还在**——一个字节都不写（"重复件尽量不动库"的
+      既有精神，也让"已挂同一份原件时不写"可断言）；
+    * 写盘失败——只记 warning、返回 ``False``。**绝不**把这条降级成
+      ``failed``：书确实已经在库里，把"补挂附件失败"说成"这本没进去"是更糟的
+      谎；响应仍是 ``duplicate``，只是不带补挂标记。
+    """
+    if novel is None or not novel.path:
+        return False
+
+    path = formats.sibling_path(Path(novel.path), formats.EPUB)
+    if novel.has_epub == EpubStatus.DONE and path.is_file():
+        return False
+
+    try:
+        atomic.write_atomic(path, epub_bytes, root=root)
+    except OSError as exc:
+        logger.warning(
+            "EPUB 补挂失败（书已在库，按 duplicate 上报）: #{} {}: {}",
+            novel.id, path, exc,
+        )
+        return False
+
+    # has_epub 是派生状态（docs/epub-status-fix-contract.md）：**产出该 EPUB 的
+    # 路径**写出成品后自己置位。这里的"产出方"就是这次上传——文件确实落盘了，
+    # 置 DONE 是如实记录；负 id 不在 check_epub 的巡检区间（cursor 从 0 起），
+    # 不会被改回。
+    novel.has_epub = EpubStatus.DONE
+    session.flush()
+    return True
+
+
 def ingest_uploads(
     session,
-    download_dir: str,
+    storage: FileStorage,
     files: list[tuple[str, bytes]],
     *,
     preset_author_id: int | None = None,
@@ -444,6 +554,9 @@ def ingest_uploads(
     不 commit / rollback。**部分成功**：一条失败不影响其余条，失败条目不写任何
     库表（尤其不写 ``failed_novel``，失败时也不会去动 ``author`` 行）。
 
+    ``storage`` 是路径与落盘的**唯一所有者**（``FileStorage``）：本函数不再自己
+    拼 ``download/local/...``，也不再自带原子写——那两件事各只有一处实现。
+
     ``preset_author_id`` / ``preset_author_name`` 可选、**整批共用**：给了 id 就
     把这一批全部挂到它名下（覆盖文件名解析出的作者名；名字可以是 ``None``，
     含义见模块 docstring 的「预设作者」一节）。两条前置约定：
@@ -454,7 +567,7 @@ def ingest_uploads(
     * ``preset_author_id`` 的 ``author`` 占位行由调用方保证存在
       （``author_id`` 有外键；API 侧在读事务里建、写事务里再兜一次）。
     """
-    root = Path(download_dir)
+    root = Path(storage.download_dir)
     results: list[IngestResult] = []
     # 锁懒初始化：整批全是解码失败时不碰数据库。
     locked = False
@@ -469,13 +582,16 @@ def ingest_uploads(
     for filename, data in files:
         name = clean_filename(filename)
 
+        # ---- 分派与解析：TXT / EPUB 在这里汇合（§4.1）----
+        # 之后的 normalize / 指纹 / 去重 / 发号 / 落库对格式无感知，
+        # "是不是 EPUB"只剩 ``parsed.original is not None`` 一个判据。
         try:
-            raw = decode_txt(data)
-        except TextDecodeError:
-            results.append(IngestResult(name, STATUS_FAILED, error=DECODE_ERROR))
+            parsed = parse_upload(name, data)
+        except UploadUnreadable as exc:
+            results.append(IngestResult(name, STATUS_FAILED, error=str(exc)))
             continue
 
-        body = normalize_text(raw)
+        body = normalize_text(parsed.body)
         if not body:
             results.append(IngestResult(name, STATUS_FAILED, error=EMPTY_ERROR))
             continue
@@ -489,25 +605,38 @@ def ingest_uploads(
         existing = _find_local_duplicate(session, source_key)
         if existing is not None:
             existing_id = int(existing[0])
+            # 只有真的要动那一行时才加载它（纯重复件仍是一次 SELECT 了事）——
+            # 两个 helper 收同一个 ORM 对象，不再各自 ``session.get`` 一次。
+            needs_row = preset_author_id is not None or parsed.original is not None
+            novel = session.get(models.Novel, existing_id) if needs_row else None
+
             duplicate_author_name: str | None = None
             if preset_author_id is not None:
                 # 应用预设（重复件也应用）。没给预设时整段不进 —— 那就是既有
                 # 形状：一个字节都不改、也不回显作者名。
                 if _apply_preset_to_duplicate(
-                    session, existing_id, preset_author_id, preset_author_name,
+                    session, novel, preset_author_id, preset_author_name,
                 ):
                     preset_written = True
                 # 回显这次写进去的名字（解析不出就是 None，响应里该字段不下发）
                 # —— 前端据此显示「已在库中《…》· 已挂作者：X」。
                 duplicate_author_name = preset_author_name
+            # 够格就补挂（§4.1）：来的是 EPUB 且那一行还没有 EPUB 时，把原件
+            # 挂上去。TXT 不参与（没有原件可挂）。
+            epub_attached = (
+                _attach_epub_to_existing(session, novel, root, parsed.original)
+                if parsed.original is not None
+                else False
+            )
             results.append(IngestResult(
                 name, STATUS_DUPLICATE,
                 novel_id=existing_id, title=existing[1],
                 author_name=duplicate_author_name,
+                epub_attached=epub_attached or None,
             ))
             continue
 
-        title, parsed_author_name = parse_filename(name)
+        title, parsed_author_name = resolve_metadata(name, parsed)
         if preset_author_id is None:
             author_id, author_name = None, parsed_author_name
         else:
@@ -519,10 +648,27 @@ def ingest_uploads(
         # 「永不复用」的必然代价）。
         novel_id = _next_local_id(session)
 
-        path = local_novel_path(download_dir, title, novel_id)
+        path = storage.local_novel_path(novel_id, title)
+        epub_path = (
+            storage.local_novel_path(novel_id, title, formats.EPUB)
+            if parsed.original is not None
+            else None
+        )
         try:
-            _write_text_atomic(root, path, body)
+            atomic.write_text_atomic(path, body, root=root)
+            if epub_path is not None:
+                # 原件存成同级兄弟文件（``{…}_{id}.epub``）——读路径
+                # （GetNovelFileUseCase / 批量导出）就是拿 ``path`` 换后缀找它，
+                # 下游一行都不用改。
+                atomic.write_atomic(epub_path, parsed.original, root=root)
         except OSError as exc:
+            # 半成品清理：EPUB 写失败时正文可能已经落盘，留着就是一本"没有
+            # 原件却像是成功了"的孤儿 txt。写了哪份就删哪份（missing_ok）。
+            for written in filter(None, (path, epub_path)):
+                try:
+                    written.unlink(missing_ok=True)
+                except OSError:
+                    pass
             results.append(IngestResult(
                 name, STATUS_FAILED, error=f"写入文件失败：{exc}",
             ))
@@ -542,8 +688,12 @@ def ingest_uploads(
             series_name=None,
             series_index=None,
             create_time=datetime.now(timezone.utc),
-            # 终态：本地书永远不会有抓取路径去构建 EPUB（§3.3）。
-            has_epub=EpubStatus.NO_IMAGES,
+            # EPUB 上传：原件已在上面落盘，``DONE`` 是如实记录；TXT 上传仍是
+            # 无图终态（本地行不会被抓取路径构建 EPUB）。两种都不在 check_epub
+            # 的巡检区间（负 id，cursor 从 0 起）。
+            has_epub=(
+                EpubStatus.DONE if epub_path is not None else EpubStatus.NO_IMAGES
+            ),
             shuffle=_random_shuffle(),
             tags=[],
             is_favourite=False,
@@ -558,10 +708,12 @@ def ingest_uploads(
                 session.add(novel)
                 session.flush()
         except IntegrityError:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            # 撞车的那条也把两份盘上文件清干净（正文 + 可能已写的 EPUB）。
+            for written in filter(None, (path, epub_path)):
+                try:
+                    written.unlink(missing_ok=True)
+                except OSError:
+                    pass
             results.append(IngestResult(
                 name, STATUS_FAILED,
                 error="入库冲突：id 或正文指纹与已有记录撞车",
