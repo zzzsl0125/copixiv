@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from copixiv.core import formats
 from copixiv.core.exceptions import NotFoundError
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 
@@ -35,7 +36,7 @@ class GetNovelFileUseCase:
         if not path:
             raise NotFoundError(f"Novel {novel_id} has no file path")
 
-        file_path = Path(path).with_suffix("." + fmt)
+        file_path = formats.sibling_path(Path(path), fmt)
         try:
             resolved = file_path.resolve()
         except OSError:
@@ -47,5 +48,4 @@ class GetNovelFileUseCase:
         if not resolved.is_file():
             raise NotFoundError(f"File not found for novel {novel_id}")
 
-        media_type = "text/plain" if fmt == "txt" else "application/epub+zip"
-        return resolved, media_type
+        return resolved, formats.media_type_for(fmt)

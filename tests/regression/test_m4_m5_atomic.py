@@ -37,12 +37,14 @@ def test_save_novel_text_crash_leaves_no_partial_file(tmp_path, monkeypatch):
     """崩溃安全：写一半抛异常 → 目标文件不存在，临时文件被清理。"""
     storage = FileStorage(download_dir=str(tmp_path))
 
-    def write_half_then_raise(self, content, encoding=None):
-        with open(self, "w", encoding=encoding or "utf-8") as f:
-            f.write(content[: len(content) // 2])
+    def write_half_then_raise(self, data):
+        # 原子写落在 ``atomic.write_atomic``，它用 ``write_bytes``（不是
+        # ``write_text``）—— 这里跟着打到那一层。
+        with open(self, "wb") as f:
+            f.write(bytes(data)[: len(data) // 2])
         raise OSError("simulated disk full")
 
-    monkeypatch.setattr(Path, "write_text", write_half_then_raise)
+    monkeypatch.setattr(Path, "write_bytes", write_half_then_raise)
 
     with pytest.raises(OSError):
         storage.save_novel_text(1, "Test", "hello world")

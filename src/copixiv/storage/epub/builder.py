@@ -2,7 +2,6 @@
 
 import html
 import io
-import os
 import re
 import zipfile
 from pathlib import Path
@@ -10,8 +9,10 @@ from pathlib import Path
 from PIL import Image
 from ebooklib import epub
 
+from copixiv.core import formats
 from copixiv.core.draft import NovelDraft
 from copixiv.core.services import has_image_placeholders
+from copixiv.storage.atomic import atomic_write
 
 from copixiv.log import logger
 
@@ -117,13 +118,9 @@ class EpubBuilder:
             content, image_map, book, compress_quality
         )
 
-        # Write — atomic: build into a sibling temp file, then os.replace so
-        # a crash never leaves a truncated EPUB at the final path.
-        # The output path is the text path's sibling (same basename, ".epub"
-        # suffix): ``build_path`` already budgets the title against the
-        # worst-case ".tmp" suffix, so the temp write stays within NAME_MAX.
-        output_path = novel_path.with_suffix(".epub")
-        tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+        # 输出 = 正文的同基名兄弟（``x.txt`` → ``x.epub``；§3.2 的读路径约定）。
+        # 临时文件命名与 NAME_MAX 预算由 ``atomic_write`` / ``build_path`` 负责。
+        output_path = formats.sibling_path(novel_path, formats.EPUB)
 
         # Main page
         main_page = self._build_main_page(title, author_name, processed_content)
@@ -153,12 +150,11 @@ class EpubBuilder:
         spine.append(main_page)
         book.spine = spine
 
-        # Write — atomic: build into a sibling temp file, then os.replace so
-        # a crash never leaves a truncated EPUB at the final path.
-        # ``output_path``/``tmp_path`` were fitted to NAME_MAX above.
+        # 原子写：ebooklib 直接写临时文件，正常退出由 ``atomic_write`` 替换；
+        # 崩溃 / 异常绝不在最终路径留下截断的 EPUB。
         try:
-            epub.write_epub(tmp_path, book, {})
-            os.replace(tmp_path, output_path)
+            with atomic_write(output_path) as tmp_path:
+                epub.write_epub(tmp_path, book, {})
             # Belt-and-braces: no internal marker may ever reach the reader.
             # ``_replace_image_placeholders`` already degrades unresolved
             # markers, so this only fires if a future code path bypasses it.
@@ -169,10 +165,6 @@ class EpubBuilder:
             logger.info(f"Made Epub: ({novel.id}){novel.title}")
             return True
         except Exception:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
             logger.exception(f"Failed to write EPUB: {output_path}")
             return False
 

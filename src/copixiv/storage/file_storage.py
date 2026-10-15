@@ -1,14 +1,18 @@
 """File storage — manages novel text and EPUB files on disk."""
 
-import os
 from pathlib import Path
 
-from copixiv.core.services import build_path
+from copixiv.core import formats
+from copixiv.core.services import build_path, safe_filename
 from copixiv.log import logger
+from copixiv.storage.atomic import write_text_atomic
 
 
 class FileStorage:
     """Manages novel text and EPUB files on the local filesystem."""
+
+    #: 本地书（「我的上传」）所在的子目录（docs/LIBRARY_DESIGN.md §3.2）。
+    LOCAL_SUBDIR = "local"
 
     def __init__(self, download_dir: str = "download"):
         self.download_dir = download_dir
@@ -17,7 +21,26 @@ class FileStorage:
         return Path(build_path(novel_id, title, self.download_dir))
 
     def novel_epub_path(self, novel_id: int, title: str) -> Path:
-        return self.novel_text_path(novel_id, title).with_suffix(".epub")
+        return formats.sibling_path(self.novel_text_path(novel_id, title), formats.EPUB)
+
+    def local_novel_path(
+        self, novel_id: int, title: str, kind: str = formats.TEXT,
+    ) -> Path:
+        """``{download_dir}/local/{安全标题}_{id}{后缀}``（§3.2）。
+
+        本地书不走 :func:`build_path`：它按 id 分片，负数会被塞进 ``0000/``，
+        而契约要的是 ``local/``。这里是那条第二约定的**唯一**所有者 ——
+        上传管线只调用它，不再自己拼路径。
+
+        标题按 ``NAME_MAX`` 截断，并把最长的临时后缀
+        （``_{id}.epub.tmp``）算进余量，所以正文与 EPUB 原件两份都在限额内。
+        """
+        reserved = len(f"_{novel_id}{formats.SUFFIXES[formats.EPUB]}.tmp") + 1
+        filename = (
+            f"{safe_filename(title, max_length=254 - reserved)}"
+            f"_{novel_id}{formats.suffix_for(kind)}"
+        )
+        return Path(self.download_dir) / self.LOCAL_SUBDIR / filename
 
     def save_novel_text(
         self,
@@ -31,17 +54,7 @@ class FileStorage:
         if path.exists() and not force and path.stat().st_size > 0:
             logger.debug(f"下载: #{novel_id} \"{title}\" 已存在，跳过")
             return path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
-        try:
-            tmp_path.write_text(content, encoding="utf-8")
-            os.replace(tmp_path, path)
-        except Exception:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise
+        write_text_atomic(path, content, root=Path(self.download_dir))
         logger.info(
             f"下载: #{novel_id} \"{title}\" → {path} ({len(content)} 字符)",
         )
@@ -84,7 +97,7 @@ class FileStorage:
             )
             return
 
-        for suffix in (".txt", ".epub"):
+        for suffix in formats.ALL_SUFFIXES:
             file_path = resolved.with_suffix(suffix)
             if file_path.is_file():
                 try:

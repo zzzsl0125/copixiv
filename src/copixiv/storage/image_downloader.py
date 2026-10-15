@@ -22,9 +22,11 @@ from typing import Any
 
 import requests
 
+from copixiv.core import formats
 from copixiv.core.draft import NovelDraft
 from copixiv.core.services import has_image_placeholders
 from copixiv.pixiv.http import create_image_session, pick_image_url
+from copixiv.storage.atomic import atomic_write
 from copixiv.storage.epub.builder import is_valid_epub
 from copixiv.log import logger
 
@@ -144,10 +146,8 @@ class ImageDownloader:
             self._proxy_http, self._proxy_https,
         )
         should_close = session is None
-        tmp_path = save_path.with_suffix(save_path.suffix + ".tmp")
 
         try:
-            save_path.parent.mkdir(parents=True, exist_ok=True)
             self._throttle()
             response = local_session.get(url, stream=True, timeout=10)
             response.raise_for_status()
@@ -155,41 +155,40 @@ class ImageDownloader:
             expected_size = int(response.headers.get("content-length", 0))
             downloaded_size = 0
 
-            with open(tmp_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded_size += len(chunk)
+            # 原子写：流式落临时文件，校验通过才由 atomic_write 替换到
+            # save_path。异常退出时临时文件由它清掉（下面直接返回 False）。
+            with atomic_write(save_path) as tmp_path:
+                with open(tmp_path, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded_size += len(chunk)
 
-            if expected_size and downloaded_size != expected_size:
-                raise RuntimeError(
-                    f"Incomplete download: expected {expected_size}, got {downloaded_size}"
-                )
-            # A 200 with a matching Content-Length is NOT proof of an image:
-            # the CDN can answer with an error document, and a truncated body
-            # still matches the header when the server lies.  Both produced
-            # files that ``Image.open`` rejected later (PIL
-            # UnidentifiedImageError) — surfacing as "缺图框" in the EPUB while
-            # the download was recorded as a success.  Verify pixels *here*,
-            # where the bytes are still on the temp path and a retry is cheap.
-            if not _is_decodable_image(tmp_path):
-                head = b""
-                try:
-                    with open(tmp_path, "rb") as fh:
-                        head = fh.read(64)
-                except OSError:
-                    pass
-                raise RuntimeError(
-                    f"Not a decodable image ({downloaded_size} bytes, "
-                    f"head={head[:32]!r})"
-                )
-            os.replace(tmp_path, save_path)
+                if expected_size and downloaded_size != expected_size:
+                    raise RuntimeError(
+                        f"Incomplete download: expected {expected_size}, "
+                        f"got {downloaded_size}"
+                    )
+                # A 200 with a matching Content-Length is NOT proof of an image:
+                # the CDN can answer with an error document, and a truncated body
+                # still matches the header when the server lies.  Both produced
+                # files that ``Image.open`` rejected later (PIL
+                # UnidentifiedImageError) — surfacing as "缺图框" in the EPUB while
+                # the download was recorded as a success.  Verify pixels *here*,
+                # where the bytes are still on the temp path and a retry is cheap.
+                if not _is_decodable_image(tmp_path):
+                    head = b""
+                    try:
+                        with open(tmp_path, "rb") as fh:
+                            head = fh.read(64)
+                    except OSError:
+                        pass
+                    raise RuntimeError(
+                        f"Not a decodable image ({downloaded_size} bytes, "
+                        f"head={head[:32]!r})"
+                    )
             return True
         except Exception:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
             return False
         finally:
             if should_close:
@@ -219,7 +218,7 @@ class ImageDownloader:
         if novel.content is not None:
             needs_epub = has_image_placeholders(novel.content)
 
-        epub_path = Path(path_str).with_suffix(".epub")
+        epub_path = formats.sibling_path(Path(path_str), formats.EPUB)
         if epub_path.exists() and not force and is_valid_epub(epub_path):
             if needs_epub is False:
                 # Nothing to embed and a readable file is already there:

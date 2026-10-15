@@ -17,6 +17,7 @@ import time
 from pydantic import BaseModel, field_validator
 
 from copixiv.features.authors.resolve_names import collect_author_names, writeback_author_names
+from copixiv.core import formats
 from copixiv.core.models import EpubStatus
 from copixiv.core.models import TaskResult
 from copixiv.core.services import has_image_placeholders
@@ -285,7 +286,7 @@ def _sweep(
             continue
 
         txt_path = Path(path_str)
-        epub_path = txt_path.with_suffix(".epub")
+        epub_path = formats.sibling_path(txt_path, formats.EPUB)
         epub_ok = is_valid_epub(epub_path)
 
         if status == EpubStatus.DONE:

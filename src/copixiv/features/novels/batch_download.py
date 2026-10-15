@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import BinaryIO
 
+from copixiv.core import formats
 from copixiv.core.exceptions import NotFoundError, ValidationError
 from copixiv.core.models import EpubStatus
 from copixiv.core.services import build_batch_zip
@@ -161,13 +162,10 @@ class BatchDownloadUseCase:
             raise ValidationError(str(exc)) from exc
 
         novel = novels[0]
-        actual_fmt = (
-            "epub"
-            if (format_mode == "prefer_epub"
-                and novel.has_epub == EpubStatus.DONE)
-            else "txt"
+        actual_fmt = formats.preferred_format(
+            format_mode, epub_ready=novel.has_epub == EpubStatus.DONE,
         )
-        return template.resolve(novel) + "." + actual_fmt
+        return template.resolve(novel) + formats.suffix_for(actual_fmt)
 
 
 def _build_search_desc(conditions: SearchConditions) -> str:

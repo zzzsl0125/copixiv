@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
 
+from copixiv.core import formats
 from copixiv.core.models import EpubStatus
 
 
@@ -753,21 +754,18 @@ def build_batch_zip(
                 novel_path_str = novel.path
                 title = novel.title or str(novel_id)
 
-                actual_fmt = (
-                    "epub"
-                    if (format_mode == "prefer_epub"
-                        and novel.has_epub == EpubStatus.DONE)
-                    else "txt"
+                actual_fmt = formats.preferred_format(
+                    format_mode, epub_ready=novel.has_epub == EpubStatus.DONE,
                 )
 
                 if not novel_path_str:
                     missing_ids.append(str(novel_id))
                 else:
-                    file_path = Path(novel_path_str).with_suffix("." + actual_fmt)
+                    file_path = formats.sibling_path(Path(novel_path_str), actual_fmt)
                     if not file_path.is_file():
                         missing_ids.append(str(novel_id))
                     else:
-                        arcname = template.resolve(novel) + "." + actual_fmt
+                        arcname = template.resolve(novel) + formats.suffix_for(actual_fmt)
                         zf.write(str(file_path), arcname)
                         added_titles.append(title)
 
