@@ -52,6 +52,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'updated', novel: Novel): void
+  (e: 'deleted', novelId: number): void
   (e: 'error', message: string): void
 }>()
 
@@ -67,6 +68,8 @@ const TAG_SPLIT = /[/|#、\\]/
 const loading = ref(false)
 /** 「同步」进行中：与 `loading` 分开——保存按钮的文案只该被保存自己点亮。 */
 const syncing = ref(false)
+/** 「删除」进行中。 */
+const deleting = ref(false)
 const title = ref('')
 const authorId = ref('')
 const seriesId = ref('')
@@ -272,7 +275,7 @@ const hasChanges = computed(() => Object.keys(buildPayload()).length > 0)
 // 同步期间禁用保存：两个请求写的是同一本书，谁后回来谁的数据就是卡片上的值，
 // 让它们互斥就不必赌响应顺序。
 const confirmDisabled = computed(
-  () => !!validationError.value || !hasChanges.value || syncing.value,
+  () => !!validationError.value || !hasChanges.value || syncing.value || deleting.value,
 )
 
 function addTag() {
@@ -294,8 +297,8 @@ function removeTag(tag: string) {
 
 async function handleConfirm() {
   const novel = props.novel
-  // 与同步互斥：两个请求写同一本书，同时飞出去就只能赌响应顺序。
-  if (!novel || loading.value || syncing.value || confirmDisabled.value) return
+  // 与同步、删除互斥：不能同时飞两个请求。
+  if (!novel || loading.value || syncing.value || deleting.value || confirmDisabled.value) return
 
   loading.value = true
   try {
@@ -318,8 +321,8 @@ async function handleConfirm() {
  */
 async function handleSync() {
   const novel = props.novel
-  // 与保存互斥（同一次写入不能同时飞两个请求），且只有 pixiv 书才有来源可抓。
-  if (!novel || !canSync.value || syncing.value || loading.value) return
+  // 与保存、删除互斥（同一次写入不能同时飞两个请求），且只有 pixiv 书才有来源可抓。
+  if (!novel || !canSync.value || syncing.value || loading.value || deleting.value) return
 
   syncing.value = true
   try {
@@ -330,6 +333,30 @@ async function handleSync() {
     emit('error', getApiErrorMessage(err, '同步失败'))
   } finally {
     syncing.value = false
+  }
+}
+
+/**
+ * 「删除」：删除单本书籍及其本地文件。
+ *
+ * 弹出原生确认框防止误触；与保存、同步互斥；删除成功后通知父组件移除卡片并关闭弹窗。
+ */
+async function handleDelete() {
+  const novel = props.novel
+  if (!novel || deleting.value || loading.value || syncing.value) return
+
+  const confirmMsg = `确定要删除小说《${novel.title}》吗？\n删除操作不可撤销：小说记录与本地文件都将被移除。`
+  if (!window.confirm(confirmMsg)) return
+
+  deleting.value = true
+  try {
+    await novelApi.deleteNovel(novel.id)
+    emit('deleted', novel.id)
+    emit('close')
+  } catch (err: unknown) {
+    emit('error', getApiErrorMessage(err, '删除失败'))
+  } finally {
+    deleting.value = false
   }
 }
 </script>
@@ -514,18 +541,18 @@ async function handleSync() {
       </p>
     </div>
 
-    <!-- 「同步」：按 pixiv id 重新抓取元数据（本地书没有来源可同步，不出现）。
-         type="button"：footer 在 <form> 里，默认 submit 会顺手保存一次。
-         BaseModal 的 footer 是 row-reverse 且把本 slot 放在 DOM 末位，所以这里渲染在
-         最左（左下角）：视觉顺序「同步 / 取消 / 保存」。与「取消」的 12px 间距由
-         cancel 自带的 sm:ml-3 给，本按钮因此不带左边距（左缘与正文对齐）。 -->
+    <!-- 「同步」与「删除」等次要动作放 DOM 末位：
+         BaseModal 的 footer 是 row-reverse 且把 extra-buttons slot 放在 DOM 末位，
+         所以渲染在最左（左下角）。
+         「删除」在最左端（DOM 最后），「同步」（仅 pixiv 书有）在删除右侧。
+         type="button"：footer 在 <form> 里，避免触发默认 submit。 -->
     <template #extra-buttons>
       <button
         v-if="canSync"
         type="button"
-        :disabled="syncing || loading"
+        :disabled="syncing || loading || deleting"
         data-testid="edit-sync"
-        class="mt-3 w-full inline-flex justify-center items-center gap-1 rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 sm:mt-0 sm:w-auto sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        class="mt-3 w-full inline-flex justify-center items-center gap-1 rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 sm:mt-0 sm:ml-3 sm:w-auto sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         @click="handleSync"
       >
         <span
@@ -534,6 +561,21 @@ async function handleSync() {
           aria-hidden="true"
         ></span>
         {{ syncing ? '同步中…' : '同步' }}
+      </button>
+
+      <button
+        type="button"
+        :disabled="deleting || loading || syncing"
+        data-testid="edit-delete"
+        class="mt-3 w-full inline-flex justify-center items-center gap-1 rounded-md border border-red-200 shadow-sm px-4 py-2 bg-red-50 text-base font-medium text-red-600 hover:bg-red-100 hover:text-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 sm:mt-0 sm:w-auto sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        @click="handleDelete"
+      >
+        <span
+          v-if="deleting"
+          class="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-red-300 border-t-red-600"
+          aria-hidden="true"
+        ></span>
+        {{ deleting ? '删除中…' : '删除' }}
       </button>
     </template>
   </BaseModal>

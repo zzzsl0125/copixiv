@@ -10,10 +10,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
  * - `POST /novels/{id}/sync`：无请求体，响应与 PATCH 同形状（含 `editable_fields`）。
  */
 
-const clientMock = vi.hoisted(() => ({ patch: vi.fn(), get: vi.fn(), post: vi.fn() }))
+const clientMock = vi.hoisted(() => ({ patch: vi.fn(), get: vi.fn(), post: vi.fn(), delete: vi.fn() }))
 
 vi.mock('../../src/api/client', () => ({
-  apiClient: { patch: clientMock.patch, get: clientMock.get, post: clientMock.post },
+  apiClient: { patch: clientMock.patch, get: clientMock.get, post: clientMock.post, delete: clientMock.delete },
   buildApiUrl: (p: string) => p,
   apiBaseUrl: '/api',
 }))
@@ -133,3 +133,20 @@ describe('novelApi.lookupAuthor / lookupSeries', () => {
     expect(result).toEqual(profile)
   })
 })
+
+describe('novelApi.deleteNovel', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('DELETE /novels/{id}，调用正确 endpoint', async () => {
+    clientMock.delete.mockResolvedValue({})
+    const { novelApi } = await loadApi()
+
+    await novelApi.deleteNovel(12345)
+
+    expect(clientMock.delete).toHaveBeenCalledTimes(1)
+    expect(clientMock.delete).toHaveBeenCalledWith('/novels/12345')
+  })
+})
+

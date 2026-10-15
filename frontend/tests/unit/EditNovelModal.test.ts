@@ -716,27 +716,33 @@ describe('EditNovelModal 「同步」（POST /api/novels/{id}/sync）', () => {
     expect(mountModal(LOCAL_NOVEL).find('[data-testid="edit-sync"]').exists()).toBe(false)
   })
 
-  it('DOM 末位 → 渲染在最左（左下角）：footer 子节点顺序为 保存 / 取消 / 同步', () => {
+  it('DOM 末位 → 渲染在最左（左下角）：footer 子节点顺序为 保存 / 取消 / 同步 / 删除', () => {
     // 位置由 BaseModal 的 slot 落点决定：footer 是 row-reverse + 本 slot 在 DOM 末位，
     // 末位 DOM 才是视觉最左。只断言 DOM 顺序，样式类怎么调都不影响这条契约。
+    // 「删除」在 slot 里排最后（无条件渲染，任何书都能删），所以它在 DOM 末位、
+    // 视觉最左；「同步」仅 pixiv 书有，排在删除右侧。
     const wrapper = mountModal(PIXIV_NOVEL)
     const sync = wrapper.get('[data-testid="edit-sync"]').element
+    const del = wrapper.get('[data-testid="edit-delete"]').element
     const footer = sync.parentElement
     expect(footer).not.toBeNull()
 
     const children = Array.from(footer!.children)
-    expect(children).toHaveLength(3)
+    expect(children).toHaveLength(4)
     expect(children[0]).toBe(wrapper.get('[data-testid="base-modal"] button[type="submit"]').element)
     expect((children[1] as HTMLElement).textContent?.trim()).toBe('取消')
     expect(children[2]).toBe(sync)
+    expect(children[3]).toBe(del)
   })
 
-  it('本地书：footer 里只有保存与取消，末位没有次要动作', () => {
+  it('本地书：footer 里没有同步（无来源可抓），但删除仍在末位', () => {
     const wrapper = mountModal(LOCAL_NOVEL)
     const footer = wrapper.get('[data-testid="base-modal"] button[type="submit"]').element.parentElement
 
     // 条件为假的 slot 内容只留注释节点，不进元素子节点列表
-    expect(Array.from(footer!.children)).toHaveLength(2)
+    expect(Array.from(footer!.children)).toHaveLength(3)
+    expect(wrapper.find('[data-testid="edit-sync"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="edit-delete"]').exists()).toBe(true)
   })
 
   it('type="button"：点它不会顺手提交表单（footer 在 <form> 里）', async () => {

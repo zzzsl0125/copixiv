@@ -55,6 +55,11 @@ export const novelApi = {
     return response.data as Novel
   },
 
+  /** 删除单本小说及其本地文件（DELETE /api/novels/{novelId}）。 */
+  async deleteNovel(novelId: number) {
+    await apiClient.delete(`/novels/${novelId}`)
+  },
+
   /**
    * 作者 ID 预览（编辑器「作者」一栏的即时反馈）。
    *
