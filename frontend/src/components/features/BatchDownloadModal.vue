@@ -3,7 +3,7 @@ import { ref, watch, computed, onUnmounted } from 'vue'
 import BaseModal from '../ui/BaseModal.vue'
 import { novelApi, getApiErrorMessage } from '../../api'
 import { downloadBlob, filenameFromContentDisposition } from '../../lib/utils'
-import { useSystem } from '../../composables'
+import { useSystem, useTaskStatus } from '../../composables'
 
 const props = defineProps<{
   isOpen: boolean
@@ -34,6 +34,7 @@ const totalCount = ref(0)
 const totalTruncated = ref(false)
 const formatMode = ref<'txt' | 'prefer_epub'>('txt')
 const { systemConfig } = useSystem()
+const { isBusy, notifyTaskEnqueued } = useTaskStatus()
 
 const zipName = ref('')
 const namingTemplate = ref('')
@@ -183,7 +184,7 @@ watch(() => props.isOpen, async (open) => {
 })
 
 async function handleConfirm() {
-  if (loading.value || totalCount.value === 0) return
+  if (loading.value || isBusy('batch_export') || totalCount.value === 0) return
   // 范围已在批量模式中决定——选多少下多少，不再二次决定数量。
   loading.value = true
   try {
@@ -194,6 +195,7 @@ async function handleConfirm() {
         zip_name: zipName.value || undefined,
         naming_template: namingTemplate.value || undefined,
       })
+      notifyTaskEnqueued('batch_export')
       emit('task-submitted', res)
       emit('close')
       return
@@ -248,7 +250,7 @@ async function handleConfirm() {
 </script>
 
 <template>
-  <BaseModal :is-open="isOpen" title="📦 打包下载" :loading="loading" confirm-text="确认下载" @close="$emit('close')" @confirm="handleConfirm">
+  <BaseModal :is-open="isOpen" title="📦 打包下载" :loading="loading" confirm-text="确认下载" :confirm-disabled="isBusy('batch_export')" @close="$emit('close')" @confirm="handleConfirm">
     <div class="text-sm text-gray-600 space-y-1">
       <div v-if="isIdsMode" class="flex items-center gap-2">
         <span class="font-medium text-gray-700 w-16 shrink-0">范围：</span>

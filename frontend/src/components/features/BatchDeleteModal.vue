@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import BaseModal from '../ui/BaseModal.vue'
 import { novelApi, BATCH_MAX_NOVELS, getApiErrorMessage } from '../../api'
+import { useTaskStatus } from '../../composables'
 import type { BatchScope } from '../../types'
 
 const CONFIRM_WORD = 'DELETE'
@@ -21,6 +22,7 @@ const emit = defineEmits<{
 
 const loading = ref(false)
 const confirmInput = ref('')
+const { isBusy, notifyTaskEnqueued } = useTaskStatus()
 
 const confirmReady = computed(() => confirmInput.value === CONFIRM_WORD)
 
@@ -34,7 +36,7 @@ watch(() => props.isOpen, (open) => {
 })
 
 async function handleConfirm() {
-  if (loading.value || !props.scope || !confirmReady.value) return
+  if (loading.value || isBusy('batch_operation') || !props.scope || !confirmReady.value) return
   loading.value = true
   try {
     if (isTaskMode.value) {
@@ -42,6 +44,7 @@ async function handleConfirm() {
         operation: 'delete',
         scope: props.scope,
       })
+      notifyTaskEnqueued('batch_operation')
       emit('task-submitted', res)
     } else {
       const result = await novelApi.batchOperation({
@@ -65,7 +68,7 @@ async function handleConfirm() {
     title="🗑️ 批量删除"
     :loading="loading"
     confirm-text="确认删除"
-    :confirm-disabled="!confirmReady"
+    :confirm-disabled="!confirmReady || isBusy('batch_operation')"
     @close="$emit('close')"
     @confirm="handleConfirm"
   >

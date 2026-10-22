@@ -4,7 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import Sidebar from './components/Sidebar.vue'
 import ToastContainer from './components/ui/ToastContainer.vue'
 import UploadModal from './components/features/UploadModal.vue'
-import { useNovels, useSystem, useToast, useBatchMode } from './composables'
+import { useNovels, useSystem, useToast, useBatchMode, useTaskStatus } from './composables'
 import { SECTIONS, resolveSection, sectionFor, type SectionId } from './config'
 import type { Novel, NovelFilters, BatchOperationResult, BatchMetadataResult } from './types'
 import type { NovelsState, BatchState, NovelsCommand, BatchAction } from './views/Novels.vue'
@@ -24,6 +24,10 @@ const {
 
 const { systemConfig, fetchConfig } = useSystem()
 const { toasts, success: toastSuccess, warning: toastWarning, info: toastInfo, error: toastError } = useToast()
+// Global task-status singleton: one fetch on mount picks up rows that were
+// already pending/running before the page loaded; it then polls only while
+// something is active (no per-view polling loops).
+const { startTaskStatusPolling } = useTaskStatus()
 const configLoadedAndApplied = ref(false)
 
 const isSidebarOpen = ref(false)
@@ -390,6 +394,7 @@ onMounted(() => {
   if (route.path !== '/') {
     activeSection.value = null
   }
+  startTaskStatusPolling()
   // Load novels once the config attempt settles — success applies the
   // defaults, failure still lets the home page browse with URL/current
   // filters instead of waiting forever for a systemConfig that never comes.

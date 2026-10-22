@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, watch, onMounted } from 'vue'
 import { taskApi, getApiErrorMessage } from '../api'
 import type { ScheduledTask } from '../types'
-import { usePagination, useToast } from '../composables'
+import { usePagination, useToast, useTaskStatus } from '../composables'
 import ScheduledTaskList from '../components/features/ScheduledTaskList.vue'
 import TaskHistoryList from '../components/features/TaskHistoryList.vue'
 import TaskEditModal from '../components/features/TaskEditModal.vue'
@@ -13,6 +13,8 @@ defineOptions({ inheritAttrs: false })
 defineEmits<{ (e: 'toggle-sidebar'): void }>()
 
 const toast = useToast()
+// 全局任务状态单例：唯一轮询器。运行入队后立即置灰同函数的「运行」按钮。
+const { busyFuncNames, tick, notifyTaskEnqueued } = useTaskStatus()
 const activeTab = ref<'scheduled' | 'history'>('scheduled')
 
 const {
@@ -32,6 +34,12 @@ const {
   refresh: refreshHistory,
   hasMore: hasMoreHistory,
 } = usePagination((offset, limit) => taskApi.getTaskHistory(limit, offset))
+
+// 单例每次成功轮询都会 +1 tick：历史页借用同一个 5s 节拍静默刷新，
+// 这样 running 行的 progress 仍然实时更新，而应用里依旧只有一个轮询器。
+watch(tick, () => {
+  if (activeTab.value === 'history') void refreshHistory({ silent: true })
+})
 
 const openModal = (task?: ScheduledTask) => {
   editingTask.value = task || null
@@ -89,8 +97,8 @@ const deleteTask = async (id: number) => {
 const runTask = async (task: ScheduledTask) => {
   try {
     await taskApi.runScheduledTask(task.id)
+    notifyTaskEnqueued(task.task)
     toast.success(`任务 "${task.name}" 已加入队列`)
-    if (activeTab.value === 'history') loadHistory()
   } catch (err: unknown) {
     toast.error(getApiErrorMessage(err, '运行失败'))
   }
@@ -107,29 +115,6 @@ const reorderTasks = async (newTasks: ScheduledTask[]) => {
 }
 
 onMounted(() => { loadTasks(); loadHistory() })
-
-// ---- live progress: poll the history while any task is pending/running
-// (batch_operation rows self-report progress into the `progress` column) ----
-const hasRunningTask = computed(() =>
-  history.value.some(h => ['pending', 'running'].includes((h.status || '').toLowerCase())),
-)
-
-let pollTimer: ReturnType<typeof setInterval> | null = null
-
-watch(hasRunningTask, (running) => {
-  if (running && pollTimer === null) {
-    // Silent in-place refresh — no list clear, no loading spinner, so the
-    // progress updates render without the page flickering.
-    pollTimer = setInterval(() => { void refreshHistory({ silent: true }) }, 5000)
-  } else if (!running && pollTimer !== null) {
-    clearInterval(pollTimer)
-    pollTimer = null
-  }
-})
-
-onBeforeUnmount(() => {
-  if (pollTimer !== null) clearInterval(pollTimer)
-})
 </script>
 
 <template>
@@ -149,7 +134,7 @@ onBeforeUnmount(() => {
       />
 
       <div v-if="activeTab === 'scheduled'">
-        <ScheduledTaskList :tasks="tasks" :loading="loadingTasks" @edit="openModal" @delete="deleteTask" @toggle="toggleTask" @run="runTask" @reorder="reorderTasks" />
+        <ScheduledTaskList :tasks="tasks" :loading="loadingTasks" :busy-task-names="busyFuncNames" @edit="openModal" @delete="deleteTask" @toggle="toggleTask" @run="runTask" @reorder="reorderTasks" />
       </div>
 
       <div v-if="activeTab === 'history'">

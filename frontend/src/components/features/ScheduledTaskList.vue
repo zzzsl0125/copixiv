@@ -3,10 +3,14 @@ import { Play, Square, Edit, Trash2, Zap } from '@lucide/vue'
 import DraggableTable, { type TableColumn } from './DraggableTable.vue'
 import type { ScheduledTask } from '../../types'
 
-defineProps<{
+const props = withDefaults(defineProps<{
   tasks: ScheduledTask[]
   loading: boolean
-}>()
+  /** Registered task functions that already have a pending/running history row. */
+  busyTaskNames?: string[]
+}>(), {
+  busyTaskNames: () => [],
+})
 
 const emit = defineEmits<{
   (e: 'edit', task: ScheduledTask): void
@@ -46,6 +50,12 @@ const columns: TableColumn[] = [
 const onDragEnd = (reorderedTasks: unknown[]) => {
   emit('reorder', reorderedTasks as ScheduledTask[])
 }
+
+/** 同函数已有 pending/running 行时禁止再次入队（去 409 后唯一防护）。 */
+const isTaskBusy = (task: ScheduledTask) => props.busyTaskNames.includes(task.task)
+
+const runTitle = (task: ScheduledTask) =>
+  isTaskBusy(task) ? '该任务已有待执行或执行中的记录，请稍候' : '立即运行'
 </script>
 
 <template>
@@ -70,7 +80,7 @@ const onDragEnd = (reorderedTasks: unknown[]) => {
       </template>
       <template #actions="{ item: task }">
         <div class="flex items-center justify-end space-x-2">
-          <button @click="emit('run', task as ScheduledTask)" class="inline-flex items-center px-2.5 py-1.5 border border-orange-200 shadow-sm text-xs font-medium rounded text-orange-700 bg-orange-50 hover:bg-orange-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500 transition-colors" title="立即运行">
+          <button @click="emit('run', task as ScheduledTask)" :disabled="isTaskBusy(task as ScheduledTask)" :title="runTitle(task as ScheduledTask)" class="inline-flex items-center px-2.5 py-1.5 border border-orange-200 shadow-sm text-xs font-medium rounded text-orange-700 bg-orange-50 hover:bg-orange-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
             <Zap class="w-4 h-4 mr-1" /> 运行
           </button>
           <button @click="emit('edit', task as ScheduledTask)" class="inline-flex items-center px-2.5 py-1.5 border border-blue-200 shadow-sm text-xs font-medium rounded text-blue-700 bg-blue-50 hover:bg-blue-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors" title="编辑">

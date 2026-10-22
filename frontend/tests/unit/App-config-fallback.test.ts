@@ -14,6 +14,8 @@ vi.mock('../../src/composables', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/composables')>()
   return {
     ...actual,
+    // App 挂载时只启动全局任务状态轮询；用空实现避免测试打真实 API。
+    useTaskStatus: () => ({ startTaskStatusPolling: vi.fn() }),
     useNovels: () => ({
       novels: { value: [] },
       loading: { value: false },

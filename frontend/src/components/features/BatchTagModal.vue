@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import BaseModal from '../ui/BaseModal.vue'
 import { novelApi, BATCH_MAX_NOVELS, getApiErrorMessage } from '../../api'
+import { useTaskStatus } from '../../composables'
 import type { BatchOperation, BatchScope } from '../../types'
 
 const props = defineProps<{
@@ -20,6 +21,7 @@ const emit = defineEmits<{
 
 const loading = ref(false)
 const input = ref('')
+const { isBusy, notifyTaskEnqueued } = useTaskStatus()
 
 const isAdd = computed(() => props.operation === 'add_tags')
 
@@ -48,7 +50,7 @@ watch(() => props.isOpen, (open) => {
 })
 
 async function handleConfirm() {
-  if (loading.value || !props.scope || parsedTags.value.length === 0) return
+  if (loading.value || isBusy('batch_operation') || !props.scope || parsedTags.value.length === 0) return
   loading.value = true
   try {
     const payload = {
@@ -58,6 +60,7 @@ async function handleConfirm() {
     }
     if (isTaskMode.value) {
       const res = await novelApi.submitBatchTask(payload)
+      notifyTaskEnqueued('batch_operation')
       emit('task-submitted', res)
     } else {
       const result = await novelApi.batchOperation(payload)
@@ -78,7 +81,7 @@ async function handleConfirm() {
     :title="title"
     :loading="loading"
     :confirm-text="confirmText"
-    :confirm-disabled="parsedTags.length === 0"
+    :confirm-disabled="parsedTags.length === 0 || isBusy('batch_operation')"
     @close="$emit('close')"
     @confirm="handleConfirm"
   >

@@ -3,7 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import { RefreshCw, RotateCcw, ExternalLink, AlertTriangle } from '@lucide/vue'
 import type { FailedNovel } from '../types'
 import { failedNovelApi, getApiErrorMessage } from '../api'
-import { useToast } from '../composables'
+import { useToast, useTaskStatus } from '../composables'
 import PageHeader from '../components/features/PageHeader.vue'
 import EmptyState from '../components/ui/EmptyState.vue'
 
@@ -11,6 +11,7 @@ defineOptions({ inheritAttrs: false })
 defineEmits<{ (e: 'toggle-sidebar'): void }>()
 
 const toast = useToast()
+const { isBusy, notifyTaskEnqueued } = useTaskStatus()
 
 const items = ref<FailedNovel[]>([])
 const total = ref(0)
@@ -72,10 +73,11 @@ async function resetOne(novel: FailedNovel) {
 }
 
 async function retryOne(novel: FailedNovel) {
-  if (anyRetrying.value) return
+  if (anyRetrying.value || isBusy('failed_retry')) return
   retryingIds.value = new Set([novel.novel_id])
   try {
     const { task_id } = await failedNovelApi.retry([novel.novel_id])
+    notifyTaskEnqueued('failed_retry')
     toast.success(`已入队重试 #${novel.novel_id}（任务 #${task_id}，可在任务管理查看进度）`)
   } catch (err) {
     toast.error(getApiErrorMessage(err, '入队重试失败'))
@@ -85,13 +87,14 @@ async function retryOne(novel: FailedNovel) {
 }
 
 async function retryAll() {
-  if (anyRetrying.value || total.value === 0) return
+  if (anyRetrying.value || isBusy('failed_retry') || total.value === 0) return
   // 全部重试 = 整本台账（服务端取全量），不是已加载的当前页。
   // 确认数用 total（真实总数），与「所有失败项，不只当前页」的表述一致。
   if (!window.confirm(`入队重试全部 ${total.value} 条失败记录？（所有失败项，不只当前页）`)) return
   retryingAll.value = true
   try {
     const { task_id, matched } = await failedNovelApi.retryAll()
+    notifyTaskEnqueued('failed_retry')
     toast.success(`已入队重试 ${matched} 条记录（任务 #${task_id}，可在任务管理查看进度）`)
   } catch (err) {
     toast.error(getApiErrorMessage(err, '入队重试失败'))
@@ -131,7 +134,7 @@ onMounted(load)
         <div class="flex gap-2">
           <button
             class="inline-flex items-center px-3 py-1.5 text-sm font-medium rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-            :disabled="anyRetrying || total === 0"
+            :disabled="anyRetrying || isBusy('failed_retry') || total === 0"
             @click="retryAll"
           >
             <RefreshCw class="mr-1.5 h-4 w-4" />
@@ -198,7 +201,7 @@ onMounted(load)
                   <div class="flex justify-end gap-2">
                     <button
                       class="inline-flex items-center px-2.5 py-1 text-xs font-medium rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                      :disabled="anyRetrying"
+                      :disabled="anyRetrying || isBusy('failed_retry')"
                       @click="retryOne(item)"
                     >
                       <RefreshCw class="mr-1 h-3.5 w-3.5" :class="{ 'animate-spin': retryingIds.has(item.novel_id) }" />

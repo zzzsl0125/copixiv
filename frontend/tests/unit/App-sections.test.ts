@@ -37,6 +37,7 @@ function createFilters(): NovelFilters {
 }
 
 vi.mock('../../src/composables', () => ({
+  useTaskStatus: () => ({ startTaskStatusPolling: vi.fn() }),
   useNovels: () => ({
     novels: { value: [] },
     loading: { value: false },
