@@ -28,7 +28,6 @@ class ScheduledTaskCreate(BaseModel):
     task: str
     cron: str
     params: dict[str, Any] | None = None
-    config: dict[str, Any] | None = None
     is_enabled: bool = False
     sort_index: int = 0
 
@@ -63,7 +62,6 @@ class ScheduledTaskUpdate(BaseModel):
     task: str | None = None
     cron: str | None = None
     params: dict[str, Any] | None = None
-    config: dict[str, Any] | None = None
     is_enabled: bool | None = None
     sort_index: int | None = None
 
@@ -79,7 +77,6 @@ class ScheduledTaskResponse(ScheduledTaskCreate):
     id: int
     model_config = ConfigDict(from_attributes=True)
 
-    _parse_config = field_validator("config", mode="before")(_parse_json_str)
     _parse_params = field_validator("params", mode="before")(_parse_json_str)
 
 

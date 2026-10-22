@@ -346,7 +346,6 @@ class ScheduledTask(Base):
     cron = Column(Text, nullable=False)
     params = Column(JSONB, nullable=True)
     is_enabled = Column(Boolean, default=False, nullable=False)
-    config = Column(Text, nullable=True, default="{}")
     sort_index = Column(Integer, default=0, nullable=False)
 
 

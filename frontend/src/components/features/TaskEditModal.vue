@@ -31,7 +31,6 @@ const formState = ref({
   task: '',
   cron: '',
   params: '{}',
-  config: '{}',
   is_enabled: true,
 })
 
@@ -158,13 +157,12 @@ watch(() => props.isOpen, (newVal) => {
         task: props.task.task,
         cron: props.task.cron,
         params: props.task.params ? JSON.stringify(props.task.params, null, 2) : '{}',
-        config: props.task.config ? JSON.stringify(props.task.config, null, 2) : '{}',
         is_enabled: props.task.is_enabled,
       }
       parseCronToUI(props.task.cron)
       dynamicParams.value = initialDynamicParams(props.task.task)
     } else {
-      formState.value = { name: '', task: '', cron: '0 0 * * *', params: '{}', config: '{}', is_enabled: true }
+      formState.value = { name: '', task: '', cron: '0 0 * * *', params: '{}', is_enabled: true }
       cronMode.value = 'daily'
       cronTime.value = { hour: 0, minute: 0 }
       dynamicParams.value = {}
@@ -201,13 +199,11 @@ const handleSave = () => {
         paramsObj[name] = coerceFormValue(name, dynamicParams.value[name], prop)
       }
     })
-    const configObj = JSON.parse(formState.value.config || '{}')
     emit('save', {
       name: formState.value.name,
       task: formState.value.task,
       cron: formState.value.cron,
       params: paramsObj,
-      config: configObj,
       is_enabled: formState.value.is_enabled,
     })
   } catch (err: unknown) {

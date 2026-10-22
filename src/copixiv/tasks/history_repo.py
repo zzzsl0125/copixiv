@@ -125,8 +125,6 @@ class SQLAlchemyTaskRepository(BaseRepository):
     async def create_scheduled(
         self, task_data: dict
     ) -> models.ScheduledTask:
-        if "config" in task_data and isinstance(task_data["config"], dict):
-            task_data["config"] = json.dumps(task_data["config"], ensure_ascii=False)
         task = models.ScheduledTask(**task_data)
         self.session.add(task)
         self.session.flush()
@@ -135,8 +133,6 @@ class SQLAlchemyTaskRepository(BaseRepository):
     async def update_scheduled(
         self, task_id: int, task_data: dict
     ) -> models.ScheduledTask | None:
-        if "config" in task_data and isinstance(task_data["config"], dict):
-            task_data["config"] = json.dumps(task_data["config"], ensure_ascii=False)
         return self._update_attrs(models.ScheduledTask, task_id, task_data)
 
     async def delete_scheduled(self, task_id: int) -> bool:

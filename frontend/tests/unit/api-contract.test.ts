@@ -270,16 +270,13 @@ describe('TaskHistory（tasks/schemas.py:TaskHistoryResponse）', () => {
 })
 
 describe('ScheduledTask（tasks/schemas.py:ScheduledTaskResponse）', () => {
-  it('id/name/task/cron/is_enabled 必填；params/config 可空 dict；sort_index 默认 0', () => {
+  it('id/name/task/cron/is_enabled 必填；params 可空 dict；sort_index 默认 0', () => {
     const t: ScheduledTask = {
       id: 3,
       name: '每日收藏同步',
       task: 'novel_follow',
       cron: '0 3 * * *',
       params: { limit: 50 },
-      // 后端 config 为 dict|None，缺省时线上下发 null；前端类型已允许 null
-      // （F3 收口对齐），这里用 null 钉住缺省形态。
-      config: null,
       is_enabled: true,
       sort_index: 0,
     }
@@ -289,8 +286,17 @@ describe('ScheduledTask（tasks/schemas.py:ScheduledTaskResponse）', () => {
     expect(typeof t.cron).toBe('string')
     expect(typeof t.is_enabled).toBe('boolean')
     optionalDict(t.params)
-    optionalDict(t.config)
     optionalNumber(t.sort_index)
+  })
+
+  it('没有 config 字段（0011 已删除该死列）', () => {
+    // ``config`` 从未被任何任务读取、UI 也没有输入框；这里钉住"不再回来"，
+    // 防止后端误加字段后生成的类型静默变大。
+    const t: ScheduledTask = {
+      id: 1, name: 'n', task: 'rebuild_fts', cron: '0 0 * * *',
+      is_enabled: false, sort_index: 0,
+    }
+    expect('config' in t).toBe(false)
   })
 })
 

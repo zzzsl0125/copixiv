@@ -1547,10 +1547,6 @@ export interface components {
         };
         /** ScheduledTaskCreate */
         ScheduledTaskCreate: {
-            /** Config */
-            config?: {
-                [key: string]: unknown;
-            } | null;
             /** Cron */
             cron: string;
             /**
@@ -1574,10 +1570,6 @@ export interface components {
         };
         /** ScheduledTaskResponse */
         ScheduledTaskResponse: {
-            /** Config */
-            config?: {
-                [key: string]: unknown;
-            } | null;
             /** Cron */
             cron: string;
             /** Id */
@@ -1603,10 +1595,6 @@ export interface components {
         };
         /** ScheduledTaskUpdate */
         ScheduledTaskUpdate: {
-            /** Config */
-            config?: {
-                [key: string]: unknown;
-            } | null;
             /** Cron */
             cron?: string | null;
             /** Is Enabled */

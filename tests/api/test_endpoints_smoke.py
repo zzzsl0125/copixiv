@@ -342,6 +342,33 @@ class TestTasksEndpoints:
         assert r.status_code == 200
         assert r.json()["cron"] == "*/15 9-17 * * 1-5"
 
+    def test_scheduled_tasks_no_longer_expose_config(self, client):
+        """``config`` was a dead TEXT column; the wire shape must not carry it.
+
+        The UI never had an input for it and always sent ``{}``; ``params``
+        (JSONB) is the field tasks actually read.  Pinning this keeps the
+        generated frontend types from silently growing the field back.
+        """
+        created = client.post("/api/tasks/scheduled", json={
+            "name": "无 config", "task": "rebuild_fts", "cron": "0 4 * * *",
+            "is_enabled": False, "config": {"ignored": True},
+        })
+        assert created.status_code == 200
+        assert "config" not in created.json()
+
+        listed = client.get("/api/tasks/scheduled")
+        assert listed.status_code == 200
+        assert listed.json()
+        assert all("config" not in t for t in listed.json())
+
+        task_id = created.json()["id"]
+        updated = client.put(f"/api/tasks/scheduled/{task_id}", json={
+            "name": "改名后", "is_enabled": True,
+        })
+        assert updated.status_code == 200
+        assert updated.json()["name"] == "改名后"
+        assert "config" not in updated.json()
+
     @pytest.mark.parametrize(
         "cron",
         [

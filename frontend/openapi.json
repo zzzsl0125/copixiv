@@ -1051,18 +1051,6 @@
       },
       "ScheduledTaskCreate": {
         "properties": {
-          "config": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Config"
-          },
           "cron": {
             "title": "Cron",
             "type": "string"
@@ -1108,18 +1096,6 @@
       },
       "ScheduledTaskResponse": {
         "properties": {
-          "config": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Config"
-          },
           "cron": {
             "title": "Cron",
             "type": "string"
@@ -1170,18 +1146,6 @@
       },
       "ScheduledTaskUpdate": {
         "properties": {
-          "config": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Config"
-          },
           "cron": {
             "anyOf": [
               {

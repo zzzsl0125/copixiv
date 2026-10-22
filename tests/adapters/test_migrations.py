@@ -88,6 +88,23 @@ class TestMigrations:
         from copixiv.db import models  # noqa: F401 — import registers mappings
         configure_mappers()
 
+    def test_scheduled_task_dropped_dead_config_column(self, pg_engine):
+        """0011 removed the never-read ``config`` TEXT column.
+
+        The ORM model and the migrated schema must agree: keeping the column in
+        one place only would make a downgrade (or a fresh install) differ from
+        the running app, which is exactly the drift 0011 exists to remove.
+        """
+        insp = inspect(pg_engine)
+        columns = {c["name"] for c in insp.get_columns("scheduled_task")}
+        assert "config" not in columns
+        assert {"id", "name", "task", "cron", "params", "is_enabled",
+                "sort_index"} <= columns
+
+        from copixiv.db.models import ScheduledTask
+
+        assert "config" not in ScheduledTask.__table__.columns
+
 
 @pytest.mark.slow
 def test_fresh_database_upgrades_to_head():
