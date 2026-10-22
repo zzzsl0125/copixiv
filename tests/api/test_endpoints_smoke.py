@@ -700,12 +700,14 @@ class TestTaskHistoryShape:
         with session_factory() as s:
             s.add_all([
                 TaskHistory(
-                    name="novel_fetch", status="success",
+                    name="下载小说", task_func="novel_fetch", status="success",
                     arguments='{"id": 1}',
                     start_time=datetime(2026, 1, 1, tzinfo=timezone.utc),
                     result={"summary": "下载完成", "new_novels_count": 1,
                             "new_novel_titles": ["t"]},
                 ),
+                # Legacy row: written before ``task_func`` existed — the field
+                # must serialize as null instead of breaking the response.
                 TaskHistory(
                     name="rebuild_fts", status="running",
                     start_time=datetime(2026, 1, 2, tzinfo=timezone.utc),
@@ -728,8 +730,14 @@ class TestTaskHistoryShape:
             assert item["status"] in self.LOWER_STATUSES
             assert item["status"] == item["status"].lower()
 
-        success = next(i for i in body["items"] if i["name"] == "novel_fetch")
+        success = next(i for i in body["items"] if i["task_func"] == "novel_fetch")
+        # ``name`` stays the display label; ``task_func`` is the registered
+        # function the frontend guard keys on.
+        assert success["name"] == "下载小说"
         # JSON columns must arrive as parsed objects, not strings.
         assert success["arguments"] == {"id": 1}
         assert success["result"]["new_novels_count"] == 1
         assert success["result"]["new_novel_titles"] == ["t"]
+
+        legacy_running = next(i for i in body["items"] if i["name"] == "rebuild_fts")
+        assert legacy_running["task_func"] is None

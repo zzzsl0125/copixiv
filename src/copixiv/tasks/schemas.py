@@ -86,6 +86,10 @@ class ScheduledTaskResponse(ScheduledTaskCreate):
 class TaskHistoryResponse(BaseModel):
     id: int
     name: str
+    # Registered function name (``task_history.task_func``); ``name`` is the
+    # user-facing display label.  NULL on legacy rows written before the
+    # column existed.
+    task_func: str | None = None
     arguments: dict | None = None
     status: str
     # timestamptz → datetime; Pydantic serializes to an ISO string on the wire.
