@@ -22,6 +22,10 @@ from copixiv.tasks.maintenance import (
     rebuild_fts,
 )
 from copixiv.tasks.maintenance import FixSeriesIndexArgs, fix_series_index
+# ``check_epub`` reads its sweep knobs from its own module globals, so patches
+# that must change its behaviour target ``.epub`` (the package only re-exports
+# them). Patching the package would leave the real consumer untouched.
+from copixiv.tasks.maintenance import epub as maintenance_epub
 
 
 @pytest.fixture(autouse=True)
@@ -241,12 +245,10 @@ class TestCheckEpubTombstoneRepair:
             session_factory, 14, "纯文字无图", False, tmp_path,
             status=EpubStatus.NO_IMAGES,
         )
-        from copixiv.tasks import maintenance
-
         calls: list[str] = []
-        real_scan = maintenance._scan_placeholder
+        real_scan = maintenance_epub._scan_placeholder
         monkeypatch.setattr(
-            maintenance, "_scan_placeholder",
+            maintenance_epub, "_scan_placeholder",
             lambda p: calls.append(str(p)) or real_scan(p),
         )
 
@@ -409,21 +411,19 @@ class TestCheckEpubDoesNotBlockTheEventLoop:
     ):
         import threading
 
-        from copixiv.tasks import maintenance
-
         await _seed_pending(
             session_factory, 30, "正文 [uploadedimage:1]", True, tmp_path,
         )
 
         loop_thread = threading.get_ident()
         seen: dict[str, int] = {}
-        real_sweep = maintenance._sweep
+        real_sweep = maintenance_epub._sweep
 
         def spy(rows, offset=0):
             seen["thread"] = threading.get_ident()
             return real_sweep(rows, offset)
 
-        monkeypatch.setattr(maintenance, "_sweep", spy)
+        monkeypatch.setattr(maintenance_epub, "_sweep", spy)
 
         await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
 
@@ -531,7 +531,7 @@ class TestCheckEpubResumableSweep:
                 session_factory, nid, "纯文字无图", False, tmp_path,
                 status=EpubStatus.NO,
             )
-        monkeypatch.setattr(maintenance, "_MAX_ROWS_PER_RUN", 2)
+        monkeypatch.setattr(maintenance_epub, "_MAX_ROWS_PER_RUN", 2)
 
         first = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
         assert "下轮从" in first.summary
@@ -553,7 +553,7 @@ class TestCheckEpubResumableSweep:
             session_factory, 44, "纯文字无图", False, tmp_path,
             status=EpubStatus.NO,
         )
-        monkeypatch.setattr(maintenance, "_MAX_ROWS_PER_RUN", 1)
+        monkeypatch.setattr(maintenance_epub, "_MAX_ROWS_PER_RUN", 1)
 
         await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
         # 游标停在表尾且非 0 → 本轮无事可做，复位并声明从头复查
