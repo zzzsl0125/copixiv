@@ -69,14 +69,9 @@ def has_raw_markers(path: Path) -> bool:
     """
     try:
         with zipfile.ZipFile(path) as archive:
-            for name in archive.namelist():
-                if not name.lower().endswith(_TEXT_SUFFIXES):
-                    continue
-                if has_image_placeholders_bytes(archive.read(name)):
-                    return True
-    except (OSError, zipfile.BadZipFile, KeyError):
+            return _archive_has_raw_markers(archive)
+    except (OSError, zipfile.BadZipFile):
         return False
-    return False
 
 
 def has_embedded_images(path: Path) -> bool:
@@ -89,12 +84,7 @@ def has_embedded_images(path: Path) -> bool:
     """
     try:
         with zipfile.ZipFile(path) as archive:
-            # A real file entry, not the "images/" directory entry itself —
-            # an empty EPUB can carry the directory and nothing in it.
-            return any(
-                _IMAGES_PREFIX in info.filename and not info.is_dir()
-                for info in archive.infolist()
-            )
+            return _archive_has_images(archive)
     except (OSError, zipfile.BadZipFile):
         return False
 
@@ -105,8 +95,56 @@ def is_complete(path: Path) -> bool:
     This is the single "the produced EPUB is actually finished" predicate.
     Every promotion to ``DONE`` uses it, so a file written while its images
     were missing can never be blessed regardless of the row's current status.
+
+    Opens the container **once** and asks both questions against that one
+    archive: re-opening the same file to answer the second half of the same
+    predicate is exactly the kind of duplicated work this module exists to
+    remove (it also keeps the two answers from ever seeing different files if
+    a rebuild lands between the reads).
     """
-    return has_embedded_images(path) and not has_raw_markers(path)
+    try:
+        with zipfile.ZipFile(path) as archive:
+            return (
+                _archive_has_images(archive)
+                and not _archive_has_raw_markers(archive)
+            )
+    except (OSError, zipfile.BadZipFile):
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Archive-level helpers — the bodies shared by the single- and multi-open
+# entry points.  Keeping them separate is what lets ``is_complete`` read one
+# archive while the individual predicates stay cheap to call on their own.
+# ---------------------------------------------------------------------------
+
+def _archive_has_raw_markers(archive: zipfile.ZipFile) -> bool:
+    """Scan *archive*'s XHTML members for an unresolved marker.
+
+    A member that cannot be read (KeyError) means the container is damaged;
+    the marker question then has no reliable answer, so it is reported as
+    "no markers" — the same conservative result the old per-call version
+    produced, and ``is_complete`` still guards the file via the images check.
+    """
+    try:
+        for name in archive.namelist():
+            if not name.lower().endswith(_TEXT_SUFFIXES):
+                continue
+            if has_image_placeholders_bytes(archive.read(name)):
+                return True
+    except (OSError, KeyError):
+        return False
+    return False
+
+
+def _archive_has_images(archive: zipfile.ZipFile) -> bool:
+    """True when *archive* carries a real file entry under ``images/``."""
+    # A real file entry, not the "images/" directory entry itself — an empty
+    # EPUB can carry the directory and nothing in it.
+    return any(
+        _IMAGES_PREFIX in info.filename and not info.is_dir()
+        for info in archive.infolist()
+    )
 
 
 def needs_epub(body: str | None) -> bool | None:

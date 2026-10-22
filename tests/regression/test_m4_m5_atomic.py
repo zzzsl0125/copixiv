@@ -377,3 +377,69 @@ def test_valid_epub_still_short_circuits(tmp_path):
         assert dl._futures == []          # nothing submitted
     finally:
         dl.shutdown()
+
+
+def test_existing_epub_short_circuits_on_a_metadata_only_draft(tmp_path):
+    """``content=None`` (no body) must not force a rebuild of a clean file.
+
+    The short-circuit is tri-state: with a body that has placeholders an
+    existing file must be *complete*; with no body at all nothing can be
+    judged, so any readable file without raw markers is accepted as-is.
+    Treating "no body" as "needs images" would rebuild every metadata-only
+    draft on every run.
+    """
+    novel_dir = tmp_path / "novel"
+    novel_dir.mkdir()
+    text_path = novel_dir / "novel9.txt"
+    text_path.write_text("纯文字正文", encoding="utf-8")
+    assert EpubBuilder().create_epub(NovelDraft(
+        id=9, title="t", author_id=0, path=str(text_path),
+    )) is True
+
+    dl = ImageDownloader(max_workers=1)
+    try:
+        asyncio.run(dl.process_novel_assets(NovelDraft(
+            id=9, title="t", author_id=0, path=str(text_path),  # content=None
+        )))
+        assert dl._futures == []          # nothing submitted
+        assert dl.drain_outcomes() == {9: "done"}
+    finally:
+        dl.shutdown()
+
+
+def test_marker_bearing_existing_epub_is_rebuilt_without_a_body(tmp_path):
+    """Even with no body, a file whose XHTML still holds a marker is rebuilt."""
+    novel_dir = tmp_path / "novel"
+    novel_dir.mkdir()
+    text_path = novel_dir / "novel10.txt"
+    text_path.write_text("正文 [pixivimage:94602186]", encoding="utf-8")
+    data = NovelDraft(
+        id=10, title="t", author_id=0, path=str(text_path),
+        images={"1": {}},
+    )
+    assert EpubBuilder().create_epub(data) is True
+    epub = text_path.with_suffix(".epub")
+
+    # Force a leftover marker into the built file (the 216-file lineage).
+    # ebooklib emits ``<body>`` with attributes, so the marker is appended to
+    # the end of the document instead of matching a literal ``<body>``.
+    with zipfile.ZipFile(epub) as zf:
+        members = [(n, zf.read(n)) for n in zf.namelist()]
+    marker = b"[pixivimage:94602186]"
+    with zipfile.ZipFile(epub, "w") as zf:
+        for name, payload in members:
+            if name == "EPUB/content.xhtml" and marker not in payload:
+                payload = payload.replace(b"</body>", marker + b"</body>")
+            zf.writestr(name, payload)
+
+    dl = ImageDownloader(max_workers=1, min_interval=0)
+    try:
+        asyncio.run(dl.process_novel_assets(NovelDraft(
+            id=10, title="t", author_id=0, path=str(text_path),  # content=None
+            # An asset must be present, otherwise the "no assets and no body"
+            # early return would ``skip`` before the guard is ever consulted.
+            images={"1": {}},
+        )))
+        assert dl._futures != []          # submitted for a rebuild
+    finally:
+        dl.shutdown()

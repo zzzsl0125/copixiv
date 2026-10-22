@@ -188,6 +188,17 @@ class ImageDownloader:
         # disagreed with the reconciler (same row: PENDING + file + no
         # placeholder → NO_IMAGES there, ``done`` here) and blessed files
         # whose XHTML still carried raw markers.
+        #
+        # Tri-state, and all three branches matter:
+        #   True  — the body has placeholders: an existing file only counts if
+        #           it is *complete* (markers resolved AND an illustration
+        #           embedded), otherwise rebuild.
+        #   False — the body needs no EPUB: a pre-existing file is final, even
+        #           an image-less one.  Re-judging it would downgrade a
+        #           legitimately DONE row.
+        #   None  — a metadata-only draft (no body): nothing can be judged, so
+        #           any readable file short-circuits.  Rebuilding here would be
+        #           pure waste and the builder would read the text anyway.
         needs_epub = state.needs_epub(novel.content)
 
         epub_path = formats.sibling_path(Path(path_str), formats.EPUB)
@@ -198,14 +209,33 @@ class ImageDownloader:
                 # re-download of an image-less novel from downgrading an
                 # existing DONE to NO_IMAGES merely because the fresh body
                 # carries no marker.
+                #
+                # Deliberately *not* ``state.is_complete``: a body with no
+                # placeholders can never need an EPUB, so a pre-existing file
+                # (even an image-less one from an earlier run) is the final
+                # state.  Re-judging it here would downgrade a legitimately
+                # DONE row — the exact regression this branch exists to stop.
                 self._record_outcome(novel_id, "done")
                 return
-            if not state.has_raw_markers(epub_path):
-                # Marker-bearing text, clean file: done.
+            if needs_epub is None and not state.has_raw_markers(epub_path):
+                # No body to judge: the only observable defect is an unresolved
+                # marker (a file we know the reader would see as raw text).
+                # Absent a body, "no images embedded" is not a verdict — a
+                # plain-text novel built without pictures is legitimately done.
                 self._record_outcome(novel_id, "done")
                 return
-            # File exists but still holds raw markers — fall through and
-            # rebuild it instead of reporting a finished novel that isn't.
+            if needs_epub is True and state.is_complete(epub_path):
+                # Marker-bearing text, finished file (markers resolved *and*
+                # illustrations embedded): done.  Asking the same predicate the
+                # reconciler uses is the point of ``state`` — the old
+                # marker-only check called a "缺图框" EPUB done while
+                # ``check_epub`` kept it PENDING, so two guards disagreed about
+                # the very same file.
+                self._record_outcome(novel_id, "done")
+                return
+            # File exists but is not finished for the body we have (raw markers,
+            # or needed images that never landed) — fall through and rebuild it
+            # instead of reporting a finished novel that isn't.
 
         if not novel.images and not novel.illusts and needs_epub is not True:
             # No downloadable asset in this API payload and the body needs no

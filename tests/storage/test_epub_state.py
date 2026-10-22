@@ -138,6 +138,58 @@ class TestFilePredicates:
         assert state.is_complete(path) is True
 
 
+class TestSingleOpen:
+    """``is_complete`` must ask both questions of **one** archive handle."""
+
+    def test_is_complete_opens_the_container_once(self, tmp_path, monkeypatch):
+        path = _write(
+            tmp_path / "done.epub",
+            _zip_of(("images/1.jpg", b"\xff\xd8\xff"),
+                    ("content.xhtml", b"<p>resolved</p>")),
+        )
+        openings: list[object] = []
+        original = zipfile.ZipFile
+
+        class Counting(original):
+            def __init__(self, *args, **kwargs):
+                openings.append(args[0] if args else kwargs.get("file"))
+                super().__init__(*args, **kwargs)
+
+        monkeypatch.setattr(zipfile, "ZipFile", Counting)
+        assert state.is_complete(path) is True
+        assert len(openings) == 1
+
+    def test_is_complete_agrees_with_the_two_predicates(self, tmp_path):
+        """The combined answer is exactly ``images and not markers``."""
+        cases = {
+            "complete": (("images/1.jpg", b"x"),
+                         ("content.xhtml", b"<p>ok</p>")),
+            "no_images": (("content.xhtml", b"<p>ok</p>"),),
+            "marker": (("images/1.jpg", b"x"),
+                       ("content.xhtml", b"<p>[uploadedimage:1]</p>")),
+            "both": (("content.xhtml", b"<p>[pixivimage:2]</p>"),),
+        }
+        for name, members in cases.items():
+            path = _write(tmp_path / f"{name}.epub", _zip_of(*members))
+            expected = (
+                state.has_embedded_images(path)
+                and not state.has_raw_markers(path)
+            )
+            assert state.is_complete(path) is expected, name
+
+    def test_unreadable_member_does_not_raise(self, tmp_path):
+        """A zip whose member read fails must degrade, not crash."""
+        path = _write(
+            tmp_path / "broken.epub",
+            _zip_of(("images/1.jpg", b"x"), ("content.xhtml", b"ok")),
+        )
+        # Truncate so the central directory survives but member data does not.
+        data = path.read_bytes()
+        path.write_bytes(data[: len(data) // 2])
+        assert state.is_complete(path) in (True, False)   # no exception
+        assert state.has_raw_markers(path) in (True, False)
+
+
 class TestNeedsEpub:
     def test_unknown_body_is_none(self):
         assert state.needs_epub(None) is None

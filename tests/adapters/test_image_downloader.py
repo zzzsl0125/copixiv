@@ -224,8 +224,17 @@ class TestDrainOutcomes:
     async def test_done_when_valid_epub_already_exists(self, tmp_path):
         body = "正文 [uploadedimage:1]"
         path = self._text(tmp_path, 6, body)
+        # The pre-built file must be *complete* (markers resolved AND an
+        # illustration embedded): the short-circuit now asks the same
+        # ``state.is_complete`` predicate the reconciler uses.  Without the
+        # image the builder emits a 缺图框 shell, which deliberately no longer
+        # short-circuits — see ``test_incomplete_epub_is_rebuilt``.
+        from PIL import Image
+
+        Image.new("RGB", (2, 2), (0, 0, 255)).save(path.parent / "6_u_1.jpg")
         assert EpubBuilder().create_epub(NovelDraft(
             id=6, title="novel6", author_id=0, path=str(path),
+            images={"1": {}},
         )) is True
 
         dl = ImageDownloader(
@@ -238,6 +247,41 @@ class TestDrainOutcomes:
             ))
             assert dl._futures == []              # short-circuit, no worker
             assert dl.drain_outcomes() == {6: "done"}
+        finally:
+            dl.shutdown()
+
+    async def test_incomplete_epub_is_rebuilt_not_reported_done(self, tmp_path):
+        """A 缺图框 EPUB must not short-circuit — the reconciler keeps it PENDING.
+
+        This is the disagreement the shared predicate removes: the builder
+        degrades an un-embeddable marker to a visible missing-image box (so
+        no raw marker is left), and the old marker-only guard called that file
+        done while ``check_epub`` refused to promote it.  Asking
+        ``state.is_complete`` makes both agree, and the downloader rebuilds
+        instead of blessing an empty shell.
+        """
+        body = "正文 [uploadedimage:1]"
+        path = self._text(tmp_path, 61, body)
+        # Build with no image on disk → 缺图框 shell (readable, no marker, no
+        # images/ member): exactly the file that used to be reported done.
+        assert EpubBuilder().create_epub(NovelDraft(
+            id=61, title="novel61", author_id=0, path=str(path),
+        )) is True
+
+        dl = ImageDownloader(
+            max_workers=1, min_interval=0, epub_builder=EpubBuilder(),
+        )
+        try:
+            await dl.process_novel_assets(NovelDraft(
+                id=61, title="novel61", author_id=0, path=str(path),
+                content=body, images={"1": {}},
+            ))
+            # Not short-circuited: a worker was actually submitted.
+            assert dl._futures != []
+            await dl.await_all()
+            # The rebuild still cannot embed the (still missing) image, so the
+            # "done" here comes from one builder run — never from the guard.
+            assert dl.drain_outcomes() == {61: "done"}
         finally:
             dl.shutdown()
 
