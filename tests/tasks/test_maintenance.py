@@ -158,43 +158,67 @@ def _get_status(sf, nid: int) -> int:
         return s.get(Novel, nid).has_epub
 
 
+# ``check_epub`` is a decision table over (row status x file facts x body
+# facts), so its cases are data, not prose: one row per combination keeps the
+# whole table visible at once and makes a new state cheap to add.  The columns
+# are the same three facts the sweep reads (``state.py``): is there a readable
+# container, does its XHTML still hold a raw marker, did it embed an image.
+async def _run_check_epub(session_factory):
+    return await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
+
+
+def _epub_case(
+    nid: int, body: str, *, epub: bool, status: int,
+):
+    """One ``check_epub`` row: seed a novel, run the task, return the verdict."""
+    return nid, body, epub, status
+
+
 class TestCheckEpubDowngrade:
-    async def test_downgrades_pending_without_placeholders(
+    @pytest.mark.parametrize(
+        "body,epub,status,expected_summary,expected_status",
+        [
+            # PENDING + no epub + body has no placeholders -> terminal no-images.
+            ("没有图片的正文", False, EpubStatus.PENDING, "确认为无图",
+             EpubStatus.NO_IMAGES),
+            # PENDING + no epub file + placeholders present -> stays pending.
+            ("正文 [uploadedimage:12345]", False, EpubStatus.PENDING, "仍待处理",
+             EpubStatus.PENDING),
+            # PENDING + epub file exists -> DONE (existing behaviour).
+            ("有图 [uploadedimage:1]", True, EpubStatus.PENDING, "已完成",
+             EpubStatus.DONE),
+        ],
+        ids=["no-images-terminal", "placeholders-pending", "epub-completes"],
+    )
+    async def test_pending_row_verdict(
         self, session_factory, tmp_path,
+        body, epub, status, expected_summary, expected_status,
     ):
-        """PENDING + no epub + body has no placeholders → NO_IMAGES (terminal)."""
-        await _seed_pending(session_factory, 1, "没有图片的正文", False, tmp_path)
+        await _seed(session_factory, 1, body, epub, tmp_path, status=status)
 
-        result = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
+        result = await _run_check_epub(session_factory)
 
-        assert "确认为无图" in result.summary
-        assert _get_status(session_factory, 1) == EpubStatus.NO_IMAGES
+        assert expected_summary in result.summary
+        assert _get_status(session_factory, 1) == expected_status
 
-    async def test_keeps_pending_with_placeholders(
-        self, session_factory, tmp_path,
-    ):
-        """PENDING + no epub file + placeholders present → stays PENDING."""
-        await _seed_pending(
-            session_factory, 2, "正文 [uploadedimage:12345]", False, tmp_path,
-        )
 
-        result = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
-
-        assert "仍待处理" in result.summary
-        assert _get_status(session_factory, 2) == 1
-
-    async def test_completes_pending_with_epub_file(
-        self, session_factory, tmp_path,
-    ):
-        """PENDING + epub file exists → DONE (existing behaviour)."""
-        await _seed_pending(
-            session_factory, 3, "有图 [uploadedimage:1]", True, tmp_path,
-        )
-
-        result = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
-
-        assert "已完成" in result.summary
-        assert _get_status(session_factory, 3) == 2
+def _prepare_epub(prep: str, txt_path: Path, nid: int) -> None:
+    """Materialise one "EPUB file facts" column of the check_epub table."""
+    if prep == "none":
+        return
+    if prep == "complete":
+        _write_real_epub(txt_path, nid)                     # readable + image
+    elif prep == "image_less":
+        _write_real_epub(txt_path, nid, with_image=False)   # readable, no image
+    elif prep == "cover_only":
+        _write_real_epub(
+            txt_path, nid, with_image=False, cover_only=True,
+        )                                                  # the 216 lineage shape
+    elif prep == "marker":
+        _write_real_epub(txt_path, nid, with_image=True)
+        _inject_marker(txt_path.with_suffix(".epub"))      # B1 residue
+    else:                                                  # pragma: no cover
+        raise AssertionError(f"unknown epub prep: {prep}")
 
 
 class TestCheckEpubTombstoneRepair:
@@ -203,44 +227,78 @@ class TestCheckEpubTombstoneRepair:
     229 806 rows carried 0, 3 124 of them with image placeholders in the
     body and no EPUB — they could never be repaired because the query
     filtered on ``has_epub > 0``.
+
+    The verdict is a pure function of (row status, body placeholders, file
+    facts), so every promotion rule is one row here.  Two facts carry the
+    incident knowledge:
+
+    * ``2 -> DONE`` (and ``0 -> DONE``) require ``state.is_complete`` — a file
+      written while its images were missing must not be blessed, or a
+      ``DONE`` row is never re-examined (B1/B2).
+    * A cover-only EPUB is *not* "has an illustration": counting it was how
+      the 216 empty shells got promoted.
     """
 
-    async def test_no_with_placeholders_and_no_file_becomes_pending(
+    @pytest.mark.parametrize(
+        "status,body,prep,expected_summary,expected_status",
+        [
+            # 0 + placeholders, no file -> queue for generation.
+            (EpubStatus.NO, "正文 [uploadedimage:12345]", "none",
+             "启用为待处理", EpubStatus.PENDING),
+            # 0 + plain body -> terminal no-images (the old code left it 0,
+            # which was both re-read forever and indistinguishable from
+            # "still waiting to be classified").
+            (EpubStatus.NO, "纯文字无图", "none",
+             "确认为无图", EpubStatus.NO_IMAGES),
+            # 0 + a complete file that merely was never marked -> heal to done.
+            (EpubStatus.NO, "正文 [uploadedimage:1]", "complete",
+             "已完成", EpubStatus.DONE),
+            # 0 + file whose images never landed -> rebuild, never done.
+            (EpubStatus.NO, "正文 [uploadedimage:1]", "image_less",
+             "启用为待处理", EpubStatus.PENDING),
+            # 0 + complete file still carrying a raw marker -> rebuild (B1).
+            (EpubStatus.NO, "正文 [pixivimage:94602186]", "marker",
+             "启用为待处理", EpubStatus.PENDING),
+            # 3 (terminal) + a complete file appearing later -> heal to done.
+            (EpubStatus.NO_IMAGES, "纯文字无图", "complete",
+             "已完成", EpubStatus.DONE),
+            # 3 + cover-only file stays terminal (B2: the 216 lineage).
+            (EpubStatus.NO_IMAGES, "纯文字无图", "cover_only",
+             "无变化", EpubStatus.NO_IMAGES),
+            # 1 + readable file embedding nothing -> regenerate, not done.
+            (EpubStatus.PENDING, "正文 [uploadedimage:1]", "image_less",
+             "仍待处理", EpubStatus.PENDING),
+        ],
+        ids=[
+            "no-placeholders-no-file", "no-plain-body", "no-complete-file",
+            "no-image-less", "no-leftover-marker", "no-images-healed",
+            "no-images-cover-only", "pending-image-less",
+        ],
+    )
+    async def test_verdict(
         self, session_factory, tmp_path,
+        status, body, prep, expected_summary, expected_status,
     ):
-        await _seed(
-            session_factory, 10, "正文 [uploadedimage:12345]", False, tmp_path,
-            status=EpubStatus.NO,
+        txt = await _seed(
+            session_factory, 1, body,
+            prep == "complete",          # _seed can build the file itself
+            tmp_path, status=status,
         )
+        _prepare_epub(prep, txt, 1)
 
-        result = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
+        result = await _run_check_epub(session_factory)
 
-        assert "启用为待处理" in result.summary
-        assert _get_status(session_factory, 10) == 1
+        assert expected_summary in result.summary
+        assert _get_status(session_factory, 1) == expected_status
 
-    async def test_no_without_placeholders_becomes_no_images(
-        self, session_factory, tmp_path,
-    ):
-        """Unclassified row + body has no placeholders → terminal NO_IMAGES.
-
-        The old behaviour left it at 0, which meant the row was re-read from
-        disk on every future sweep *and* was indistinguishable from a row
-        still waiting for classification.
-        """
-        await _seed(
-            session_factory, 11, "纯文字无图", False, tmp_path,
-            status=EpubStatus.NO,
-        )
-
-        result = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
-
-        assert "确认为无图" in result.summary
-        assert _get_status(session_factory, 11) == EpubStatus.NO_IMAGES
-
-    async def test_no_images_row_is_not_rescanned(
+    async def test_terminal_row_with_no_file_does_no_disk_io(
         self, session_factory, tmp_path, monkeypatch,
     ):
-        """A terminal NO_IMAGES row with no file is skipped without disk I/O."""
+        """A terminal NO_IMAGES row with no file is skipped without disk I/O.
+
+        Separate from the verdict table because this asserts *cost*, not a
+        status: the sweep must not read the body of a row that cannot change.
+        """
         await _seed(
             session_factory, 14, "纯文字无图", False, tmp_path,
             status=EpubStatus.NO_IMAGES,
@@ -252,118 +310,11 @@ class TestCheckEpubTombstoneRepair:
             lambda p: calls.append(str(p)) or real_scan(p),
         )
 
-        result = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
+        result = await _run_check_epub(session_factory)
 
         assert calls == []                      # no text read at all
         assert _get_status(session_factory, 14) == EpubStatus.NO_IMAGES
         assert "无变化" in result.summary
-
-    async def test_no_images_row_with_complete_file_becomes_done(
-        self, session_factory, tmp_path,
-    ):
-        """A *complete* file appearing later heals a terminal row."""
-        await _seed(
-            session_factory, 15, "纯文字无图", False, tmp_path,
-            status=EpubStatus.NO_IMAGES,
-        )
-        _write_real_epub(tmp_path / "15" / "novel15.txt", 15)   # 有插图
-
-        result = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
-
-        assert "已完成" in result.summary
-        assert _get_status(session_factory, 15) == EpubStatus.DONE
-
-    async def test_no_images_row_with_cover_only_file_stays_terminal(
-        self, session_factory, tmp_path,
-    ):
-        """A cover-only EPUB must NOT drag a terminal row back to done.
-
-        This is the B2 case from the 2026-09-16 review: the old rule promoted
-        on ``state.is_readable_container`` alone, so any readable zip —
-        including the empty
-        shells of the 216-lineage — was blessed as finished.
-        """
-        await _seed(
-            session_factory, 17, "纯文字无图", False, tmp_path,
-            status=EpubStatus.NO_IMAGES,
-        )
-        _write_real_epub(
-            tmp_path / "17" / "novel17.txt", 17,
-            with_image=False, cover_only=True,
-        )
-
-        result = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
-
-        assert _get_status(session_factory, 17) == EpubStatus.NO_IMAGES
-        assert "无变化" in result.summary
-
-    async def test_pending_with_image_less_epub_is_queued(
-        self, session_factory, tmp_path,
-    ):
-        """PENDING + valid file but nothing embedded → regenerate, not done."""
-        await _seed(
-            session_factory, 16, "正文 [uploadedimage:1]", False, tmp_path,
-            status=EpubStatus.PENDING,
-        )
-        _write_real_epub(tmp_path / "16" / "novel16.txt", 16, with_image=False)
-
-        result = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
-
-        assert "仍待处理" in result.summary
-        assert _get_status(session_factory, 16) == EpubStatus.PENDING
-
-    async def test_no_with_leftover_marker_epub_is_queued_not_done(
-        self, session_factory, tmp_path,
-    ):
-        """B1 regression: ``0 → 2`` must check content, not just zip-ness.
-
-        The ``1 → 2`` branch already refused to bless a file whose XHTML still
-        held a raw marker; the ``0 → 2`` branch did not, so the first full
-        sweep of 229 k unclassified rows would have re-blessed the 216
-        leftover-marker EPUBs as finished — and a ``2`` row is never
-        re-examined.  Both promotions now share ``state.is_complete``.
-        """
-        txt = await _seed(
-            session_factory, 18, "正文 [pixivimage:94602186]", False, tmp_path,
-            status=EpubStatus.NO,
-        )
-        _write_real_epub(txt, 18, with_image=True)      # 有插图……
-        _inject_marker(txt.with_suffix(".epub"))        # ……但 XHTML 残留裸标记
-
-        result = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
-
-        assert "启用为待处理" in result.summary
-        assert _get_status(session_factory, 18) != EpubStatus.DONE
-
-    async def test_no_with_epub_containing_images_becomes_done(
-        self, session_factory, tmp_path,
-    ):
-        """The 784-file heal: EPUB already on disk, status never updated."""
-        await _seed(
-            session_factory, 12, "正文 [uploadedimage:1]", True, tmp_path,
-            status=EpubStatus.NO,
-        )
-
-        result = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
-
-        assert "已完成" in result.summary
-        assert _get_status(session_factory, 12) == 2
-
-    async def test_no_with_image_less_epub_is_queued_for_rebuild(
-        self, session_factory, tmp_path,
-    ):
-        """File exists but embeds nothing → rebuild, do not call it done."""
-        await _seed(
-            session_factory, 13, "正文 [uploadedimage:1]", False, tmp_path,
-            status=EpubStatus.NO,
-        )
-        # A valid EPUB built before the image landed: no EPUB/images/ entry.
-        _write_real_epub(tmp_path / "13" / "novel13.txt", 13, with_image=False)
-
-        result = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
-
-        assert "启用为待处理" in result.summary
-        assert _get_status(session_factory, 13) == 1
 
 
 class TestCheckEpubCorruptAndLeftoverEpubs:
@@ -378,7 +329,7 @@ class TestCheckEpubCorruptAndLeftoverEpubs:
             status=EpubStatus.DONE, real_epub=False,   # text stub, not a zip
         )
 
-        result = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
+        result = await _run_check_epub(session_factory)
 
         assert "回退" in result.summary
         assert _get_status(session_factory, 20) == 1
@@ -392,7 +343,7 @@ class TestCheckEpubCorruptAndLeftoverEpubs:
         )
         _write_placeholder_epub(txt)
 
-        result = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
+        result = await _run_check_epub(session_factory)
 
         assert "仍待处理" in result.summary
         assert _get_status(session_factory, 21) == 1
@@ -446,7 +397,7 @@ class TestCheckEpubStalePlaceholders:
         old = _time.time() - 30 * 86400          # 30 天前 = 早已放弃重试
         os.utime(txt, (old, old))
 
-        result = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
+        result = await _run_check_epub(session_factory)
 
         assert "确认为无图" in result.summary
         assert _get_status(session_factory, 4) == EpubStatus.NO_IMAGES
@@ -459,7 +410,7 @@ class TestCheckEpubStalePlaceholders:
             session_factory, 5, "正文 [uploadedimage:2]", False, tmp_path,
         )
 
-        result = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
+        result = await _run_check_epub(session_factory)
 
         assert "仍待处理" in result.summary
         assert _get_status(session_factory, 5) == 1
