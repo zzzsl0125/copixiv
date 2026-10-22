@@ -29,7 +29,7 @@ class TelegramNotifier:
     """Sends task-completion notifications to a Telegram chat.
 
     The Telegram notification backend (docs/MODULARITY.md §M6), assembled
-    by ``notifier.factory.build_notifiers`` from config.
+    by ``notifier.factory.build_notifier`` from config.
 
     Requires ``telegram.token`` and ``telegram.chat_id`` in the app config.
     If either is missing, notifications are silently skipped.

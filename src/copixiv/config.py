@@ -10,7 +10,13 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -113,18 +119,31 @@ class SecurityConfig(BaseModel):
 
 
 class NotificationBackendConfig(BaseModel):
-    """A single notification backend (one class serves both kinds).
+    """A single notification backend.
 
-    The unused fields stay empty: a ``telegram`` entry fills ``token`` and
-    ``chat_id``; a ``webhook`` entry fills ``url``.  ``type`` is a
-    ``Literal`` so an unknown backend fails fast at validation rather than
-    silently doing nothing.
+    Telegram is the only supported backend: a ``telegram`` entry fills
+    ``token`` and ``chat_id``.  The ``notifications`` list shape is kept
+    for future channels, but the factory only builds the first entry.  An
+    old ``webhook`` entry fails fast at validation with a migration
+    message (never silently skipped), and unknown fields (such as the
+    removed ``url``) are rejected by ``extra="forbid"``.
     """
 
-    type: Literal["telegram", "webhook"]
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["telegram"]
     token: str = ""
     chat_id: str | int = ""
-    url: str = ""
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def _reject_removed_webhook(cls, value: object) -> object:
+        if value == "webhook":
+            raise ValueError(
+                "webhook 通知后端已移除（本版本只支持 telegram）；"
+                "请从 config.yaml 的 notifications 列表中删除该条目"
+            )
+        return value
 
 
 class AppConfig(BaseModel):

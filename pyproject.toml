@@ -10,7 +10,7 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
     # 运行时依赖，不是测试专用：copixiv/notify/factory.py 在模块顶层
-    # import telegram/webhook，而两者都 `import httpx`。build_notifiers()
+    # import telegram，而它 `import httpx`。build_notifier()
     # 在应用装配阶段就会被调用，所以只装 `pip install .`（不含 [dev]）时
     # 缺 httpx 会直接 ImportError，服务起不来。
     "httpx>=0.27",

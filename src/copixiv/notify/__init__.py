@@ -1,1 +1,1 @@
-"""Notifier adapters."""
+"""Notifier adapters (telegram only)."""

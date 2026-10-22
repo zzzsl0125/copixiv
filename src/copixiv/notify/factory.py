@@ -1,11 +1,11 @@
 """Notifier assembly — plain config-driven mapping, no registry.
 
-``config.notifications`` lists backend entries (each ``type`` is a
-``Literal["telegram", "webhook"]``); this module maps each entry to its
-implementation (docs/MODULARITY.md §M6).  It is deliberately a plain
-function and not a plugin registry: the only backends are the two built
-in here, and a third-party channel has never existed.  If one ever does,
-revisit this decision then (MODULARITY.md §6).
+Telegram is the only notification backend.  ``config.notifications`` keeps
+its list shape for future channels, but only the first entry is used: this
+module maps it to its implementation (docs/MODULARITY.md §M6).  It is
+deliberately a plain function and not a plugin registry: no third-party
+channel has ever existed.  If one ever does, revisit this decision then
+(MODULARITY.md §6).
 """
 
 from __future__ import annotations
@@ -13,27 +13,31 @@ from __future__ import annotations
 from copixiv.log import logger
 
 from .telegram import TelegramNotifier
-from .webhook import WebhookNotifier
 
 
-def build_notifiers(config) -> list[TelegramNotifier | WebhookNotifier]:
-    """Build the notification backends from *config*.
+def build_notifier(config) -> TelegramNotifier | None:
+    """Build the notification backend from *config*.
 
-    Each ``config.notifications`` entry selects one backend by ``type``.
-    Unknown names are logged loudly and skipped (never fatal) — a
-    defensive path, since ``NotificationBackendConfig.type`` is a
-    ``Literal`` that would already fail validation on a bad value.
+    Returns ``None`` when ``config.notifications`` is empty (notifications
+    disabled).  Otherwise the first entry is mapped to a
+    :class:`TelegramNotifier`; any additional entries are ignored with a
+    warning, since there is no fan-out anymore.
     """
-    backends: list[TelegramNotifier | WebhookNotifier] = []
-    for backend in config.notifications:
-        if backend.type == "telegram":
-            backends.append(TelegramNotifier(
-                token=backend.token,
-                chat_id=backend.chat_id,
-                proxy_http=config.proxy.url or None,
-            ))
-        elif backend.type == "webhook":
-            backends.append(WebhookNotifier(url=backend.url))
-        else:
-            logger.warning("Unknown notifier backend '{}' — skipped.", backend.type)
-    return backends
+    entries = config.notifications
+    if not entries:
+        return None
+
+    if len(entries) > 1:
+        logger.warning(
+            "Multiple notification entries configured ({}) — only the first "
+            "Telegram entry is used; the list shape is retained for future "
+            "channels.",
+            len(entries),
+        )
+
+    entry = entries[0]
+    return TelegramNotifier(
+        token=entry.token,
+        chat_id=entry.chat_id,
+        proxy_http=config.proxy.url or None,
+    )

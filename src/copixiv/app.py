@@ -44,8 +44,8 @@ from copixiv.db.engine import (
     init_database,
 )
 from copixiv.log import InterceptHandler, logger, setup_logging
-from copixiv.notify.composite import CompositeNotifier
-from copixiv.notify.factory import build_notifiers
+from copixiv.notify.factory import build_notifier
+from copixiv.notify.telegram import TelegramNotifier
 from copixiv.pixiv.account import PixivAccount, TokenInfo
 from copixiv.pixiv.accounts import AccountPool
 from copixiv.pixiv.client import PixivClient
@@ -299,7 +299,7 @@ class _AppSingletons:
     image_downloader: ImageDownloader
     account_pool: AccountPool
     client: PixivClient
-    notifier: CompositeNotifier | None
+    notifier: TelegramNotifier | None
     task_manager: TaskManagerSystem
 
 
@@ -448,9 +448,8 @@ def _build(config_path: str | None = None) -> _AppSingletons:
         max_concurrency=cfg.pixiv_client.max_concurrency,
     )
 
-    # Notification backends — plain config-driven assembly
-    backends = build_notifiers(cfg)
-    notifier = CompositeNotifier(backends) if backends else None
+    # Notification backend — Telegram only, plain config-driven assembly
+    notifier = build_notifier(cfg)
 
     # Cron ticker + task executor
     task_manager = TaskManagerSystem(
