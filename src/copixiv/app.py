@@ -26,7 +26,7 @@ import sys
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -54,6 +54,9 @@ from copixiv.storage.epub.builder import EpubBuilder
 from copixiv.storage.file_storage import FileStorage
 from copixiv.storage.image_downloader import ImageDownloader
 from copixiv.tasks.kernel import TaskManagerSystem
+
+if TYPE_CHECKING:
+    from fastapi import FastAPI
 
 # uvicorn re-applies its own logging config on startup (dictConfig), which
 # would wipe the InterceptHandler that setup_logging() installed on the
@@ -479,6 +482,57 @@ def _build(config_path: str | None = None) -> _AppSingletons:
 
 
 # ---------------------------------------------------------------------------
+# Router mounting
+# ---------------------------------------------------------------------------
+
+
+def _mount_routers(app: FastAPI) -> None:
+    """Mount every API router on *app* (same prefixes/tags/order as before).
+
+    Kept separate from :func:`create_app` so the OpenAPI export
+    (``copixiv.export_openapi``) can build the schema without constructing
+    the container (no config.yaml, no DB, no startup).
+    """
+    from copixiv.tasks import api as tasks
+    from copixiv.features.novels import api as novels
+    from copixiv.features.novels import history_api as search_history
+    from copixiv.features.accounts import api as tokens
+    from copixiv.features.tags import aliases as tag_aliases
+    from copixiv.features.tags import preferences as tag_preferences
+    from copixiv.features.failures import api as failed_novels
+    from copixiv.features.library import api as library
+    from copixiv.features.system import api as system
+
+    # Routers are mounted explicitly here, one ``include_router`` per API
+    # area.  Each endpoint module owns its ``APIRouter``; the prefix and
+    # tags travel with the registration call below.  Mount order matches
+    # the former per-module prefix manifest (novels → tasks → system →
+    # tag_preferences → tag_aliases → search_history → tokens →
+    # failed_novels).
+    app.include_router(novels.router, prefix="/api/novels", tags=["novels"])
+    app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
+    app.include_router(system.router, prefix="/api/system", tags=["system"])
+    app.include_router(
+        tag_preferences.router, prefix="/api/tag-preferences",
+        tags=["tag_preferences"],
+    )
+    app.include_router(
+        tag_aliases.router, prefix="/api/tag-aliases", tags=["tag_aliases"],
+    )
+    app.include_router(
+        search_history.router, prefix="/api/search-history",
+        tags=["search_history"],
+    )
+    app.include_router(tokens.router, prefix="/api/tokens", tags=["tokens"])
+    app.include_router(
+        failed_novels.router, prefix="/api/failed-novels", tags=["failed-novels"],
+    )
+    app.include_router(
+        library.router, prefix="/api/library", tags=["library"],
+    )
+
+
+# ---------------------------------------------------------------------------
 # FastAPI factory
 # ---------------------------------------------------------------------------
 
@@ -501,15 +555,6 @@ def create_app(config_path: str | None = None):
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import JSONResponse
 
-    from copixiv.tasks import api as tasks
-    from copixiv.features.novels import api as novels
-    from copixiv.features.novels import history_api as search_history
-    from copixiv.features.accounts import api as tokens
-    from copixiv.features.tags import aliases as tag_aliases
-    from copixiv.features.tags import preferences as tag_preferences
-    from copixiv.features.failures import api as failed_novels
-    from copixiv.features.library import api as library
-    from copixiv.features.system import api as system
     from copixiv.pixiv.account import AccountStatus
 
     # Cold-start mitigation: PG has no built-in pre-warm here (128MB default
@@ -634,33 +679,7 @@ def create_app(config_path: str | None = None):
         allow_headers=["*"],
     )
 
-    # Routers are mounted explicitly here, one ``include_router`` per API
-    # area.  Each endpoint module owns its ``APIRouter``; the prefix and
-    # tags travel with the registration call below.  Mount order matches
-    # the former per-module prefix manifest (novels → tasks → system →
-    # tag_preferences → tag_aliases → search_history → tokens →
-    # failed_novels).
-    app.include_router(novels.router, prefix="/api/novels", tags=["novels"])
-    app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
-    app.include_router(system.router, prefix="/api/system", tags=["system"])
-    app.include_router(
-        tag_preferences.router, prefix="/api/tag-preferences",
-        tags=["tag_preferences"],
-    )
-    app.include_router(
-        tag_aliases.router, prefix="/api/tag-aliases", tags=["tag_aliases"],
-    )
-    app.include_router(
-        search_history.router, prefix="/api/search-history",
-        tags=["search_history"],
-    )
-    app.include_router(tokens.router, prefix="/api/tokens", tags=["tokens"])
-    app.include_router(
-        failed_novels.router, prefix="/api/failed-novels", tags=["failed-novels"],
-    )
-    app.include_router(
-        library.router, prefix="/api/library", tags=["library"],
-    )
+    _mount_routers(app)
 
     return app
 

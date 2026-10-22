@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
+    "codegen": "openapi-typescript openapi.json -o src/types/api.generated.ts",
     "preview": "vite preview",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
@@ -13,9 +14,12 @@
   },
   "dependencies": {
     "@lucide/vue": "^1.22.0",
+    "@vueuse/core": "^15.0.0",
     "axios": "^1.18.1",
+    "reka-ui": "^2.11.0",
     "vue": "^3.5.38",
     "vue-router": "^4.6.4",
+    "vue-sonner": "^2.0.9",
     "vuedraggable": "^4.1.0"
   },
   "devDependencies": {
@@ -26,10 +30,16 @@
     "@vue/test-utils": "^2.4.11",
     "@vue/tsconfig": "^0.9.1",
     "jsdom": "^29.1.1",
+    "openapi-typescript": "^7.13.0",
     "tailwindcss": "^4.3.1",
     "typescript": "~6.0.2",
     "vite": "^8.1.0",
     "vitest": "^4.1.9",
     "vue-tsc": "^3.3.5"
+  },
+  "overrides": {
+    "openapi-typescript": {
+      "typescript": "$typescript"
+    }
   }
 }

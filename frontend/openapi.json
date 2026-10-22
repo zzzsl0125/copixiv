@@ -1,0 +1,4665 @@
+{
+  "components": {
+    "schemas": {
+      "AuthorLookupResponse": {
+        "description": "作者 ID 预览（``GET /api/novels/author/{author_id}``）。\n\n编辑器里填完 ID 就调它，好在保存*之前*告诉用户这个名字对不对；保存路径\n（PATCH）用同一个解析函数，所以预览与实际落库结果一致。\n\n``source`` 是诚实性字段：``local`` = 库里已知（离线可用）、``pixiv`` =\n本次现查（说明网络通、作者存在）、``unknown`` = 拿不到名字。它**不影响\n可保存性**——id 才是身份，名字只是缓存，拿不到名字照样允许挂上去。",
+        "properties": {
+          "author_id": {
+            "title": "Author Id",
+            "type": "integer"
+          },
+          "author_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author Name"
+          },
+          "novel_count": {
+            "default": 0,
+            "title": "Novel Count",
+            "type": "integer"
+          },
+          "source": {
+            "default": "unknown",
+            "enum": [
+              "local",
+              "pixiv",
+              "unknown"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "author_id"
+        ],
+        "title": "AuthorLookupResponse",
+        "type": "object"
+      },
+      "BatchDownloadRequest": {
+        "properties": {
+          "excluded_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Excluded Ids"
+          },
+          "format_mode": {
+            "default": "txt",
+            "enum": [
+              "txt",
+              "prefer_epub"
+            ],
+            "title": "Format Mode",
+            "type": "string"
+          },
+          "keyword": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Keyword"
+          },
+          "limit": {
+            "default": 500,
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "min_like": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Like"
+          },
+          "min_text": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Text"
+          },
+          "naming_template": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Naming Template"
+          },
+          "novel_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Novel Ids"
+          },
+          "order_by": {
+            "default": "id",
+            "enum": [
+              "id",
+              "like",
+              "view",
+              "text",
+              "create_time",
+              "random"
+            ],
+            "title": "Order By",
+            "type": "string"
+          },
+          "order_direction": {
+            "default": "DESC",
+            "enum": [
+              "ASC",
+              "DESC"
+            ],
+            "title": "Order Direction",
+            "type": "string"
+          },
+          "zip_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Zip Name"
+          }
+        },
+        "title": "BatchDownloadRequest",
+        "type": "object"
+      },
+      "BatchExportRequest": {
+        "description": "Background-task export (large selections — the ZIP is built offline).",
+        "properties": {
+          "format_mode": {
+            "default": "txt",
+            "enum": [
+              "txt",
+              "prefer_epub"
+            ],
+            "title": "Format Mode",
+            "type": "string"
+          },
+          "naming_template": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Naming Template"
+          },
+          "novel_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Novel Ids",
+            "type": "array"
+          },
+          "zip_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Zip Name"
+          }
+        },
+        "required": [
+          "novel_ids"
+        ],
+        "title": "BatchExportRequest",
+        "type": "object"
+      },
+      "BatchExportResponse": {
+        "properties": {
+          "matched": {
+            "title": "Matched",
+            "type": "integer"
+          },
+          "task_id": {
+            "title": "Task Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "task_id",
+          "matched"
+        ],
+        "title": "BatchExportResponse",
+        "type": "object"
+      },
+      "BatchMetadataRequest": {
+        "additionalProperties": false,
+        "description": "批量编辑「作者」/「系列」（``POST /api/novels/batch-metadata``）。\n\n与单本 ``NovelUpdateRequest`` 同一套三态：``author_id`` / ``series_id``\n**键不出现 = 不改这个字段**（调用方用 ``model_dump(exclude_unset=True)``\n取值，再映射到用例的 ``_UNSET``），**显式 ``null`` = 解除关联**\n（作者保留显示名并给空名行补「未知作者」；系列连名字与章节号一起清）。\n\n收尾语义与单本**完全一致**，唯一刻意的差异在**来源**上：pixiv 书不报 400，\n而是被跳过并计数（``applicable`` / ``skipped``）——批量的选择集天然是混合的，\n「全选匹配 + 挂作者」整体 400 会让功能完全不可用；\"先报数再确认\"里跳过的\n数量是显式字段，所以不存在\"以为成功其实没写\"的静默。论证见\n``features/novels/batch_edit_metadata.py`` 模块 docstring。\n\n``extra=\"forbid\"``：结构性字段（``source`` / ``path`` / ``id`` …）与未知字段\n一律 422（与 PATCH 同一约定）；业务规则拒绝（空 patch / 非法 id）走用例的\n``ValidationError`` → 400。``true`` 不是 id（``_reject_bool_id``）→ 422。",
+        "properties": {
+          "apply": {
+            "default": false,
+            "title": "Apply",
+            "type": "boolean"
+          },
+          "author_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author Id"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/BatchScope"
+          },
+          "series_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Series Id"
+          }
+        },
+        "required": [
+          "scope"
+        ],
+        "title": "BatchMetadataRequest",
+        "type": "object"
+      },
+      "BatchMetadataResponse": {
+        "description": "批量编辑的计数（预演与落库同一形状）。\n\n``matched`` = 调用方给的整个选择集；``applicable`` = 其中本地书（**会**被改\n的那些）；``skipped = matched - applicable``（pixiv 书——跳过不是错误）；\n``affected`` = 实际被 UPDATE 改动的行数（预演恒 0，重复提交同一请求第二次\n也是 0：WHERE 里有逐列的 ``IS DISTINCT FROM``）。",
+        "properties": {
+          "affected": {
+            "title": "Affected",
+            "type": "integer"
+          },
+          "applicable": {
+            "title": "Applicable",
+            "type": "integer"
+          },
+          "matched": {
+            "title": "Matched",
+            "type": "integer"
+          },
+          "skipped": {
+            "title": "Skipped",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "matched",
+          "applicable",
+          "skipped",
+          "affected"
+        ],
+        "title": "BatchMetadataResponse",
+        "type": "object"
+      },
+      "BatchOperationRequest": {
+        "properties": {
+          "operation": {
+            "enum": [
+              "delete",
+              "add_tags",
+              "remove_tags"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/BatchScope"
+          },
+          "tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "operation",
+          "scope"
+        ],
+        "title": "BatchOperationRequest",
+        "type": "object"
+      },
+      "BatchOperationResponse": {
+        "properties": {
+          "affected": {
+            "title": "Affected",
+            "type": "integer"
+          },
+          "matched": {
+            "title": "Matched",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "matched",
+          "affected"
+        ],
+        "title": "BatchOperationResponse",
+        "type": "object"
+      },
+      "BatchScope": {
+        "description": "Which novels a batch operation applies to.\n\nTwo modes mirror the frontend selection model:\n- ``ids``: an explicit list of selected novel IDs.\n- ``all_matched``: the full filter-matched set (optionally minus\n  ``excluded_ids`` — the \"select all, then uncheck a few\" case).",
+        "properties": {
+          "excluded_ids": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Excluded Ids",
+            "type": "array"
+          },
+          "keyword": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Keyword"
+          },
+          "min_like": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Like"
+          },
+          "min_text": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Text"
+          },
+          "mode": {
+            "default": "all_matched",
+            "enum": [
+              "ids",
+              "all_matched"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "novel_ids": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Novel Ids",
+            "type": "array"
+          }
+        },
+        "title": "BatchScope",
+        "type": "object"
+      },
+      "BatchTaskResponse": {
+        "description": "A batch operation enqueued into the background task system.",
+        "properties": {
+          "matched": {
+            "title": "Matched",
+            "type": "integer"
+          },
+          "task_id": {
+            "title": "Task Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "task_id",
+          "matched"
+        ],
+        "title": "BatchTaskResponse",
+        "type": "object"
+      },
+      "Body_upload_novels_api_library_uploads_post": {
+        "properties": {
+          "author_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author Id"
+          },
+          "files": {
+            "anyOf": [
+              {
+                "items": {
+                  "contentMediaType": "application/octet-stream",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Files"
+          }
+        },
+        "title": "Body_upload_novels_api_library_uploads_post",
+        "type": "object"
+      },
+      "EpubStatus": {
+        "description": "EPUB conversion status for a novel.\n\n``NO`` and ``NO_IMAGES`` are different facts, and conflating them cost\nthis project five weeks of invisible breakage (2026-09 追溯):\n\n* ``NO`` (0) — **unclassified**.  A legacy value, and the column default.\n  It carries no claim: the row may or may not need an EPUB, and only the\n  text file can settle it.  The reconciler re-examines these rows so they\n  eventually reach a terminal state.\n* ``NO_IMAGES`` (3) — **terminal: nothing to build**.  The body text is\n  known to contain no image placeholder, so an EPUB would add nothing.\n  The reconciler never re-reads the text of a row in this state.\n\nHistorically ``0`` meant \"no images\" *and* \"don't look at me\" at once\n(the reconciler filtered on ``has_epub > 0``), so rows demoted by the\nstale-image rule — or clobbered to 0 by every metadata refresh — could\nnever be repaired.  Splitting the two meanings is the point.",
+        "enum": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "title": "EpubStatus",
+        "type": "integer"
+      },
+      "FailedNovelCountResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "count"
+        ],
+        "title": "FailedNovelCountResponse",
+        "type": "object"
+      },
+      "FailedNovelItem": {
+        "description": "One download-failure record.\n\n``title`` may be null for legacy rows recorded before title capture\nexisted; ``last_failed_at`` may be null for pre-migration rows (they\nsort to the end of the list).",
+        "properties": {
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          },
+          "failed_times": {
+            "default": 1,
+            "title": "Failed Times",
+            "type": "integer"
+          },
+          "failure_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Type"
+          },
+          "last_failed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Failed At"
+          },
+          "novel_id": {
+            "title": "Novel Id",
+            "type": "integer"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "required": [
+          "novel_id"
+        ],
+        "title": "FailedNovelItem",
+        "type": "object"
+      },
+      "FailedNovelListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/FailedNovelItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "default": 100,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "FailedNovelListResponse",
+        "type": "object"
+      },
+      "FailedNovelRetryRequest": {
+        "properties": {
+          "novel_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Novel Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "novel_ids"
+        ],
+        "title": "FailedNovelRetryRequest",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "MatchIdsRequest": {
+        "description": "Intersect a selection with the current search scope (scoped clear).",
+        "properties": {
+          "keyword": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Keyword"
+          },
+          "min_like": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Like"
+          },
+          "min_text": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Text"
+          },
+          "novel_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Novel Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "novel_ids"
+        ],
+        "title": "MatchIdsRequest",
+        "type": "object"
+      },
+      "MatchIdsResponse": {
+        "properties": {
+          "matching_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Matching Ids",
+            "type": "array"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "matching_ids",
+          "truncated"
+        ],
+        "title": "MatchIdsResponse",
+        "type": "object"
+      },
+      "NovelBase": {
+        "description": "小说列表 / 详情的响应模型。\n\n字段与领域模型 :class:`copixiv.core.models.Novel` 逐条对应（`path` /\n`shuffle` / `source_key` 三个内部字段除外），字段集由\n``tests/features/test_schema_drift.py`` 钉住。刻意**不**继承领域模型：\nPydantic 的 ``ConfigDict(exclude=...)`` 会静默失效、``Field(exclude=True)``\n挡不住 JSON Schema，而这份 schema 正是前端 codegen 的契约源（§7.4）。\n\n``create_time`` 是 ``timestamptz`` → ``datetime``，JSON 里是 ISO 字符串；\n写侧的 ``NovelUpdateRequest`` 仍收字符串（PATCH 接受日期字面量）。",
+        "properties": {
+          "author_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author Id"
+          },
+          "author_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author Name"
+          },
+          "caption": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Caption"
+          },
+          "create_time": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Create Time"
+          },
+          "editable_fields": {
+            "description": "该行可编辑的字段清单 —— 由 ``source`` 派生（前端据此置灰输入框）。\n\n策略的唯一所有者在 ``features/novels/field_policy.py``：前端**不再**\n自己判断来源，两端共用这一份清单，避免各写一套后悄悄漂移。列表响应与\nPATCH 响应都带它（同一个 ``NovelBase``），前端拿到即可渲染。\n\n为什么是 ``computed_field`` 而不是普通字段：它是 ``source`` 的纯函数、\n不是数据库列，也不接受客户端提交；放在响应模型上等于把\"能改什么\"从\n服务端下发，而不是让客户端猜。",
+            "items": {
+              "type": "string"
+            },
+            "readOnly": true,
+            "title": "Editable Fields",
+            "type": "array"
+          },
+          "has_epub": {
+            "$ref": "#/components/schemas/EpubStatus",
+            "default": 0
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "is_favourite": {
+            "default": 0,
+            "title": "Is Favourite",
+            "type": "integer"
+          },
+          "is_special_follow": {
+            "default": 0,
+            "title": "Is Special Follow",
+            "type": "integer"
+          },
+          "like": {
+            "default": 0,
+            "title": "Like",
+            "type": "integer"
+          },
+          "series_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Series Id"
+          },
+          "series_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Series Index"
+          },
+          "series_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Series Name"
+          },
+          "source": {
+            "default": "pixiv",
+            "title": "Source",
+            "type": "string"
+          },
+          "tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          },
+          "text": {
+            "default": 0,
+            "title": "Text",
+            "type": "integer"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "view": {
+            "default": 0,
+            "title": "View",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "editable_fields"
+        ],
+        "title": "NovelBase",
+        "type": "object"
+      },
+      "NovelCountResponse": {
+        "description": "``GET /api/novels/count`` —— 匹配数 + 隐藏数（均为有界计数）。\n\n计数由仓库的 ``COUNT_CAP`` 封顶：``truncated`` / ``excluded_truncated``\n为 true 时对应数字只是下界，前端必须显示成 ``5000+`` 之类的形态。\n两个标志恒在响应里（与老客户端的读法一致）。",
+        "properties": {
+          "excluded": {
+            "title": "Excluded",
+            "type": "integer"
+          },
+          "excluded_truncated": {
+            "default": false,
+            "title": "Excluded Truncated",
+            "type": "boolean"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "total",
+          "excluded"
+        ],
+        "title": "NovelCountResponse",
+        "type": "object"
+      },
+      "NovelIdsResponse": {
+        "description": "Matching novel IDs for the 「全选匹配」 bulk-add action.\n\n*limit*-truncated when the match set is larger than the batch cap;\n``truncated`` tells the frontend to warn the user.",
+        "properties": {
+          "ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Ids",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ids",
+          "total",
+          "truncated"
+        ],
+        "title": "NovelIdsResponse",
+        "type": "object"
+      },
+      "NovelListResponse": {
+        "properties": {
+          "cursor": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cursor"
+          },
+          "has_excluded": {
+            "default": false,
+            "title": "Has Excluded",
+            "type": "boolean"
+          },
+          "novels": {
+            "items": {
+              "$ref": "#/components/schemas/NovelBase"
+            },
+            "title": "Novels",
+            "type": "array"
+          }
+        },
+        "required": [
+          "novels"
+        ],
+        "title": "NovelListResponse",
+        "type": "object"
+      },
+      "NovelUpdateRequest": {
+        "additionalProperties": false,
+        "description": "单本元数据编辑的部分更新体。\n\n只列**可编辑**字段。结构性事实（``source`` / ``source_key`` / ``path`` /\n``id`` / ``has_epub``）与任何未知字段一样，提交即被 ``extra=\"forbid\"`` 拒掉\n（FastAPI 的请求体校验错误 → 422，与仓库既有约定一致；业务规则拒绝走\n``ValidationError`` → 400）。\n\n``title`` / ``author_id`` / ``series_id`` / ``caption`` 能否改由 **``source``\n决定**（仅本地书），这条业务规则在用例里执法并返回 400——schema 层表达不了\n\"取决于行\"的约束。四者的**理由与清单的唯一所有者**是\n``features/novels/field_policy.py``，同一份策略由\n``NovelBase.editable_fields`` 下发给前端；pixiv 书提交它们 → 400，错配的\n修正入口是 ``POST /api/novels/{id}/sync``（按 id 从来源重抓、恢复来源值）。\n\n``caption`` 自 2026-09-22 从\"全局不可编辑\"改成\"仅本地书可编辑\"：原理由\n（来源刷新会覆盖、不在界面展示）通篇是拿 pixiv 书论证的，而本地书永不进\n``_upsert_rows``、上传时 ``caption`` 写死 ``None``——填进去的就是用户自己的\n话，没有来源会来顶掉它。详见 ``field_policy.py`` 的模块 docstring。\n\n**作者与系列都是 id 而不是名字**（2026-09-19 拍板）：``author_name`` /\n``series_name`` 已从可编辑集合移除，提交即 422；身份由 ``author_id`` /\n``series_id`` 表达，显示名是它们的解析结果\n（``features/authors/resolve_names.py::lookup_author_profile``、\n``features/novels/resolve_series.py::lookup_series_profile``）。这样上传的\n本地书才能真正挂到 pixiv 作者/系列名下——作者页、系列页、``author_id:`` /\n``series_id:`` 搜索全部按 id 工作，而名字只是一份可刷新的缓存。\n\n\"未提交\"与\"显式 null\"必须可区分（PATCH 三态）：调用方用\n``model_dump(exclude_unset=True)`` 取值——键不出现 = 不动，显式 ``null``\n= 清空（``series_index`` / ``create_time`` / ``caption`` 允许清空；\n``author_id`` / ``series_id`` 显式 null = 解除关联，收尾见\n``update_metadata.py::_series_columns``：作者保留显示名，系列连名字与章节号\n一起清，2026-09-22）。\n\n注意 ``create_time`` 在这里仍是**字符串**（写侧载体）：HTTP 边界接受\n``YYYY-MM-DD`` 之类的日期字面量，由 ``update_metadata._create_time``\n解析成 ``datetime`` 后写库。响应模型 ``NovelBase.create_time`` 才是\n``datetime``（DB 列是 ``timestamptz``）。",
+        "properties": {
+          "author_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author Id"
+          },
+          "caption": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Caption"
+          },
+          "create_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Create Time"
+          },
+          "series_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Series Id"
+          },
+          "series_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Series Index"
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tags"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "title": "NovelUpdateRequest",
+        "type": "object"
+      },
+      "NovelsByIdsRequest": {
+        "properties": {
+          "novel_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Novel Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "novel_ids"
+        ],
+        "title": "NovelsByIdsRequest",
+        "type": "object"
+      },
+      "NovelsByIdsResponse": {
+        "properties": {
+          "novels": {
+            "items": {
+              "$ref": "#/components/schemas/NovelBase"
+            },
+            "title": "Novels",
+            "type": "array"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "novels",
+          "truncated"
+        ],
+        "title": "NovelsByIdsResponse",
+        "type": "object"
+      },
+      "ScheduledTaskCreate": {
+        "properties": {
+          "config": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Config"
+          },
+          "cron": {
+            "title": "Cron",
+            "type": "string"
+          },
+          "is_enabled": {
+            "default": false,
+            "title": "Is Enabled",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "params": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Params"
+          },
+          "sort_index": {
+            "default": 0,
+            "title": "Sort Index",
+            "type": "integer"
+          },
+          "task": {
+            "title": "Task",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "task",
+          "cron"
+        ],
+        "title": "ScheduledTaskCreate",
+        "type": "object"
+      },
+      "ScheduledTaskResponse": {
+        "properties": {
+          "config": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Config"
+          },
+          "cron": {
+            "title": "Cron",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "is_enabled": {
+            "default": false,
+            "title": "Is Enabled",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "params": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Params"
+          },
+          "sort_index": {
+            "default": 0,
+            "title": "Sort Index",
+            "type": "integer"
+          },
+          "task": {
+            "title": "Task",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "task",
+          "cron",
+          "id"
+        ],
+        "title": "ScheduledTaskResponse",
+        "type": "object"
+      },
+      "ScheduledTaskUpdate": {
+        "properties": {
+          "config": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Config"
+          },
+          "cron": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cron"
+          },
+          "is_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Enabled"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "params": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Params"
+          },
+          "sort_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sort Index"
+          },
+          "task": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task"
+          }
+        },
+        "title": "ScheduledTaskUpdate",
+        "type": "object"
+      },
+      "SearchHistoryResponse": {
+        "properties": {
+          "display_value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Value"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "timestamp": {
+            "format": "date-time",
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "value",
+          "timestamp"
+        ],
+        "title": "SearchHistoryResponse",
+        "type": "object"
+      },
+      "SeriesLookupResponse": {
+        "description": "系列 ID 预览（``GET /api/novels/series/{series_id}``）—— 与作者那份同构。\n\n差别只在名字的来源链：``series`` 行 → 同系列的 novel 行 → pixiv\n``novel_series``（前两步都是本地查询，见 ``resolve_series.py``）。",
+        "properties": {
+          "novel_count": {
+            "default": 0,
+            "title": "Novel Count",
+            "type": "integer"
+          },
+          "series_id": {
+            "title": "Series Id",
+            "type": "integer"
+          },
+          "series_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Series Name"
+          },
+          "source": {
+            "default": "unknown",
+            "enum": [
+              "local",
+              "pixiv",
+              "unknown"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "series_id"
+        ],
+        "title": "SeriesLookupResponse",
+        "type": "object"
+      },
+      "SortIdsRequest": {
+        "description": "Order an explicit id list by a novel column — 「查看已选」排序.",
+        "properties": {
+          "novel_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Novel Ids",
+            "type": "array"
+          },
+          "order_by": {
+            "enum": [
+              "id",
+              "like",
+              "text"
+            ],
+            "title": "Order By",
+            "type": "string"
+          },
+          "order_direction": {
+            "default": "DESC",
+            "enum": [
+              "ASC",
+              "DESC"
+            ],
+            "title": "Order Direction",
+            "type": "string"
+          }
+        },
+        "required": [
+          "novel_ids",
+          "order_by"
+        ],
+        "title": "SortIdsRequest",
+        "type": "object"
+      },
+      "SystemConfigResponse": {
+        "properties": {
+          "batch_download_naming": {
+            "title": "Batch Download Naming",
+            "type": "string"
+          },
+          "exclude_blocked_tag_novels": {
+            "default": true,
+            "title": "Exclude Blocked Tag Novels",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "batch_download_naming"
+        ],
+        "title": "SystemConfigResponse",
+        "type": "object"
+      },
+      "SystemConfigUpdate": {
+        "properties": {
+          "exclude_blocked_tag_novels": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exclude Blocked Tag Novels"
+          }
+        },
+        "title": "SystemConfigUpdate",
+        "type": "object"
+      },
+      "TagAliasBase": {
+        "properties": {
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "target": {
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "target"
+        ],
+        "title": "TagAliasBase",
+        "type": "object"
+      },
+      "TagAliasResponse": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "target": {
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "target",
+          "id"
+        ],
+        "title": "TagAliasResponse",
+        "type": "object"
+      },
+      "TagAliasSuggestListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TagAliasSuggestResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_offset": {
+            "title": "Next Offset",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "next_offset"
+        ],
+        "title": "TagAliasSuggestListResponse",
+        "type": "object"
+      },
+      "TagAliasSuggestResponse": {
+        "properties": {
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/TagCandidate"
+            },
+            "title": "Candidates",
+            "type": "array"
+          },
+          "target": {
+            "$ref": "#/components/schemas/TagCandidate"
+          }
+        },
+        "required": [
+          "target",
+          "candidates"
+        ],
+        "title": "TagAliasSuggestResponse",
+        "type": "object"
+      },
+      "TagCandidate": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "reference_count": {
+            "title": "Reference Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "reference_count"
+        ],
+        "title": "TagCandidate",
+        "type": "object"
+      },
+      "TagPreferenceCreate": {
+        "properties": {
+          "preference": {
+            "enum": [
+              "favourite",
+              "blocked"
+            ],
+            "title": "Preference",
+            "type": "string"
+          },
+          "sort_index": {
+            "default": 0,
+            "title": "Sort Index",
+            "type": "integer"
+          },
+          "tag": {
+            "title": "Tag",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tag",
+          "preference"
+        ],
+        "title": "TagPreferenceCreate",
+        "type": "object"
+      },
+      "TagPreferenceResponse": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "preference": {
+            "enum": [
+              "favourite",
+              "blocked"
+            ],
+            "title": "Preference",
+            "type": "string"
+          },
+          "sort_index": {
+            "title": "Sort Index",
+            "type": "integer"
+          },
+          "tag": {
+            "title": "Tag",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "tag",
+          "preference",
+          "sort_index"
+        ],
+        "title": "TagPreferenceResponse",
+        "type": "object"
+      },
+      "TagPreferenceUpdate": {
+        "properties": {
+          "preference": {
+            "anyOf": [
+              {
+                "enum": [
+                  "favourite",
+                  "blocked"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preference"
+          },
+          "sort_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sort Index"
+          },
+          "tag": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tag"
+          }
+        },
+        "title": "TagPreferenceUpdate",
+        "type": "object"
+      },
+      "TaskHistoryListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TaskHistoryResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "TaskHistoryListResponse",
+        "type": "object"
+      },
+      "TaskHistoryResponse": {
+        "properties": {
+          "arguments": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Arguments"
+          },
+          "duration": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration"
+          },
+          "end_time": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Time"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "progress": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Progress"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "start_time": {
+            "format": "date-time",
+            "title": "Start Time",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "task_func": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Func"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "status",
+          "start_time"
+        ],
+        "title": "TaskHistoryResponse",
+        "type": "object"
+      },
+      "TaskMethod": {
+        "properties": {
+          "arguments": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Arguments"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "TaskMethod",
+        "type": "object"
+      },
+      "TokenBase": {
+        "properties": {
+          "is_follow": {
+            "default": false,
+            "title": "Is Follow",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "premium": {
+            "default": false,
+            "title": "Premium",
+            "type": "boolean"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          },
+          "valid": {
+            "default": true,
+            "title": "Valid",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "token"
+        ],
+        "title": "TokenBase",
+        "type": "object"
+      },
+      "TokenResponse": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "is_follow": {
+            "default": false,
+            "title": "Is Follow",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "premium": {
+            "default": false,
+            "title": "Premium",
+            "type": "boolean"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          },
+          "valid": {
+            "default": true,
+            "title": "Valid",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "token",
+          "id"
+        ],
+        "title": "TokenResponse",
+        "type": "object"
+      },
+      "TokenUpdate": {
+        "properties": {
+          "is_follow": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Follow"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "premium": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Premium"
+          },
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token"
+          },
+          "valid": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid"
+          }
+        },
+        "title": "TokenUpdate",
+        "type": "object"
+      },
+      "UploadResponse": {
+        "properties": {
+          "created": {
+            "default": 0,
+            "title": "Created",
+            "type": "integer"
+          },
+          "duplicate": {
+            "default": 0,
+            "title": "Duplicate",
+            "type": "integer"
+          },
+          "failed": {
+            "default": 0,
+            "title": "Failed",
+            "type": "integer"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/UploadResultItem"
+            },
+            "title": "Results",
+            "type": "array"
+          }
+        },
+        "required": [
+          "results"
+        ],
+        "title": "UploadResponse",
+        "type": "object"
+      },
+      "UploadResultItem": {
+        "description": "一条上传结果。\n\n``created``：``novel_id`` / ``title`` / ``author_name`` / ``text``；\n``duplicate``：``novel_id`` / ``title``（已在库中那本）；这次带了预设作者\n（``author_id`` 表单字段）时**也**带 ``author_name`` —— 回显这次写进去的\n名字，前端据此显示「已在库中《…》· 已挂作者：X」；解析不出名字时该字段\n照样不下发（``response_model_exclude_none=True``），前端只显示「已在库中」。\n``duplicate`` + ``epub_attached=True``：这次上传的 EPUB 原件被补挂到了那本\n已在库、此前没有 EPUB 的本地书上（§4.1）——前端据此刷新列表 / 显示补挂。\n``failed``：``error``（like「无法识别编码…」）。\n\n字段名与可选性与前端 ``frontend/src/types/uploads.ts`` 一一对应，**不可改**\n——``author_name`` 从\"只有 created 才有\"扩成\"created 与 duplicate 都可能有\"、\n``epub_attached`` 是新增的**可选**字段（只有 true 时才下发），两次都是\n向后兼容的扩展，形状本身没动。",
+        "properties": {
+          "author_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author Name"
+          },
+          "epub_attached": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Epub Attached"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "novel_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Novel Id"
+          },
+          "status": {
+            "enum": [
+              "created",
+              "duplicate",
+              "failed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "text": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Text"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "required": [
+          "filename",
+          "status"
+        ],
+        "title": "UploadResultItem",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Novel Database API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/failed-novels": {
+      "delete": {
+        "description": "Clear the whole ledger.",
+        "operationId": "clear_all_failed_novels_api_failed_novels_delete",
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Clear All Failed Novels",
+        "tags": [
+          "failed-novels"
+        ]
+      },
+      "get": {
+        "operationId": "list_failed_novels_api_failed_novels_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FailedNovelListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Failed Novels",
+        "tags": [
+          "failed-novels"
+        ]
+      }
+    },
+    "/api/failed-novels/count": {
+      "get": {
+        "operationId": "count_failed_novels_api_failed_novels_count_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FailedNovelCountResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Count Failed Novels",
+        "tags": [
+          "failed-novels"
+        ]
+      }
+    },
+    "/api/failed-novels/reset-count": {
+      "post": {
+        "description": "Reset every failure count to 0 — records stay, all unblocked.",
+        "operationId": "reset_all_failed_novel_counts_api_failed_novels_reset_count_post",
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Reset All Failed Novel Counts",
+        "tags": [
+          "failed-novels"
+        ]
+      }
+    },
+    "/api/failed-novels/retry": {
+      "post": {
+        "description": "Enqueue a background ``failed_retry`` task for the given ids.",
+        "operationId": "retry_failed_novels_api_failed_novels_retry_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FailedNovelRetryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchTaskResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retry Failed Novels",
+        "tags": [
+          "failed-novels"
+        ]
+      }
+    },
+    "/api/failed-novels/retry-all": {
+      "post": {
+        "description": "Enqueue a background ``failed_retry`` task for EVERY failure record.\n\nThis is the server-side 「全部重试」: the ledger itself is the payload,\nso the whole ledger gets retried regardless of which page the client\ncurrently has loaded. Unlike ``POST /retry`` there is no id-payload\ncap — the confirmation dialog on the client is the consent guard, and\nthe task fans out with the same one-client-per-id pattern.",
+        "operationId": "retry_all_failed_novels_api_failed_novels_retry_all_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchTaskResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Retry All Failed Novels",
+        "tags": [
+          "failed-novels"
+        ]
+      }
+    },
+    "/api/failed-novels/{novel_id}": {
+      "delete": {
+        "description": "Clear one failure record (unblocks automatic retry).",
+        "operationId": "delete_failed_novel_api_failed_novels__novel_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "novel_id",
+            "required": true,
+            "schema": {
+              "title": "Novel Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Failed Novel",
+        "tags": [
+          "failed-novels"
+        ]
+      }
+    },
+    "/api/failed-novels/{novel_id}/reset-count": {
+      "post": {
+        "description": "Reset one record's failure count to 0 — the record stays.\n\nPreferred over deletion: the history row (title / error / first-seen\ninfo) remains visible in the 「失败记录」 view while the novel is\nunblocked for automatic retry.",
+        "operationId": "reset_failed_novel_count_api_failed_novels__novel_id__reset_count_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "novel_id",
+            "required": true,
+            "schema": {
+              "title": "Novel Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reset Failed Novel Count",
+        "tags": [
+          "failed-novels"
+        ]
+      }
+    },
+    "/api/library/uploads": {
+      "post": {
+        "description": "把本地 TXT / EPUB 收进库（「我的上传」）。\n\n整个写入是一个写事务：id 分配 + 指纹去重 + 落库都在里面，\n``ingest_uploads`` 只写库、逐条给出结果。每个文件按后缀 / 内容分派：\nTXT 解码入库、EPUB 抽正文 + 存原件（§4.1）。\n\n``author_id`` 可选、**整批共用**：给了就把这批书挂到这位 pixiv 作者名下\n（新书直接写 id；已在库的重复件也应用——用户拍板），名字由 id 解析出来\n（本地 ``author`` 表优先、pixiv 兜底、**整批只解析一次**），解析不出就写\n``NULL``（\"待解析\"，仓库认可的中间态；``sync_empty_name`` 默认禁用，别把它\n当兜底任务）。**本版刻意不做系列**（``series_id``）：系列要连名字与章节号\n一起收尾（``update_metadata.py::_series_columns``），是另一件事。\n\n**解析在写事务之外**（模块 docstring 第 1 条）：防的是\"写事务里等 pixiv\"\n——咨询锁与一个开着的事务被慢对端攥着。失败不致命：名字是缓存，id 是身份。",
+        "operationId": "upload_novels_api_library_uploads_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_novels_api_library_uploads_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Upload Novels",
+        "tags": [
+          "library"
+        ]
+      }
+    },
+    "/api/novels/": {
+      "get": {
+        "operationId": "get_novels_api_novels__get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "keyword",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Keyword"
+            }
+          },
+          {
+            "in": "query",
+            "name": "order_by",
+            "required": false,
+            "schema": {
+              "default": "random",
+              "title": "Order By",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "order_direction",
+            "required": false,
+            "schema": {
+              "default": "DESC",
+              "title": "Order Direction",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "per_page",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Per Page",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "min_like",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Min Like"
+            }
+          },
+          {
+            "in": "query",
+            "name": "min_text",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Min Text"
+            }
+          },
+          {
+            "in": "query",
+            "name": "exclude_blocked",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Exclude Blocked"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NovelListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Novels",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
+    "/api/novels/author/{author_id}": {
+      "get": {
+        "description": "作者 ID → 显示名预览（编辑器「作者」一栏的即时反馈）。\n\n只读、不写库：本地 ``author`` 表命中就返回（零延迟、离线可用），否则问一次\nPixiv。``source`` 告诉前端这个名字是哪来的；``unknown`` **不是错误**——\nid 才是身份，名字只是缓存，编辑器照样允许保存。保存后名字若为 NULL，那是\n**仓库认可的中间态**、不是\"有任务会兜底\"：``sync_empty_name`` 默认禁用\n（``scheduled_task.is_enabled`` 列默认 false），会把名字补回来的是**再抓\n一次该作品 / 作者**或编辑器里的「同步」（见 ``update_metadata.py``）。\n\n放在 ``/author/{author_id}`` 而不是新开 ``/api/authors`` 路由：既有的\n``POST /author/{author_id}/follow`` 已经在这里，作者相关的两个动作挨着更好找，\n也不用动路由前缀的接线测试。",
+        "operationId": "lookup_author_api_novels_author__author_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "author_id",
+            "required": true,
+            "schema": {
+              "title": "Author Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorLookupResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Lookup Author",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
+    "/api/novels/author/{author_id}/follow": {
+      "post": {
+        "operationId": "toggle_special_follow_api_novels_author__author_id__follow_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "author_id",
+            "required": true,
+            "schema": {
+              "title": "Author Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Toggle Special Follow",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
+    "/api/novels/batch": {
+      "post": {
+        "operationId": "batch_operation_api_novels_batch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchOperationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchOperationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Batch Operation",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
+    "/api/novels/batch-download": {
+      "post": {
+        "operationId": "batch_download_novels_api_novels_batch_download_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchDownloadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Batch Download Novels",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
+    "/api/novels/batch-download/preview": {
+      "post": {
+        "operationId": "batch_download_preview_api_novels_batch_download_preview_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchDownloadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Batch Download Preview",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
+    "/api/novels/batch-export": {
+      "post": {
+        "description": "Enqueue a batch export into the background task system.\n\nThe ZIP is built offline (progress in 「任务管理」) and downloaded via\n``GET /api/novels/export/{task_id}/download`` — the page can be closed\nwhile it runs.",
+        "operationId": "batch_export_task_api_novels_batch_export_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchExportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchExportResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Batch Export Task",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
+    "/api/novels/batch-metadata": {
+      "post": {
+        "description": "批量编辑本地书的「作者」/「系列」—— 预演（``apply=false``，默认）或落库。\n\n与单本 ``PATCH /{novel_id}`` 同一套三态与收尾语义（名字由 id 解析、解析失败\n落 NULL 待补、解除关联时作者留名 / 系列连名字与章节号一起清），唯一刻意的\n差异是**来源**：pixiv 书不报 400，而是被跳过并计数\n（``applicable`` / ``skipped``）——批量的选择集天然混合，整体 400 会让这个\n功能不可用。论证与写路径纪律见 ``batch_edit_metadata.py``。\n\n``apply=false`` 是**预演**：只算数、一个字都不写（不建占位 author / series 行、\n不解析名字、不打网络），用户先看到「N 篇本地书将被修改、M 篇 pixiv 书跳过」\n再确认；``apply=true`` 先算数再落库，``affected`` 是真正被改动的行数。\n\n``cap=None``：与 ``batch_task_operation`` 同一口径，不引入新的 5000 上限——\n写操作是**一条** set-based UPDATE（``update_metadata_many``），天然快，\n``matched`` 可以任意大。作用域解析仍是唯一那条规则（``resolve_batch_scope``）；\n来源收窄（只动本地书）由用例做，全量 id 原样交给它。\n\n路由是**精确路径** ``/batch-metadata``，与 ``/batch`` / ``/batch-export``\n同形：``POST /{novel_id}/...`` 那几条都要第二段路径，所以不会把\n``batch-metadata`` 当成 ``novel_id``（``batch-export`` 早已是同样的形状）。",
+        "operationId": "batch_metadata_operation_api_novels_batch_metadata_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchMetadataRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchMetadataResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Batch Metadata Operation",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
+    "/api/novels/batch-task": {
+      "post": {
+        "description": "Enqueue a batch operation into the background task system.\n\nUnlike :func:`batch_operation` (synchronous, capped at\n:data:`BATCH_MAX_NOVELS`), this path accepts selections of ANY size —\nthe task chunks the work, so the user can close the page and watch\nprogress in 「任务管理」.  Validation (empty scope / tags) still\nhappens synchronously so mistakes surface immediately.",
+        "operationId": "batch_task_operation_api_novels_batch_task_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchOperationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchTaskResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Batch Task Operation",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
+    "/api/novels/blocked-ids": {
+      "get": {
+        "description": "IDs of novels carrying blocked tags WITHIN the current search scope.\n\nPowers the 「查看被排除」view.  Follows the global exclusion setting:\nempty when exclusion is off.  The blocked-id list is filtered through\nthe same scope logic as ``filter_ids_in_scope`` (chunked to stay under\nSQLite's variable limit); exclusion itself is not re-applied (the ids\nare already the excluded set).\n\n``order_by`` (id/like/text) orders the result set; ``random`` or\nunsupported values return the scope order.",
+        "operationId": "get_blocked_novel_ids_api_novels_blocked_ids_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "keyword",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Keyword"
+            }
+          },
+          {
+            "in": "query",
+            "name": "min_like",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Min Like"
+            }
+          },
+          {
+            "in": "query",
+            "name": "min_text",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Min Text"
+            }
+          },
+          {
+            "in": "query",
+            "name": "order_by",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Order By"
+            }
+          },
+          {
+            "in": "query",
+            "name": "order_direction",
+            "required": false,
+            "schema": {
+              "default": "DESC",
+              "title": "Order Direction",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NovelIdsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Blocked Novel Ids",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
+    "/api/novels/by-ids": {
+      "post": {
+        "description": "Novel details for an explicit ID list — powers the 「查看已选」view.\n\nPreserves the caller's ID order; missing IDs are dropped.  The input\nis capped at :data:`BATCH_MAX_NOVELS` (the view's page size — the\nfrontend pages large selections in 5000-novel slices).",
+        "operationId": "get_novels_by_ids_api_novels_by_ids_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NovelsByIdsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NovelsByIdsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Novels By Ids",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
+    "/api/novels/count": {
+      "get": {
+        "description": "匹配数（**有界**）+ 被厌恶标签隐藏数 + 两个截断标志。\n\n计数由 ``repo.COUNT_CAP`` 封顶（见 :class:`NovelCount`）：``total`` 保持\n老客户端的读法不变，但被截断时它只是下界 —— ``truncated: true`` 表示真实\n匹配数 > ``total``（调用方应显示 ``total+`` / ``≥ total``）。``excluded``\n同理，标志为 ``excluded_truncated``。两个标志恒在响应里，值只可能是\n布尔，不会缺席。",
+        "operationId": "count_novels_api_novels_count_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "keyword",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Keyword"
+            }
+          },
+          {
+            "in": "query",
+            "name": "min_like",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Min Like"
+            }
+          },
+          {
+            "in": "query",
+            "name": "min_text",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Min Text"
+            }
+          },
+          {
+            "in": "query",
+            "name": "excluded_ids",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "integer"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Excluded Ids"
+            }
+          },
+          {
+            "in": "query",
+            "name": "exclude_blocked",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Exclude Blocked"
+            }
+          },
+          {
+            "in": "query",
+            "name": "with_excluded",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "With Excluded",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NovelCountResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Count Novels",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
+    "/api/novels/export/{task_id}/download": {
+      "get": {
+        "description": "Stream a completed background export ZIP to the browser.",
+        "operationId": "download_export_file_api_novels_export__task_id__download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Export File",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
+    "/api/novels/ids": {
+      "get": {
+        "description": "All VISIBLE IDs matching the filters — powers the 「全选匹配」bulk-add action.\n\nNo size cap: the selection itself may be any size (operations beyond\nthe sync cap run as background tasks).  ``truncated`` is kept for wire\ncompatibility and is always false here.\n\n``total`` 直接取 ID 列表长度（精确、免费），**不**再打一次有界计数：\n有界计数的值会与这里完整返回的 ID 数不一致。",
+        "operationId": "get_matching_novel_ids_api_novels_ids_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "keyword",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Keyword"
+            }
+          },
+          {
+            "in": "query",
+            "name": "min_like",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Min Like"
+            }
+          },
+          {
+            "in": "query",
+            "name": "min_text",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Min Text"
+            }
+          },
+          {
+            "in": "query",
+            "name": "exclude_blocked",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Exclude Blocked"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NovelIdsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Matching Novel Ids",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
+    "/api/novels/match-ids": {
+      "post": {
+        "description": "Subset of *novel_ids* that match the filters — scoped 「清除选择」.\n\nIntersects the accumulated selection with the CURRENT search scope so\nthe clear action only removes what belongs to the visible scope (the\nrest of the selection survives across searches).  Any-size input: the\nID list is processed in internal chunks to stay under SQLite's\nvariable limit.",
+        "operationId": "match_novel_ids_api_novels_match_ids_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "exclude_blocked",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Exclude Blocked"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MatchIdsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MatchIdsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Match Novel Ids",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
+    "/api/novels/series/{series_id}": {
+      "get": {
+        "description": "系列 ID → 系列名预览（编辑器「系列」一栏的即时反馈）。\n\n与作者预览同构（见 ``lookup_author``）：只读、不写库，``unknown`` **不是\n错误**——id 才是身份，编辑器照样允许保存。名字的来源链更长一点：``series``\n行 → 同系列的 novel 行 → pixiv ``novel_series``（前两步都是本地查询）。",
+        "operationId": "lookup_series_api_novels_series__series_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "series_id",
+            "required": true,
+            "schema": {
+              "title": "Series Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeriesLookupResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Lookup Series",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
+    "/api/novels/sort-ids": {
+      "post": {
+        "description": "Order an explicit id list by a novel column — 「查看已选」排序.\n\nReturns the same ids ordered by id/like/text (missing ids dropped).",
+        "operationId": "sort_novel_ids_api_novels_sort_ids_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SortIdsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NovelIdsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Sort Novel Ids",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
+    "/api/novels/{novel_id}": {
+      "delete": {
+        "operationId": "delete_novel_api_novels__novel_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "novel_id",
+            "required": true,
+            "schema": {
+              "title": "Novel Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Novel",
+        "tags": [
+          "novels"
+        ]
+      },
+      "patch": {
+        "description": "编辑单本小说的元数据（卡片「编辑」按钮）—— docs/NOVEL_EDIT_DESIGN.md §5。\n\nPATCH 三态：未提交的键不动，显式 ``null`` 清空（``series_index`` /\n``create_time`` / ``tags`` / ``caption`` / ``author_id`` / ``series_id``）。\n只提交**发生变化的字段**是前端的约定，服务端不做 diff（写同样的值也是幂等的）。\n\n``title`` / ``author_id`` / ``series_id`` / ``caption`` 仅本地书可改\n（2026-09-22 起前三个收掉、``caption`` 从\"全局不可编辑\"改成此形；清单与\n400 文案的唯一所有者在 ``features/novels/field_policy.py``），pixiv 书提交\n→ 400；结构性字段（``source`` / ``path`` / ``id`` / ``has_epub`` …）在 schema\n层就被 ``extra=\"forbid\"`` 拒掉 → 422（``author_name`` / ``series_name``\n自 2026-09-19 起也在其中：它们是 id 的解析结果，不是可编辑值）。响应是更新后的\n**完整**对象，前端据此原地替换卡片（不整页重取）；同一份对象里带\n``editable_fields``，前端据此置灰输入框。\n\npixiv 书那四列错配之后的出口是**同步**（``POST /{novel_id}/sync``）：按 id\n从来源重抓一遍、恢复来源值，而不是靠手改。\n\n``author_id`` / ``series_id`` 是仅有的可能触发网络请求的字段（本地表没有\n这个名字时问一次 Pixiv）。失败**不致命**：id 照写，名字留 NULL 待补。",
+        "operationId": "update_novel_metadata_api_novels__novel_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "novel_id",
+            "required": true,
+            "schema": {
+              "title": "Novel Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NovelUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NovelBase"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Novel Metadata",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
+    "/api/novels/{novel_id}/download": {
+      "get": {
+        "operationId": "download_novel_api_novels__novel_id__download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "novel_id",
+            "required": true,
+            "schema": {
+              "title": "Novel Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "default": "txt",
+              "enum": [
+                "txt",
+                "epub"
+              ],
+              "title": "Format",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Novel",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
+    "/api/novels/{novel_id}/favourite": {
+      "post": {
+        "operationId": "toggle_favourite_api_novels__novel_id__favourite_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "novel_id",
+            "required": true,
+            "schema": {
+              "title": "Novel Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Toggle Favourite",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
+    "/api/novels/{novel_id}/sync": {
+      "post": {
+        "description": "按 id 从 pixiv 重抓这一本的元数据并落库（编辑器的「同步」）。\n\n修的是\"手改会与来源打架\"那类错配：pixiv 书的 ``title`` / ``author_id`` /\n``series_id`` 都是只读（``field_policy.py``），错配之后的出口就是这里 ——\n把来源值拉回来（docs/NOVEL_EDIT_DESIGN.md §4.3 的单本版）。\n\n**无请求体**：动作的输入只有路径上的 id。响应与 PATCH 同形状（更新后的完整\n``NovelBase``），前端同样原地替换卡片。本地书 → 400（没有来源可恢复）；\npixiv 上已不存在 / 受限（webview 返回空）→ 404。\n\n依赖用 ``Depends(get_uow)`` 而**不是** ``get_write_uow``：抓取必须在写事务\n之外，写事务由用例里的 ``run_write_transaction`` 自己开（与\n``tasks/maintenance.py`` 同一种用法）——依赖注入阶段开不出\"稍后再写\"的\n事务边界。",
+        "operationId": "sync_novel_api_novels__novel_id__sync_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "novel_id",
+            "required": true,
+            "schema": {
+              "title": "Novel Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NovelBase"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Sync Novel",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
+    "/api/search-history/": {
+      "delete": {
+        "description": "Delete all search-history entries (frontend \"全部清除\" button).",
+        "operationId": "clear_search_history_api_search_history__delete",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Clear Search History",
+        "tags": [
+          "search_history"
+        ]
+      },
+      "get": {
+        "operationId": "get_search_history_api_search_history__get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SearchHistoryResponse"
+                  },
+                  "title": "Response Get Search History Api Search History  Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Search History",
+        "tags": [
+          "search_history"
+        ]
+      }
+    },
+    "/api/search-history/{history_id}": {
+      "delete": {
+        "operationId": "delete_search_history_api_search_history__history_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "history_id",
+            "required": true,
+            "schema": {
+              "title": "History Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Search History",
+        "tags": [
+          "search_history"
+        ]
+      }
+    },
+    "/api/system/config": {
+      "get": {
+        "operationId": "get_system_config_api_system_config_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get System Config",
+        "tags": [
+          "system"
+        ]
+      },
+      "put": {
+        "operationId": "update_system_config_api_system_config_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SystemConfigUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update System Config",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/tag-aliases/": {
+      "get": {
+        "operationId": "get_tag_aliases_api_tag_aliases__get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TagAliasResponse"
+                  },
+                  "title": "Response Get Tag Aliases Api Tag Aliases  Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Tag Aliases",
+        "tags": [
+          "tag_aliases"
+        ]
+      },
+      "post": {
+        "operationId": "create_tag_alias_api_tag_aliases__post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TagAliasBase"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagAliasResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Tag Alias",
+        "tags": [
+          "tag_aliases"
+        ]
+      }
+    },
+    "/api/tag-aliases/suggest": {
+      "get": {
+        "description": "相似标签建议。\n\n``offset`` 是**游标**（不是行偏移）：把上一次响应里的 ``next_offset`` 原样\n传回来续扫即可（字段名保留 ``offset`` / ``next_offset`` 是为了不动前端契约，\n前端只把它当不透明整数回传）。``target_tag=`` 模式只指名一个 target，\n没有「页」可续，因此忽略 ``offset`` 且 ``next_offset`` 恒为 0。",
+        "operationId": "suggest_tag_aliases_api_tag_aliases_suggest_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 5,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "target_tag",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Target Tag"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagAliasSuggestListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Suggest Tag Aliases",
+        "tags": [
+          "tag_aliases"
+        ]
+      }
+    },
+    "/api/tag-aliases/{alias_id}": {
+      "delete": {
+        "operationId": "delete_tag_alias_api_tag_aliases__alias_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "alias_id",
+            "required": true,
+            "schema": {
+              "title": "Alias Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Tag Alias",
+        "tags": [
+          "tag_aliases"
+        ]
+      }
+    },
+    "/api/tag-preferences/": {
+      "get": {
+        "operationId": "get_tag_preferences_api_tag_preferences__get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TagPreferenceResponse"
+                  },
+                  "title": "Response Get Tag Preferences Api Tag Preferences  Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Tag Preferences",
+        "tags": [
+          "tag_preferences"
+        ]
+      },
+      "post": {
+        "operationId": "create_tag_preference_api_tag_preferences__post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TagPreferenceCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagPreferenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Tag Preference",
+        "tags": [
+          "tag_preferences"
+        ]
+      }
+    },
+    "/api/tag-preferences/reorder": {
+      "post": {
+        "operationId": "reorder_tag_preferences_api_tag_preferences_reorder_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "type": "integer"
+                },
+                "title": "Ids",
+                "type": "array"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reorder Tag Preferences",
+        "tags": [
+          "tag_preferences"
+        ]
+      }
+    },
+    "/api/tag-preferences/{pref_id}": {
+      "delete": {
+        "operationId": "delete_tag_preference_api_tag_preferences__pref_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pref_id",
+            "required": true,
+            "schema": {
+              "title": "Pref Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Tag Preference",
+        "tags": [
+          "tag_preferences"
+        ]
+      },
+      "put": {
+        "operationId": "update_tag_preference_api_tag_preferences__pref_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pref_id",
+            "required": true,
+            "schema": {
+              "title": "Pref Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TagPreferenceUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagPreferenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Tag Preference",
+        "tags": [
+          "tag_preferences"
+        ]
+      }
+    },
+    "/api/tasks/history": {
+      "get": {
+        "operationId": "get_task_history_api_tasks_history_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskHistoryListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Task History",
+        "tags": [
+          "tasks"
+        ]
+      }
+    },
+    "/api/tasks/methods": {
+      "get": {
+        "operationId": "get_task_methods_api_tasks_methods_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TaskMethod"
+                  },
+                  "title": "Response Get Task Methods Api Tasks Methods Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Task Methods",
+        "tags": [
+          "tasks"
+        ]
+      }
+    },
+    "/api/tasks/scheduled": {
+      "get": {
+        "operationId": "get_scheduled_tasks_api_tasks_scheduled_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ScheduledTaskResponse"
+                  },
+                  "title": "Response Get Scheduled Tasks Api Tasks Scheduled Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Scheduled Tasks",
+        "tags": [
+          "tasks"
+        ]
+      },
+      "post": {
+        "operationId": "create_scheduled_task_api_tasks_scheduled_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScheduledTaskCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduledTaskResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Scheduled Task",
+        "tags": [
+          "tasks"
+        ]
+      }
+    },
+    "/api/tasks/scheduled/reorder": {
+      "post": {
+        "operationId": "reorder_scheduled_tasks_api_tasks_scheduled_reorder_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "type": "integer"
+                },
+                "title": "Task Ids",
+                "type": "array"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reorder Scheduled Tasks",
+        "tags": [
+          "tasks"
+        ]
+      }
+    },
+    "/api/tasks/scheduled/{task_id}": {
+      "delete": {
+        "operationId": "delete_scheduled_task_api_tasks_scheduled__task_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Scheduled Task",
+        "tags": [
+          "tasks"
+        ]
+      },
+      "put": {
+        "operationId": "update_scheduled_task_api_tasks_scheduled__task_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScheduledTaskUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduledTaskResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Scheduled Task",
+        "tags": [
+          "tasks"
+        ]
+      }
+    },
+    "/api/tasks/scheduled/{task_id}/run": {
+      "post": {
+        "operationId": "run_scheduled_task_api_tasks_scheduled__task_id__run_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Run Scheduled Task",
+        "tags": [
+          "tasks"
+        ]
+      }
+    },
+    "/api/tokens/": {
+      "get": {
+        "operationId": "get_tokens_api_tokens__get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TokenResponse"
+                  },
+                  "title": "Response Get Tokens Api Tokens  Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Tokens",
+        "tags": [
+          "tokens"
+        ]
+      },
+      "post": {
+        "operationId": "create_token_api_tokens__post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenBase"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Token",
+        "tags": [
+          "tokens"
+        ]
+      }
+    },
+    "/api/tokens/reorder/": {
+      "post": {
+        "operationId": "reorder_tokens_api_tokens_reorder__post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "type": "integer"
+                },
+                "title": "Ids",
+                "type": "array"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reorder Tokens",
+        "tags": [
+          "tokens"
+        ]
+      }
+    },
+    "/api/tokens/{token_id}": {
+      "delete": {
+        "operationId": "delete_token_api_tokens__token_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token_id",
+            "required": true,
+            "schema": {
+              "title": "Token Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Token",
+        "tags": [
+          "tokens"
+        ]
+      },
+      "put": {
+        "operationId": "update_token_api_tokens__token_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token_id",
+            "required": true,
+            "schema": {
+              "title": "Token Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Token",
+        "tags": [
+          "tokens"
+        ]
+      }
+    }
+  }
+}

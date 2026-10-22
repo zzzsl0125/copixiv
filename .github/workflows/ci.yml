@@ -47,6 +47,13 @@ jobs:
       - name: Run tests
         run: python -m pytest -q -m "not slow"
 
+      # 前端类型的唯一真相是后端导出的 OpenAPI：提交的 frontend/openapi.json
+      # 必须与当前路由/模型一致，否则 openapi-typescript 生成的就是过期类型。
+      - name: Check OpenAPI schema is up to date
+        run: |
+          python -m copixiv.export_openapi > /tmp/openapi.json
+          diff -u frontend/openapi.json /tmp/openapi.json
+
   frontend:
     name: Frontend (vitest + build)
     runs-on: ubuntu-latest
@@ -65,6 +72,13 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      # 生成文件是提交进仓库的：openapi-typescript 的产物若与 openapi.json
+      # 不同步（比如手改了 src/types/api.generated.ts），这里直接失败。
+      - name: Check generated API types are up to date
+        run: |
+          npm run codegen
+          git diff --exit-code -- src/types/api.generated.ts
 
       - name: Run tests
         run: npm run test

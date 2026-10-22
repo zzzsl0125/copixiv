@@ -27,6 +27,7 @@ from copixiv.features.novels.schemas import (
     MatchIdsRequest,
     MatchIdsResponse,
     NovelBase,
+    NovelCountResponse,
     NovelIdsResponse,
     NovelListResponse,
     NovelsByIdsRequest,
@@ -122,7 +123,7 @@ async def get_novels(
     return results
 
 
-@router.get("/count")
+@router.get("/count", response_model=NovelCountResponse)
 async def count_novels(
     uow: SqlUnitOfWork = Depends(get_uow),
     keyword: str | None = Query(None),
@@ -158,12 +159,12 @@ async def count_novels(
     excluded = NovelCount(0)
     if with_excluded and exclude_blocked is not False:
         excluded = await SQLAlchemyNovelRepository(uow.session).count_excluded_novels(spec)
-    return {
-        "total": total.value,
-        "excluded": excluded.value,
-        "truncated": total.truncated,
-        "excluded_truncated": excluded.truncated,
-    }
+    return NovelCountResponse(
+        total=total.value,
+        excluded=excluded.value,
+        truncated=total.truncated,
+        excluded_truncated=excluded.truncated,
+    )
 
 
 @router.get("/ids", response_model=NovelIdsResponse)

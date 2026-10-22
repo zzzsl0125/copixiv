@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, onMounted, computed } from 'vue'
 import { taskApi, getApiErrorMessage } from '../../api'
-import type { ScheduledTask, TaskMethod } from '../../types'
+import type { JsonSchemaProperty, ScheduledTask, TaskMethod } from '../../types'
 import { useToast } from '../../composables'
 import BaseModal from '../ui/BaseModal.vue'
 import AppInput from '../ui/AppInput.vue'
@@ -74,18 +74,72 @@ const buildCronFromUI = () => {
   return '* * * * *'
 }
 
-watch(() => formState.value.task, (newTaskName) => {
-  const method = availableMethods.value.find(m => m.name === newTaskName)
-  if (method) {
-    const currentParams = JSON.parse(formState.value.params || '{}')
-    const newParams: Record<string, unknown> = {}
-    method.arguments.forEach(arg => {
-      newParams[arg.name] = currentParams[arg.name] !== undefined ? currentParams[arg.name] : (arg.default !== null ? arg.default : '')
-    })
-    dynamicParams.value = newParams
-  } else {
-    dynamicParams.value = {}
+// --- JSON Schema helpers ---------------------------------------------------
+// Task methods carry Pydantic's model_json_schema().  The editor only needs
+// each property's effective JSON type (unwrapping nullable unions) plus the
+// schema defaults / required list.
+
+const jsonType = (prop?: JsonSchemaProperty): string => {
+  if (!prop) return 'string'
+  if (prop.anyOf && prop.anyOf.length > 0) {
+    const branch = prop.anyOf.find(p => jsonType(p) !== 'null')
+    return branch ? jsonType(branch) : 'null'
   }
+  if (Array.isArray(prop.type)) {
+    return prop.type.find(t => t !== 'null') || 'null'
+  }
+  return prop.type || 'string'
+}
+
+const isNullable = (prop?: JsonSchemaProperty): boolean => {
+  if (!prop) return false
+  if (prop.type === 'null') return true
+  if (Array.isArray(prop.type) && prop.type.includes('null')) return true
+  return (prop.anyOf || []).some(isNullable)
+}
+
+const hasDefault = (prop: JsonSchemaProperty): boolean =>
+  Object.prototype.hasOwnProperty.call(prop, 'default')
+
+/** Shape a stored/default value for its form control (arrays become JSON text). */
+const toFormValue = (value: unknown, type: string): unknown => {
+  if (type === 'array') {
+    if (value == null) return ''
+    return typeof value === 'string' ? value : JSON.stringify(value)
+  }
+  if (type === 'boolean') return !!value
+  return value == null ? '' : value
+}
+
+const defaultFormValue = (prop: JsonSchemaProperty, type: string): unknown => {
+  if (hasDefault(prop)) return toFormValue(prop.default, type)
+  if (type === 'boolean') return false
+  if (type === 'array') return '[]'
+  return ''
+}
+
+/** Build form values for *taskName*, reusing any currently-entered params. */
+const initialDynamicParams = (taskName: string): Record<string, unknown> => {
+  const method = availableMethods.value.find(m => m.name === taskName)
+  if (!method) return {}
+  let currentParams: Record<string, unknown> = {}
+  try {
+    currentParams = JSON.parse(formState.value.params || '{}')
+  } catch {
+    currentParams = {}
+  }
+  const next: Record<string, unknown> = {}
+  Object.entries(method.arguments?.properties || {}).forEach(([name, prop]) => {
+    const type = jsonType(prop)
+    next[name] = currentParams[name] !== undefined
+      ? toFormValue(currentParams[name], type)
+      : defaultFormValue(prop, type)
+  })
+  return next
+}
+
+watch(() => formState.value.task, (newTaskName) => {
+  dynamicParams.value = initialDynamicParams(newTaskName)
 })
 
 watch(dynamicParams, (newVal) => {
@@ -108,7 +162,7 @@ watch(() => props.isOpen, (newVal) => {
         is_enabled: props.task.is_enabled,
       }
       parseCronToUI(props.task.cron)
-      if (props.task.params) dynamicParams.value = { ...props.task.params }
+      dynamicParams.value = initialDynamicParams(props.task.task)
     } else {
       formState.value = { name: '', task: '', cron: '0 0 * * *', params: '{}', config: '{}', is_enabled: true }
       cronMode.value = 'daily'
@@ -118,19 +172,36 @@ watch(() => props.isOpen, (newVal) => {
   }
 })
 
+const coerceFormValue = (
+  name: string, value: unknown, prop: JsonSchemaProperty,
+): unknown => {
+  const type = jsonType(prop)
+  if (type === 'array') {
+    if (Array.isArray(value)) return value
+    const text = typeof value === 'string' ? value.trim() : ''
+    return text === '' ? [] : JSON.parse(text)
+  }
+  if (type === 'boolean') return !!value
+  const text = value == null ? '' : String(value)
+  if (text === '' && isNullable(prop)) return null
+  if (type === 'integer' || type === 'number') {
+    const parsed = type === 'integer' ? parseInt(text, 10) : parseFloat(text)
+    if (Number.isNaN(parsed)) throw new Error(`参数 ${name} 必须是数字`)
+    return parsed
+  }
+  return value ?? ''
+}
+
 const handleSave = () => {
   try {
-    const paramsObj = JSON.parse(formState.value.params)
-    const configObj = JSON.parse(formState.value.config || '{}')
+    const paramsObj = JSON.parse(formState.value.params || '{}')
     const method = availableMethods.value.find(m => m.name === formState.value.task)
-    if (method) {
-      method.arguments.forEach(arg => {
-        if (paramsObj[arg.name] !== undefined) {
-          if (arg.type === 'int') paramsObj[arg.name] = parseInt(paramsObj[arg.name])
-          else if (arg.type === 'float') paramsObj[arg.name] = parseFloat(paramsObj[arg.name])
-        }
-      })
-    }
+    Object.entries(method?.arguments?.properties || {}).forEach(([name, prop]) => {
+      if (name in dynamicParams.value) {
+        paramsObj[name] = coerceFormValue(name, dynamicParams.value[name], prop)
+      }
+    })
+    const configObj = JSON.parse(formState.value.config || '{}')
     emit('save', {
       name: formState.value.name,
       task: formState.value.task,
@@ -146,7 +217,13 @@ const handleSave = () => {
 
 const selectedMethodArgs = computed(() => {
   const method = availableMethods.value.find(m => m.name === formState.value.task)
-  return method ? method.arguments : []
+  const schema = method?.arguments
+  const required = new Set(schema?.required || [])
+  return Object.entries(schema?.properties || {}).map(([name, prop]) => ({
+    name,
+    type: jsonType(prop),
+    required: required.has(name),
+  }))
 })
 
 const weekDays = [
@@ -177,11 +254,11 @@ const weekDays = [
           <span v-if="arg.required" class="text-red-500">*</span>
         </label>
         <div class="w-2/3">
-          <div v-if="arg.type === 'bool'" class="flex items-center">
+          <div v-if="arg.type === 'boolean'" class="flex items-center">
             <AppCheckbox :model-value="!!dynamicParams[arg.name]" @update:model-value="dynamicParams[arg.name] = $event" />
             <span class="ml-2 text-sm text-gray-600">{{ dynamicParams[arg.name] ? 'Yes' : 'No' }}</span>
           </div>
-          <input v-else-if="arg.type === 'int' || arg.type === 'float'" v-model.number="dynamicParams[arg.name]" type="number" :step="arg.type === 'float' ? '0.1' : '1'" class="block w-full border border-gray-300 rounded-md shadow-sm py-1.5 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm" />
+          <input v-else-if="arg.type === 'integer' || arg.type === 'number'" v-model.number="dynamicParams[arg.name]" type="number" :step="arg.type === 'number' ? '0.1' : '1'" class="block w-full border border-gray-300 rounded-md shadow-sm py-1.5 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm" />
           <input v-else v-model="dynamicParams[arg.name]" type="text" class="block w-full border border-gray-300 rounded-md shadow-sm py-1.5 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm" />
         </div>
       </div>

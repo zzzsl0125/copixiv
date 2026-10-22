@@ -1,19 +1,8 @@
-export interface FailedNovel {
-  novel_id: number
-  title: string | null
-  failure_type: string | null
-  error_message: string | null
-  failed_times: number
-  last_failed_at: string | null
-}
+/** Failed-novel ledger types — thin aliases over the generated schemas. */
+import type { components } from './api.generated'
 
-export interface FailedNovelListResponse {
-  items: FailedNovel[]
-  total: number
-  offset: number
-  limit: number
-}
+type S = components['schemas']
 
-export interface FailedNovelCountResponse {
-  count: number
-}
+export type FailedNovel = S['FailedNovelItem']
+export type FailedNovelListResponse = S['FailedNovelListResponse']
+export type FailedNovelCountResponse = S['FailedNovelCountResponse']

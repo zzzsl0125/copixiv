@@ -86,6 +86,20 @@ class NovelListResponse(BaseModel):
     has_excluded: bool = False
 
 
+class NovelCountResponse(BaseModel):
+    """``GET /api/novels/count`` —— 匹配数 + 隐藏数（均为有界计数）。
+
+    计数由仓库的 ``COUNT_CAP`` 封顶：``truncated`` / ``excluded_truncated``
+    为 true 时对应数字只是下界，前端必须显示成 ``5000+`` 之类的形态。
+    两个标志恒在响应里（与老客户端的读法一致）。
+    """
+
+    total: int
+    excluded: int
+    truncated: bool = False
+    excluded_truncated: bool = False
+
+
 # ---------------------------------------------------------------------------
 # 元数据编辑（PATCH /api/novels/{novel_id}）—— docs/NOVEL_EDIT_DESIGN.md §5
 # ---------------------------------------------------------------------------

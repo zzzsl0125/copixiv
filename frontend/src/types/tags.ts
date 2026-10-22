@@ -1,30 +1,10 @@
-/** Tag domain types */
+/** Tag domain types — thin aliases over the generated OpenAPI schemas. */
+import type { components } from './api.generated'
 
-export interface TagPreference {
-  id: number
-  tag: string
-  preference: 'favourite' | 'blocked'
-  sort_index: number
-}
+type S = components['schemas']
 
-export interface TagAlias {
-  id: number
-  source: string
-  target: string
-}
-
-export interface TagCandidate {
-  id: number
-  name: string
-  reference_count: number
-}
-
-export interface TagAliasSuggest {
-  target: TagCandidate
-  candidates: TagCandidate[]
-}
-
-export interface TagAliasSuggestList {
-  items: TagAliasSuggest[]
-  next_offset: number
-}
+export type TagPreference = S['TagPreferenceResponse']
+export type TagAlias = S['TagAliasResponse']
+export type TagCandidate = S['TagCandidate']
+export type TagAliasSuggest = S['TagAliasSuggestResponse']
+export type TagAliasSuggestList = S['TagAliasSuggestListResponse']

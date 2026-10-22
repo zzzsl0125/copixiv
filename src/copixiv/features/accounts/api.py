@@ -57,14 +57,14 @@ def _token_to_masked_dict(t) -> dict:
     }
 
 
-@router.get("/")
+@router.get("/", response_model=list[TokenResponse])
 async def get_tokens(uow: SqlUnitOfWork = Depends(get_uow)):
-    # Build the response manually — a response_model=list[TokenResponse]
-    # would serialize the raw refresh_token back to the client.
+    # Build each row manually so the masked token (not the raw refresh_token)
+    # is what the response model validates and serializes.
     return [_token_to_masked_dict(t) for t in await SQLAlchemyTokenRepository(uow.session).get_all()]
 
 
-@router.post("/")
+@router.post("/", response_model=TokenResponse)
 async def create_token(data: TokenBase, uow: SqlUnitOfWork = Depends(get_write_uow)):
     # The request schema still accepts the full token; only the response
     # is masked so the client can't read back the secret it just submitted.
@@ -77,7 +77,7 @@ async def create_token(data: TokenBase, uow: SqlUnitOfWork = Depends(get_write_u
     return _token_to_masked_dict(created)
 
 
-@router.put("/{token_id}")
+@router.put("/{token_id}", response_model=TokenResponse)
 async def update_token(token_id: int, data: TokenUpdate, uow: SqlUnitOfWork = Depends(get_write_uow)):
     payload = data.model_dump(exclude_none=True)
     # is_follow is a singleton designation — clear it on every other

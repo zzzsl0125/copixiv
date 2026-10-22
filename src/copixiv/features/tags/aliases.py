@@ -41,7 +41,7 @@ class TagAliasSuggestListResponse(BaseModel):
 router = APIRouter()
 
 
-@router.get("/")
+@router.get("/", response_model=list[TagAliasResponse])
 async def get_tag_aliases(uow: SqlUnitOfWork = Depends(get_uow)):
     return await SQLAlchemyTagRepository(uow.session).get_aliases()
 
@@ -63,7 +63,7 @@ async def suggest_tag_aliases(
     return await SQLAlchemyTagRepository(uow.session).suggest_aliases(limit=limit, offset=offset, target_tag=target_tag)
 
 
-@router.post("/")
+@router.post("/", response_model=TagAliasResponse)
 async def create_tag_alias(data: TagAliasBase, uow: SqlUnitOfWork = Depends(get_write_uow)):
     if data.source == data.target:
         raise ValidationError("原标签不能和目标标签相同")

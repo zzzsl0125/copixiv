@@ -1,25 +1,8 @@
-/** Token domain types */
+/** Token domain types — thin aliases over the generated OpenAPI schemas. */
+import type { components } from './api.generated'
 
-export interface Token {
-  id: number
-  name: string
-  token: string
-  premium: boolean
-  valid: boolean
-  is_follow: boolean
-}
+type S = components['schemas']
 
-export interface TokenCreate {
-  name: string
-  token: string
-  premium?: boolean
-  valid?: boolean
-}
-
-export interface TokenUpdate {
-  name?: string
-  token?: string
-  premium?: boolean
-  valid?: boolean
-  is_follow?: boolean
-}
+export type Token = S['TokenResponse']
+export type TokenCreate = S['TokenBase']
+export type TokenUpdate = S['TokenUpdate']

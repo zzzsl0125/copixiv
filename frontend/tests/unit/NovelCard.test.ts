@@ -24,6 +24,7 @@ const novel: Novel = {
   tags: ['tag-a', 'tag-b'],
   is_favourite: 0,
   is_special_follow: 0,
+  source: 'pixiv',
   // 后端 NovelBase 下发的字段策略（本用例不关心，给 pixiv 形态即可）。
   editable_fields: ['series_index', 'tags', 'create_time'],
 }

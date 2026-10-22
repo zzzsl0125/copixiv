@@ -60,6 +60,7 @@ export function useTokens() {
         token: trimmedToken,
         premium: data.premium || false,
         valid: data.valid !== false,
+        is_follow: false,
       })
     }
     await loadTokens()

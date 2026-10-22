@@ -4,7 +4,7 @@ export type {
   MatchIdsResult, NovelCountResult, NovelListResult, NovelUpdatePayload,
   AuthorLookup, SeriesLookup, BatchMetadataRequest, BatchMetadataResult,
 } from './novels'
-export type { TaskArgument, TaskMethod, ScheduledTask, ScheduledTaskCreate, ScheduledTaskUpdate, TaskHistory } from './tasks'
+export type { JsonSchemaProperty, TaskArgumentsSchema, TaskMethod, ScheduledTask, ScheduledTaskCreate, ScheduledTaskUpdate, TaskHistory } from './tasks'
 export type { TagPreference, TagAlias, TagCandidate, TagAliasSuggest, TagAliasSuggestList } from './tags'
 export type { Token, TokenCreate, TokenUpdate } from './tokens'
 export type { SystemConfig, SearchHistory } from './system'

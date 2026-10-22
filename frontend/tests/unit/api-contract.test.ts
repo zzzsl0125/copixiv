@@ -147,7 +147,12 @@ describe('NovelListResult（schemas.py:NovelListResponse）', () => {
 
 describe('NovelCountResult（GET /api/novels/count）', () => {
   it('total/excluded 均为 number（with_excluded=true 时 excluded 才非零）', () => {
-    const count: NovelCountResult = { total: 5, excluded: 2 }
+    const count: NovelCountResult = {
+      total: 5,
+      excluded: 2,
+      truncated: false,
+      excluded_truncated: false,
+    }
     expect(typeof count.total).toBe('number')
     expect(typeof count.excluded).toBe('number')
   })
@@ -163,7 +168,8 @@ describe('NovelCountResult（GET /api/novels/count）', () => {
     expect(capped.truncated).toBe(true)
     expect(capped.excluded_truncated).toBe(false)
 
-    const old: NovelCountResult = { total: 5, excluded: 0 }
+    // 老后端可能不下发两个标志：显式断言一次性，类型上用断言保留这个兼容场景。
+    const old = { total: 5, excluded: 0 } as NovelCountResult
     expect(old.truncated ?? false).toBe(false)
   })
 })

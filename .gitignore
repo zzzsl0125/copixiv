@@ -71,3 +71,6 @@ docs
 
 # === 路径迁移时的整树快照（venv/pgdata 副本，非源码）===
 .pathfix-backup-*/
+
+# npm cache override for sandboxed runs
+.npm-cache/

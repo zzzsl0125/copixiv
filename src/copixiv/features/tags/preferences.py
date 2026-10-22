@@ -18,7 +18,9 @@ from copixiv.features.tags.repo import SQLAlchemyTagRepository
 class TagPreferenceResponse(BaseModel):
     id: int
     tag: str
-    preference: str  # "favourite" | "blocked"
+    # 列有 CHECK 约束（favourite / blocked），响应模型也用 Literal 把它带到
+    # OpenAPI，前端 codegen 才不需要在手写类型里再窄化一次。
+    preference: Literal["favourite", "blocked"]
     sort_index: int
     model_config = ConfigDict(from_attributes=True)
 

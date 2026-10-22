@@ -1,14 +1,7 @@
-/** System & search history types */
+/** System & search history types — thin aliases over the generated schemas. */
+import type { components } from './api.generated'
 
-export interface SystemConfig {
-  batch_download_naming: string
-  exclude_blocked_tag_novels: boolean
-}
+type S = components['schemas']
 
-export interface SearchHistory {
-  id: number
-  type: string
-  value: string
-  display_value?: string | null
-  timestamp: string
-}
+export type SystemConfig = S['SystemConfigResponse']
+export type SearchHistory = S['SearchHistoryResponse']
