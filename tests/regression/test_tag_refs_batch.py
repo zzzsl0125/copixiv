@@ -24,7 +24,6 @@ from copixiv.db.uow import SqlUnitOfWork
 from copixiv.db.write_lock import run_write_transaction
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 from copixiv.tasks.kernel import TaskContext
-from copixiv.tasks.maintenance import rebuild_tag_counts
 
 _ALL_TABLES = (
     "novel, author, series, tag, tag_alias, tag_preference, "
@@ -166,32 +165,29 @@ class TestStatementLevelBatchTrigger:
         assert counts["A"] == 1 and counts["C"] == 1
 
 
-class TestRebuildTagCounts:
-    async def test_rebuild_tag_counts_uses_novel_tags_array(
-        self, session_factory, clean_db, _author,
-    ):
-        """The maintenance fallback must recompute from ``novel.tags`` (the
-        ``novel_tag`` table no longer exists)."""
-        with session_factory() as s:
-            s.add(Novel(id=1, title="a", author_id=1, tags=["A"]))
-            s.add(Novel(id=2, title="b", author_id=1, tags=["A", "B"]))
-            s.commit()
+class TestRebuildTagCountsIsGone:
+    """The recount task was deleted (2026-10-23): the trigger already owns it.
 
-        # Simulate drift: wrong counts + an orphan tag.
-        with session_factory() as s:
-            s.execute(text("UPDATE tag SET reference_count = 999 WHERE name IN ('A', 'B')"))
-            s.add(Tag(name="ORPHAN", reference_count=123))
-            s.commit()
+    ``sync_tag_refs_batch`` is a statement-level trigger that covers INSERT /
+    UPDATE / DELETE (including ``COPY`` and the retroactive alias
+    ``array_replace``).  Production had **zero** drifted tags across 75 496
+    rows while the task had never once run, and its own report was a lie: it
+    ran ``UPDATE`` then counted drift *in the same transaction*, so it always
+    printed 「修正 0 个偏差」.  Keeping a repair task whose only measurable
+    output was wrong turned a healthy invariant into a false alarm.
+    """
 
-        result = await rebuild_tag_counts(
-            TaskContext(uow=SqlUnitOfWork(session_factory))
-        )
+    def test_the_task_is_not_registered(self):
+        from copixiv.tasks.kernel import discover_tasks, get_spec
 
-        assert "标签引用计数重建" in result.summary
-        counts = _tag_counts(session_factory)
-        assert counts["A"] == 2
-        assert counts["B"] == 1
-        assert counts["ORPHAN"] == 0
+        discover_tasks()
+        assert get_spec("rebuild_tag_counts") is None
+
+    def test_the_module_is_gone(self):
+        import importlib
+
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module("copixiv.tasks.maintenance.tags")
 
 
 class TestRunWriteTransactionRetry:
