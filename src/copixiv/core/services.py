@@ -1,24 +1,21 @@
 """Pure domain services — no I/O, no side effects.
 
 Merged from ``domain/services/*`` (8 files + ``__init__.py`` re-exports).
+
+Filename/naming-template rules live in :mod:`copixiv.core.naming` and the
+batch ZIP builder in :mod:`copixiv.core.zip`; both are re-exported here so
+existing ``from copixiv.core.services import ...`` call sites keep working.
 """
 
 from __future__ import annotations
 
 import hashlib
-import logging
 import re
-import tempfile
-import zipfile
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, BinaryIO, Callable
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
-
-from copixiv.core import formats
-from copixiv.core.models import EpubStatus
 
 
 # ---------------------------------------------------------------------------
@@ -112,10 +109,6 @@ def parse_tags(tags: list[str | dict]) -> list[str]:
 # Image placeholders — text and byte entry points share one pattern.
 # ---------------------------------------------------------------------------
 
-# stdlib logging keeps this core module free of app-layer imports; the
-# app's loguru bridge forwards these records.
-logger = logging.getLogger(__name__)
-
 # Pattern for embedded images in novel text.  This is the **only** definition
 # of the marker syntax in the codebase: text callers use
 # ``has_image_placeholders`` / ``IMAGE_PLACEHOLDER_PATTERN`` (the builder needs
@@ -191,274 +184,6 @@ def body_unchanged(local_text: str | None, incoming: str | None) -> bool:
     if not local_text or not incoming:
         return False
     return sha256_text(local_text) == sha256_text(incoming)
-
-
-# ---------------------------------------------------------------------------
-# Safe filename and path generation — pure functions.
-# ---------------------------------------------------------------------------
-
-# Characters illegal in Windows / Linux filenames
-_ILLEGAL_CHARS: re.Pattern[str] = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-_WHITESPACE_RUN: re.Pattern[str] = re.compile(r"\s+")
-
-
-def safe_filename(text: str, max_length: int = 240) -> str:
-    """Clean *text* of illegal filename characters and truncate to *max_length* bytes.
-
-    Returns ``"untitled"`` if the result would be empty.
-    """
-    clean = _ILLEGAL_CHARS.sub("", text)
-    clean = _WHITESPACE_RUN.sub(" ", clean).strip()
-    if not clean:
-        return "untitled"
-
-    encoded = clean.encode("utf-8")
-    if len(encoded) > max_length:
-        encoded = encoded[:max_length]
-        # Don't split a multi-byte character
-        while True:
-            try:
-                clean = encoded.decode("utf-8")
-                break
-            except UnicodeDecodeError:
-                encoded = encoded[:-1]
-    return clean.strip()
-
-
-def build_path(
-    novel_id: int | str,
-    title: str,
-    download_dir: str = "download",
-) -> str:
-    """Generate the filesystem path where a novel's text should be stored.
-
-    Format: ``{download_dir}/{subdir}/{safe_title}_{novel_id}.txt``
-
-    The title is truncated so the *complete* basename always fits within
-    ``NAME_MAX`` (255 bytes) — including the ``_{novel_id}.txt`` suffix
-    and the ``.tmp`` suffix that atomic writes (``save_novel_text`` /
-    the EPUB builder) append transiently.  One extra byte of headroom is
-    reserved so no component ever sits exactly at the limit.  Without
-    that reservation a long title can still overflow the limit on the
-    ``.tmp`` write and fail the whole download with
-    ``OSError: [Errno 36] File name too long``.
-    """
-    id_int = int(novel_id)
-    subdir = "0000" if id_int < 10_000_000 else str(id_int).zfill(8)[:4]
-    # Worst-case basename suffix is "_<id>.epub.tmp" (one byte longer
-    # than "_<id>.txt.tmp"); reserve it so both text and EPUB temp
-    # writes stay within NAME_MAX, with 1 byte of margin.
-    reserved = len(f"_{id_int}.epub.tmp") + 1
-    filename = (
-        f"{safe_filename(title, max_length=254 - reserved)}_{id_int}.txt"
-    )
-    return str(Path(download_dir) / subdir / filename)
-
-
-# ---------------------------------------------------------------------------
-# Batch-download naming template engine
-# ---------------------------------------------------------------------------
-
-# Half-width illegal chars → full-width equivalents (preserve readability)
-_FULLWIDTH_MAP: dict[int, int] = {
-    0x5C: 0xFF3C,   # \ → ＼
-    0x2F: 0xFF0F,   # / → ／
-    0x3A: 0xFF1A,   # : → ：
-    0x3F: 0xFF1F,   # ? → ？
-    0x22: 0xFF02,   # " → ＂
-    0x3C: 0xFF1C,   # < → ＜
-    0x3E: 0xFF1E,   # > → ＞
-    0x2A: 0xFF0A,   # * → ＊
-    0x7C: 0xFF5C,   # | → ｜
-    0x7E: 0xFF5E,   # ~ → ～
-}
-
-# Windows file-system reserved names (case-insensitive)
-_WINDOWS_RESERVED: frozenset[str] = frozenset({
-    "CON", "PRN", "AUX", "NUL",
-    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-})
-
-_SEPARATORS: str = "#_- ,&"
-
-# Invisible / control characters — stripped entirely
-_CONTROL_CHARS: re.Pattern[str] = re.compile(
-    "[\x00-\x1f\x7f-\x9f\xad"
-    "؀-؅؜۝܏࣢᠎"
-    "​-‏‪-‮⁠-⁤⁦-⁯"
-    "﷐-﷯﻿￹-￻￾￿]"
-)
-
-
-def _replace_illegal_chars(value: str) -> str:
-    """Remove invisible chars and map half-width filename chars to full-width."""
-    return _CONTROL_CHARS.sub("", value).translate(_FULLWIDTH_MAP)
-
-
-def _sanitize_path_segment(segment: str) -> str:
-    """Sanitize one ``/``-delimited path segment.
-
-    Handles Windows reserved names and leading/trailing dots.
-    Returns ``"untitled"`` if empty after processing.
-    """
-    segment = segment.strip()
-    if not segment:
-        return "untitled"
-
-    # Strip leading dots BEFORE the reserved-name check — ``.CON`` /
-    # ``..CON`` must not slip past the Windows reserved-name guard.
-    segment = segment.lstrip(".")
-    if not segment:
-        return "untitled"
-
-    name, _dot, ext = segment.partition(".")
-    if name.upper() in _WINDOWS_RESERVED:
-        if ext:
-            segment = segment.replace(".", "．")  # full-width ．
-        else:
-            segment = name + "[WinReserved]"
-
-    if segment[-1] == ".":
-        segment = segment[:-1] + "．"
-
-    return segment or "untitled"
-
-
-def _remove_empty_token(text: str, placeholder: str) -> str:
-    """Replace *placeholder* and any adjacent separator chars with ``""``.
-
-    All occurrences are removed (a template may repeat a token), including
-    ``#{series_index}_`` wrapping an empty ``{series_index}``; ``/`` (not a
-    separator) is left in place.
-    """
-    if placeholder not in text:
-        return text
-
-    while True:
-        idx = text.find(placeholder)
-        if idx == -1:
-            break
-        left = idx
-        while left > 0 and text[left - 1] in _SEPARATORS:
-            left -= 1
-        right = idx + len(placeholder)
-        while right < len(text) and text[right] in _SEPARATORS:
-            right += 1
-        text = text[:left] + text[right:]
-    return text
-
-
-def _post_process(path: str) -> str:
-    """Final cleanup: sanitize each ``/`` segment, discard empties, rejoin.
-
-    Literal characters in the template (e.g. a user-written ``:``) are
-    sanitized the same way token values are, so the produced path is legal
-    on Windows as well as Linux.
-    """
-    segments = path.split("/")
-    cleaned: list[str] = []
-    for seg in segments:
-        seg = _replace_illegal_chars(seg.strip())
-        if not seg:
-            continue
-        cleaned.append(_sanitize_path_segment(seg))
-    return "/".join(cleaned)
-
-
-class NovelNamingTemplate:
-    """Resolve a token-based naming template into a ZIP arcname.
-
-    Token names match the keys of the novel dict directly::
-
-        {id}            — novel["id"] (REQUIRED — guarantees unique filenames)
-        {title}         — novel["title"]
-        {author_name}   — novel["author_name"] (falls back to "未知作者")
-        {author_id}     — novel["author_id"]
-        {like}          — novel["like"]
-        {view}          — novel["view"]
-        {text}          — novel["text"] (character count)
-        {date}          — novel["create_time"] formatted as YYYY-MM-DD
-        {series_name}   — novel["series_name"] (empty if no series)
-        {series_index}  — novel["series_index"] (raw number, no ``#`` prefix;
-                          ``0`` counts as "no index", same as ``None``)
-
-    ``/`` in the template defines the directory structure inside the ZIP.
-
-    Raises:
-        ValueError: If the template does not contain ``{id}``.
-    """
-
-    def __init__(self, template: str) -> None:
-        if "{id}" not in template:
-            raise ValueError(
-                "Template must contain '{id}' to guarantee unique filenames."
-            )
-        self._template = template
-
-    # -- resolve ---------------------------------------------------------
-
-    def resolve(self, novel: dict[str, Any]) -> str:
-        """Produce a sanitized relative path (caller appends the extension)."""
-        result = self._template
-
-        # Scan the novel dict for matching tokens; {date} is the sole
-        # computed token (formatted from create_time).
-        for key, raw in self._iter_token_values(novel):
-            placeholder = "{" + key + "}"
-            val = _replace_illegal_chars(raw)
-
-            if val:
-                result = result.replace(placeholder, val)
-            else:
-                result = _remove_empty_token(result, placeholder)
-
-        return _post_process(result)
-
-    def _iter_token_values(self, novel):
-        """Yield ``(key, raw_string)`` for each token found in the template.
-
-        *novel* is a domain :class:`~copixiv.core.models.Novel`
-        (or any object exposing the token attributes).
-        """
-        # {id} — mandatory
-        yield "id", str(novel.id)
-
-        # {date} — computed, formatted create_time
-        if "{date}" in self._template:
-            yield "date", _format_date(novel.create_time)
-
-        # All other tokens are novel attributes directly
-        for key in ("title", "author_name", "author_id", "like", "view",
-                     "text", "series_name", "series_index"):
-            placeholder = "{" + key + "}"
-            if placeholder not in self._template:
-                continue
-            value = getattr(novel, key, None)
-            if key == "author_name" and not value:
-                yield key, "未知作者"
-            elif key == "series_index" and value == 0:
-                # ``0`` = 无章节号，与 None 同义（2026-09-22 统一口径：
-                # 编辑器只收正整数或空，见 update_metadata.py）。yield "" 让
-                # ``#{series_index}_`` 整个 token 连同分隔符一起消失。
-                #
-                # **只对 series_index 生效**：``{id}`` / ``{like}`` / ``{view}``
-                # / ``{text}`` 的 0 是真实数字，必须照旧渲染成 "0"——所以这里
-                # 判的是具体 token，不是全局 falsy。
-                yield key, ""
-            elif value is None:
-                yield key, ""
-            else:
-                yield key, str(value)
-
-
-def _format_date(value: Any) -> str:
-    """Format *value* as ``YYYY-MM-DD``, or return ``""`` if unavailable."""
-    if value is None:
-        return ""
-    if isinstance(value, datetime):
-        return value.strftime("%Y-%m-%d")
-    return str(value)[:10]
 
 
 # ---------------------------------------------------------------------------
@@ -684,80 +409,17 @@ def resolve_active(
 
 
 # ---------------------------------------------------------------------------
-# Batch ZIP archive builder — pure function.
+# Backward-compatible re-exports — the naming/ZIP code moved to sibling
+# modules (``core/naming.py`` / ``core/zip.py``), but these names stay
+# importable from here so no call site has to change.
 # ---------------------------------------------------------------------------
-
-# Buffers up to 8 MB stay in memory; larger batches (e.g. 200 EPUBs)
-# spill to a disk-backed temp file instead of exhausting RAM.
-_SPOOL_MAX = 8 * 1024 * 1024
-
-# Progress callback fires every N processed files (used by the background
-# batch_export task to report live progress).
-_PROGRESS_EVERY = 500
-
-
-def build_batch_zip(
-    novels: list[dict[str, Any]],
-    format_mode: str = "txt",
-    naming_template: str | None = None,
-    progress: Callable[[int, int], None] | None = None,
-) -> tuple[BinaryIO, list[str], list[str]]:
-    """Build a ZIP of novel files matching the given criteria.
-
-    Args:
-        novels: List of novel dicts, each containing at least ``id``, ``path``,
-                ``title``, ``author_name``, ``series_id``, ``series_name``,
-                ``series_index``, and ``has_epub``.
-        format_mode: ``'txt'`` or ``'prefer_epub'`` (prefers EPUB when available).
-        naming_template: Token-based naming template for ZIP arcnames.
-                Defaults to ``{author_name}/{series_name}/#{series_index}_{title}_{id}``.
-        progress: Optional callback ``(processed, total)`` invoked every
-                ~500 files — lets long-running exports report progress.
-
-    Returns:
-        ``(zip_buffer, added_titles, missing_ids)`` — the ZIP as a seekable
-        binary file object (spooled: memory up to 8 MB, then disk), the
-        titles successfully added, and the IDs whose files were missing.
-    """
-    zip_buffer: BinaryIO = tempfile.SpooledTemporaryFile(max_size=_SPOOL_MAX)
-    added_titles: list[str] = []
-    missing_ids: list[str] = []
-
-    template = NovelNamingTemplate(
-        naming_template or "{author_name}/{series_name}/#{series_index}_{title}_{id}"
-    )
-
-    try:
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            for index, novel in enumerate(novels, start=1):
-                novel_id = novel.id
-                novel_path_str = novel.path
-                title = novel.title or str(novel_id)
-
-                actual_fmt = formats.preferred_format(
-                    format_mode, epub_ready=novel.has_epub == EpubStatus.DONE,
-                )
-
-                if not novel_path_str:
-                    missing_ids.append(str(novel_id))
-                else:
-                    file_path = formats.sibling_path(Path(novel_path_str), actual_fmt)
-                    if not file_path.is_file():
-                        missing_ids.append(str(novel_id))
-                    else:
-                        arcname = template.resolve(novel) + formats.suffix_for(actual_fmt)
-                        zf.write(str(file_path), arcname)
-                        added_titles.append(title)
-
-                if progress is not None and index % _PROGRESS_EVERY == 0:
-                    progress(index, len(novels))
-    except Exception:
-        # Never leak the spooled file on partial builds.
-        zip_buffer.close()
-        raise
-
-    return zip_buffer, added_titles, missing_ids
-
+from copixiv.core.naming import (  # noqa: E402  re-exported: call sites still import from services
+    NovelNamingTemplate,
+    _sanitize_path_segment,
+    build_path,
+    safe_filename,
+)
+from copixiv.core.zip import build_batch_zip  # noqa: E402  re-exported
 
 __all__ = [
     "parse_tags",
@@ -770,6 +432,8 @@ __all__ = [
     "body_unchanged",
     "safe_filename",
     "build_path",
+    "NovelNamingTemplate",
+    "_sanitize_path_segment",
     "safe_get",
     "safe_set",
     "guess_series_order",
