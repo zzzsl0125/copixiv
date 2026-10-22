@@ -139,12 +139,99 @@ class TestReadEpub:
         assert str(excinfo.value) == EPUB_INVALID_ERROR
 
     def test_oversize_input_is_rejected_before_parsing(self, monkeypatch):
-        """字节上限必须在**解析之前**拦 —— 否则畸形大容器会先被整个读进内存。"""
-        monkeypatch.setattr(reader, "MAX_EPUB_BYTES", 8)
+        """容器上限仍必须在**解析之前**拦（容器本身要整个读进内存做瘦身）。"""
+        monkeypatch.setattr(reader, "MAX_CONTAINER_BYTES", 8)
         with pytest.raises(EpubReadError) as excinfo:
             read_epub(build_epub())
 
         assert str(excinfo.value) == EPUB_TOO_LARGE_ERROR
+
+
+def _pad_with_fake_image(data: bytes, *, size: int) -> bytes:
+    """往一份 EPUB 里塞一个大 "image" 成员，返回新容器（体积约 ``size``）。
+
+    走 OPF 声明，所以它同时也验证了"非文本成员留空占位"这条路：ebooklib
+    要在 manifest 里找到它，但正文读取一个字节都不该碰它。图片按 STORED
+    写入 —— 压缩会把 ``b"\xff" * n`` 压成几百字节，测不出"容器很大"。
+    """
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(data)) as source:
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as target:
+            for info in source.infolist():
+                payload = source.read(info.filename)
+                if info.filename == "EPUB/content.opf":
+                    payload = payload.replace(
+                        b"</manifest>",
+                        b'<item id="padding-image" href="images/padding.jpg" '
+                        b'media-type="image/jpeg"/></manifest>',
+                    )
+                target.writestr(info, payload)
+            target.writestr("EPUB/images/padding.jpg", b"\xff" * size,
+                            compress_type=zipfile.ZIP_STORED)
+    return buffer.getvalue()
+
+
+class TestSlimContainer:
+    """瘦身读取：容器可以很大，只要正文小就该读得出来，且正文不变。"""
+
+    def test_container_over_the_old_cap_is_readable_when_text_is_small(self):
+        """旧 50 MB 上限的失败根因是插图，不是正文 —— 现在不该再失败。"""
+        big = _pad_with_fake_image(build_epub(), size=51 * 1024 * 1024)
+        assert len(big) > 50 * 1024 * 1024
+
+        content = read_epub(big)
+
+        assert content.body == "第一段。\n第二段。"
+        assert content.title == "测试书名"
+
+    def test_slimmed_read_matches_an_unlimited_whole_container_read(self):
+        """瘦身版喂给 ebooklib 的结果必须与整容器一致（正文 + 元数据）。"""
+        import io
+        import zipfile
+
+        from ebooklib import epub
+
+        from copixiv.storage.epub.reader import _slim_container
+
+        big = _pad_with_fake_image(build_epub(title="t", author="a"),
+                                   size=1024 * 1024)
+        slim = _slim_container(big)
+        assert len(slim) < len(big) / 10
+
+        # 图片在瘦身容器里仍在（空占位）—— 删掉会让 ebooklib 抛 KeyError。
+        with zipfile.ZipFile(io.BytesIO(slim)) as archive:
+            assert archive.read("EPUB/images/padding.jpg") == b""
+
+        whole = epub.read_epub(io.BytesIO(big))
+        from_slim = epub.read_epub(io.BytesIO(slim))
+        assert reader.extract_body(from_slim) == reader.extract_body(whole)
+        assert reader._first_metadata(from_slim, "title") == "t"
+        assert reader._first_metadata(from_slim, "creator") == "a"
+
+    def test_opf_referencing_a_missing_member_still_fails_as_invalid(self):
+        """OPF 指向不存在的成员：ebooklib 的 KeyError 仍要落成 EpubReadError。"""
+        import io
+        import zipfile
+
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(build_epub())) as source:
+            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as target:
+                for info in source.infolist():
+                    payload = source.read(info.filename)
+                    if info.filename == "EPUB/content.opf":
+                        payload = payload.replace(
+                            b"</manifest>",
+                            b'<item id="ghost" href="images/ghost.jpg" '
+                            b'media-type="image/jpeg"/></manifest>',
+                        )
+                    target.writestr(info, payload)
+        with pytest.raises(EpubReadError) as excinfo:
+            read_epub(buffer.getvalue())
+
+        assert str(excinfo.value) == EPUB_INVALID_ERROR
 
 
 class TestHtmlToText:

@@ -11,6 +11,13 @@
 与 TXT 路径的关系（契约，别改）：本模块产出的 ``body`` 仍要经过
 ``ingest.normalize_text`` 与 ``body_fingerprint``，所以 EPUB 与 TXT 共用同一套
 「规范化 → sha256 去重」语义；EPUB 只是多带了一个标题/作者来源和一份原件。
+
+内存（契约，别改）：解析前先由 :func:`_slim_container` 把容器缩成"只含文本
+成员"的内存 zip，再交给 ebooklib。真实的下载语料里容器体积几乎全在插图上
+（80 MB 的书正文只有几十 KB），ebooklib 却会把每个 manifest 成员的完整
+``content`` 都留在内存里；瘦身之后它保留的只有我们真正读的东西，容器上限
+（:data:`MAX_CONTAINER_BYTES`）因而可以按"能装下真实书籍"来定，而不是按
+"能安全整个解压"来定。
 """
 
 from __future__ import annotations
@@ -18,10 +25,12 @@ from __future__ import annotations
 import codecs
 import html
 import io
+import posixpath
 import re
 import zipfile
 from dataclasses import dataclass
 from html.parser import HTMLParser
+from urllib.parse import unquote
 
 from ebooklib import epub
 from lxml import etree
@@ -38,12 +47,17 @@ EPUB_TOO_LARGE_ERROR = "EPUB 文件过大"
 # 截断）与列表标题。截断比让一条脏元数据撑爆路径名好。
 MAX_METADATA_CHARS = 200
 
-# 输入字节上限（压缩包本身）。解析前就拦，否则一个几百 MB 的容器会在
-# ``read_epub`` 里被整个解进内存 —— 上传是同步请求，不能让它拖垮写事务。
-MAX_EPUB_BYTES = 50 * 1024 * 1024
+# 输入字节上限（压缩包本身）。解析前仍然要拦：容器是先整个读进内存的（上传
+# 是同步请求，不能让它拖垮写事务），所以这个上限是**容器**上限，不再冒充
+# "内存保护"——真正把内存压下来的是 :func:`_slim_container`：它只把正文 /
+# 元数据所需的文本成员喂给 ebooklib，图片等大块负载以空占位代替。真实下载
+# 语料里最大的容器约 120 MiB（体积几乎全是插图），文本部分通常只有它的 8%
+# 左右；128 MiB 足够放进整份语料，而不让解析侧保留几十 MB 的图片字节。
+MAX_CONTAINER_BYTES = 128 * 1024 * 1024
 
 # 解压后正文上限（字符）。它防的是"把一本书的正文撑爆 text 列 / FTS"，**不是**
-# 内存保护（那由 MAX_EPUB_BYTES 负责）：这个检查发生在解析之后。
+# 容器大小保护（那由 MAX_CONTAINER_BYTES 负责）：这个检查发生在解析之后，
+# 与容器里有多少图片无关。
 MAX_BODY_CHARS = 20_000_000
 
 # ``read_epub`` 预期内的读取失败：畸形 / 损坏 / 结构不对的容器。之外的异常
@@ -111,6 +125,149 @@ def _zip_mimetype_is_epub(data: bytes) -> bool:
         return False
 
 
+# 瘦身时要保留**内容**的成员后缀：正文、目录、OPF、XML、样式。其余成员
+# （图片 / 字体 / 音频……）只留空占位 —— ebooklib 会把每个 manifest 成员的
+# 完整字节挂在 ``item.content`` 上，而本模块一个字节都不读它们。
+_TEXT_MEMBER_SUFFIXES = frozenset({
+    ".xhtml", ".html", ".htm", ".ncx", ".opf", ".xml", ".css",
+})
+# 没有后缀（或后缀不可信）的正文文档：按 OPF 声明的 media-type 兜底，否则
+# 会被当图片清空 —— 一本读得出来的书会突然变成"没有正文"。
+_TEXT_MEDIA_TYPES = frozenset({
+    "application/xhtml+xml", "text/html", "application/x-dtbncx+xml",
+})
+# "归档里未被 OPF 引用、但仍可能是正文"的后缀（防御畸形书）。
+_XHTML_MEMBER_SUFFIXES = frozenset({".xhtml", ".html", ".htm"})
+
+_CONTAINER_NS = "urn:oasis:names:tc:opendocument:xmlns:container"
+
+
+def _opf_path(container_xml: bytes) -> str:
+    """``META-INF/container.xml`` → OPF 在 zip 里的路径（取不到返回空串）。
+
+    优先 ebooklib 认的那个 ``media-type="application/oebps-package+xml"``，
+    避免"我们瘦身时留了 A、ebooklib 却去找 B"。
+    """
+    root = etree.fromstring(container_xml)
+    fallback = ""
+    for rootfile in root.iter(f"{{{_CONTAINER_NS}}}rootfile"):
+        full_path = (rootfile.get("full-path") or "").strip()
+        if not full_path:
+            continue
+        if rootfile.get("media-type") == "application/oebps-package+xml":
+            return posixpath.normpath(full_path.lstrip("/"))
+        fallback = fallback or full_path
+    return posixpath.normpath(fallback.lstrip("/")) if fallback else ""
+
+
+def _opf_declared(opf_doc: bytes) -> list[tuple[str, str]]:
+    """OPF 里每处 ``href`` 声明 → ``(href, media-type)``。
+
+    manifest / spine / guide 三种声明都带 ``href``；只有 ``<item>`` 通常带
+    ``media-type``，其余取空串。
+    """
+    root = etree.fromstring(opf_doc)
+    return [
+        (element.get("href"), element.get("media-type") or "")
+        for element in root.iter()
+        if element.get("href")
+    ]
+
+
+def _resolve_opf_href(opf_dir: str, href: str) -> str:
+    """OPF 的相对 ``href`` → zip 成员名（规则与 ebooklib 的 ``zip_path.join`` 一致）。
+
+    带 ``#fragment`` 的只取路径部分；百分号编码与裸写法各试一次 —— ebooklib
+    在 nav 项上不 unquote、在普通项上 unquote，两种都得留。
+    """
+    target = (href or "").split("#", 1)[0].strip()
+    if not target or "://" in target:
+        return ""
+    return posixpath.normpath(posixpath.join(opf_dir, target))
+
+
+def _is_text_member(name: str, media_type: str = "") -> bool:
+    """该成员要不要保留内容（正文 / 目录 / 样式 / XML），还是只留空占位。"""
+    if posixpath.splitext(name)[1].lower() in _TEXT_MEMBER_SUFFIXES:
+        return True
+    normalised = (media_type or "").lower()
+    return normalised in _TEXT_MEDIA_TYPES or normalised.startswith("text/")
+
+
+def _slim_container(data: bytes) -> bytes:
+    """把容器缩成 ebooklib 真正要读的部分，返回新的 zip 字节流。
+
+    图片 / 字体这些大块负载在 ebooklib 里会以完整 ``content`` 留在内存，而
+    本模块只读 XHTML 正文与元数据。这里按 OPF 的声明重建一个只含文本成员的
+    zip：``mimetype`` / ``container.xml`` / OPF 原样保留，OPF 声明过的成员全部
+    保留名字，非文本的写**空占位**（不能删 —— ebooklib 加载 manifest 时对缺失
+    条目抛 ``KeyError``），以及归档里未被声明的 XHTML（畸形书仍有正文）。
+
+    返回值和原容器对 ebooklib 等价（正文 / 元数据不变）；任何一步失败（坏 zip、
+    缺 ``container.xml``、OPF 解析不了……）都原样返回 ``data``，让
+    :func:`read_epub` 走既有的失败分类。
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            names = set(archive.namelist())
+            if "mimetype" not in names or "META-INF/container.xml" not in names:
+                return data
+
+            mimetype = archive.read("mimetype")
+            container = archive.read("META-INF/container.xml")
+            opf_path = _opf_path(container)
+            if not opf_path or opf_path not in names:
+                return data
+            opf_doc = archive.read(opf_path)
+            opf_dir = posixpath.dirname(opf_path)
+
+            # 先按 OPF 声明收集，再补归档里未声明的 XHTML。用 seen 去重并保持
+            # 首次出现的顺序（manifest 顺序，稳定且好排查）。
+            keep: list[str] = []
+            types: dict[str, str] = {}
+            seen: set[str] = {"mimetype", "META-INF/container.xml", opf_path}
+
+            def _remember(name: str, media_type: str = "") -> None:
+                if not name:
+                    return
+                if media_type and not types.get(name):
+                    types[name] = media_type
+                if name not in seen:
+                    seen.add(name)
+                    keep.append(name)
+
+            for href, media_type in _opf_declared(opf_doc):
+                target = (href or "").split("#", 1)[0].strip()
+                if not target or "://" in target:
+                    continue
+                _remember(_resolve_opf_href(opf_dir, target), media_type)
+                decoded = unquote(target)
+                if decoded != target:
+                    _remember(_resolve_opf_href(opf_dir, decoded), media_type)
+            for name in archive.namelist():
+                if posixpath.splitext(name)[1].lower() in _XHTML_MEMBER_SUFFIXES:
+                    _remember(name)
+
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as slim:
+                slim.writestr("mimetype", mimetype, compress_type=zipfile.ZIP_STORED)
+                slim.writestr("META-INF/container.xml", container)
+                slim.writestr(opf_path, opf_doc)
+                for name in keep:
+                    if name not in names:
+                        # OPF 声明了但归档里没有：故意不补占位，让 ebooklib
+                        # 照旧抛 KeyError → EpubReadError。
+                        continue
+                    if _is_text_member(name, types.get(name, "")):
+                        slim.writestr(name, archive.read(name))
+                    else:
+                        slim.writestr(name, b"")
+            return buffer.getvalue()
+    except Exception as exc:  # noqa: BLE001 —— 优化失败不能改变读取语义
+        logger.debug("EPUB 瘦身失败，回退整容器读取：{}: {}", type(exc).__name__, exc)
+        return data
+
+
 def looks_like_epub(name: str, data: bytes) -> bool:
     """是否按 EPUB 处理（``ingest`` 的分发判据）。
 
@@ -129,14 +286,17 @@ def read_epub(data: bytes) -> EpubContent:
     正文按 **spine 顺序**取所有 XHTML 文档（含 ``<p>`` 一类块级标签的段落
     边界），跳过 nav / ncx / 封面页。图片、样式、字体一律不读 —— 这本管理器
     只索引正文；原件本身照原样另存（``ingest`` 负责），排版不会丢。
+
+    解析前先 :func:`_slim_container`：只有文本成员（加空占位的非文本成员）
+    进 ebooklib，所以内存占用跟着正文走，不跟容器里的插图走。
     """
     if not data:
         raise EpubReadError(EPUB_INVALID_ERROR)
-    if len(data) > MAX_EPUB_BYTES:
+    if len(data) > MAX_CONTAINER_BYTES:
         raise EpubReadError(EPUB_TOO_LARGE_ERROR)
 
     try:
-        book = epub.read_epub(io.BytesIO(data))
+        book = epub.read_epub(io.BytesIO(_slim_container(data)))
     except _EXPECTED_READ_ERRORS as exc:
         logger.warning("EPUB 读取失败：{}: {}", type(exc).__name__, exc)
         raise EpubReadError(EPUB_INVALID_ERROR) from exc
