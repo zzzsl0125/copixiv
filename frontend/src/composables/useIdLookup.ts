@@ -1,4 +1,5 @@
 import { computed, onUnmounted, ref, watch, type ComputedRef, type Ref } from 'vue'
+import { useDebounceFn } from '@vueuse/core'
 
 /**
  * 「填 pixiv ID → 预览解析出的名字」这条交互的**唯一实现**。
@@ -59,14 +60,17 @@ export function useIdLookup<T>(options: UseIdLookupOptions<T>): IdLookup<T> {
   const result = ref<T | null>(null) as Ref<T | null>
   const loading = ref(false)
   const failed = ref(false)
-  let timer: ReturnType<typeof setTimeout> | undefined
   // 过期响应的丢弃依据：输入每变一次就 +1，慢回来的旧响应直接扔掉。
   let seq = 0
 
   const idNumber = computed(() => parseIdInput(options.input.value))
 
+  // 防抖实例建在组合式函数作用域内：`schedule()` 与卸载时都能 cancel，
+  // 退出弹窗后不会再发一次没人要的查询。
+  const debouncedRun = useDebounceFn((wanted: number) => run(wanted), ID_LOOKUP_DEBOUNCE_MS)
+
   function schedule() {
-    clearTimeout(timer)
+    debouncedRun.cancel()
     seq += 1
     failed.value = false
 
@@ -82,7 +86,7 @@ export function useIdLookup<T>(options: UseIdLookupOptions<T>): IdLookup<T> {
       return
     }
     loading.value = true
-    timer = setTimeout(() => void run(wanted), ID_LOOKUP_DEBOUNCE_MS)
+    void debouncedRun(wanted)
   }
 
   async function run(wanted: number) {
@@ -101,7 +105,7 @@ export function useIdLookup<T>(options: UseIdLookupOptions<T>): IdLookup<T> {
   }
 
   watch(options.input, schedule)
-  onUnmounted(() => clearTimeout(timer))
+  onUnmounted(() => debouncedRun.cancel())
 
   return { idNumber, result, loading, failed, schedule }
 }

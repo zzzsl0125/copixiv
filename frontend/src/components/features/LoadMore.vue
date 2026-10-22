@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, watch, onUnmounted, nextTick } from 'vue'
+import { ref, watch, onUnmounted } from 'vue'
 import { Loader2 } from '@lucide/vue'
+import { useIntersectionObserver } from '@vueuse/core'
 
 const props = defineProps<{
   loading: boolean
@@ -11,40 +12,29 @@ const props = defineProps<{
 const emit = defineEmits<{ (e: 'load-more'): void }>()
 
 const containerRef = ref<HTMLElement | null>(null)
-let observer: IntersectionObserver | null = null
 
-const setupObserver = () => {
-  if (observer) {
-    observer.disconnect()
-    observer = null
-  }
-  if (!containerRef.value) return
+const { pause, resume, stop } = useIntersectionObserver(
+  containerRef,
+  (entries) => {
+    const target = entries[0]
+    if (target && target.isIntersecting && !props.loading && !props.noMoreData && props.hasData) {
+      emit('load-more')
+    }
+  },
+  { rootMargin: '100px', threshold: 0.1 },
+)
 
-  observer = new IntersectionObserver(
-    (entries) => {
-      const target = entries[0]
-      if (target && target.isIntersecting && !props.loading && !props.noMoreData && props.hasData) {
-        emit('load-more')
-      }
-    },
-    { root: null, rootMargin: '100px', threshold: 0.1 },
-  )
-  observer.observe(containerRef.value)
-}
+// 旧实现用 unobserve + observe 让仍停在视口里的哨兵重新触发一次；pause/resume
+// 是同一件事（resume 会重建 observer，观察时必发一次初始 entry）。
+let resumeTimer: ReturnType<typeof setTimeout> | undefined
 
-watch(containerRef, (el) => {
-  if (el) setupObserver()
-  else if (observer) { observer.disconnect(); observer = null }
-})
-
-const checkAndReobserve = async () => {
+const checkAndReobserve = () => {
   if (!props.loading && !props.noMoreData && props.hasData) {
-    await nextTick()
-    setTimeout(() => {
-      if (observer && containerRef.value) {
-        observer.unobserve(containerRef.value)
-        observer.observe(containerRef.value)
-      }
+    pause()
+    if (resumeTimer) clearTimeout(resumeTimer)
+    resumeTimer = setTimeout(() => {
+      resumeTimer = undefined
+      resume()
     }, 300)
   }
 }
@@ -54,7 +44,8 @@ watch(() => props.loading, (newVal) => {
 })
 
 onUnmounted(() => {
-  if (observer) { observer.disconnect(); observer = null }
+  if (resumeTimer) { clearTimeout(resumeTimer); resumeTimer = undefined }
+  stop()
 })
 </script>
 

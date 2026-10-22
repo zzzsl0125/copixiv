@@ -1,23 +1,13 @@
-import { ref, watch, nextTick, computed, onMounted, onUnmounted, type Ref } from 'vue'
+import { ref, watch, nextTick, computed, type Ref } from 'vue'
+import { useWindowSize } from '@vueuse/core'
 
 export function useMasonryLayout<T>(
   items: Ref<T[]>,
   columnRefs: Ref<HTMLElement[]>,
 ) {
-  const windowWidth = ref(window.innerWidth)
+  // 响应式窗口宽度：resize 监听与挂载/卸载由 VueUse 负责（SSR/无 window 时安全）。
+  const { width: windowWidth } = useWindowSize()
   const columns = ref<T[][]>([]) as Ref<T[][]>
-
-  const updateWidth = () => {
-    windowWidth.value = window.innerWidth
-  }
-
-  onMounted(() => {
-    window.addEventListener('resize', updateWidth)
-  })
-
-  onUnmounted(() => {
-    window.removeEventListener('resize', updateWidth)
-  })
 
   const columnCount = computed(() => {
     if (windowWidth.value >= 1000) return 3

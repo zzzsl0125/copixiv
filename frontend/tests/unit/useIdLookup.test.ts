@@ -201,4 +201,27 @@ describe('useIdLookup', () => {
     expect(fetchSpy).not.toHaveBeenCalled()
     expect(api().loading.value).toBe(false)
   })
+
+  it('防抖窗口内又清空输入 → 之前排队的查询被取消', async () => {
+    const { input, fetchSpy } = mountLookup({ currentId: null })
+
+    input.value = '888'
+    await nextTick()                                 // 已排队，还没到 350ms
+    input.value = ''
+    await nextTick()
+
+    await settle()
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('卸载时取消待执行的查询（关弹窗后不再发请求）', async () => {
+    const { input, fetchSpy, wrapper } = mountLookup({ currentId: null })
+
+    input.value = '888'
+    await nextTick()
+    wrapper.unmount()
+
+    await settle()
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
 })
