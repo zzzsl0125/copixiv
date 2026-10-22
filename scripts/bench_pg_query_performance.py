@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """PostgreSQL query-performance verification for copixiv v2 (post-migration).
 
-Successor to the SQLite-era ``benchmark_query_performance.py`` — that is dead
-after the SQLite → PG migration (new schema ``novel.tags text[]``, keyword
-search as an expression index on ``novel``, ``QuerySpec``-based builder).
-This script measures what the *user* actually pays for on the migrated stack:
+The SQLite-era benchmark was deleted along with the SQLite stack (new schema
+``novel.tags text[]``, keyword search as an expression index on ``novel``,
+``QuerySpec``-based builder).  This script measures what the *user* actually
+pays for on the migrated stack:
 
   * ``check``  — environment/data sanity (row counts, indexes, ANALYZE state,
                  PG runtime settings, blocked-tag config).  Run this first.
