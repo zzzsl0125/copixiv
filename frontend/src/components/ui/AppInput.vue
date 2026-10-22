@@ -1,6 +1,9 @@
 <template>
   <div>
-    <label v-if="label" :for="id" class="block text-sm font-medium text-gray-700">{{ label }}</label>
+    <!-- reka-ui 没有文本输入原语（headless 库不接管原生 input/textarea 的
+         value/受控语义），所以只把 <label> 换成 reka 的 Label 以获得一致的
+         for/id 关联；input/textarea 继续用原生元素承载 v-model 行为。 -->
+    <Label v-if="label" :for="id" class="block text-sm font-medium text-gray-700">{{ label }}</Label>
     <div class="mt-1">
       <textarea
         v-if="type === 'textarea'"
@@ -28,6 +31,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { Label } from 'reka-ui'
 
 const props = withDefaults(defineProps<{
   modelValue: string | number

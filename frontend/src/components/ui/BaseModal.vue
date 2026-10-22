@@ -1,38 +1,54 @@
 <template>
-  <div v-if="isOpen" class="fixed inset-0 z-50 flex items-center justify-center" :aria-labelledby="titleId" role="dialog" aria-modal="true" data-testid="base-modal">
-    <!-- backdrop -->
-    <div class="absolute inset-0 bg-gray-500/75 transition-opacity" aria-hidden="true" @click="close"></div>
-    <!-- dialog panel -->
-    <div ref="panelRef" tabindex="-1" class="relative bg-white rounded-lg text-left overflow-hidden shadow-xl transform transition-all max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto focus:outline-none">
-      <form @submit.prevent="confirm">
-        <div class="bg-white px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
-          <h3 class="text-lg leading-6 font-medium text-gray-900 mb-4" :id="titleId">
-            {{ title }}
-          </h3>
-          <div class="space-y-4">
-            <slot></slot>
+  <!-- v-if 而非仅交给 reka 的 Presence：关闭时同步卸载（测试在 click 后立刻断言
+       panel 不存在），也避免弹窗关闭后残留空的 DialogRoot。 -->
+  <div v-if="isOpen" class="fixed inset-0 z-50 flex items-center justify-center">
+    <DialogRoot :open="isOpen" @update:open="onOpenChange">
+      <!-- 不套 DialogPortal：面板必须留在组件树内，测试用
+           `wrapper.get('[data-testid="base-modal"] form')` 查找。 -->
+      <DialogOverlay
+        data-testid="base-modal-overlay"
+        aria-hidden="true"
+        class="absolute inset-0 bg-gray-500/75 transition-opacity"
+        @click="close"
+      />
+      <DialogContent
+        data-testid="base-modal"
+        tabindex="-1"
+        aria-modal="true"
+        :aria-describedby="undefined"
+        class="relative bg-white rounded-lg text-left overflow-hidden shadow-xl transform transition-all max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto focus:outline-none"
+        @escape-key-down="onEscapeKeyDown"
+      >
+        <form @submit.prevent="confirm">
+          <div class="bg-white px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
+            <DialogTitle as="h3" class="text-lg leading-6 font-medium text-gray-900 mb-4">
+              {{ title }}
+            </DialogTitle>
+            <div class="space-y-4">
+              <slot></slot>
+            </div>
           </div>
-        </div>
-        <div class="bg-gray-50 px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse">
-          <button type="submit" :disabled="loading || confirmDisabled" class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-blue-600 text-base font-medium text-white hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 sm:ml-3 sm:w-auto sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
-            {{ loading ? confirmText.replace(/保存/g, '保存中').replace(/确认/g, '确认中') : confirmText }}
-          </button>
-          <button type="button" @click="close" class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 sm:mt-0 sm:ml-3 sm:w-auto sm:text-sm transition-colors">
-            {{ cancelText }}
-          </button>
-          <!-- 次要动作（#extra-buttons）放 DOM 末位：footer 是 row-reverse，末位才渲染在
-               最左（左下角），与右端的「保存」分居两端；窄屏竖排时它排在最下。
-               与「取消」的 12px 间距由 cancel 自带的 sm:ml-3 提供，slot 内容不必再补左边距
-               （补了等于从容器左内边距再往里缩 12px，与正文左边缘对不齐）。 -->
-          <slot name="extra-buttons"></slot>
-        </div>
-      </form>
-    </div>
+          <div class="bg-gray-50 px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse">
+            <button type="submit" :disabled="loading || confirmDisabled" class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-blue-600 text-base font-medium text-white hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 sm:ml-3 sm:w-auto sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+              {{ loading ? confirmText.replace(/保存/g, '保存中').replace(/确认/g, '确认中') : confirmText }}
+            </button>
+            <button type="button" @click="close" class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 sm:mt-0 sm:ml-3 sm:w-auto sm:text-sm transition-colors">
+              {{ cancelText }}
+            </button>
+            <!-- 次要动作（#extra-buttons）放 DOM 末位：footer 是 row-reverse，末位才渲染在
+                 最左（左下角），与右端的「保存」分居两端；窄屏竖排时它排在最下。
+                 与「取消」的 12px 间距由 cancel 自带的 sm:ml-3 提供，slot 内容不必再补左边距
+                 （补了等于从容器左内边距再往里缩 12px，与正文左边缘对不齐）。 -->
+            <slot name="extra-buttons"></slot>
+          </div>
+        </form>
+      </DialogContent>
+    </DialogRoot>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, watch, nextTick, onUnmounted, useId } from 'vue'
+import { DialogContent, DialogOverlay, DialogRoot, DialogTitle } from 'reka-ui'
 
 const props = withDefaults(defineProps<{
   isOpen: boolean
@@ -54,45 +70,15 @@ const emit = defineEmits<{
   (e: 'confirm'): void
 }>()
 
-const titleId = useId()
-const panelRef = ref<HTMLElement | null>(null)
-
-const FOCUSABLE =
-  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-
-const handleKeydown = (event: KeyboardEvent) => {
-  if (event.key === 'Escape') {
-    close()
-    return
-  }
-  if (event.key !== 'Tab' || !panelRef.value) return
-  const focusable = Array.from(
-    panelRef.value.querySelectorAll<HTMLElement>(FOCUSABLE),
-  ).filter((el) => el.offsetParent !== null)
-  if (focusable.length === 0) return
-  const first = focusable[0]
-  const last = focusable[focusable.length - 1]
-  if (event.shiftKey && document.activeElement === first) {
-    event.preventDefault()
-    last.focus()
-  } else if (!event.shiftKey && document.activeElement === last) {
-    event.preventDefault()
-    first.focus()
-  }
+/** reka 的关闭路径统一走 update:open（ESC 的 dismiss）；loading 时 close() 不再放行。 */
+const onOpenChange = (open: boolean) => {
+  if (!open) close()
 }
 
-watch(() => props.isOpen, (open) => {
-  if (open) {
-    document.addEventListener('keydown', handleKeydown)
-    nextTick(() => panelRef.value?.focus())
-  } else {
-    document.removeEventListener('keydown', handleKeydown)
-  }
-}, { immediate: true })
-
-onUnmounted(() => {
-  document.removeEventListener('keydown', handleKeydown)
-})
+/** loading 时吃掉 ESC：否则 reka 会继续 dismiss → update:open(false) → close()。 */
+const onEscapeKeyDown = (event: KeyboardEvent) => {
+  if (props.loading) event.preventDefault()
+}
 
 const close = () => {
   if (props.loading) return
@@ -100,7 +86,7 @@ const close = () => {
 }
 
 const confirm = () => {
-  if (props.loading) return
+  if (props.loading || props.confirmDisabled) return
   emit('confirm')
 }
 </script>
