@@ -277,7 +277,8 @@ class TestCheckEpubTombstoneRepair:
         """A cover-only EPUB must NOT drag a terminal row back to done.
 
         This is the B2 case from the 2026-09-16 review: the old rule promoted
-        on ``is_valid_epub`` alone, so any readable zip — including the empty
+        on ``state.is_readable_container`` alone, so any readable zip —
+        including the empty
         shells of the 216-lineage — was blessed as finished.
         """
         await _seed(
@@ -318,7 +319,7 @@ class TestCheckEpubTombstoneRepair:
         held a raw marker; the ``0 → 2`` branch did not, so the first full
         sweep of 229 k unclassified rows would have re-blessed the 216
         leftover-marker EPUBs as finished — and a ``2`` row is never
-        re-examined.  Both promotions now share ``_epub_is_complete``.
+        re-examined.  Both promotions now share ``state.is_complete``.
         """
         txt = await _seed(
             session_factory, 18, "正文 [pixivimage:94602186]", False, tmp_path,

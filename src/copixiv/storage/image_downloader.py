@@ -11,10 +11,8 @@ import asyncio
 import atexit
 import copy
 import os
-import re
 import threading
 import time
-import zipfile
 from collections.abc import Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
@@ -24,34 +22,10 @@ import requests
 
 from copixiv.core import formats
 from copixiv.core.draft import NovelDraft
-from copixiv.core.services import has_image_placeholders
 from copixiv.pixiv.http import create_image_session, pick_image_url
 from copixiv.storage.atomic import atomic_write
-from copixiv.storage.epub.builder import is_valid_epub
+from copixiv.storage.epub import state
 from copixiv.log import logger
-
-# Same marker syntax the builder resolves — keep in sync with
-# ``storage.epub.builder._HAS_IMAGE_PATTERN``.
-_MARKER = re.compile(rb"\[(?:uploadedimage|pixivimage):[\d-]+\]")
-
-
-def _epub_has_raw_marker(epub_path: Path) -> bool:
-    """True when a built EPUB still carries an unresolved image marker.
-
-    Such a file is readable but *not finished*: the reader would see
-    ``[pixivimage:123]`` as literal text.  The "already exists ⇒ done" guard
-    must not treat it as complete.
-    """
-    try:
-        with zipfile.ZipFile(epub_path) as zf:
-            for name in zf.namelist():
-                if not name.lower().endswith((".xhtml", ".html", ".htm")):
-                    continue
-                if _MARKER.search(zf.read(name)):
-                    return True
-    except (OSError, zipfile.BadZipFile):
-        return False
-    return False
 
 
 def _is_decodable_image(path: Path) -> bool:
@@ -214,12 +188,10 @@ class ImageDownloader:
         # disagreed with the reconciler (same row: PENDING + file + no
         # placeholder → NO_IMAGES there, ``done`` here) and blessed files
         # whose XHTML still carried raw markers.
-        needs_epub: bool | None = None
-        if novel.content is not None:
-            needs_epub = has_image_placeholders(novel.content)
+        needs_epub = state.needs_epub(novel.content)
 
         epub_path = formats.sibling_path(Path(path_str), formats.EPUB)
-        if epub_path.exists() and not force and is_valid_epub(epub_path):
+        if epub_path.exists() and not force and state.is_readable_container(epub_path):
             if needs_epub is False:
                 # Nothing to embed and a readable file is already there:
                 # genuinely finished.  Reporting ``done`` here is what keeps a
@@ -228,7 +200,7 @@ class ImageDownloader:
                 # carries no marker.
                 self._record_outcome(novel_id, "done")
                 return
-            if not _epub_has_raw_marker(epub_path):
+            if not state.has_raw_markers(epub_path):
                 # Marker-bearing text, clean file: done.
                 self._record_outcome(novel_id, "done")
                 return
@@ -357,9 +329,7 @@ class ImageDownloader:
         # no ``[uploadedimage:…]`` placeholder has nothing to embed.  The
         # webview draft carries the text; a metadata-only draft (content is
         # None) leaves the decision to the builder.
-        needs_epub: bool | None = None
-        if novel.content is not None:
-            needs_epub = has_image_placeholders(novel.content)
+        needs_epub = state.needs_epub(novel.content)
 
         downloaded_files: list[Path] = []
         session = create_image_session(self._proxy_http, self._proxy_https)
@@ -412,7 +382,7 @@ class ImageDownloader:
             # EPUB —— 只有成功才清理临时图片。
             # ``needs_epub=False``（正文没有图片占位符）时跳过，避免为一本
             # 无图小说留下一个空壳 EPUB；正文占位符判定与 has_epub 同一套
-            # 规则（core.services.has_image_placeholders）。
+            # 规则（storage.epub.state.needs_epub → core.services）。
             if self._epub_builder is not None:
                 if not self._epub_builder.create_epub(
                     novel, needs_epub=needs_epub,

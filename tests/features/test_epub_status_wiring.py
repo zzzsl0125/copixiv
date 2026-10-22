@@ -27,7 +27,8 @@ import pytest
 from copixiv.core.models import EpubStatus
 from copixiv.db.models import Author, FailedNovel, Novel
 from copixiv.features.novels.ingest import ingest
-from copixiv.storage.epub.builder import EpubBuilder, is_valid_epub
+from copixiv.storage.epub import state
+from copixiv.storage.epub.builder import EpubBuilder
 from copixiv.storage.file_storage import FileStorage
 from copixiv.storage.image_downloader import ImageDownloader
 
@@ -78,7 +79,7 @@ class _FailingEpubBuilder:
 
 
 def _prebuilt_epub(path: Path) -> None:
-    """A readable (zip) EPUB at *path* — satisfies ``is_valid_epub``."""
+    """A readable (zip) EPUB at *path* — satisfies ``state.is_readable_container``."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path, "w") as zf:
         zf.writestr("mimetype", "application/epub+zip")
@@ -115,7 +116,9 @@ class TestProducerMarksDone:
         assert out.failed == []
         # 磁盘上确实有 EPUB —— 不是"标成 2 却没有文件"（事故的另一半：
         # 216 本残缺 EPUB 被记成完成）。
-        assert is_valid_epub(storage.novel_epub_path(100, "新小说"))
+        assert state.is_readable_container(
+            storage.novel_epub_path(100, "新小说")
+        )
 
         with session_factory() as s:
             novel = s.get(Novel, 100)

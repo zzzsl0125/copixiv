@@ -20,13 +20,16 @@ from copixiv.features.authors.resolve_names import collect_author_names, writeba
 from copixiv.core import formats
 from copixiv.core.models import EpubStatus
 from copixiv.core.models import TaskResult
-from copixiv.core.services import has_image_placeholders
+from copixiv.core.services import (
+    MARKER_OVERLAP,
+    has_image_placeholders_bytes,
+)
 from copixiv.db.write_lock import run_write_transaction
 from copixiv.features.novels.repo import (
     SQLAlchemyNovelRepository,
     SQLAlchemySeriesRepository,
 )
-from copixiv.storage.epub.builder import is_valid_epub
+from copixiv.storage.epub import state
 from copixiv.log import logger
 
 from .kernel import TaskContext
@@ -69,8 +72,9 @@ async def check_epub(ctx: TaskContext) -> TaskResult:
     238 936-row sweep only re-reads text for rows that can still change
     state, and ``0`` disappears after the first full pass.
 
-    The EPUB-content scans (:func:`_epub_has_placeholders`,
-    :func:`_epub_has_images`) only run for rows that need them.
+    The EPUB-content scans (:func:`copixiv.storage.epub.state.is_complete` —
+    ``has_embedded_images`` + ``not has_raw_markers``) only run for rows that
+    need them.
 
     **Bounded per run, resumable.**  The first full pass over production
     measured ~10.5 ms/row — 42 minutes for 238 k rows, well past the task
@@ -287,7 +291,7 @@ def _sweep(
 
         txt_path = Path(path_str)
         epub_path = formats.sibling_path(txt_path, formats.EPUB)
-        epub_ok = is_valid_epub(epub_path)
+        epub_ok = state.is_readable_container(epub_path)
 
         if status == EpubStatus.DONE:
             # A file that is not a valid zip is as good as missing — two
@@ -314,7 +318,7 @@ def _sweep(
             # placeholder).  A complete EPUB is the *only* promotion
             # evidence; a bare zip is not (that is how shell/partial files
             # got blessed as done before).
-            if epub_ok and _epub_is_complete(epub_path):
+            if epub_ok and state.is_complete(epub_path):
                 completed_ids.append(novel_id)
             continue
 
@@ -331,7 +335,7 @@ def _sweep(
                 no_image_ids.append(novel_id)
             elif canonical is None:
                 pending_ids.append(novel_id)   # unreadable → do not judge
-            elif _epub_is_complete(epub_path):
+            elif state.is_complete(epub_path):
                 completed_ids.append(novel_id)
             else:
                 # Written while its images were missing: keep it queued so a
@@ -344,7 +348,7 @@ def _sweep(
             no_image_ids.append(novel_id)
         elif canonical is None:
             continue          # unreadable text → stay unclassified
-        elif not epub_ok or not _epub_is_complete(epub_path):
+        elif not epub_ok or not state.is_complete(epub_path):
             # Missing file, or a file written before its images landed
             # (nothing embedded) → queue it for proper (re)generation.
             enable_ids.append(novel_id)
@@ -352,19 +356,6 @@ def _sweep(
             completed_ids.append(novel_id)
 
     return completed_ids, revert_ids, no_image_ids, enable_ids, pending_ids
-
-
-def _epub_is_complete(epub_path: Path) -> bool:
-    """True when *epub_path* is a usable book: no raw marker left, ≥1 image.
-
-    This is the single "the produced EPUB is actually finished" predicate.
-    Both the ``→ 2`` promotions (from ``1`` and from ``0``) use it, so a file
-    written while its images were missing can never be blessed as done no
-    matter which status the row happens to carry — the asymmetry that let a
-    leftover-marker EPUB be re-promoted from ``0`` to ``2`` and then never
-    re-examined.
-    """
-    return _epub_has_images(epub_path) and not _epub_has_placeholders(epub_path)
 
 
 def _txt_has_images(txt_path: Path) -> bool | None:
@@ -386,19 +377,24 @@ def _scan_placeholder(txt_path: Path) -> bool | None:
 
     Chunked byte search: this runs over every row of the production table
     (238 936 rows in the 2026-09 sweep), so it must not decode whole novels
-    into Python strings just to look for a marker.  ``overlap`` keeps a
-    marker that straddles a chunk boundary detectable.
+    into Python strings just to look for a marker.  The marker *syntax* comes
+    from the single owner (:func:`core.services.has_image_placeholders_bytes`);
+    this loop only supplies the overlap so a marker straddling a chunk
+    boundary is still detectable.
+
+    ``MARKER_OVERLAP`` bytes are carried between chunks: the longest possible
+    prefix of a marker minus one, so any marker starting near the end of one
+    chunk is completed by the head of the next.
     """
-    needles = (b"[uploadedimage:", b"[pixivimage:")
-    overlap = max(len(n) for n in needles) - 1
+    overlap = MARKER_OVERLAP
     try:
         with open(txt_path, "rb") as fh:
             tail = b""
             while chunk := fh.read(1 << 20):
-                buf = tail + chunk
-                if any(n in buf for n in needles):
+                buffer = tail + chunk
+                if has_image_placeholders_bytes(buffer):
                     return True
-                tail = buf[-overlap:]
+                tail = buffer[-overlap:]
     except OSError:
         return None
     return False
@@ -410,59 +406,6 @@ _STALE_DAYS = 7
 # gets a turn (and HTTP keeps being served) several times a second, large
 # enough that the `to_thread` overhead stays negligible.
 _SWEEP_CHUNK = 4000
-
-
-def _epub_text(epub_path: Path) -> bytes | None:
-    """Concatenated XHTML members of *epub_path*, or None when unreadable."""
-    import zipfile
-
-    try:
-        with zipfile.ZipFile(epub_path) as zf:
-            return b"".join(
-                zf.read(name)
-                for name in zf.namelist()
-                if name.endswith((".xhtml", ".html", ".htm"))
-            )
-    except (OSError, zipfile.BadZipFile, KeyError):
-        return None
-
-
-def _epub_has_placeholders(epub_path: Path) -> bool:
-    """True when the built EPUB still contains raw image placeholders.
-
-    Those novels were written while their images were missing: the marker
-    survived as literal text (216 of them in the 2026-09 audit), so the
-    EPUB is not actually finished and must not read as completed.
-    """
-    text = _epub_text(epub_path)
-    if text is None:
-        return False
-    return has_image_placeholders(text.decode("utf-8", errors="ignore"))
-
-
-def _epub_has_images(epub_path: Path) -> bool:
-    """True when the EPUB embedded at least one illustration.
-
-    Guards the promotion to ``2``: a file written from a draft whose images
-    had not landed yet is empty of pictures and must be regenerated instead
-    of being blessed as done.
-
-    Deliberately only counts the ``images/`` folder — the cover lives at
-    ``EPUB/cover.jpg`` and must not satisfy this check, or every cover-only
-    EPUB would pass as having its illustrations embedded.
-    """
-    import zipfile
-
-    try:
-        with zipfile.ZipFile(epub_path) as zf:
-            # A real file entry, not the "images/" directory entry itself —
-            # an empty EPUB can carry the directory and nothing in it.
-            return any(
-                "images/" in info.filename and not info.is_dir()
-                for info in zf.infolist()
-            )
-    except (OSError, zipfile.BadZipFile):
-        return False
 
 
 def _no_images_ever_and_stale(txt_path: Path, novel_id: int) -> bool:

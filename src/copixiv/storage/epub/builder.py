@@ -2,8 +2,6 @@
 
 import html
 import io
-import re
-import zipfile
 from pathlib import Path
 
 from PIL import Image
@@ -11,26 +9,11 @@ from ebooklib import epub
 
 from copixiv.core import formats
 from copixiv.core.draft import NovelDraft
-from copixiv.core.services import has_image_placeholders
+from copixiv.core.services import IMAGE_PLACEHOLDER_PATTERN
+from copixiv.storage.epub import state
 from copixiv.storage.atomic import atomic_write
 
 from copixiv.log import logger
-
-# Pattern for embedded image placeholders — keep in sync with domain.services.language
-_HAS_IMAGE_PATTERN = re.compile(
-    r"\[(uploadedimage|pixivimage):([\d\-]+)\]"
-)
-
-
-def is_valid_epub(epub_path: Path) -> bool:
-    """True when *epub_path* exists and is a readable zip container.
-
-    Deliberately weak: this answers "can it be opened as an EPUB at all",
-    not "is it complete".  A zip whose XHTML still holds raw image
-    placeholders passes here — use :func:`is_readable_epub` semantics plus a
-    content check (``check_epub`` does) before calling a novel done.
-    """
-    return epub_path.is_file() and zipfile.is_zipfile(epub_path)
 
 CSS_STYLE = """
 body { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; margin: 5%; text-align: justify; }
@@ -158,7 +141,7 @@ class EpubBuilder:
             # Belt-and-braces: no internal marker may ever reach the reader.
             # ``_replace_image_placeholders`` already degrades unresolved
             # markers, so this only fires if a future code path bypasses it.
-            if _HAS_IMAGE_PATTERN.search(processed_content):
+            if IMAGE_PLACEHOLDER_PATTERN.search(processed_content):
                 logger.error(
                     f"EPUB 仍含未替换的图片占位符: {output_path.name}"
                 )
@@ -273,7 +256,7 @@ class EpubBuilder:
             )
             return EpubBuilder._missing_image_note(img_id)
 
-        return _HAS_IMAGE_PATTERN.sub(_replace, content)
+        return IMAGE_PLACEHOLDER_PATTERN.sub(_replace, content)
 
     @staticmethod
     def _missing_image_note(img_id: str) -> str:

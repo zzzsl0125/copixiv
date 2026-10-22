@@ -126,10 +126,24 @@ _CHINESE_TAG_KEYWORDS: frozenset[str] = frozenset({
     "中国語注意", "中國語注意", "中国语注意", "Chinese", "chinese", "中國", "中国",
 })
 
-# Pattern for embedded images in novel text
-_HAS_IMAGE_PATTERN: re.Pattern[str] = re.compile(
+# Pattern for embedded images in novel text.  This is the **only** definition
+# of the marker syntax in the codebase: text callers use
+# ``has_image_placeholders`` / ``IMAGE_PLACEHOLDER_PATTERN`` (the builder needs
+# the compiled pattern's capture groups to substitute), and byte callers use
+# ``has_image_placeholders_bytes``.  Do not re-spell this regex anywhere else.
+IMAGE_PLACEHOLDER_PATTERN: re.Pattern[str] = re.compile(
     r"\[(uploadedimage|pixivimage):([\d\-]+)\]"
 )
+_HAS_IMAGE_PATTERN_BYTES: re.Pattern[bytes] = re.compile(
+    IMAGE_PLACEHOLDER_PATTERN.pattern.encode()
+)
+
+# Bytes a chunked byte scan must carry between reads so a marker straddling a
+# chunk boundary is still matched.  A marker is ``[uploadedimage:`` (15) or
+# ``[pixivimage:`` (12), then digits/hyphens, then ``]`` — real ids are well
+# under 20 digits, so 64 bytes covers the whole token with room to spare and
+# costs nothing on a 1 MiB read.
+MARKER_OVERLAP = 64
 
 
 def is_chinese(
@@ -177,7 +191,20 @@ def has_image_placeholders(content: str | None) -> bool:
     """
     if not content:
         return False
-    return bool(re.search(_HAS_IMAGE_PATTERN, content))
+    return bool(IMAGE_PLACEHOLDER_PATTERN.search(content))
+
+
+def has_image_placeholders_bytes(content: bytes | None) -> bool:
+    """Byte-level variant of :func:`has_image_placeholders`.
+
+    Exists so file sweeps can look for a marker **without decoding** the
+    whole document (``check_epub`` walks 238 k EPUB members; ``maintenance``
+    reads 1 MiB chunks of novel text).  Same syntax, same owner — this is not
+    a second regex, just the bytes view of the one pattern.
+    """
+    if not content:
+        return False
+    return bool(_HAS_IMAGE_PATTERN_BYTES.search(content))
 
 
 # ---------------------------------------------------------------------------
@@ -783,7 +810,10 @@ __all__ = [
     "parse_tags",
     "normalize_tag",
     "is_chinese",
+    "IMAGE_PLACEHOLDER_PATTERN",
     "has_image_placeholders",
+    "has_image_placeholders_bytes",
+    "MARKER_OVERLAP",
     "sha256_text",
     "body_unchanged",
     "safe_filename",
