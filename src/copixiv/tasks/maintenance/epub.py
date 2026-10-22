@@ -69,39 +69,63 @@ async def check_epub(ctx: TaskContext) -> TaskResult:
     ``has_embedded_images`` + ``not has_raw_markers``) only run for rows that
     need them.
 
-    **Bounded per run, resumable.**  The first full pass over production
-    measured ~10.5 ms/row — 42 minutes for 238 k rows, well past the task
-    runner's 30-minute ``TIMEOUT_SECONDS``, and the previous "scan everything,
-    then write everything" shape meant a killed run wrote *nothing* (1374 on
-    2026-09-16 died at row 100 k having never applied a single update).  Each
-    run now covers at most :data:`_MAX_ROWS_PER_RUN` rows and **applies every
-    chunk before advancing a cursor**, so a timeout simply resumes where it
-    stopped.  Once the whole table is classified, the cursor resets and later
-    sweeps are cheap (terminal rows cost a stat, not a read).
+    **Full table every run, chunked for the event loop.**  The first full pass
+    over production measured ~10.5 ms/row — 42 minutes for 238 k rows — because
+    every row still had to be *classified*; that is what the old bounded-slice
+    + cursor design was built for.  After the one-off classification the
+    per-row cost collapsed (terminal rows cost a stat, not a read): a full pass
+    now measures 5.0 s on the production table, 1.1 s for a complete
+    ``check_epub`` run on 200 k rows, and 1.2 min even in the worst case where
+    every row needs its text read.
+
+    So the cursor is gone.  It advanced after every chunk and reset only when
+    ``id > cursor`` returned nothing — which, with new novels arriving daily,
+    almost never happened.  Everything below the cursor was never examined
+    again while the task reported 「全表完成」: 1 594 production rows sat
+    stranded that way (684 with a vanished source file, 910 pending).  The scan
+    is still chunked and still applies every chunk as it goes (a killed run
+    repeats work, never stranding rows — the sweep is idempotent).
     """
     from sqlalchemy import select as _select
     from copixiv.db import models
 
     uow = ctx.uow
     started = time.monotonic()
-    cursor = await _read_cursor(uow)
 
+    # **Full-table scan every run.**  This used to read ``id > cursor`` with a
+    # 60 000-row cap, advancing the cursor after each chunk and resetting it
+    # only when the query returned *nothing*.  Because new novels arrive every
+    # day, the "nothing" branch almost never fires, so the cursor only ever
+    # moved forward: everything below it was never examined again, while the
+    # task happily reported 「全表完成」.
+    #
+    # Why the cap is now pointless: the steady-state sweep is cheap by
+    # construction.  Terminal ``NO_IMAGES`` rows cost one ``stat`` (they skip
+    # the text read unless a readable EPUB appeared), ``DONE`` rows cost one
+    # zip check, and only rows that can still change state read the body.
+    # Measured on the production 246 035-row table: 5.0 s for a full pass
+    # (0.02 ms/row), 1.1 s for a complete ``check_epub`` run on a 200 k-row
+    # test table, and 1.2 min even in the worst case where every row needs its
+    # text read.  All of that is far below the 30-minute task timeout.
+    #
+    # Dropping the cursor removes the entire starvation class instead of
+    # patching the wrap-around: there is no "below the cursor" any more, so a
+    # bounded slice can never strand rows.  An interrupted run simply repeats
+    # work next time — the sweep is idempotent.
     async with uow.begin():
         rows = uow.session.execute(
             _select(models.Novel.id, models.Novel.path, models.Novel.has_epub)
-            .where(models.Novel.id > cursor)
             .order_by(models.Novel.id)
-            .limit(_MAX_ROWS_PER_RUN + 1)
         ).fetchall()
 
-    if not rows:
-        if cursor:
-            await _write_cursor(uow, 0)
-            return TaskResult(summary="EPUB 状态检查: 全表巡检完成，下轮从头复查")
-        return TaskResult(summary="EPUB 状态检查: 无需修复")
+    # A leftover cursor from the old design would make the next reader think
+    # part of the table was already done; clear it once, then forget it.
+    if await _read_cursor(uow):
+        await _write_cursor(uow, 0)
 
-    truncated = len(rows) > _MAX_ROWS_PER_RUN
-    rows = rows[:_MAX_ROWS_PER_RUN]
+    if not rows:
+        return TaskResult(summary="EPUB 状态检查: 无需修复（空库）")
+
 
     # The sweep is file-I/O bound and must not monopolise the event loop: on
     # 2026-09-14 a single run left every API endpoint timing out while it held
@@ -113,7 +137,11 @@ async def check_epub(ctx: TaskContext) -> TaskResult:
     no_image_ids: list[int] = []
     enable_ids: list[int] = []
     pending_ids: list[int] = []
-    totals = {"completed": 0, "reverted": 0, "enabled": 0, "no_images": 0}
+    missing_ids: list[int] = []
+    totals = {
+        "completed": 0, "reverted": 0, "enabled": 0,
+        "no_images": 0, "missing": 0,
+    }
 
     async def _apply(ids: list[int], status: EpubStatus) -> None:
         await run_write_transaction(
@@ -145,29 +173,31 @@ async def check_epub(ctx: TaskContext) -> TaskResult:
             await _apply(no_image_ids, EpubStatus.NO_IMAGES)
             totals["no_images"] += len(no_image_ids)
             no_image_ids.clear()
+        if missing_ids:
+            await _apply(missing_ids, EpubStatus.MISSING_SOURCE)
+            totals["missing"] += len(missing_ids)
+            missing_ids.clear()
 
     for start in range(0, len(rows), _SWEEP_CHUNK):
         chunk = rows[start:start + _SWEEP_CHUNK]
         (
-            c_done, c_revert, c_noimg, c_enable, c_pending,
+            c_done, c_revert, c_noimg, c_enable, c_pending, c_missing,
         ) = await asyncio.to_thread(_sweep, chunk, start)
         completed_ids += c_done
         revert_ids += c_revert
         no_image_ids += c_noimg
         enable_ids += c_enable
         pending_ids += c_pending
+        missing_ids += c_missing
         await _flush()
-        await _write_cursor(uow, int(chunk[-1][0]))
         # Explicit yield: give the HTTP handlers a turn between chunks.
         await asyncio.sleep(0)
 
-    next_cursor = 0 if not truncated else await _read_cursor(uow)
     logger.info(
         f"check_epub: 本轮 {len(rows)} 行（{time.monotonic() - started:.0f}s），"
         f"completed={totals['completed']}, reverted={totals['reverted']}, "
         f"enabled={totals['enabled']}, no_images={totals['no_images']}, "
-        f"pending={len(pending_ids)}，游标 {cursor} → {next_cursor}"
-        f"{'，下轮继续' if truncated else '，全表完成'}"
+        f"missing={totals['missing']}, pending={len(pending_ids)}（全表）"
     )
 
     parts: list[str] = []
@@ -179,51 +209,48 @@ async def check_epub(ctx: TaskContext) -> TaskResult:
         parts.append(f"{totals['enabled']} 本启用为待处理")
     if totals["no_images"]:
         parts.append(f"{totals['no_images']} 本确认为无图")
+    if totals["missing"]:
+        parts.append(f"{totals['missing']} 本源文件丢失（需重新下载）")
     if pending_ids:
         parts.append(f"{len(pending_ids)} 本仍待处理")
-    tail = (
-        f"（本轮 {len(rows)} 行，下轮从 #{next_cursor} 继续）"
-        if truncated else f"（全表完成，本轮 {len(rows)} 行）"
-    )
+    # "scanned but nothing changed" and "nothing to scan" are different facts;
+    # the old wording collapsed both into 「无变化」, which read as "all good"
+    # even on a run that examined 3 843 rows and touched none of them.
     return TaskResult(
-        summary="EPUB 状态检查: " + (" ".join(parts) or "无变化") + " " + tail
+        summary=(
+            "EPUB 状态检查: "
+            + (" ".join(parts) if parts else "本轮无变化")
+            + f"（全表 {len(rows)} 行）"
+        )
     )
 
 
 
 _CURSOR_KEY = "check_epub.cursor"
 
-
-
-
-# Rows classified per run.  Bounded on purpose: the measured cost is ~10.5 ms
-# per unclassified row (a full text read to look for image markers), so 60 k
-# rows ≈ 10.5 minutes worst case — a third of the 30-minute task timeout,
-# which leaves room for a slow disk.  The cursor makes the split harmless:
-# each run is a work slice, not a do-or-die full pass.
-#
-# After the one-off classification of the legacy ``0`` backlog the per-row cost
-# collapses (terminal rows cost a stat, not a read), so this cap is no longer
-# binding for routine sweeps — a full pass then finishes in a minute or two.
-_MAX_ROWS_PER_RUN = 60_000
+# Retained only so the one-time cursor cleanup in ``check_epub`` can clear a
+# ``setting`` row left behind by the old bounded-slice design.  Nothing reads
+# the cursor to decide what to scan any more — see the task docstring.
+_LEGACY_CURSOR_KEY = _CURSOR_KEY
 
 
 def _sweep(
     rows: list, offset: int = 0,
-) -> tuple[list[int], list[int], list[int], list[int], list[int]]:
+) -> tuple[list[int], list[int], list[int], list[int], list[int], list[int]]:
     """Classify *rows* against the files on disk (runs in a worker thread).
 
     Pure file I/O + decisions — no database access, so it can be offloaded
     with :func:`asyncio.to_thread` without touching the session.  *offset*
     is the index of the first row within the whole table, used only so the
     progress log reports absolute positions.  Returns
-    ``(completed, reverted, no_images, enabled, pending)`` id lists.
+    ``(completed, reverted, no_images, enabled, pending, missing)`` id lists.
     """
     completed_ids: list[int] = []
     revert_ids: list[int] = []
     no_image_ids: list[int] = []
     enable_ids: list[int] = []
     pending_ids: list[int] = []
+    missing_ids: list[int] = []
 
     for row_no, (novel_id, path_str, status) in enumerate(rows, 1):
         if (offset + row_no) % 50000 == 0:
@@ -240,11 +267,43 @@ def _sweep(
         epub_path = formats.sibling_path(txt_path, formats.EPUB)
         epub_ok = state.is_readable_container(epub_path)
 
+        # No local text at all: nothing can ever be *built* from this row, so
+        # it must not sit in ``0``/``1`` claiming work is pending.  This is the
+        # whole 684-row production backlog: metadata written, body never
+        # downloaded, no EPUB, no image, no failure record.  Classifying it is
+        # this task's job; re-downloading is the UI's (``MISSING_SOURCE`` is
+        # terminal for the builder, not for the fetch path).
+        if not txt_path.is_file():
+            if status != EpubStatus.MISSING_SOURCE:
+                missing_ids.append(novel_id)
+            continue
+
         if status == EpubStatus.DONE:
             # A file that is not a valid zip is as good as missing — two
             # such novels were served to readers for months.
             if not epub_ok:
                 revert_ids.append(novel_id)
+                continue
+            # "Readable" is not "finished": an EPUB whose XHTML still carries
+            # raw ``[pixivimage:…]`` markers is served to the reader as literal
+            # text.  DONE must mean ``state.is_complete`` (markers resolved AND
+            # an illustration embedded) — the same predicate every other
+            # promotion uses, so the reader and the reconciler cannot disagree.
+            if state.is_complete(epub_path):
+                continue
+            # Readable but unfinished: decide where it belongs instead of
+            # leaving it advertised as done.
+            canonical = _txt_has_images(txt_path)
+            if canonical is False:
+                # Nothing to embed — the (superfluous) EPUB is not a reason to
+                # keep a book in the build queue.
+                no_image_ids.append(novel_id)
+            elif canonical is None:
+                revert_ids.append(novel_id)   # unreadable text → rebuildable
+            elif _no_images_ever_and_stale(txt_path, novel_id):
+                no_image_ids.append(novel_id)  # images gone for good
+            else:
+                revert_ids.append(novel_id)   # rebuild it properly
             continue
 
         # Body scan — but a terminal row only needs it when a *readable* file
@@ -284,6 +343,20 @@ def _sweep(
                 pending_ids.append(novel_id)   # unreadable → do not judge
             elif state.is_complete(epub_path):
                 completed_ids.append(novel_id)
+            elif _no_images_ever_and_stale(txt_path, novel_id):
+                # A readable shell whose illustrations never landed, with the
+                # text untouched for _STALE_DAYS: the images are gone for good
+                # (author deleted them / the URLs are dead).  The "give up"
+                # rule used to be reachable only from the ``not epub_ok``
+                # branch, so these rows stayed PENDING forever — 905 of them
+                # in production, re-judged every night and never resolved.
+                #
+                # ORDER IS LOAD-BEARING: this must stay *after*
+                # ``state.is_complete``.  A finished, image-less EPUB whose
+                # text file happens to be stale also satisfies the stale
+                # predicate (one production row does exactly that), and
+                # demoting it to NO_IMAGES would destroy a perfectly good book.
+                no_image_ids.append(novel_id)
             else:
                 # Written while its images were missing: keep it queued so a
                 # later sweep rebuilds it instead of advertising it as done.
@@ -302,7 +375,10 @@ def _sweep(
         else:
             completed_ids.append(novel_id)
 
-    return completed_ids, revert_ids, no_image_ids, enable_ids, pending_ids
+    return (
+        completed_ids, revert_ids, no_image_ids, enable_ids, pending_ids,
+        missing_ids,
+    )
 
 
 def _txt_has_images(txt_path: Path) -> bool | None:

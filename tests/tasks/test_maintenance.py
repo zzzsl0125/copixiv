@@ -416,6 +416,184 @@ class TestCheckEpubStalePlaceholders:
         assert _get_status(session_factory, 5) == 1
 
 
+class TestCheckEpubPendingShellBecomesTerminal:
+    """Readable-but-unfinished EPUBs must reach a terminal state (2026-10-23).
+
+    Production had 905 ``has_epub=1`` rows shaped exactly like this: a readable
+    shell, zero illustrations on disk, the body *does* carry placeholders, txt
+    untouched for months.  ``_no_images_ever_and_stale`` already described that
+    case, but it was only consulted from the ``not epub_ok`` branch — so these
+    rows were re-judged as pending every night, forever.
+    """
+
+    async def test_stale_shell_with_placeholders_becomes_no_images(
+        self, session_factory, tmp_path,
+    ):
+        import os
+        import time as _time
+
+        txt = await _seed_pending(
+            session_factory, 61, "正文 [uploadedimage:1]", False, tmp_path,
+        )
+        # A real EPUB *without* the illustration: readable, not complete.
+        _write_real_epub(txt, 61, with_image=False)
+        old = _time.time() - 200 * 86400
+        os.utime(txt, (old, old))
+
+        result = await _run_check_epub(session_factory)
+
+        assert "确认为无图" in result.summary
+        assert _get_status(session_factory, 61) == EpubStatus.NO_IMAGES
+
+    async def test_fresh_shell_with_placeholders_stays_pending(
+        self, session_factory, tmp_path,
+    ):
+        """Fresh txt = the images may still arrive; never give up early."""
+        txt = await _seed_pending(
+            session_factory, 62, "正文 [uploadedimage:1]", False, tmp_path,
+        )
+        _write_real_epub(txt, 62, with_image=False)
+
+        result = await _run_check_epub(session_factory)
+
+        assert "仍待处理" in result.summary
+        assert _get_status(session_factory, 62) == 1
+
+    async def test_complete_epub_with_stale_txt_is_not_downgraded(
+        self, session_factory, tmp_path,
+    ):
+        """ORDER MATTERS: ``is_complete`` wins over the stale predicate.
+
+        One production row is a finished, legitimately image-less EPUB whose
+        txt is ancient — it satisfies the stale predicate too.  Demoting it
+        would destroy a good book, so the stale check must stay *after*
+        ``is_complete``.
+        """
+        import os
+        import time as _time
+
+        txt = await _seed_pending(
+            session_factory, 63, "正文 [uploadedimage:1]", False, tmp_path,
+        )
+        _write_real_epub(txt, 63, with_image=True)
+        old = _time.time() - 400 * 86400
+        os.utime(txt, (old, old))
+
+        result = await _run_check_epub(session_factory)
+
+        # Promoted to DONE, never demoted to NO_IMAGES.
+        assert _get_status(session_factory, 63) == EpubStatus.DONE
+        assert "确认为无图" not in result.summary
+
+
+class TestCheckEpubDoneMustBeComplete:
+    """``DONE`` now means ``state.is_complete``, not merely "a readable zip".
+
+    Three production rows shipped an EPUB whose XHTML still carried literal
+    ``[pixivimage:…]`` markers: the reader saw raw text.  The download endpoint
+    serves whatever ``has_epub=2`` points at (``NovelCard`` picks the epub
+    format from that value), so "readable" was not a good enough verdict.
+    """
+
+    async def test_done_with_raw_markers_is_demoted(
+        self, session_factory, tmp_path,
+    ):
+        # epub=False: the case builder supplies the *broken* container itself.
+        txt = await _seed(
+            session_factory, 64, "正文 [pixivimage:999]", False, tmp_path,
+            status=EpubStatus.DONE,
+        )
+        _write_placeholder_epub(txt)          # readable zip, markers intact
+
+        result = await _run_check_epub(session_factory)
+
+        assert "回退为待处理" in result.summary
+        assert _get_status(session_factory, 64) == EpubStatus.PENDING
+
+    async def test_done_shell_with_gone_images_becomes_no_images(
+        self, session_factory, tmp_path,
+    ):
+        """A finished-looking shell whose illustrations can never land."""
+        import os
+        import time as _time
+
+        txt = await _seed(
+            session_factory, 65, "正文 [uploadedimage:1]", False, tmp_path,
+            status=EpubStatus.DONE,
+        )
+        _write_real_epub(txt, 65, with_image=False)
+        old = _time.time() - 200 * 86400
+        os.utime(txt, (old, old))
+
+        await _run_check_epub(session_factory)
+
+        assert _get_status(session_factory, 65) == EpubStatus.NO_IMAGES
+
+    async def test_complete_epub_stays_done(self, session_factory, tmp_path):
+        txt = await _seed(
+            session_factory, 66, "正文 [uploadedimage:1]", False, tmp_path,
+            status=EpubStatus.DONE,
+        )
+        _write_real_epub(txt, 66, with_image=True)
+
+        await _run_check_epub(session_factory)
+
+        assert _get_status(session_factory, 66) == EpubStatus.DONE
+
+
+class TestCheckEpubMissingSource:
+    """``path`` set but the text file is gone → ``MISSING_SOURCE`` (4).
+
+    The production backlog was 684 such rows: metadata written by an older
+    ingest that never downloaded the body, no EPUB, no image, no failure
+    record, and status ``0`` — a state the reconciler never reported and never
+    left.  Classifying them makes them visible; re-downloading stays a user
+    action.
+    """
+
+    async def test_missing_text_file_becomes_missing_source(
+        self, session_factory, tmp_path,
+    ):
+        # Seed a row, then delete the file behind its back.
+        txt = await _seed(
+            session_factory, 71, "正文 [uploadedimage:1]", False, tmp_path,
+            status=EpubStatus.NO,
+        )
+        txt.unlink()
+
+        result = await _run_check_epub(session_factory)
+
+        assert "源文件丢失" in result.summary
+        assert _get_status(session_factory, 71) == EpubStatus.MISSING_SOURCE
+
+    async def test_missing_source_is_idempotent(
+        self, session_factory, tmp_path,
+    ):
+        txt = await _seed(
+            session_factory, 72, "正文", False, tmp_path,
+            status=EpubStatus.MISSING_SOURCE,
+        )
+        txt.unlink()
+
+        result = await _run_check_epub(session_factory)
+
+        # Already terminal: not re-reported as a change.
+        assert "源文件丢失" not in result.summary
+        assert _get_status(session_factory, 72) == EpubStatus.MISSING_SOURCE
+
+    async def test_present_text_is_not_marked_missing(
+        self, session_factory, tmp_path,
+    ):
+        await _seed(
+            session_factory, 73, "纯文字无图", False, tmp_path,
+            status=EpubStatus.NO,
+        )
+
+        await _run_check_epub(session_factory)
+
+        assert _get_status(session_factory, 73) == EpubStatus.NO_IMAGES
+
+
 class TestSearchIndexMaintenanceTasks:
     """rebuild_fts (REINDEX) + check_fts (index health) maintenance tasks."""
 
@@ -464,55 +642,79 @@ class TestSearchIndexMaintenanceTasks:
                 conn.execute(text(self._CREATE_INDEX))
 
 
-class TestCheckEpubResumableSweep:
-    """一轮有界 + 游标续跑（2026-09-16：全表 42 分钟 vs 30 分钟上限）。
+class TestCheckEpubFullTableScan:
+    """每一轮都扫全表：不再有「游标以下」的行（2026-10-23 重写）。
 
-    旧形态「先扫全表再整批写」被超时掐掉时**一个字节都没写**（任务 1374 扫到
-    10 万行被杀，库里毫无变化）。现在按块写入 + 推进游标，超时只是少做一点。
+    旧设计按 ``id > cursor`` 取 60 000 行、每块推进游标，只在「游标之上零行」时
+    归零。新书每天入库，那个分支几乎不触发，于是游标只增不减：**游标以下的行
+    永远不会再被检查**（生产积压 1 594 行），而任务每天照报「全表完成」。
+
+    实测整表一轮只要几秒（终端行只 stat、DONE 只验 zip），所以覆盖面不再需要
+    分片来换。这里钉住新语义：一轮 = 全表，且游标残留会被清掉。
     """
 
-    async def test_second_run_resumes_from_cursor(
-        self, session_factory, tmp_path, monkeypatch,
-    ):
-        from copixiv.tasks import maintenance
-
-        # 3 本：前 2 本限量跑完，第 3 本留给下一轮
+    async def test_single_run_covers_the_whole_table(self, session_factory, tmp_path):
         for nid in (41, 42, 43):
             await _seed(
                 session_factory, nid, "纯文字无图", False, tmp_path,
                 status=EpubStatus.NO,
             )
-        monkeypatch.setattr(maintenance_epub, "_MAX_ROWS_PER_RUN", 2)
 
-        first = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
-        assert "下轮从" in first.summary
-        assert _get_status(session_factory, 41) == EpubStatus.NO_IMAGES
-        assert _get_status(session_factory, 42) == EpubStatus.NO_IMAGES
-        # 第 3 本本轮没扫到，状态未动
-        assert _get_status(session_factory, 43) == EpubStatus.NO
+        result = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
 
-        second = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
-        assert _get_status(session_factory, 43) == EpubStatus.NO_IMAGES
-        assert "全表完成" in second.summary
+        # 一轮就把三本都分类完 —— 不需要第二次运行
+        for nid in (41, 42, 43):
+            assert _get_status(session_factory, nid) == EpubStatus.NO_IMAGES
+        assert "下轮从" not in result.summary
+        assert "全表 3 行" in result.summary
 
-    async def test_wrap_around_clears_cursor_and_reports_nothing_to_do(
-        self, session_factory, tmp_path, monkeypatch,
+    async def test_rows_below_an_old_cursor_are_still_examined(
+        self, session_factory, tmp_path,
     ):
-        from copixiv.tasks import maintenance
+        """A leftover cursor must never strand rows again.
 
+        Regression for the production shape: cursor at the table's tail, rows
+        below it in ``0``/``1`` that the old design would never revisit.
+        """
+        from copixiv.core.draft import NovelDraft  # noqa: F401  (doc anchor)
+        from copixiv.tasks.maintenance import _write_cursor
+
+        for nid in (51, 52):
+            await _seed(
+                session_factory, nid, "纯文字无图", False, tmp_path,
+                status=EpubStatus.NO,
+            )
+
+        # A stale cursor pointing past every seeded row.
+        wait_cursor_writer = _write_cursor(
+            SqlUnitOfWork(session_factory), 9_999_999,
+        )
+        await wait_cursor_writer
+
+        result = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
+
+        assert _get_status(session_factory, 51) == EpubStatus.NO_IMAGES
+        assert _get_status(session_factory, 52) == EpubStatus.NO_IMAGES
+        assert "全表 2 行" in result.summary
+        # The legacy cursor is cleared so nothing downstream trusts it.
+        assert await _read_cursor(
+            SqlUnitOfWork(session_factory)
+        ) == 0
+
+    async def test_rerun_reports_no_change_without_claiming_nothing_to_do(
+        self, session_factory, tmp_path,
+    ):
         await _seed(
             session_factory, 44, "纯文字无图", False, tmp_path,
             status=EpubStatus.NO,
         )
-        monkeypatch.setattr(maintenance_epub, "_MAX_ROWS_PER_RUN", 1)
 
         await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
-        # 游标停在表尾且非 0 → 本轮无事可做，复位并声明从头复查
-        wrap = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
-        assert "从头复查" in wrap.summary
-        # 复位后再跑：全表重扫一遍（该行已是终态，无变化）
-        third = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
-        assert "无变化" in third.summary
+        second = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
+
+        # 「本轮无变化」≠「没东西可查」——行数仍然是全表行数。
+        assert "本轮无变化" in second.summary
+        assert "全表 1 行" in second.summary
         assert _get_status(session_factory, 44) == EpubStatus.NO_IMAGES
 
 

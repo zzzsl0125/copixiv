@@ -24,19 +24,29 @@ class EpubStatus(IntEnum):
       It carries no claim: the row may or may not need an EPUB, and only the
       text file can settle it.  The reconciler re-examines these rows so they
       eventually reach a terminal state.
-    * ``NO_IMAGES`` (3) — **terminal: nothing to build**.  The body text is
-      known to contain no image placeholder, so an EPUB would add nothing.
-      The reconciler never re-reads the text of a row in this state.
+    * ``NO_IMAGES`` (3) — **terminal: nothing to build**.  Means *no EPUB will
+      ever be produced for this row*, for either of two reasons: the body has
+      no image placeholder to embed, **or** the placeholders' images are gone
+      for good (author deleted them / the URLs are dead, confirmed by the
+      stale-image rule).  The reconciler never re-reads the text of a row in
+      this state.
+    * ``MISSING_SOURCE`` (4) — **terminal: no local text**.  ``novel.path`` is
+      set but the text file is not on disk (and no renamed copy exists).  The
+      row can never be *built from* anything local, so it must not sit in
+      ``NO``/``PENDING`` pretending work is pending.  It is recoverable only
+      by a re-download, which the UI must offer explicitly.
 
     Historically ``0`` meant "no images" *and* "don't look at me" at once
     (the reconciler filtered on ``has_epub > 0``), so rows demoted by the
     stale-image rule — or clobbered to 0 by every metadata refresh — could
-    never be repaired.  Splitting the two meanings is the point.
+    never be repaired.  Splitting the two meanings is the point; ``4`` exists
+    for the same reason (one more fact that must not hide behind ``0``).
     """
     NO = 0
     PENDING = 1
     DONE = 2
     NO_IMAGES = 3
+    MISSING_SOURCE = 4
 
 
 class Novel(BaseModel):
