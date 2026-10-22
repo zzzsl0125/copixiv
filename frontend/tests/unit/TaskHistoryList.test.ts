@@ -23,6 +23,7 @@ function mountWithStatus(status: string) {
           end_time: null,
           duration: 1.5,
           result: null,
+          has_log: false,
         },
       ],
       loading: false,
@@ -74,6 +75,7 @@ describe('TaskHistoryList row identity across polls', () => {
       end_time: null,
       duration: null,
       result: { summary },
+      has_log: false,
     }
   }
 

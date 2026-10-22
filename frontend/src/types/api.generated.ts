@@ -865,6 +865,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/tasks/busy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Busy Tasks
+         * @description Task functions with a pending/running row — the front-end busy set.
+         *
+         *     Tiny on purpose: the task-status poller hits this every 5 s while a task
+         *     runs, and it used to read a full history page instead.
+         */
+        get: operations["get_busy_tasks_api_tasks_busy_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/tasks/history": {
         parameters: {
             query?: never;
@@ -872,8 +895,35 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Task History */
+        /**
+         * Get Task History
+         * @description List task-history rows **without** their log payload.
+         *
+         *     The log is fetched on demand via ``GET /history/{id}/log``.  Returning it
+         *     inline made one page ~7.4 MB (96 % log text) while the front-end poller
+         *     re-read it every 5 s whenever a task was running.
+         */
         get: operations["get_task_history_api_tasks_history_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/tasks/history/{task_id}/log": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Task Log
+         * @description Return the stored execution log for one task-history row.
+         */
+        get: operations["get_task_log_api_tasks_history__task_id__log_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1251,17 +1301,26 @@ export interface components {
          *       It carries no claim: the row may or may not need an EPUB, and only the
          *       text file can settle it.  The reconciler re-examines these rows so they
          *       eventually reach a terminal state.
-         *     * ``NO_IMAGES`` (3) — **terminal: nothing to build**.  The body text is
-         *       known to contain no image placeholder, so an EPUB would add nothing.
-         *       The reconciler never re-reads the text of a row in this state.
+         *     * ``NO_IMAGES`` (3) — **terminal: nothing to build**.  Means *no EPUB will
+         *       ever be produced for this row*, for either of two reasons: the body has
+         *       no image placeholder to embed, **or** the placeholders' images are gone
+         *       for good (author deleted them / the URLs are dead, confirmed by the
+         *       stale-image rule).  The reconciler never re-reads the text of a row in
+         *       this state.
+         *     * ``MISSING_SOURCE`` (4) — **terminal: no local text**.  ``novel.path`` is
+         *       set but the text file is not on disk (and no renamed copy exists).  The
+         *       row can never be *built from* anything local, so it must not sit in
+         *       ``NO``/``PENDING`` pretending work is pending.  It is recoverable only
+         *       by a re-download, which the UI must offer explicitly.
          *
          *     Historically ``0`` meant "no images" *and* "don't look at me" at once
          *     (the reconciler filtered on ``has_epub > 0``), so rows demoted by the
          *     stale-image rule — or clobbered to 0 by every metadata refresh — could
-         *     never be repaired.  Splitting the two meanings is the point.
+         *     never be repaired.  Splitting the two meanings is the point; ``4`` exists
+         *     for the same reason (one more fact that must not hide behind ``0``).
          * @enum {integer}
          */
-        EpubStatus: 0 | 1 | 2 | 3;
+        EpubStatus: 0 | 1 | 2 | 3 | 4;
         /** FailedNovelCountResponse */
         FailedNovelCountResponse: {
             /** Count */
@@ -1760,12 +1819,34 @@ export interface components {
             /** Tag */
             tag?: string | null;
         };
+        /**
+         * TaskBusyResponse
+         * @description Task functions that currently have a pending or running history row.
+         *
+         *     Deliberately its own endpoint: the front-end needs exactly this set to
+         *     gray out the "run" buttons, and reusing the history list for it meant
+         *     polling a ~7.4 MB page every 5 seconds.
+         */
+        TaskBusyResponse: {
+            /** Funcs */
+            funcs: string[];
+        };
         /** TaskHistoryListResponse */
         TaskHistoryListResponse: {
             /** Items */
             items: components["schemas"]["TaskHistoryResponse"][];
             /** Total */
             total: number;
+        };
+        /**
+         * TaskHistoryLogResponse
+         * @description The stored execution log for one task-history row.
+         */
+        TaskHistoryLogResponse: {
+            /** Id */
+            id: number;
+            /** Log */
+            log: string;
         };
         /** TaskHistoryResponse */
         TaskHistoryResponse: {
@@ -1777,6 +1858,11 @@ export interface components {
             duration?: number | null;
             /** End Time */
             end_time?: string | null;
+            /**
+             * Has Log
+             * @default false
+             */
+            has_log: boolean;
             /** Id */
             id: number;
             /** Name */
@@ -3306,6 +3392,26 @@ export interface operations {
             };
         };
     };
+    get_busy_tasks_api_tasks_busy_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskBusyResponse"];
+                };
+            };
+        };
+    };
     get_task_history_api_tasks_history_get: {
         parameters: {
             query?: {
@@ -3325,6 +3431,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TaskHistoryListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_task_log_api_tasks_history__task_id__log_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskHistoryLogResponse"];
                 };
             };
             /** @description Validation Error */

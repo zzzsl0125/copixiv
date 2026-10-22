@@ -31,6 +31,8 @@ const emit = defineEmits<{
 const toast = useToast()
 const showMobileActions = computed(() => props.isActive)
 const hasEpubReady = computed(() => props.novel.has_epub === 2)
+/** 源文件丢失（4）：本地没有正文，只能重新下载，别再假装"待处理"。 */
+const isMissingSource = computed(() => props.novel.has_epub === 4)
 /** 本地上传的书（novel.source === 'local'，TXT / EPUB 都是）。 */
 const isLocal = computed(() => props.novel.source === 'local')
 
@@ -55,6 +57,14 @@ const badges = computed(() => {
       label: 'EPUB',
       class: 'bg-green-100 text-green-800',
       title: '已生成 EPUB',
+    })
+  }
+  if (isMissingSource.value) {
+    list.push({
+      key: 'missing',
+      label: '缺文件',
+      class: 'bg-red-100 text-red-800',
+      title: '本地正文文件已丢失（has_epub=4），需重新下载',
     })
   }
   return list

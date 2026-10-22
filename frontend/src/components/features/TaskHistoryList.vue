@@ -3,7 +3,7 @@ import { ref } from 'vue'
 import { RefreshCw, Clock, FileText, CheckCircle, XCircle, Download } from '@lucide/vue'
 import LoadMore from './LoadMore.vue'
 import LogViewer from './LogViewer.vue'
-import { novelApi } from '../../api'
+import { getApiErrorMessage, novelApi, taskApi } from '../../api'
 import { downloadUrl } from '../../lib/utils'
 import type { TaskHistory } from '../../types'
 
@@ -22,6 +22,8 @@ const currentTitles = ref('')
 
 const parseResult = (resultStr?: string | Record<string, any> | null) => {
   if (!resultStr) return { log: '', summary: '', new_novels_count: null, new_novel_titles: [] as string[] }
+  // ``result`` no longer carries ``log`` (the list endpoint strips it); the
+  // log is fetched on demand. Everything else stays inline.
   // Handle the case where the API already returns a parsed object (not a JSON string)
   if (typeof resultStr === 'object') {
     return {
@@ -88,10 +90,30 @@ const handleDownloadExport = (item: TaskHistory) => {
   downloadUrl(novelApi.exportDownloadUrl(item.id))
 }
 
-const showLog = (result: string | Record<string, any> | null | undefined) => {
-  const parsed = parseResult(result)
-  currentLog.value = parsed.log || '无输出日志'
+const loadingLog = ref(false)
+
+/**
+ * Fetch and show one row's log.
+ *
+ * The list response carries only ``has_log`` now, so this is the single place
+ * that loads log text — on demand, never during polling.
+ */
+const showLog = async (item: TaskHistory) => {
   logModalOpen.value = true
+  currentLog.value = ''
+  if (!item.has_log) {
+    currentLog.value = '无输出日志'
+    return
+  }
+  loadingLog.value = true
+  try {
+    const data = await taskApi.getTaskLog(item.id)
+    currentLog.value = data.log || '无输出日志'
+  } catch (err) {
+    currentLog.value = `日志获取失败: ${getApiErrorMessage(err, '未知错误')}`
+  } finally {
+    loadingLog.value = false
+  }
 }
 
 const showTitles = (result: string | Record<string, any> | null | undefined) => {
@@ -165,8 +187,8 @@ const statusIs = (status: string, ...names: string[]) =>
                       <FileText class="w-3.5 h-3.5 mr-1" /> 清单
                     </button>
                     <button
-                      v-if="item.result || statusIs(item.status, 'failed')"
-                      @click="showLog(item.result || '')"
+                      v-if="item.has_log || statusIs(item.status, 'failed')"
+                      @click="showLog(item)"
                       class="inline-flex items-center px-2.5 py-1.5 border border-gray-300 shadow-sm text-xs font-medium rounded text-gray-700 bg-white hover:bg-gray-50 focus:outline-none transition-colors"
                     >
                       <FileText class="w-3.5 h-3.5 mr-1" /> 日志

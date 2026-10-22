@@ -468,12 +468,13 @@
         "type": "object"
       },
       "EpubStatus": {
-        "description": "EPUB conversion status for a novel.\n\n``NO`` and ``NO_IMAGES`` are different facts, and conflating them cost\nthis project five weeks of invisible breakage (2026-09 追溯):\n\n* ``NO`` (0) — **unclassified**.  A legacy value, and the column default.\n  It carries no claim: the row may or may not need an EPUB, and only the\n  text file can settle it.  The reconciler re-examines these rows so they\n  eventually reach a terminal state.\n* ``NO_IMAGES`` (3) — **terminal: nothing to build**.  The body text is\n  known to contain no image placeholder, so an EPUB would add nothing.\n  The reconciler never re-reads the text of a row in this state.\n\nHistorically ``0`` meant \"no images\" *and* \"don't look at me\" at once\n(the reconciler filtered on ``has_epub > 0``), so rows demoted by the\nstale-image rule — or clobbered to 0 by every metadata refresh — could\nnever be repaired.  Splitting the two meanings is the point.",
+        "description": "EPUB conversion status for a novel.\n\n``NO`` and ``NO_IMAGES`` are different facts, and conflating them cost\nthis project five weeks of invisible breakage (2026-09 追溯):\n\n* ``NO`` (0) — **unclassified**.  A legacy value, and the column default.\n  It carries no claim: the row may or may not need an EPUB, and only the\n  text file can settle it.  The reconciler re-examines these rows so they\n  eventually reach a terminal state.\n* ``NO_IMAGES`` (3) — **terminal: nothing to build**.  Means *no EPUB will\n  ever be produced for this row*, for either of two reasons: the body has\n  no image placeholder to embed, **or** the placeholders' images are gone\n  for good (author deleted them / the URLs are dead, confirmed by the\n  stale-image rule).  The reconciler never re-reads the text of a row in\n  this state.\n* ``MISSING_SOURCE`` (4) — **terminal: no local text**.  ``novel.path`` is\n  set but the text file is not on disk (and no renamed copy exists).  The\n  row can never be *built from* anything local, so it must not sit in\n  ``NO``/``PENDING`` pretending work is pending.  It is recoverable only\n  by a re-download, which the UI must offer explicitly.\n\nHistorically ``0`` meant \"no images\" *and* \"don't look at me\" at once\n(the reconciler filtered on ``has_epub > 0``), so rows demoted by the\nstale-image rule — or clobbered to 0 by every metadata refresh — could\nnever be repaired.  Splitting the two meanings is the point; ``4`` exists\nfor the same reason (one more fact that must not hide behind ``0``).",
         "enum": [
           0,
           1,
           2,
-          3
+          3,
+          4
         ],
         "title": "EpubStatus",
         "type": "integer"
@@ -1575,6 +1576,23 @@
         "title": "TagPreferenceUpdate",
         "type": "object"
       },
+      "TaskBusyResponse": {
+        "description": "Task functions that currently have a pending or running history row.\n\nDeliberately its own endpoint: the front-end needs exactly this set to\ngray out the \"run\" buttons, and reusing the history list for it meant\npolling a ~7.4 MB page every 5 seconds.",
+        "properties": {
+          "funcs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Funcs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "funcs"
+        ],
+        "title": "TaskBusyResponse",
+        "type": "object"
+      },
       "TaskHistoryListResponse": {
         "properties": {
           "items": {
@@ -1594,6 +1612,25 @@
           "total"
         ],
         "title": "TaskHistoryListResponse",
+        "type": "object"
+      },
+      "TaskHistoryLogResponse": {
+        "description": "The stored execution log for one task-history row.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "log": {
+            "title": "Log",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "log"
+        ],
+        "title": "TaskHistoryLogResponse",
         "type": "object"
       },
       "TaskHistoryResponse": {
@@ -1632,6 +1669,11 @@
               }
             ],
             "title": "End Time"
+          },
+          "has_log": {
+            "default": false,
+            "title": "Has Log",
+            "type": "boolean"
           },
           "id": {
             "title": "Id",
@@ -4110,8 +4152,31 @@
         ]
       }
     },
+    "/api/tasks/busy": {
+      "get": {
+        "description": "Task functions with a pending/running row — the front-end busy set.\n\nTiny on purpose: the task-status poller hits this every 5 s while a task\nruns, and it used to read a full history page instead.",
+        "operationId": "get_busy_tasks_api_tasks_busy_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskBusyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Busy Tasks",
+        "tags": [
+          "tasks"
+        ]
+      }
+    },
     "/api/tasks/history": {
       "get": {
+        "description": "List task-history rows **without** their log payload.\n\nThe log is fetched on demand via ``GET /history/{id}/log``.  Returning it\ninline made one page ~7.4 MB (96 % log text) while the front-end poller\nre-read it every 5 s whenever a task was running.",
         "operationId": "get_task_history_api_tasks_history_get",
         "parameters": [
           {
@@ -4161,6 +4226,49 @@
           }
         },
         "summary": "Get Task History",
+        "tags": [
+          "tasks"
+        ]
+      }
+    },
+    "/api/tasks/history/{task_id}/log": {
+      "get": {
+        "description": "Return the stored execution log for one task-history row.",
+        "operationId": "get_task_log_api_tasks_history__task_id__log_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskHistoryLogResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Task Log",
         "tags": [
           "tasks"
         ]

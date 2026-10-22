@@ -13,12 +13,10 @@
  */
 import { computed, ref } from 'vue'
 import * as apiModule from '../api'
-import type { TaskHistory } from '../types'
 
 const POLL_MS = 5000
 
-type TaskHistoryPage = { items: TaskHistory[]; total: number }
-type TaskHistoryFetcher = (limit: number, offset: number) => Promise<TaskHistoryPage>
+type BusyFetcher = () => Promise<{ funcs: string[] }>
 
 const busyFuncs = ref<Set<string>>(new Set())
 const busyFuncNames = computed(() => Array.from(busyFuncs.value))
@@ -35,19 +33,19 @@ let inFlight = false
 let rerunRequested = false
 
 /**
- * Resolve ``taskApi.getTaskHistory`` lazily through the module namespace.
+ * Resolve ``taskApi.getBusyTasks`` lazily through the module namespace.
  *
  * Some tests / staging mocks replace the whole ``../api`` module without a
  * ``taskApi`` export; a namespace property access is simply ``undefined``
  * there (a named import binding could throw on access).
  */
-function getHistoryFetcher(): TaskHistoryFetcher | null {
+function getBusyFetcher(): BusyFetcher | null {
   try {
     const taskApi = (apiModule as unknown as {
-      taskApi?: { getTaskHistory?: unknown }
+      taskApi?: { getBusyTasks?: unknown }
     }).taskApi
-    if (!taskApi || typeof taskApi.getTaskHistory !== 'function') return null
-    return (taskApi.getTaskHistory as TaskHistoryFetcher).bind(taskApi)
+    if (!taskApi || typeof taskApi.getBusyTasks !== 'function') return null
+    return (taskApi.getBusyTasks as BusyFetcher).bind(taskApi)
   } catch {
     // A fully mocked api module can even throw while resolving a missing
     // export; treat "no taskApi" the same as "not available yet".
@@ -73,7 +71,7 @@ function stopTimer(): void {
 /** 只在确实有活跃任务可轮询时才建立定时器（避免空转）。 */
 function ensureTimer(): void {
   if (timer !== null) return
-  if (getHistoryFetcher() === null) return
+  if (getBusyFetcher() === null) return
   timer = setInterval(() => {
     void refreshTaskStatus()
   }, POLL_MS)
@@ -90,18 +88,16 @@ async function refreshTaskStatus(): Promise<void> {
     rerunRequested = true
     return
   }
-  const fetchHistory = getHistoryFetcher()
-  if (fetchHistory === null) return
+  const fetchBusy = getBusyFetcher()
+  if (fetchBusy === null) return
 
   inFlight = true
   try {
-    const page = await fetchHistory(100, 0)
-    const next = new Set<string>()
-    for (const item of page.items ?? []) {
-      const status = (item.status || '').toLowerCase()
-      if (status !== 'pending' && status !== 'running') continue
-      if (item.task_func) next.add(item.task_func)
-    }
+    // One tiny query, not a multi-megabyte history page: the busy set is now
+    // computed server-side (``GET /api/tasks/busy``) and is no longer limited
+    // to the first 100 history rows.
+    const { funcs } = await fetchBusy()
+    const next = new Set<string>(funcs ?? [])
     // 只在集合真正变化时替换 ref，避免每个 5s 周期都触发一轮无意义重渲染。
     if (!sameSet(busyFuncs.value, next)) {
       busyFuncs.value = next

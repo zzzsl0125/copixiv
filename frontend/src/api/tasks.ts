@@ -41,4 +41,28 @@ export const taskApi = {
     const response = await apiClient.get('/tasks/history', { params: { limit, offset } })
     return response.data as { items: TaskHistory[]; total: number }
   },
+
+  /**
+   * Task functions that currently have a pending/running row.
+   *
+   * Hundreds of bytes. The busy flags used to be derived from
+   * ``getTaskHistory(100, 0)`` — a multi-megabyte page polled every 5 s while
+   * a task was running, and blind past the first 100 rows.
+   */
+  async getBusyTasks() {
+    const response = await apiClient.get('/tasks/busy')
+    return response.data as { funcs: string[] }
+  },
+
+  /**
+   * Fetch one row's execution log on demand.
+   *
+   * The list endpoint no longer inlines it: it was 96 % of a 7.4 MB page and
+   * the poller re-read the whole page every 5 s while a task was running.
+   * The log is only needed after the user clicks 「日志」.
+   */
+  async getTaskLog(taskId: number) {
+    const response = await apiClient.get(`/tasks/history/${taskId}/log`)
+    return response.data as { id: number; log: string }
+  },
 }

@@ -235,7 +235,8 @@ describe('BatchMetadata（POST /api/novels/batch-metadata）', () => {
 // ---------------------------------------------------------------------------
 // TaskHistory / ScheduledTask。权威：tasks/schemas.py:TaskHistoryResponse / ScheduledTaskResponse；
 // 写路径 tasks/history_repo.py（progress 只写字符串、从不清除）；前端 types/tasks.ts。
-// task_func 是内部 dedup 键，Response 不下发；progress 后端类型写 Any（为未来 dict 形态预留），
+// task_func 是内部 dedup 键，Response 不下发；progress 后端类型写 Any（为未来 dict 形态预留）；
+// has_log 指示该行有可单独获取的日志（列表不再内联 result.log）；
 // 当前线上下发恒 string|null，前端钉 string|null 一致；sort_index 后端默认 0 必回，前端可选（宽松）。
 // ---------------------------------------------------------------------------
 describe('TaskHistory（tasks/schemas.py:TaskHistoryResponse）', () => {
@@ -249,6 +250,7 @@ describe('TaskHistory（tasks/schemas.py:TaskHistoryResponse）', () => {
     duration: null,
     result: null,
     progress: '下载 12/30',
+    has_log: false,
   }
 
   it('id/status/start_time 必填；start_time 为 ISO 字符串（datetime 序列化）', () => {

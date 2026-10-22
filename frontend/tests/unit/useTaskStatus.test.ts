@@ -3,28 +3,18 @@ import {
   useTaskStatus,
   __resetTaskStatusForTests,
 } from '../../src/composables/useTaskStatus'
-import type { TaskHistory } from '../../src/types'
 
-const getTaskHistoryMock = vi.hoisted(() => vi.fn())
+const getBusyTasksMock = vi.hoisted(() => vi.fn())
 
 vi.mock('../../src/api', () => ({
-  taskApi: { getTaskHistory: getTaskHistoryMock },
+  taskApi: { getBusyTasks: getBusyTasksMock },
 }))
 
 const POLL_MS = 5000
 
-function historyItem(overrides: Partial<TaskHistory> = {}): TaskHistory {
-  return {
-    id: 1,
-    name: 'display label',
-    status: 'pending',
-    start_time: '2026-01-01T00:00:00+00:00',
-    ...overrides,
-  } as TaskHistory
-}
-
-function historyPage(items: TaskHistory[]) {
-  return { items, total: items.length }
+/** The busy endpoint's payload: function names only. */
+function busyPage(funcs: string[]) {
+  return { funcs }
 }
 
 /** Flush microtasks without advancing the 5s interval. */
@@ -34,8 +24,8 @@ describe('useTaskStatus (global task-status singleton)', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     __resetTaskStatusForTests()
-    getTaskHistoryMock.mockReset()
-    getTaskHistoryMock.mockResolvedValue(historyPage([]))
+    getBusyTasksMock.mockReset()
+    getBusyTasksMock.mockResolvedValue(busyPage([]))
   })
 
   afterEach(() => {
@@ -44,9 +34,7 @@ describe('useTaskStatus (global task-status singleton)', () => {
   })
 
   it('notifyTaskEnqueued marks the function busy immediately and starts the interval', async () => {
-    getTaskHistoryMock.mockResolvedValue(
-      historyPage([historyItem({ task_func: 'batch_operation', status: 'pending' })]),
-    )
+    getBusyTasksMock.mockResolvedValue(busyPage(['batch_operation']))
     const status = useTaskStatus()
 
     status.notifyTaskEnqueued('batch_operation')
@@ -59,20 +47,16 @@ describe('useTaskStatus (global task-status singleton)', () => {
     await flushMicrotasks()
 
     // The follow-up refresh agrees with the optimistic state.
-    expect(getTaskHistoryMock).toHaveBeenCalledWith(100, 0)
+    expect(getBusyTasksMock).toHaveBeenCalledWith()
     expect(status.isBusy('batch_operation')).toBe(true)
     expect(vi.getTimerCount()).toBe(1)
   })
 
-  it('refreshTaskStatus tracks pending/running task_func rows and clears on terminal states', async () => {
-    getTaskHistoryMock.mockResolvedValue(historyPage([
-      historyItem({ id: 1, task_func: 'batch_operation', status: 'pending' }),
-      historyItem({ id: 2, task_func: 'batch_export', status: 'running' }),
-      // Terminal rows do not count.
-      historyItem({ id: 3, task_func: 'failed_retry', status: 'success' }),
-      // A legacy pending row without task_func cannot be attributed to a function.
-      historyItem({ id: 4, task_func: null, status: 'pending' }),
-    ]))
+  it('refreshTaskStatus adopts the server-side busy set and clears when it empties', async () => {
+    // The server computes the set (pending/running rows with a task_func);
+    // the client no longer filters history rows itself, so this pins the
+    // contract rather than re-testing server logic.
+    getBusyTasksMock.mockResolvedValue(busyPage(['batch_operation', 'batch_export']))
     const status = useTaskStatus()
 
     await status.refreshTaskStatus()
@@ -94,10 +78,7 @@ describe('useTaskStatus (global task-status singleton)', () => {
     expect(status.busyFuncs.value).toBe(stable)
 
     // Everything reached a terminal state → busy set empties, interval stops.
-    getTaskHistoryMock.mockResolvedValue(historyPage([
-      historyItem({ id: 1, task_func: 'batch_operation', status: 'success' }),
-      historyItem({ id: 2, task_func: 'batch_export', status: 'failed' }),
-    ]))
+    getBusyTasksMock.mockResolvedValue(busyPage([]))
 
     await status.refreshTaskStatus()
 
@@ -107,15 +88,13 @@ describe('useTaskStatus (global task-status singleton)', () => {
   })
 
   it('a failed history request neither throws nor clears the known set', async () => {
-    getTaskHistoryMock.mockResolvedValue(
-      historyPage([historyItem({ task_func: 'failed_retry', status: 'running' })]),
-    )
+    getBusyTasksMock.mockResolvedValue(busyPage(['failed_retry']))
     const status = useTaskStatus()
     await status.refreshTaskStatus()
     const known = status.busyFuncs.value
     expect(status.isBusy('failed_retry')).toBe(true)
 
-    getTaskHistoryMock.mockRejectedValue(new Error('network down'))
+    getBusyTasksMock.mockRejectedValue(new Error('network down'))
 
     await expect(status.refreshTaskStatus()).resolves.toBeUndefined()
 
@@ -135,7 +114,7 @@ describe('useTaskStatus (global task-status singleton)', () => {
     await status.refreshTaskStatus()
     expect(status.tick.value).toBe(2)
 
-    getTaskHistoryMock.mockRejectedValue(new Error('network down'))
+    getBusyTasksMock.mockRejectedValue(new Error('network down'))
     await status.refreshTaskStatus()
     // A failed poll must not drive view refreshes with stale data.
     expect(status.tick.value).toBe(2)
@@ -147,67 +126,65 @@ describe('useTaskStatus (global task-status singleton)', () => {
     status.startTaskStatusPolling()
     await flushMicrotasks()
 
-    expect(getTaskHistoryMock).toHaveBeenCalledTimes(1)
+    expect(getBusyTasksMock).toHaveBeenCalledTimes(1)
     // Nothing active → no interval exists yet.
     expect(vi.getTimerCount()).toBe(0)
 
     await vi.advanceTimersByTimeAsync(POLL_MS * 2)
-    expect(getTaskHistoryMock).toHaveBeenCalledTimes(1)
+    expect(getBusyTasksMock).toHaveBeenCalledTimes(1)
   })
 
   it('a poll already in flight cannot erase an enqueue that happened meanwhile', async () => {
-    let resolveFirst!: (page: { items: TaskHistory[]; total: number }) => void
-    getTaskHistoryMock
+    let resolveFirst!: (page: { funcs: string[] }) => void
+    getBusyTasksMock
       .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve }))
       .mockResolvedValue(
-        historyPage([historyItem({ task_func: 'batch_operation', status: 'pending' })]),
+        busyPage(['batch_operation']),
       )
     const status = useTaskStatus()
 
     status.startTaskStatusPolling()
-    expect(getTaskHistoryMock).toHaveBeenCalledTimes(1)
+    expect(getBusyTasksMock).toHaveBeenCalledTimes(1)
 
     // Enqueue lands while the stale snapshot request is still open.
     status.notifyTaskEnqueued('batch_operation')
     expect(status.isBusy('batch_operation')).toBe(true)
 
-    resolveFirst(historyPage([]))
+    resolveFirst(busyPage([]))
     await flushMicrotasks()
     await flushMicrotasks()
 
     // The coalesced follow-up re-reads the row instead of leaving the optimistic
     // entry cleared by the stale response.
-    expect(getTaskHistoryMock).toHaveBeenCalledTimes(2)
+    expect(getBusyTasksMock).toHaveBeenCalledTimes(2)
     expect(status.isBusy('batch_operation')).toBe(true)
     expect(vi.getTimerCount()).toBe(1)
   })
 
   it('polls once per interval only while busy, then stops polling when idle', async () => {
-    getTaskHistoryMock.mockResolvedValue(
-      historyPage([historyItem({ task_func: 'batch_operation', status: 'pending' })]),
-    )
+    getBusyTasksMock.mockResolvedValue(busyPage(['batch_operation']))
     const status = useTaskStatus()
     await status.refreshTaskStatus()
-    expect(getTaskHistoryMock).toHaveBeenCalledTimes(1)
+    expect(getBusyTasksMock).toHaveBeenCalledTimes(1)
     expect(vi.getTimerCount()).toBe(1)
 
     // Busy: exactly one poll per 5s tick.
     await vi.advanceTimersByTimeAsync(POLL_MS)
     await flushMicrotasks()
-    expect(getTaskHistoryMock).toHaveBeenCalledTimes(2)
+    expect(getBusyTasksMock).toHaveBeenCalledTimes(2)
 
     // The next poll observes a terminal row → set clears and the timer dies.
-    getTaskHistoryMock.mockResolvedValue(
-      historyPage([historyItem({ task_func: 'batch_operation', status: 'success' })]),
+    getBusyTasksMock.mockResolvedValue(
+      busyPage([]),
     )
     await vi.advanceTimersByTimeAsync(POLL_MS)
     await flushMicrotasks()
-    expect(getTaskHistoryMock).toHaveBeenCalledTimes(3)
+    expect(getBusyTasksMock).toHaveBeenCalledTimes(3)
     expect(status.busyFuncs.value.size).toBe(0)
     expect(vi.getTimerCount()).toBe(0)
 
     // Idle: advancing further must not produce any request.
     await vi.advanceTimersByTimeAsync(POLL_MS * 3)
-    expect(getTaskHistoryMock).toHaveBeenCalledTimes(3)
+    expect(getBusyTasksMock).toHaveBeenCalledTimes(3)
   })
 })
