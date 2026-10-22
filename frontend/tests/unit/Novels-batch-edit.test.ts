@@ -24,7 +24,7 @@ const h = vi.hoisted(() => ({
 // useIdLookup / formatIdLookupHint 用真实现（弹窗自己的行为），只换掉外部依赖。
 vi.mock('../../src/composables', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../src/composables')>()),
-  useToast: () => ({ toasts: [], show: vi.fn(), success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() }),
+  useToast: () => ({ show: vi.fn(), success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() }),
   useSystem: () => ({
     systemConfig: ref(null),
     loading: ref(false),

@@ -41,7 +41,6 @@ vi.mock('../../src/composables', async (importOriginal) => {
       fetchConfig: mocks.fetchConfig,
     }),
     useToast: () => ({
-      toasts: [],
       show: vi.fn(),
       success: vi.fn(),
       error: vi.fn(),
@@ -85,7 +84,6 @@ describe('App bootstrap resilience', () => {
         plugins: [router],
         stubs: {
           Sidebar: true,
-          ToastContainer: true,
           RouterView: true,
         },
       },

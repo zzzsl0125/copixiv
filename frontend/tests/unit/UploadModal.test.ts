@@ -40,7 +40,6 @@ vi.mock('../../src/composables', async (importOriginal) => {
   return {
     ...actual,
     useToast: () => ({
-      toasts: { value: [] },
       show: vi.fn(),
       success: toastMock.success,
       error: toastMock.error,

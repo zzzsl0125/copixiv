@@ -66,7 +66,6 @@ vi.mock('../../src/composables', () => ({
     }
   },
   useToast: () => ({
-    toasts: [],
     show: vi.fn(),
     success: vi.fn(),
     error: vi.fn(),
@@ -167,7 +166,6 @@ async function mountApp(path = '/', search = '') {
       stubs: {
         Sidebar: SidebarStub,
         UploadModal: UploadModalStub,
-        ToastContainer: true,
         RouterView: RouterViewStub,
       },
     },
