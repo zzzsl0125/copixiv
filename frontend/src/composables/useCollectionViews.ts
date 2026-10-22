@@ -64,22 +64,18 @@ export function useCollectionViews(options: UseCollectionViewsOptions) {
         : novels.value,
   )
 
-  // LoadMore / 提示框用的「当前激活视图」聚合状态
-  const viewLoading = computed(() =>
-    viewingSelected.value ? selectedView.loading.value : excludedView.loading.value,
+  // LoadMore / 提示框用的「当前激活视图」聚合状态。
+  // activeView 返回的是**实例本身**（实例字段都是 ref，下游 computed 既随
+  // 实例切换重算，也随实例内部状态响应式更新）。未进入任何视图时回退到
+  // excludedView —— 与原先逐项三元式一致：Novels.vue 空闲时也会读这些状态。
+  const activeView = computed(() =>
+    viewingSelected.value ? selectedView : excludedView,
   )
-  const viewLoadingMore = computed(() =>
-    viewingSelected.value ? selectedView.loadingMore.value : excludedView.loadingMore.value,
-  )
-  const viewHasMore = computed(() =>
-    viewingSelected.value ? selectedView.hasMore.value : excludedView.hasMore.value,
-  )
-  const viewShownCount = computed(() =>
-    viewingSelected.value ? selectedView.novels.value.length : excludedView.novels.value.length,
-  )
-  const viewTotalCount = computed(() =>
-    viewingSelected.value ? selectedView.totalIds.value : excludedView.totalIds.value,
-  )
+  const viewLoading = computed(() => activeView.value.loading.value)
+  const viewLoadingMore = computed(() => activeView.value.loadingMore.value)
+  const viewHasMore = computed(() => activeView.value.hasMore.value)
+  const viewShownCount = computed(() => activeView.value.novels.value.length)
+  const viewTotalCount = computed(() => activeView.value.totalIds.value)
 
   function resetSelectedView() {
     viewingSelected.value = false
@@ -89,6 +85,14 @@ export function useCollectionViews(options: UseCollectionViewsOptions) {
   function resetExcludedView() {
     viewingExcluded.value = false
     excludedView.reset()
+  }
+
+  /** 关闭某个集合视图的统一收尾：先 reset（同步清标志+分页状态），
+   * 再等 DOM 更新后重排——退出视图 / 集合为空 / 加载出错 / 各 watcher 共用。 */
+  async function closeView(reset: () => void) {
+    reset()
+    await nextTick()
+    afterLayout()
   }
 
   // ---- 视图的集合顺序：随机在集合视图内禁用，其余按当前排序条件取序 ----
@@ -139,9 +143,7 @@ export function useCollectionViews(options: UseCollectionViewsOptions) {
       if (seq !== excludedSeq) return  // 已有更新的请求，丢弃本次结果
       if (result.ids.length === 0) {
         // 新范围没有被排除的小说 → 退回浏览列表
-        resetExcludedView()
-        await nextTick()
-        afterLayout()
+        await closeView(resetExcludedView)
         return
       }
       await excludedView.start(result.ids)
@@ -151,17 +153,13 @@ export function useCollectionViews(options: UseCollectionViewsOptions) {
     } catch (err: unknown) {
       if (seq !== excludedSeq) return
       toast.error(getApiErrorMessage(err, '加载被排除小说失败'))
-      resetExcludedView()
-      await nextTick()
-      afterLayout()
+      await closeView(resetExcludedView)
     }
   }
 
   async function toggleViewSelected() {
     if (viewingSelected.value) {
-      resetSelectedView()
-      await nextTick()
-      afterLayout()
+      await closeView(resetSelectedView)
       return
     }
     const ids = batchScope.value?.novel_ids ?? []
@@ -175,17 +173,13 @@ export function useCollectionViews(options: UseCollectionViewsOptions) {
       afterLayout()
     } catch (err: unknown) {
       toast.error(getApiErrorMessage(err, '加载已选小说失败'))
-      resetSelectedView()
-      await nextTick()
-      afterLayout()
+      await closeView(resetSelectedView)
     }
   }
 
   async function toggleViewExcluded() {
     if (viewingExcluded.value) {
-      resetExcludedView()
-      await nextTick()
-      afterLayout()
+      await closeView(resetExcludedView)
       return
     }
     resetSelectedView()  // 互斥：进入被排除视图时退出已选视图
@@ -214,19 +208,16 @@ export function useCollectionViews(options: UseCollectionViewsOptions) {
   // Leaving batch mode (or an emptied selection) closes the selected view;
   // entering batch mode closes the excluded view (批量模式优先互斥).
   watch(() => batchMode.value, (on) => {
-    if (on) {
-      if (viewingExcluded.value) resetExcludedView()
-    } else {
-      resetSelectedView()
+    // 进入批量模式但本就没开被排除视图时，原本也只重排、不 reset
+    if (on && !viewingExcluded.value) {
+      void nextTick().then(afterLayout)
+      return
     }
-    void nextTick().then(afterLayout)
+    void closeView(on ? resetExcludedView : resetSelectedView)
   })
 
   watch(() => hasSelection.value, (has) => {
-    if (!has && viewingSelected.value) {
-      resetSelectedView()
-      void nextTick().then(afterLayout)
-    }
+    if (!has && viewingSelected.value) void closeView(resetSelectedView)
   })
 
   // 视图活跃状态上报给 App → 侧边栏在集合视图内禁用「随机」排序
@@ -246,8 +237,7 @@ export function useCollectionViews(options: UseCollectionViewsOptions) {
     () => {
       if (!viewingExcluded.value) return
       if (!filters.value.keyword.trim()) {
-        resetExcludedView()
-        void nextTick().then(afterLayout)
+        void closeView(resetExcludedView)
         return
       }
       void loadExcludedView()
@@ -268,8 +258,7 @@ export function useCollectionViews(options: UseCollectionViewsOptions) {
           })
           .catch((err: unknown) => {
             toast.error(getApiErrorMessage(err, '重新排序失败'))
-            resetSelectedView()
-            void nextTick().then(afterLayout)
+            void closeView(resetSelectedView)
           })
       } else if (viewingExcluded.value) {
         void loadExcludedView()

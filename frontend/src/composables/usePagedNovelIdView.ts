@@ -1,4 +1,4 @@
-import { ref, computed } from 'vue'
+import { ref, computed, type Ref } from 'vue'
 import { novelApi } from '../api'
 import type { Novel } from '../types'
 import { DEFAULT_PAGE_SIZE } from '../config'
@@ -41,28 +41,29 @@ export function usePagedNovelIdView() {
     novels.value.push(...result.novels)
   }
 
+  /** 取一页并把给定的 loading 标志包起来（start / loadMore 共用）。
+   * 只有标志位不同：守卫（首屏 vs 有更多/已在翻页）留在各自调用处。 */
+  async function runPage(flag: Ref<boolean>) {
+    flag.value = true
+    try {
+      await fetchPage()
+    } finally {
+      flag.value = false
+    }
+  }
+
   /** 从第一页开始展示 *idList*（重置旧状态；loading 覆盖首屏加载）。 */
   async function start(idList: number[]) {
     reset()
     ids.value = [...idList]
     if (ids.value.length === 0) return
-    loading.value = true
-    try {
-      await fetchPage()
-    } finally {
-      loading.value = false
-    }
+    await runPage(loading)
   }
 
   /** 加载下一页（惰性，无更多时 no-op）。 */
   async function loadMore() {
     if (!hasMore.value || loadingMore.value) return
-    loadingMore.value = true
-    try {
-      await fetchPage()
-    } finally {
-      loadingMore.value = false
-    }
+    await runPage(loadingMore)
   }
 
   /**
