@@ -22,7 +22,6 @@ dependencies = [
     "psycopg2-binary>=2.9",
     "croniter>=6.0",
     "requests>=2.31",
-    "langid>=1.1.6",
     "ebooklib>=0.18",
     "Pillow>=10.0",
     "python-multipart>=0.0.9",

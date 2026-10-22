@@ -28,7 +28,8 @@ from copixiv.db.write_lock import run_write_transaction
 
 from copixiv.core.draft import NovelDraft, NovelInfoLike, build_from_novel_info
 from copixiv.core.models import EpubStatus
-from copixiv.core.services import is_chinese, safe_get
+from copixiv.core.language import is_chinese
+from copixiv.core.services import safe_get
 from copixiv.features.novels.download_novel import fetch_novel_and_assets
 from copixiv.features.novels.persist import persist_novels
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
