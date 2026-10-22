@@ -529,17 +529,24 @@ class TestTaskManagerHelpers:
         r = TaskExecutor._normalize_result(None)
         assert r.summary == "完成"
 
-    def test_construction_strips_none_deps(self):
+    def test_construction_keeps_only_what_tasks_read(self):
+        """The injected deps are exactly the services task bodies consume.
+
+        ``config`` / ``epub_builder`` / ``write_lock`` / ``notifier`` used to
+        be carried too, but no task ever read them (``db_write()`` is a no-op
+        boundary under PostgreSQL, and the executor uses the notifier itself),
+        so they were removed rather than advertised.
+        """
         from copixiv.tasks.kernel import TaskManagerSystem
+
         tms = TaskManagerSystem(
             session_factory=lambda: None,
             client="cli", file_storage=None, image_downloader=None,
-            epub_builder=None, config=None,
         )
         deps = tms._executor._deps
         assert deps["client"] == "cli"
         assert deps["file_storage"] is None
-        assert "write_lock" in deps
+        assert set(deps) == {"client", "file_storage", "image_downloader"}
 
 
 class TestFailedNovelRepository:

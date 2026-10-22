@@ -18,10 +18,12 @@ BATCH_MAX_TAGS = 20
 
 # Internal chunk size for statements that address an explicit ID list
 # (match-ids intersection, blocked-ids, sort-ids, task safety fallback).
-# 30k sits safely under the LOWEST mainstream SQLite variable limit
-# (32766 — SQLite 3.32~3.46 default), so chunked IN-lists work on any
-# environment instead of only on 250k-limit builds.  More chunks cost
-# a few extra index scans — negligible next to the row work itself.
+#
+# The original 30k was chosen to stay under SQLite's variable limit; the
+# database is PostgreSQL now, which has no such limit for ``IN`` lists.  The
+# value is kept as a *bounded-work* default: it caps statement length, keeps
+# one request's memory/latency predictable, and lets long operations report
+# progress between chunks.  It is a tuning knob, not a correctness boundary.
 BATCH_ID_CHUNK_SIZE = 30_000
 
 
