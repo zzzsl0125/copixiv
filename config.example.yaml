@@ -10,17 +10,14 @@ pixiv_client:
   min_interval: 2
   cooling_duration: 120
   max_concurrency: 5
-# 通知后端：一个字段承载两种后端，多余字段留空；按列表顺序装配。
+# 通知后端：`notifications` 只支持 telegram；列表形状保留用于将来加渠道。
 #   - type: telegram → token + chat_id
-#   - type: webhook  → url（空 = 该后端跳过）
 # 留空 [] 关闭所有通知。旧 telegram / notifiers.enabled / webhook 键已合并到此列表。
 # 旧 env（如 COPIXIV_TELEGRAM__TOKEN / COPIXIV_WEBHOOK__URL）同样改为此列表。
 notifications:
   - type: telegram
     token: "YOUR_TELEGRAM_BOT_TOKEN"
     chat_id: "YOUR_TELEGRAM_CHAT_ID"
-  - type: webhook
-    url: ""               # webhook 后端的 JSON 投递地址（空 = 该后端跳过）
 # proxy 单键：同时用于 HTTP 与 HTTPS。旧 proxy.http / proxy.https（及 env
 # COPIXIV_PROXY_HTTP / COPIXIV_PROXY_HTTPS）已废弃，改用 proxy.url / COPIXIV_PROXY_URL。
 proxy:

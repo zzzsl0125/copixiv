@@ -15,8 +15,8 @@
 | `db/` | engine / uow（纯事务边界）/ write_lock（事务边界标记，PG 后不再持锁）/ backup / models / constants / base / data_version |
 | `pixiv/` | pixivpy3 防腐层（唯一允许 import pixivpy3 的目录） |
 | `storage/` | file_storage / image_downloader / epub 子包 |
-| `notify/` | telegram / webhook / composite / factory |
-| `tasks/` | kernel.py（registry + context + history + executor + scheduler + manager 合并）/ history_repo / schemas / api / novels / batch / maintenance / pipeline |
+| `notify/` | telegram / factory |
+| `tasks/` | kernel.py（registry + context + history + executor + cron ticker + manager 合并）/ history_repo / schemas / api / novels / batch / maintenance / pipeline |
 | `features/` | accounts / authors / failures / novels / system / tags（每目录 api(+schemas)+repo；novels 另有 ingest / search / 批量用例） |
 
 ## 2. 依赖规则（约定，无矩阵执法）

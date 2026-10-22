@@ -8,7 +8,7 @@ Pixiv 小说管理器：轻松抓取、管理和导出 Pixiv 中文小说。
 - **便捷搜索**：关键词搜索涵盖标题、作者、系列名、标签，也支持指定字段搜索
 - **个人喜好**：支持收藏指定作品，追更指定作者；支持高亮标记喜好的标签
 - **厌恶标签排除**：带厌恶标签的小说从浏览/搜索/计数/全选中隐藏（全局开关，默认开启），可随时「查看被排除」并在视图内改筛选与排序
-- **定时任务**：支持定时执行爬取或维护任务，支持将任务结果发送至TG；同一任务函数（**不同显示名也算**）已有 pending/running 时入队返回 409，任务进度在「任务管理」页实时展示（`progress` 字段）
+- **定时任务**：支持定时执行爬取或维护任务，支持将任务结果发送至TG；重复触发照常入队（同一任务函数可有多条 pending/running 记录，按顺序排队执行），任务进度在「任务管理」页实时展示（`progress` 字段）
 - **Pixiv 账号池**：支持多pixiv账号并发爬取，带负载均衡及防封号冷却；可在「账号管理」指定一个账号作为**追更账号**（`is_follow`），追更/关注更新任务固定使用它
 
 ## 快速开始
@@ -32,7 +32,7 @@ cp config.example.yaml config.yaml
 
 config.yaml 需先行修改，pixiv refresh_token 可留待后续在 webui 内修改。
 
-配置为新格式：`notifications` 是一个**通知后端列表**（`type: telegram|webhook`，
+配置为新格式：`notifications` 是一个**通知后端列表**（`type: telegram`，
 多余字段留空，空数组 `[]` 关闭全部通知），`proxy.url` 单键同时用于 HTTP/HTTPS。
 遗留旧键（`telegram` / `notifiers.enabled` / `webhook` / `frontend` 段、旧
 `proxy.http`/`proxy.https` 及对应 env）会在启动时报错并给出迁移提示——请按新格式
@@ -105,7 +105,7 @@ src/copixiv/
 ├── db/             # engine / uow / write_lock / backup / models / constants / base
 ├── pixiv/          # pixivpy3 防腐层（唯一厂商边界）
 ├── storage/        # file_storage / image_downloader / epub
-├── notify/         # telegram / webhook / composite / factory
+├── notify/         # telegram / factory
 ├── tasks/          # kernel / api / novels / batch / maintenance / history_repo
 └── features/       # accounts / authors / failures / novels / system / tags（api + repo）
 alembic/            # 数据库迁移

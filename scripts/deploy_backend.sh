@@ -43,7 +43,7 @@ find "$REPO/src" "$REPO/.venv/lib/python3.12/site-packages" \
 echo "==> [3/4] 重启后端服务"
 systemctl restart copixiv-backend
 
-echo "==> [4/4] 自检（重启后应出现 copixiv.tasks.manager，而不是旧 copixiv.tasks.scheduler）"
+echo "==> [4/4] 自检（重启后应出现 TaskManagerSystem started / Registered cron job）"
 for i in $(seq 1 15); do
   if systemctl is-active --quiet copixiv-backend && \
      journalctl -u copixiv-backend --since "30 seconds ago" --no-pager 2>/dev/null | grep -q "TaskManagerSystem started"; then

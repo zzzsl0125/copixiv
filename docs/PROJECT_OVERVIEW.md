@@ -10,7 +10,7 @@
 |------|------|
 | 定位 | Pixiv 小说下载管理器 v2 重写版 |
 | 版本 | 2.0.0（`pyproject.toml`） |
-| 后端 | Python 3.12+，FastAPI + SQLAlchemy 2.0 + APScheduler + Alembic + loguru |
+| 后端 | Python 3.12+，FastAPI + SQLAlchemy 2.0 + croniter + Alembic + loguru |
 | 前端 | Vue 3 + Vite + TypeScript + Tailwind v4 + Vitest（`frontend/package.json`） |
 | 数据库 | PostgreSQL（greenfield 基线 `alembic/versions/0001_postgres_baseline.py`；BIGINT / timestamptz / JSONB / TEXT[]+GIN，详见 docs/pg-migration/） |
 | Pixiv 客户端 | pixivpy3（git 直连 `upbit/pixivpy`）+ 自定义 patch（见 MODULARITY.md `pixiv/`） |
@@ -58,8 +58,8 @@ src/copixiv/
 ├── db/             # engine / uow / write_lock / backup / models / constants / base
 ├── pixiv/          # pixivpy3 防腐层（唯一允许 import pixivpy3 的目录）
 ├── storage/        # file_storage / image_downloader / epub
-├── notify/         # telegram / webhook / composite / factory
-├── tasks/          # kernel.py（registry+context+history+executor+scheduler+manager）+ novels / batch / maintenance / pipeline / api / schemas / history_repo
+├── notify/         # telegram / factory
+├── tasks/          # kernel.py（registry+context+history+executor+cron ticker+manager）+ novels / batch / maintenance / pipeline / api / schemas / history_repo
 └── features/       # accounts / authors / failures / novels / system / tags（api + repo + schemas）
 ```
 
@@ -115,7 +115,7 @@ src/copixiv/
 ## 6. 后台任务
 
 - 任务内核：`tasks/kernel.py`（registry + context + history_recorder +
-  executor + scheduler + manager 合并）
+  executor + cron ticker + manager 合并）
 - 声明式注册：`@register(name, args=Pydantic模型)`；发现：内置
   `DEFAULT_TASK_MODULES`（novels / batch / maintenance），无第三方插件机制
 - 依赖注入：`TaskContext`（uow / client / storage / epub / notifier / config / write_lock）
