@@ -4,7 +4,7 @@ import json
 from collections.abc import Sequence
 from datetime import datetime, timezone
 
-from sqlalchemy import select, func
+from sqlalchemy import case, func, select, text as sa_text
 from sqlalchemy.orm import Session
 
 from copixiv.db import models
@@ -42,7 +42,7 @@ class SQLAlchemyTaskRepository(BaseRepository):
         return task.id
 
     async def update_task(
-        self, task_id: int, status: str, result: str | None = None,
+        self, task_id: int, status: str | None, result: str | None = None,
         duration: float | None = None, progress: str | None = None,
     ) -> None:
         self.update_task_sync(
@@ -50,14 +50,26 @@ class SQLAlchemyTaskRepository(BaseRepository):
         )
 
     def update_task_sync(
-        self, task_id: int, status: str, result: str | None = None,
+        self, task_id: int, status: str | None, result: str | None = None,
         duration: float | None = None, progress: str | None = None,
     ) -> None:
+        """Update one history row; ``status=None`` means "progress only".
+
+        A progress-only write must not touch ``status`` / ``end_time``.  The
+        batch tasks report progress through a fire-and-forget
+        ``run_coroutine_threadsafe`` (see ``tasks/batch.py``), so a late
+        progress write can land *after* the executor recorded the terminal
+        status.  Without this guard it would rewrite a finished row back to
+        ``running`` and leave the old ``end_time`` behind — the UI then shows
+        an eternally running task whose button stays disabled.
+        """
         task = self.session.get(models.TaskHistory, task_id)
         if task is not None:
-            task.status = status
+            if status is not None:
+                task.status = status
             # end_time only on terminal states — "running" rows must not
-            # carry an end timestamp.
+            # carry an end timestamp, and a progress-only update never
+            # touches either column.
             if status in ("success", "failed", "interrupted"):
                 task.end_time = datetime.now(timezone.utc)
             if result is not None:
@@ -81,14 +93,50 @@ class SQLAlchemyTaskRepository(BaseRepository):
             if duration is not None:
                 task.duration = duration
 
-    def get_next_pending_sync(self) -> models.TaskHistory | None:
-        """Oldest pending queue row (single-worker FIFO)."""
-        return self.session.execute(
+    def get_next_pending_sync(
+        self,
+        task_funcs: Sequence[str] | None = None,
+        exclude_funcs: Sequence[str] | None = None,
+    ) -> models.TaskHistory | None:
+        """Oldest pending queue row (FIFO) for one queue lane.
+
+        ``task_funcs`` / ``exclude_funcs`` partition the queue between the two
+        workers.  The exclusion is part of the query, not a post-filter: a
+        lane must never stall just because the oldest pending row belongs to
+        the other lane.  ``NULL task_func`` rows (legacy) are picked up by the
+        unrestricted lane — the same rule the front-end busy flags use.
+        """
+        stmt = (
             select(models.TaskHistory)
             .where(models.TaskHistory.status == "pending")
             .order_by(models.TaskHistory.id)
             .limit(1)
-        ).scalar_one_or_none()
+        )
+        if task_funcs is not None:
+            stmt = stmt.where(models.TaskHistory.task_func.in_(task_funcs))
+        if exclude_funcs:
+            stmt = stmt.where(
+                models.TaskHistory.task_func.not_in(exclude_funcs)
+            )
+        return self.session.execute(stmt).scalar_one_or_none()
+
+    async def get_busy_funcs(self) -> list[str]:
+        """Distinct ``task_func`` values with a pending/running row.
+
+        One tiny query backing the front-end busy flags.  It exists so the
+        poller no longer derives that set from a full history page (which it
+        did with ``limit=100`` — a 7.4 MB response while anything was running,
+        and blind to anything beyond the first 100 rows).
+        """
+        rows = self.session.execute(
+            select(models.TaskHistory.task_func)
+            .where(
+                models.TaskHistory.status.in_(("pending", "running")),
+                models.TaskHistory.task_func.isnot(None),
+            )
+            .distinct()
+        ).scalars().all()
+        return sorted(rows)
 
     async def get_history(
         self, limit: int = 50, offset: int = 0
@@ -100,6 +148,65 @@ class SQLAlchemyTaskRepository(BaseRepository):
             .offset(offset)
         )
         return list(self.session.execute(stmt).scalars().all())
+
+    async def get_history_rows(
+        self, limit: int = 50, offset: int = 0,
+    ) -> list[dict]:
+        """History rows **without** the log payload, plus a ``has_log`` flag.
+
+        The list endpoint used to return ``result`` verbatim, and the log
+        inside it was 96 % of a 7.4 MB response for ``limit=100`` — pulled
+        every 5 s by the front-end task-status poller while anything was
+        running.  The log is only ever *displayed* after the user clicks
+        「日志」, so ship the summary and a flag instead; the text itself comes
+        from :meth:`get_task_log`.
+
+        Server-side subtraction (``result - 'log'``) keeps the JSONB work in
+        the database: no need to load up to 1.3 MB per row into Python just
+        to drop it.
+        """
+        # ``result - 'log'`` raises "cannot delete from scalar" on the legacy
+        # rows whose JSONB is a *string* (``recover_stale`` used to write a
+        # ``json.dumps`` payload there).  Guard by type: those rows ship
+        # unchanged and are simply not log-bearing.
+        result_obj = models.TaskHistory.result
+        is_object = sa_text("jsonb_typeof(task_history.result) = 'object'")
+        stmt = (
+            select(
+                models.TaskHistory.id,
+                models.TaskHistory.name,
+                models.TaskHistory.task_func,
+                models.TaskHistory.arguments,
+                models.TaskHistory.status,
+                models.TaskHistory.start_time,
+                models.TaskHistory.end_time,
+                models.TaskHistory.duration,
+                # Drop the log server-side; the rest of the object is small.
+                case(
+                    (is_object, result_obj.op("-")("log")),
+                    else_=result_obj,
+                ).label("result"),
+                case(
+                    (is_object, result_obj.has_key("log")),
+                    else_=sa_text("false"),
+                ).label("has_log"),
+                models.TaskHistory.progress,
+            )
+            .order_by(models.TaskHistory.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        rows = self.session.execute(stmt).all()
+        return [dict(row._mapping) for row in rows]
+
+    async def get_task_log(self, task_id: int) -> str | None:
+        """Return just the stored log text for one row (``None`` if none)."""
+        log = self.session.execute(
+            select(models.TaskHistory.result["log"]).where(
+                models.TaskHistory.id == task_id
+            )
+        ).scalar()
+        return log if isinstance(log, str) else None
 
     async def count_history(self) -> int:
         return self.count(models.TaskHistory)

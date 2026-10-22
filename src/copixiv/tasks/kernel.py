@@ -28,7 +28,6 @@ guessing based on ``isinstance(result, list)``.
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import importlib
 import inspect
 import json
@@ -49,9 +48,7 @@ from copixiv.core.exceptions import NotFoundError, ValidationError
 from copixiv.core.models import TaskResult
 from copixiv.db import models
 from copixiv.db.uow import SqlUnitOfWork
-from copixiv.db.write_lock import DbWriteLock, db_write
-from copixiv.storage.epub.builder import EpubBuilder
-from copixiv.notify.telegram import TelegramNotifier
+from copixiv.db.write_lock import db_write
 from copixiv.pixiv.client import PixivClient
 from copixiv.storage.file_storage import FileStorage
 from copixiv.storage.image_downloader import ImageDownloader
@@ -107,6 +104,33 @@ class TaskSpec:
     args_model: type[BaseModel] | None = None
 
 
+# Queue partitions.  ``task_history`` stays the single queue, but the worker
+# is split in two so a long *fetching* task cannot block *local* work
+# (exports, batch edits, maintenance).  Fetching tasks are identified by
+# function name; every other function — including ad-hoc and legacy ``NULL``
+# rows — goes to the general lane.
+#
+# Only the fetching lane talks to Pixiv, and its request rate is governed by
+# ``PixivClient``'s semaphore + per-account ``min_interval`` + cooldown, not by
+# worker serialization.  Keeping it serial nevertheless matters for a different
+# reason: two concurrent fetches for the same author would both download and
+# then race each other's upserts for no benefit.
+FETCH_TASK_PREFIXES: tuple[str, ...] = (
+    "novel_fetch", "novel_follow", "novel_ranking", "novel_search",
+    "author_fetch", "author_delete", "author_special_follow", "failed_retry",
+)
+
+
+def is_fetch_task(func_name: str | None) -> bool:
+    """True when *func_name* is a Pixiv-fetching task (fetching lane)."""
+    if not func_name:
+        return False
+    return any(
+        func_name == p or func_name.startswith(p)
+        for p in FETCH_TASK_PREFIXES
+    )
+
+
 _registry: dict[str, TaskSpec] = {}
 
 
@@ -117,6 +141,21 @@ def register(
 ) -> Callable:
     """Register a task function under *name* with a declarative manifest.
 
+    The function **must be a coroutine function**.  That is enforced here, at
+    registration time, because the alternative cannot honour the contract the
+    executor advertises:
+
+    * Python threads cannot be cancelled, so a synchronous task that reaches
+      ``TIMEOUT_SECONDS`` keeps running while the executor has already recorded
+      a failure — a "timeout" that neither stops the work nor frees the worker;
+    * the workaround (``run_in_executor`` + ``wait_for`` around a per-call
+      ``ThreadPoolExecutor``) joined that thread **on the event loop** at
+      shutdown, stalling every HTTP request for the rest of the task.
+
+    Rejecting sync functions up front removes that class of surprise instead
+    of documenting it.  Wrap blocking work in ``asyncio.to_thread`` inside an
+    async task when a thread really is needed.
+
     Args:
         name: Task name (stored in ``scheduled_tasks.task`` / history).
         description: Human-readable description; defaults to the
@@ -124,9 +163,18 @@ def register(
         args: Pydantic model for the task's JSON arguments — validated and
             converted by the executor before the function runs.  ``None``
             for parameter-less tasks.
+
+    Raises:
+        TypeError: *func* is not a coroutine function.
     """
 
     def decorator(func):
+        if not inspect.iscoroutinefunction(func):
+            raise TypeError(
+                f"Task {name!r} must be an async def function: synchronous "
+                "tasks cannot be cancelled on timeout and would block the "
+                "event loop. Wrap blocking work in asyncio.to_thread."
+            )
         _registry[name] = TaskSpec(
             name=name,
             description=(description or (func.__doc__ or "").strip()),
@@ -223,10 +271,12 @@ class TaskContext:
     client: PixivClient | None = None
     file_storage: FileStorage | None = None
     image_downloader: ImageDownloader | None = None
-    epub_builder: EpubBuilder | None = None
-    config: Any = None  # AppConfig——由组合根装配，类型不跨层引用（§2.1）
-    write_lock: DbWriteLock | None = None
-    notifier: TelegramNotifier | None = None
+    # Only fields a task body actually reads live here.  ``config`` /
+    # ``epub_builder`` / ``write_lock`` / ``notifier`` were carried and never
+    # referenced by any task (verified by grepping ``ctx.<name>`` across the
+    # tree): the executor uses the notifier itself, ``db_write()`` is a no-op
+    # boundary under PG, and nothing needed the builder or the config.  Keeping
+    # them advertised a dependency surface that did not exist.
     task_id: int | None = None
 
     def child_uow(self) -> SqlUnitOfWork:
@@ -296,12 +346,16 @@ class TaskHistoryRecorder:
     async def update(
         self,
         task_id: int,
-        status: str,
+        status: str | None,
         result: str | None = None,
         duration: float | None = None,
         progress: str | None = None,
     ) -> None:
-        """Update a TaskHistory row in a short write transaction."""
+        """Update a TaskHistory row in a short write transaction.
+
+        ``status=None`` is a progress-only write: the row's state is left
+        alone, so a late progress update can never resurrect a finished task.
+        """
         async with db_write():
             with self._session_factory() as session:
                 repo = SQLAlchemyTaskRepository(session)
@@ -310,12 +364,50 @@ class TaskHistoryRecorder:
                     progress=progress,
                 )
                 session.commit()
-        if status != "pending":
+        if status is not None and status != "pending":
             # Once started (running) or terminal this row is no longer a
             # live queue entry.
             self._live_pending.discard(task_id)
 
     # -- stale recovery ----------------------------------------------------
+
+    def _prune_live_pending(self) -> None:
+        """Drop ids this process no longer owns from ``_live_pending``.
+
+        The set exists so :meth:`recover_stale` can tell "enqueued by this
+        process, not started yet" from a previous process's crash leftover.
+        Nothing used to remove an id except a status write, so a row that was
+        enqueued and then aborted (recovered as interrupted before the worker
+        picked it up, or failed to start at all) stayed in the set forever.
+
+        That is not just a leak: ``recover_stale`` excludes ``_live_pending``
+        from recovery, so a long-lived process would permanently shield its
+        own abandoned rows from ever being recovered — they would sit as
+        ``pending`` forever while each recovery pass skipped them.
+
+        Pruning by "does this id still exist as a pending row?" is exact: a
+        row we own is pending by definition (the worker flips it to running
+        and discards the id itself).
+        """
+        if not self._live_pending:
+            return
+        try:
+            with self._session_factory() as session:
+                alive = set(session.execute(
+                    select(models.TaskHistory.id).where(
+                        models.TaskHistory.id.in_(self._live_pending),
+                        models.TaskHistory.status == "pending",
+                    )
+                ).scalars().all())
+        except Exception:
+            logger.exception("Failed to prune live pending task ids.")
+            return
+        dropped = self._live_pending - alive
+        if dropped:
+            self._live_pending.difference_update(dropped)
+            logger.info(
+                "Pruned {} abandoned live-pending task id(s).", len(dropped),
+            )
 
     def recover_stale(self) -> None:
         """Mark tasks stuck in pending/running as interrupted.
@@ -327,6 +419,10 @@ class TaskHistoryRecorder:
         ``start()``) and are left for the worker.  Nothing is auto-resumed.
         """
         try:
+            # Prune first: an id whose row is no longer pending can never be
+            # "live" for this process, and leaving it in the set would shield
+            # it from recovery (and grow the set without bound).
+            self._prune_live_pending()
             with self._session_factory() as session:
                 stmt = select(models.TaskHistory.id).where(
                     models.TaskHistory.status.in_(("pending", "running"))
@@ -344,9 +440,14 @@ class TaskHistoryRecorder:
                     .values(
                         status="interrupted",
                         end_time=datetime.now(timezone.utc),
-                        result=json.dumps(
-                            {"summary": "服务重启导致中断"}, ensure_ascii=False,
-                        ),
+                        # ``result`` is JSONB: pass the dict, never a
+                        # ``json.dumps`` string.  A raw string lands as a JSON
+                        # *string* scalar (``jsonb_typeof = 'string'``), so
+                        # ``result->>'summary'`` returns NULL and the UI shows
+                        # an empty summary.  This bypasses
+                        # ``update_task_sync``, which is what normally parses
+                        # the string back into an object.
+                        result={"summary": "服务重启导致中断"},
                     )
                 )
                 session.commit()
@@ -503,10 +604,6 @@ class TaskExecutor:
             client=self._deps.get("client"),
             file_storage=self._deps.get("file_storage"),
             image_downloader=self._deps.get("image_downloader"),
-            epub_builder=self._deps.get("epub_builder"),
-            config=self._deps.get("config"),
-            write_lock=self._deps.get("write_lock"),
-            notifier=self._deps.get("notifier"),
             task_id=task_id,
         )
 
@@ -518,6 +615,12 @@ class TaskExecutor:
         Task functions are ``(args, ctx)`` when the manifest declares an
         args model, or ``(ctx,)`` when it does not (parameter-less tasks
         and ad-hoc functions such as test doubles).
+
+        Only coroutine functions are supported — :func:`register` rejects
+        anything else, so there is no thread-pool branch here.  That branch
+        could not honour ``TIMEOUT_SECONDS`` (a Python thread cannot be
+        cancelled) and its executor shutdown joined the thread on the event
+        loop, stalling every request for the remainder of the task.
         """
         args_obj = (
             spec.args_model.model_validate(params)
@@ -525,23 +628,13 @@ class TaskExecutor:
             else None
         )
 
-        def _call() -> Any:
-            if args_obj is None:
-                # ctx=... (keyword) keeps **kwargs-style test doubles
-                # working alongside ctx-only task functions.
-                return spec.func(ctx=ctx)
-            return spec.func(args_obj, ctx=ctx)
-
-        if inspect.iscoroutinefunction(spec.func):
-            return await asyncio.wait_for(_call(), timeout=self.TIMEOUT_SECONDS)
-
-        # Sync functions (third-party tasks) run in a throwaway thread.
-        loop = asyncio.get_running_loop()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return await asyncio.wait_for(
-                loop.run_in_executor(pool, _call),
-                timeout=self.TIMEOUT_SECONDS,
-            )
+        # ctx=... (keyword) keeps **kwargs-style test doubles working
+        # alongside ctx-only task functions.
+        if args_obj is None:
+            coro = spec.func(ctx=ctx)
+        else:
+            coro = spec.func(args_obj, ctx=ctx)
+        return await asyncio.wait_for(coro, timeout=self.TIMEOUT_SECONDS)
 
     @staticmethod
     def _normalize_result(result_val: Any) -> TaskResult:
@@ -866,10 +959,6 @@ class TaskManagerSystem:
                 "client": client,
                 "file_storage": file_storage,
                 "image_downloader": image_downloader,
-                "epub_builder": epub_builder,
-                "config": config,
-                "write_lock": DbWriteLock(),
-                "notifier": notifier,
             },
         )
         self._ticker = CronTicker(session_factory)
@@ -882,7 +971,9 @@ class TaskManagerSystem:
         # when the worker picks the row up).
         self._loop: asyncio.AbstractEventLoop | None = None
         self._wake = asyncio.Event()
-        self._worker_task: asyncio.Task | None = None
+        # One worker per queue lane (see ``_worker_loop``).  Kept as a list so
+        # start/stop stay symmetric.
+        self._worker_tasks: list[asyncio.Task] = []
         self._stopping = False
         self._adhoc_specs: dict[int, TaskSpec] = {}
         self._started = False
@@ -904,11 +995,15 @@ class TaskManagerSystem:
         # Recovery must happen before the worker starts: leftover
         # pending/running rows are crash artifacts, never resumed.
         self._recorder.recover_stale()
-        self._worker_task = asyncio.create_task(self._worker_loop())
+        self._worker_tasks = [
+            asyncio.create_task(self._worker_loop(fetch_lane))
+            for fetch_lane in (True, False)
+        ]
         self._ticker.start(self.run_scheduled)
         self._started = True
         logger.info(
-            "TaskManagerSystem started — queue worker running, cron jobs loaded."
+            "TaskManagerSystem started — 2 queue lanes (fetch/general) "
+            "running, cron jobs loaded."
         )
 
     async def stop(self) -> None:
@@ -917,11 +1012,19 @@ class TaskManagerSystem:
         self._loop = None
         await self._ticker.stop()
 
-        worker, self._worker_task = self._worker_task, None
-        if worker is not None:
+        workers, self._worker_tasks = self._worker_tasks, []
+        for worker in workers:
             worker.cancel()
+        for worker in workers:
             with suppress(asyncio.CancelledError):
                 await worker
+
+        # Explicit-function specs live only for the enqueue → run handoff.  On
+        # shutdown the worker will never pick them up, so drop them: the rows
+        # stay in the DB (recovered as interrupted on next start) and holding
+        # the closures would leak one TaskSpec per ad-hoc enqueue forever.
+        self._adhoc_specs.clear()
+        self._recorder._live_pending.clear()
 
         self._started = False
         logger.info("TaskManagerSystem stopped.")
@@ -930,13 +1033,25 @@ class TaskManagerSystem:
     # Internal: the queue worker
     # ------------------------------------------------------------------
 
-    async def _worker_loop(self) -> None:
-        """Drain ``pending`` history rows one at a time, oldest first.
+    async def _worker_loop(self, fetch_lane: bool) -> None:
+        """Drain one queue lane, one row at a time, oldest first.
+
+        There are two lanes over the same ``task_history`` queue:
+
+        * ``fetch_lane=True``  — Pixiv-fetching tasks (:func:`is_fetch_task`);
+        * ``fetch_lane=False`` — everything else, including ad-hoc runs and
+          legacy ``NULL`` rows.
+
+        The split exists because a single worker made a 30-minute fetch block
+        a 5-second export.  Serialization is still per lane (one row in, one
+        row out), so the queue semantics the UI promises are unchanged, and
+        the two lanes never touch the same Pixiv account concurrently because
+        only the fetch lane talks to Pixiv at all.
 
         Sleeps on the wake event with a 1s polling fallback (covers rows
-        inserted by a path that did not wake us).  Unexpected exceptions
-        are logged and end the current drain pass — the worker itself must
-        never die — while cancellation propagates (the executor records the
+        inserted by a path that did not wake us).  Unexpected exceptions are
+        logged and end the current drain pass — the worker itself must never
+        die — while cancellation propagates (the executor records the
         in-flight row as ``interrupted`` on its way out).
         """
         while not self._stopping:
@@ -947,7 +1062,7 @@ class TaskManagerSystem:
             self._wake.clear()
             try:
                 while not self._stopping:
-                    pending = self._next_pending()
+                    pending = self._next_pending(fetch_lane)
                     if pending is None:
                         break
                     await self._run_pending(pending)
@@ -956,12 +1071,25 @@ class TaskManagerSystem:
             except Exception:
                 # Never let the worker die: log and retry on the next pass
                 # (the row, if any, stays pending for that retry).
-                logger.exception("Task worker iteration failed — will retry.")
+                logger.exception(
+                    "Task worker iteration failed (%s lane) — will retry.",
+                    "fetch" if fetch_lane else "general",
+                )
 
-    def _next_pending(self) -> _PendingTask | None:
-        """Return the oldest pending row as a detached snapshot."""
+    def _next_pending(self, fetch_lane: bool) -> _PendingTask | None:
+        """Return the oldest pending row for one lane as a detached snapshot."""
         with self._session_factory() as session:
-            row = SQLAlchemyTaskRepository(session).get_next_pending_sync()
+            repo = SQLAlchemyTaskRepository(session)
+            if fetch_lane:
+                row = repo.get_next_pending_sync(
+                    task_funcs=list(FETCH_TASK_PREFIXES),
+                )
+            else:
+                # Exclusion happens in SQL: a lane must not stall because the
+                # oldest pending row belongs to the other lane.
+                row = repo.get_next_pending_sync(
+                    exclude_funcs=list(FETCH_TASK_PREFIXES),
+                )
             if row is None:
                 return None
             return _PendingTask(
@@ -1087,6 +1215,12 @@ class TaskManagerSystem:
             The new task-history row id (the task id).
         """
         if func is not None:
+            # Same contract as @register: only coroutine functions can honour
+            # TIMEOUT_SECONDS (threads cannot be cancelled).
+            if not inspect.iscoroutinefunction(func):
+                raise TypeError(
+                    f"Ad-hoc task {name!r} must be an async def function."
+                )
             spec = TaskSpec(name=name, description="", func=func)
         else:
             spec = get_spec(name)

@@ -26,7 +26,7 @@ import pytest
 
 from copixiv.db.models import TaskHistory
 from copixiv.tasks import kernel
-from copixiv.tasks.kernel import TaskManagerSystem
+from copixiv.tasks.kernel import TaskHistoryRecorder, TaskManagerSystem
 
 TERMINAL = ("success", "failed", "interrupted")
 
@@ -305,6 +305,98 @@ async def test_enqueue_before_start_runs_after_start(session_factory):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Queue lanes: fetching tasks must not block local work
+# ---------------------------------------------------------------------------
+
+
+async def test_fetch_task_does_not_block_a_local_task(session_factory):
+    """Two lanes over one queue: a long fetch must not starve an export.
+
+    Under a single worker a 30-minute ranking run delayed every export behind
+    it.  The queue stays FIFO *per lane*, so a local task enqueued behind a
+    running fetch starts immediately instead of waiting for it.
+    """
+    manager = TaskManagerSystem(session_factory=session_factory)
+    order: list[str] = []
+    fetch_started = asyncio.Event()
+
+    async def fetch(ctx):
+        fetch_started.set()
+        await asyncio.sleep(0.5)          # long "network" work
+        order.append("fetch")
+
+    async def local(ctx):
+        order.append("local")
+
+    try:
+        await manager.start()
+        # ``novel_ranking`` is a fetching function name → fetch lane.
+        fetch_id = manager.run_task("novel_ranking", func=fetch)
+        await asyncio.wait_for(fetch_started.wait(), timeout=2)
+        local_id = manager.run_task("batch_export", func=local)
+
+        await _wait_terminal(session_factory, [local_id], timeout=3)
+        assert order == ["local"], "the local task must not wait for the fetch"
+
+        await _wait_terminal(session_factory, [fetch_id], timeout=5)
+        assert sorted(order) == ["fetch", "local"]
+    finally:
+        await manager.stop()
+
+
+async def test_rows_within_one_lane_stay_serialized(session_factory):
+    """Splitting the queue must not introduce intra-lane concurrency."""
+    manager = TaskManagerSystem(session_factory=session_factory)
+    state = {"active": 0, "max_active": 0}
+
+    async def fetch(ctx):
+        state["active"] += 1
+        state["max_active"] = max(state["max_active"], state["active"])
+        await asyncio.sleep(0.05)
+        state["active"] -= 1
+
+    task_ids = [
+        manager.run_task(f"novel_fetch_{i}", func=fetch) for i in range(3)
+    ]
+    try:
+        await manager.start()
+        await _wait_terminal(session_factory, task_ids)
+        assert state["max_active"] == 1
+    finally:
+        await manager.stop()
+
+
+async def test_general_lane_skips_fetch_rows_in_sql(session_factory):
+    """The general lane must not stall behind a pending fetch row.
+
+    A post-filter would have been enough to *avoid* the wrong row, but it also
+    stops the lane whenever the oldest pending row belongs to the other lane —
+    so the exclusion has to be in the query.
+    """
+    from copixiv.tasks.history_repo import SQLAlchemyTaskRepository
+    from copixiv.tasks.kernel import FETCH_TASK_PREFIXES
+
+    fetch_id = _add_pending_row(
+        session_factory, name="fetch", task_func="novel_ranking", arguments="{}",
+    )
+    local_id = _add_pending_row(
+        session_factory, name="local", task_func="batch_export", arguments="{}",
+    )
+
+    with session_factory() as session:
+        repo = SQLAlchemyTaskRepository(session)
+        general = repo.get_next_pending_sync(
+            exclude_funcs=list(FETCH_TASK_PREFIXES),
+        )
+        assert general is not None and general.id == local_id
+        assert local_id > fetch_id
+        fetch = repo.get_next_pending_sync(
+            task_funcs=list(FETCH_TASK_PREFIXES),
+        )
+        assert fetch is not None and fetch.id == fetch_id
+
+
 async def test_enqueue_from_threadpool_is_picked_up(session_factory):
     """Sync endpoints run in a threadpool; the wake-up must cross threads."""
     manager = TaskManagerSystem(session_factory=session_factory)
@@ -323,3 +415,110 @@ async def test_enqueue_from_threadpool_is_picked_up(session_factory):
         assert ran == [1]
     finally:
         await manager.stop()
+
+
+# ---------------------------------------------------------------------------
+# 7: JSONB encoding + progress-only writes
+# ---------------------------------------------------------------------------
+
+
+async def test_recovered_row_stores_result_as_jsonb_object(session_factory):
+    """``recover_stale`` must write a JSON *object*, not a JSON string.
+
+    It bypasses ``update_task_sync`` (which parses a string back into a dict),
+    so a ``json.dumps`` payload lands as ``jsonb_typeof = 'string'`` and
+    ``result->>'summary'`` returns NULL — the UI shows an empty summary.
+    """
+    stale_id = _add_pending_row(
+        session_factory, name="stale", task_func="x", arguments="{}",
+        status="running",
+    )
+
+    recorder = TaskHistoryRecorder(session_factory)
+    recorder.recover_stale()
+
+    with session_factory() as session:
+        row = session.get(TaskHistory, stale_id)
+        assert row.status == "interrupted"
+        assert isinstance(row.result, dict), f"expected dict, got {type(row.result)}"
+        assert row.result["summary"]
+
+
+async def test_progress_write_does_not_change_status(session_factory):
+    """A progress-only write must never resurrect a finished row.
+
+    The batch tasks report progress via a fire-and-forget
+    ``run_coroutine_threadsafe``, so a late progress write can land after the
+    executor recorded success.  Writing ``"running"`` there left the row
+    running forever (and its button disabled).
+    """
+    from datetime import datetime, timezone
+
+    with session_factory() as session:
+        row = TaskHistory(
+            name="finished", task_func="x", arguments="{}",
+            status="success", start_time=datetime.now(timezone.utc),
+            end_time=datetime.now(timezone.utc),
+        )
+        session.add(row)
+        session.commit()
+        task_id = row.id
+
+    recorder = TaskHistoryRecorder(session_factory)
+    import asyncio
+    asyncio.get_event_loop_policy()  # noqa: B018  (keeps import used)
+    await recorder.update(task_id, None, progress="打包中 5/10 篇")
+
+    with session_factory() as session:
+        row = session.get(TaskHistory, task_id)
+        assert row.status == "success", "progress write must not change status"
+        assert row.end_time is not None, "end_time must survive"
+        assert row.progress == "打包中 5/10 篇"
+
+
+async def test_live_pending_is_pruned_and_does_not_shield_rows(session_factory):
+    """Abandoned live-pending ids must not permanently escape recovery.
+
+    ``recover_stale`` excludes ``_live_pending``.  Ids only left that set on a
+    status write, so an enqueued-but-never-started row stayed excluded forever
+    — it would sit ``pending`` while every recovery pass skipped it.
+    """
+    manager = TaskManagerSystem(session_factory=session_factory)
+
+    async def noop(ctx):
+        pass
+
+    abandoned = manager.run_task("a4_abandoned", func=noop)
+    assert abandoned in manager._recorder._live_pending
+
+    # Simulate the row being resolved by someone else (never picked up by the
+    # worker) — the id is now stale bookkeeping.
+    with session_factory() as session:
+        row = session.get(TaskHistory, abandoned)
+        row.status = "interrupted"
+        session.commit()
+
+    manager._recorder.recover_stale()
+
+    assert abandoned not in manager._recorder._live_pending, (
+        "pruning must drop ids whose rows are no longer pending"
+    )
+
+
+async def test_stop_clears_adhoc_specs(session_factory):
+    """Ad-hoc specs are an enqueue→run handoff, not a lifetime registry."""
+    manager = TaskManagerSystem(session_factory=session_factory)
+
+    async def noop(ctx):
+        pass
+
+    manager.run_task("a4_stop_adhoc", func=noop)
+    assert manager._adhoc_specs
+
+    try:
+        await manager.start()
+    finally:
+        await manager.stop()
+
+    assert manager._adhoc_specs == {}
+    assert manager._recorder._live_pending == set()

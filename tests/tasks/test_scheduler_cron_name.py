@@ -328,12 +328,12 @@ async def test_manager_start_stop_is_clean(session_factory):
 
     await manager.start()
     assert manager._ticker._task is not None
-    assert manager._worker_task is not None
+    assert len(manager._worker_tasks) == 2
     assert manager._loop is not None
 
     await manager.stop()
     assert manager._ticker._task is None
-    assert manager._worker_task is None
+    assert manager._worker_tasks == []
     assert manager._loop is None
     assert [
         task for task in asyncio.all_tasks()
