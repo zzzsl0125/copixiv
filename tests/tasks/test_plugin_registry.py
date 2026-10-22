@@ -3,8 +3,8 @@
 Pin the built-in discovery path and the declarative manifest contract:
 
 1. built-in discovery — the kernel imports the in-tree task modules;
-2. manifests — ``describe_tasks`` derives argument metadata purely from
-   the Pydantic args model;
+2. manifests — ``describe_tasks`` exposes the pydantic args model's JSON
+   Schema (``model_json_schema()``);
 3. runtime validation — params are validated against the args model at
    execution time.
 
@@ -43,18 +43,34 @@ def test_describe_tasks_derives_arguments_from_args_model():
     assert spec is not None and spec.args_model is not None
 
     methods = {m["name"]: m for m in describe_tasks()}
-    novel_search = methods["novel_search"]
+    arguments = methods["novel_search"]["arguments"]
 
-    by_name = {a["name"]: a for a in novel_search["arguments"]}
-    assert by_name["keyword"] == {
-        "name": "keyword", "type": "str", "default": "R-18", "required": False,
-    }
-    assert by_name["minlike"] == {
-        "name": "minlike", "type": "int", "default": 500, "required": False,
-    }
+    # The descriptor carries Pydantic's full JSON Schema, untouched.
+    assert isinstance(arguments, dict)
+    assert arguments == spec.args_model.model_json_schema()
+    assert arguments["title"] == "NovelSearchArgs"
+    assert arguments["type"] == "object"
 
-    # A parameter-less task describes zero arguments.
-    assert methods["rebuild_fts"]["arguments"] == []
+    properties = arguments["properties"]
+    assert properties["keyword"]["type"] == "string"
+    assert properties["keyword"]["default"] == "R-18"
+    assert properties["minlike"]["type"] == "integer"
+    assert properties["minlike"]["default"] == 500
+    assert properties["force"]["type"] == "boolean"
+    assert properties["force"]["default"] is False
+
+    # Required fields come from the schema, not from "no default".
+    assert methods["novel_fetch"]["arguments"]["required"] == ["id"]
+
+    # Nullable / list fields keep Pydantic's anyOf / array shape.
+    batch_export = methods["batch_export"]["arguments"]
+    assert batch_export["properties"]["novel_ids"]["type"] == "array"
+    assert batch_export["properties"]["zip_name"]["anyOf"] == [
+        {"type": "string"}, {"type": "null"},
+    ]
+
+    # A parameter-less task describes no arguments at all.
+    assert methods["rebuild_fts"]["arguments"] is None
 
 
 def test_args_model_validates_params():

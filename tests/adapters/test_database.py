@@ -135,7 +135,6 @@ class TestIndexesExist:
         "ix_series_author_id",
         "ix_tag_alias_target",
         "ix_search_history_type_timestamp",
-        "ux_task_history_running",
         "novel_search_bigm",
         "ix_failed_novel_last_failed_at",
         # migration 0008 — tag alias suggestion path

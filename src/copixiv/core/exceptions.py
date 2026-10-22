@@ -35,7 +35,3 @@ class NovelNotFoundError(NotFoundError):
 
 class ValidationError(DomainError):
     """Input validation failed."""
-
-
-class TaskAlreadyRunningError(DomainError):
-    """A task with the same name is already pending or running."""

@@ -8,7 +8,7 @@ from copixiv.db.uow import SqlUnitOfWork
 from copixiv.tasks.history_repo import SQLAlchemyTaskRepository
 from copixiv.tasks.schemas import (
     ScheduledTaskCreate, ScheduledTaskUpdate, ScheduledTaskResponse,
-    TaskHistoryListResponse, TaskMethod, TaskArgument,
+    TaskHistoryListResponse, TaskMethod,
 )
 from copixiv.tasks.kernel import describe_tasks, discover_tasks, get_task
 
@@ -24,18 +24,14 @@ def _validate_task_function(task_name: str) -> None:
 
 @router.get("/methods", response_model=list[TaskMethod])
 def get_task_methods():
-    raw_methods = describe_tasks()
-    methods = []
-    for m in raw_methods:
-        arguments = [
-            TaskArgument(name=a["name"], type=a["type"],
-                         default=a["default"], required=a["required"])
-            for a in m["arguments"]
-        ]
-        methods.append(TaskMethod(
-            name=m["name"], description=m["description"], arguments=arguments,
-        ))
-    return methods
+    return [
+        TaskMethod(
+            name=m["name"],
+            description=m["description"],
+            arguments=m["arguments"],
+        )
+        for m in describe_tasks()
+    ]
 
 
 @router.get("/scheduled", response_model=list[ScheduledTaskResponse])
@@ -111,8 +107,8 @@ async def run_scheduled_task(
     task_id: int,
     task_manager=Depends(get_task_manager),
 ):
-    # DomainError 子类（NotFound/Validation/TaskAlreadyRunning → 404/400/409）
-    # 由全局 DomainError handler 映射，无需在此捕获。
+    # DomainError 子类（NotFound/Validation → 404/400）由全局
+    # DomainError handler 映射，无需在此捕获；重复触发照常入队。
     task_manager.run_task_now(task_id)
     return {"ok": True}
 

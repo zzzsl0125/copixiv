@@ -182,8 +182,8 @@ class TaskHistory(BaseModel):
 
     id: int = 0
     name: str
-    # Registered function name — the dedup key (separate from ``name``,
-    # which is the display name).  See ``task_history.task_func``.
+    # Registered function name (separate from ``name``, which is the display
+    # name).  No dedup semantics — see ``task_history.task_func``.
     task_func: str | None = None
     arguments: dict | None = None
     status: str = TaskStatus.PENDING

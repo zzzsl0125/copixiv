@@ -25,9 +25,9 @@ class SQLAlchemyTaskRepository(BaseRepository):
     def add_task_sync(self, name: str, arguments: dict, task_func: str) -> int:
         """Insert a pending history row under *name* (display) + *task_func*.
 
-        *task_func* is the registered function name — the DB dedup key.  The
-        partial unique index ``ux_task_history_running`` rejects a second
-        pending/running row for the same ``task_func`` at the DB layer.
+        *task_func* is the registered function name, kept for history/audit.
+        There is no dedup index: repeated enqueues insert separate pending
+        rows (the queue ordering is the worker's job).
         """
         task = models.TaskHistory(
             name=name,
@@ -80,6 +80,15 @@ class SQLAlchemyTaskRepository(BaseRepository):
                 task.progress = progress
             if duration is not None:
                 task.duration = duration
+
+    def get_next_pending_sync(self) -> models.TaskHistory | None:
+        """Oldest pending queue row (single-worker FIFO)."""
+        return self.session.execute(
+            select(models.TaskHistory)
+            .where(models.TaskHistory.status == "pending")
+            .order_by(models.TaskHistory.id)
+            .limit(1)
+        ).scalar_one_or_none()
 
     async def get_history(
         self, limit: int = 50, offset: int = 0

@@ -35,7 +35,6 @@ from copixiv.config import config, load_config
 from copixiv.core.exceptions import (
     DomainError,
     NotFoundError,
-    TaskAlreadyRunningError,
     ValidationError,
 )
 from copixiv.db.backup import backup_database, cleanup_old_backups
@@ -86,7 +85,6 @@ UVICORN_LOG_CONFIG = {
 _DOMAIN_HTTP_STATUS = (
     (NotFoundError, 404),
     (ValidationError, 400),
-    (TaskAlreadyRunningError, 409),
 )
 
 
@@ -454,7 +452,7 @@ def _build(config_path: str | None = None) -> _AppSingletons:
     backends = build_notifiers(cfg)
     notifier = CompositeNotifier(backends) if backends else None
 
-    # Background scheduler + task executor
+    # Cron ticker + task executor
     task_manager = TaskManagerSystem(
         session_factory=session_factory,
         client=client,
@@ -577,12 +575,12 @@ def create_app(config_path: str | None = None):
                 )
             await warm_task
 
-            s.task_manager.start()
+            await s.task_manager.start()
             yield
         finally:
             # Shutdown
             logger.info("Shutting down copixiv v2...")
-            s.task_manager.stop()
+            await s.task_manager.stop()
             s.image_downloader.shutdown()
             if s.notifier is not None:
                 await s.notifier.close()

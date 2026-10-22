@@ -428,6 +428,30 @@ class TestSQLAlchemyTaskRepository:
             assert task is not None
             assert task.name == "test-task"
             assert task.status == "running"
+    def test_enqueue_same_task_func_twice_inserts_two_pending_rows(
+        self, session_factory,
+    ):
+        """A2 regression: the task-dedup partial unique index is gone.
+
+        Enqueuing the same ``task_func`` again must insert a second pending
+        row (no ``IntegrityError``) — duplicates now queue up.
+        """
+        from copixiv.tasks.kernel import TaskHistoryRecorder
+
+        recorder = TaskHistoryRecorder(session_factory)
+        first_id = recorder.enqueue("dup-task", {}, "dup_task_func")
+        second_id = recorder.enqueue("dup-task", {}, "dup_task_func")
+
+        assert first_id != second_id
+        with session_factory() as s:
+            rows = s.execute(
+                select(TaskHistory)
+                .where(TaskHistory.task_func == "dup_task_func")
+                .order_by(TaskHistory.id)
+            ).scalars().all()
+        assert [r.id for r in rows] == [first_id, second_id]
+        assert [r.status for r in rows] == ["pending", "pending"]
+
 
     def test_update_task_with_result_and_duration(self, session_factory):
         from copixiv.tasks.history_repo import SQLAlchemyTaskRepository
@@ -501,11 +525,6 @@ class TestSQLAlchemyTaskRepository:
 
 
 class TestTaskManagerHelpers:
-    def test_parse_json_string(self):
-        from copixiv.tasks.kernel import TaskHistoryRecorder
-        assert TaskHistoryRecorder.parse_params('{"a": 1}') == {"a": 1}
-        assert TaskHistoryRecorder.parse_params("not json") == {}
-
     def test_normalize_result_none(self):
         from copixiv.tasks.kernel import TaskExecutor
         r = TaskExecutor._normalize_result(None)

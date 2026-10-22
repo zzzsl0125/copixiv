@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from copixiv.app import _domain_error_http_status
 from copixiv.config import AppConfig
-from copixiv.core.exceptions import DomainError, TaskAlreadyRunningError
+from copixiv.core.exceptions import DomainError
 from copixiv.db.models import (
     Author, Novel, Tag, TaskHistory,
 )
@@ -43,16 +43,13 @@ class _FakeFileStorage:
 
 
 class _RecordingTaskManager:
-    """Records enqueues; raises TaskAlreadyRunningError when told to."""
+    """Records enqueues."""
 
     def __init__(self):
         self.enqueued: list[tuple[str, dict]] = []
         self.next_task_id = 1000
-        self.busy = False
 
     def run_task(self, name: str, func=None, params: dict | None = None) -> int:
-        if self.busy:
-            raise TaskAlreadyRunningError(f"Task '{name}' is already pending or running.")
         self.enqueued.append((name, params or {}))
         self.next_task_id += 1
         return self.next_task_id
@@ -163,15 +160,6 @@ class TestBatchTaskEndpoint:
 
         assert r.status_code == 200
         assert r.json()["matched"] == 3
-
-    def test_duplicate_run_maps_to_409(self, client, session_factory):
-        _seed(session_factory, 1, "标题", str(Path("/tmp/1.txt")))
-        client.app.state.task_manager.busy = True
-        r = client.post("/api/novels/batch-task", json={
-            "operation": "delete",
-            "scope": {"mode": "ids", "novel_ids": [1], "excluded_ids": []},
-        })
-        assert r.status_code == 409
 
 
 # ---------------------------------------------------------------------------

@@ -308,15 +308,22 @@ class TestTasksEndpoints:
     def test_methods_include_maintenance_tasks(self, client):
         r = client.get("/api/tasks/methods")
         assert r.status_code == 200
-        names = {m["name"] for m in r.json()}
-        assert {"novel_fetch", "rebuild_fts", "check_fts"} <= names
+        methods = {m["name"]: m for m in r.json()}
+        assert {"novel_fetch", "rebuild_fts", "check_fts"} <= set(methods)
+
+        # Arguments are Pydantic's JSON Schema; parameter-less tasks send null.
+        search = methods["novel_search"]["arguments"]
+        assert search["properties"]["keyword"]["type"] == "string"
+        assert search["properties"]["keyword"]["default"] == "R-18"
+        assert methods["novel_fetch"]["arguments"]["required"] == ["id"]
+        assert methods["rebuild_fts"]["arguments"] is None
 
     def test_history_empty(self, client):
         r = client.get("/api/tasks/history")
         assert r.status_code == 200
         assert r.json() == {"items": [], "total": 0}
 
-    def test_create_scheduled_reloads_scheduler(self, client, session_factory):
+    def test_create_scheduled_reloads_cron_jobs(self, client, session_factory):
         r = client.post("/api/tasks/scheduled", json={
             "name": "测试", "task": "rebuild_fts", "cron": "0 4 * * 1",
             "is_enabled": False,
@@ -325,6 +332,45 @@ class TestTasksEndpoints:
         task = r.json()
         assert task["id"] > 0
         assert task["task"] == "rebuild_fts"
+        assert client.app.state.task_manager.reloads == 1
+
+    def test_create_scheduled_accepts_valid_five_field_cron(self, client):
+        r = client.post("/api/tasks/scheduled", json={
+            "name": "工作日", "task": "rebuild_fts",
+            "cron": "*/15 9-17 * * 1-5", "is_enabled": False,
+        })
+        assert r.status_code == 200
+        assert r.json()["cron"] == "*/15 9-17 * * 1-5"
+
+    @pytest.mark.parametrize(
+        "cron",
+        [
+            "not-a-cron",
+            "0 3 * *",        # only 4 fields
+            "0 0 3 * * *",    # 6 fields (croniter would accept seconds)
+            "60 3 * * *",     # minute out of range
+        ],
+    )
+    def test_create_scheduled_rejects_invalid_cron(self, client, cron):
+        r = client.post("/api/tasks/scheduled", json={
+            "name": "坏 cron", "task": "rebuild_fts", "cron": cron,
+            "is_enabled": False,
+        })
+        assert r.status_code == 422
+        assert client.app.state.task_manager.reloads == 0
+
+    def test_update_scheduled_rejects_invalid_cron(self, client):
+        created = client.post("/api/tasks/scheduled", json={
+            "name": "测试", "task": "rebuild_fts", "cron": "0 4 * * 1",
+            "is_enabled": False,
+        })
+        assert created.status_code == 200
+        task_id = created.json()["id"]
+
+        r = client.put(f"/api/tasks/scheduled/{task_id}", json={
+            "cron": "0 0 3 * * *",
+        })
+        assert r.status_code == 422
         assert client.app.state.task_manager.reloads == 1
 
     def test_run_unknown_task_maps_to_404(self, client):

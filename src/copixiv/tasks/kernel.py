@@ -10,8 +10,13 @@ Sections:
 - :class:`TaskContext` — the injected dependency channel
 - :class:`TaskHistoryRecorder` — task_history row ownership
 - :class:`TaskExecutor` — context building + execution + lifecycle
-- :class:`CronScheduler` — APScheduler ownership + cron jobs
-- :class:`TaskManagerSystem` — the facade
+- :class:`CronTicker` / :func:`next_occurrence` — in-memory cron tick loop
+- :class:`TaskManagerSystem` — the facade + its single queue worker
+
+The ``task_history`` row *is* the queue: enqueue inserts a ``pending`` row
+and wakes the worker, which drains rows in id order one at a time.  There
+is no separate in-memory run list and no execution lock — serialization is
+structural (one consumer).
 
 Business tasks are discovered via :func:`discover_tasks` (the built-in
 task module list), receive a validated Pydantic args object plus
@@ -31,34 +36,44 @@ import time
 import traceback
 
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
-from apscheduler.events import (
-    EVENT_JOB_ERROR,
-    EVENT_JOB_MAX_INSTANCES,
-    EVENT_JOB_MISSED,
-)
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
+from croniter import croniter
 from pydantic import BaseModel
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import select, update
 
-from copixiv.core.exceptions import (
-    NotFoundError,
-    TaskAlreadyRunningError,
-    ValidationError,
-)
+from copixiv.core.exceptions import NotFoundError, ValidationError
 from copixiv.core.models import TaskResult
+from copixiv.db import models
 from copixiv.db.uow import SqlUnitOfWork
-from copixiv.db.write_lock import DbWriteLock
+from copixiv.db.write_lock import DbWriteLock, db_write
 from copixiv.storage.epub.builder import EpubBuilder
-from copixiv.notify.composite import CompositeNotifier
+from copixiv.notify.telegram import TelegramNotifier
 from copixiv.pixiv.client import PixivClient
 from copixiv.storage.file_storage import FileStorage
 from copixiv.storage.image_downloader import ImageDownloader
+from copixiv.tasks.history_repo import SQLAlchemyTaskRepository
 from copixiv.log import capture_logs, logger
+
+
+# ==== 分区: cron constants ====
+
+# Cron expressions are evaluated in the process-local timezone, matching the
+# previous scheduler behaviour (5-field crontabs used the server's local tz,
+# not UTC).  ``datetime.now().astimezone().tzinfo`` is a fixed offset captured
+# at import time: an accepted approximation for DST-transition zones (the risk
+# noted in docs/SIMPLIFY_PLAN-v2.md §2.3).
+CRON_TIMEZONE = datetime.now().astimezone().tzinfo
+
+# How often the in-memory ticker wakes up and checks for due cron entries.
+CRON_TICK_SECONDS = 30
+
+# A due occurrence more than this late is considered a missed window: it is
+# skipped (never back-filled) and the entry advances to the next occurrence.
+CRON_MISFIRE_GRACE_SECONDS = 60
 
 
 # ==== 分区: registry ====
@@ -151,9 +166,9 @@ def describe_tasks() -> list[dict]:
     """Return task descriptors for the ``/api/tasks/methods`` contract.
 
     Each descriptor is ``{"name", "description", "arguments"}`` where
-    ``arguments`` lists ``{"name", "type", "default", "required"}`` —
-    derived purely from the task's Pydantic args model (no signature
-    reflection).
+    ``arguments`` is the full JSON Schema produced by the task's Pydantic
+    args model (``model_json_schema()``), or ``None`` for a parameter-less
+    task.  Pydantic owns the schema — no signature reflection here.
     """
     discover_tasks()
     methods = []
@@ -161,47 +176,13 @@ def describe_tasks() -> list[dict]:
         methods.append({
             "name": spec.name,
             "description": spec.description,
-            "arguments": _describe_arguments(spec),
+            "arguments": (
+                spec.args_model.model_json_schema()
+                if spec.args_model is not None
+                else None
+            ),
         })
     return methods
-
-
-def _describe_arguments(spec: TaskSpec) -> list[dict]:
-    if spec.args_model is None:
-        return []
-    arguments = []
-    for field_name, info in spec.args_model.model_fields.items():
-        arguments.append({
-            "name": field_name,
-            "type": _annotation_type_name(info.annotation),
-            "default": None if info.is_required() else info.default,
-            "required": info.is_required(),
-        })
-    return arguments
-
-
-def _annotation_type_name(annotation: Any) -> str:
-    """Map a Pydantic field annotation to a display type name.
-
-    Handles ``int``/``bool``/``float``/``str``/``list[...]``, ``X | None``
-    unions (the non-None member wins), and falls back to ``"str"`` for
-    anything else (the API contract documents task arguments as JSON
-    scalars; lists render as text inputs in the task editor).
-    """
-    if annotation is None:
-        return "str"
-    origin = getattr(annotation, "__origin__", None)
-    if origin is None:
-        return {
-            int: "int", bool: "bool", float: "float", str: "str",
-        }.get(annotation, "str")
-    if origin is list:
-        return "list"
-    # Union (e.g. ``int | None``) — pick the first non-NoneType member.
-    for member in getattr(annotation, "__args__", ()) or ():
-        if member is not type(None):
-            return _annotation_type_name(member)
-    return "str"
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +226,7 @@ class TaskContext:
     epub_builder: EpubBuilder | None = None
     config: Any = None  # AppConfig——由组合根装配，类型不跨层引用（§2.1）
     write_lock: DbWriteLock | None = None
-    notifier: CompositeNotifier | None = None
+    notifier: TelegramNotifier | None = None
     task_id: int | None = None
 
     def child_uow(self) -> SqlUnitOfWork:
@@ -276,10 +257,18 @@ class TaskContext:
 # LockNotAvailable conflict on a fresh transaction.
 
 class TaskHistoryRecorder:
-    """Records task lifecycle rows (enqueue + status/result updates)."""
+    """Records task lifecycle rows (enqueue + status/result updates).
+
+    The ``task_history`` table is also the execution queue: :meth:`enqueue`
+    inserts the ``pending`` row the manager's single worker later selects.
+    ``_live_pending`` tracks rows this process enqueued but has not started,
+    so :meth:`recover_stale` can tell them apart from a previous process's
+    crash leftovers (an enqueue may legitimately precede ``start()``).
+    """
 
     def __init__(self, session_factory):
         self._session_factory = session_factory
+        self._live_pending: set[int] = set()
 
     # -- enqueue ------------------------------------------------------------
 
@@ -287,22 +276,18 @@ class TaskHistoryRecorder:
         """Insert the pending row; returns the new task id.
 
         Inserts under *name* (display name) and *task_func* (the registered
-        function name — the dedup key).  The DB partial unique index
-        ``ux_task_history_running`` rejects a second pending/running row for
-        the same ``task_func``, surfacing as ``sqlalchemy.exc.IntegrityError``
-        (caught by the manager and mapped to ``TaskAlreadyRunningError``).
+        function name, kept for history/audit).  There is no dedup: a second
+        enqueue for the same ``task_func`` simply inserts another pending row,
+        so duplicates queue up and each runs once.
 
         Short INSERT outside any write transaction — task enqueue happens in sync
         API paths; the 60s lock_timeout covers the rare collision.
         """
-        from copixiv.tasks.history_repo import (
-            SQLAlchemyTaskRepository,
-        )
-
         with self._session_factory() as session:
             repo = SQLAlchemyTaskRepository(session)
             task_id = repo.add_task_sync(name, params, task_func)
             session.commit()
+        self._live_pending.add(task_id)
         logger.info("Task '{}' (id={}) enqueued.", name, task_id)
         return task_id
 
@@ -317,11 +302,6 @@ class TaskHistoryRecorder:
         progress: str | None = None,
     ) -> None:
         """Update a TaskHistory row in a short write transaction."""
-        from copixiv.db.write_lock import db_write
-        from copixiv.tasks.history_repo import (
-            SQLAlchemyTaskRepository,
-        )
-
         async with db_write():
             with self._session_factory() as session:
                 repo = SQLAlchemyTaskRepository(session)
@@ -330,35 +310,40 @@ class TaskHistoryRecorder:
                     progress=progress,
                 )
                 session.commit()
+        if status != "pending":
+            # Once started (running) or terminal this row is no longer a
+            # live queue entry.
+            self._live_pending.discard(task_id)
 
     # -- stale recovery ----------------------------------------------------
 
     def recover_stale(self) -> None:
         """Mark tasks stuck in pending/running as interrupted.
 
-        A process crash (or ``stop()`` with ``wait=False``) leaves
-        ``task_history`` rows in pending/running forever — without this,
-        the UI shows them as eternally running and the duplicate-run
-        guard keeps treating the task name as busy.
+        A process crash leaves ``task_history`` rows in pending/running
+        forever — without this, the UI shows them as eternally running.
+        Rows this process enqueued but has not started yet are *not* crash
+        leftovers: they are this process's live queue (enqueue can precede
+        ``start()``) and are left for the worker.  Nothing is auto-resumed.
         """
-        from sqlalchemy import select as _select, update as _update
-        from copixiv.db import models
-
         try:
             with self._session_factory() as session:
-                stale_ids = session.execute(
-                    _select(models.TaskHistory.id).where(
-                        models.TaskHistory.status.in_(("pending", "running"))
+                stmt = select(models.TaskHistory.id).where(
+                    models.TaskHistory.status.in_(("pending", "running"))
+                )
+                if self._live_pending:
+                    stmt = stmt.where(
+                        models.TaskHistory.id.not_in(self._live_pending)
                     )
-                ).scalars().all()
+                stale_ids = session.execute(stmt).scalars().all()
                 if not stale_ids:
                     return
                 session.execute(
-                    _update(models.TaskHistory)
+                    update(models.TaskHistory)
                     .where(models.TaskHistory.id.in_(stale_ids))
                     .values(
                         status="interrupted",
-                        end_time=datetime.now().astimezone().isoformat(),
+                        end_time=datetime.now(timezone.utc),
                         result=json.dumps(
                             {"summary": "服务重启导致中断"}, ensure_ascii=False,
                         ),
@@ -371,36 +356,6 @@ class TaskHistoryRecorder:
                 )
         except Exception:
             logger.exception("Failed to recover stale task history rows.")
-
-    # -- params parsing ----------------------------------------------------
-
-    @staticmethod
-    def parse_params(value: Any) -> dict:
-        """Parse a JSON string or return the dict as-is.
-
-        Malformed JSON is a configuration error — warn loudly instead of
-        silently running the task with an empty parameter set.
-        """
-        if isinstance(value, str):
-            try:
-                parsed = json.loads(value)
-            except json.JSONDecodeError:
-                logger.warning(
-                    "Task params are not valid JSON — running with empty "
-                    "params. Raw value: {!r:.200}",
-                    value,
-                )
-                return {}
-            return parsed if isinstance(parsed, dict) else {}
-        if isinstance(value, dict):
-            return value
-        if value is None:
-            return {}
-        logger.warning(
-            "Task params have unexpected type {} — running with empty params.",
-            type(value).__name__,
-        )
-        return {}
 
 
 # ==== 分区: executor ====
@@ -433,9 +388,8 @@ class TaskExecutor:
     ) -> None:
         """Execute a task, record history, and send notifications.
 
-        The duplicate-run guard lives at the DB layer (the partial unique
-        index on ``task_func``); this method owns everything from the first
-        "running" row to the final notification.
+        This method owns everything from the first "running" row to the
+        final notification; there is no enqueue-time dedup.
         """
         name = spec.name
         logger.info("Starting task '{}' (id={})...", name, task_id)
@@ -481,7 +435,7 @@ class TaskExecutor:
                 error_msg = "Task timed out after 30 minutes"
                 logger.error("Task '{}' (id={}) timed out.", name, task_id)
             except asyncio.CancelledError:
-                # Cancellation (e.g. scheduler shutdown) is BaseException —
+                # Cancellation (e.g. manager shutdown) is BaseException —
                 # without this branch the row stays "running" forever.
                 # Record the interruption best-effort, then re-raise so
                 # cancellation semantics are preserved.
@@ -543,8 +497,6 @@ class TaskExecutor:
 
     def _build_context(self, task_id: int) -> TaskContext:
         """Assemble the TaskContext for one run."""
-        from copixiv.db.uow import SqlUnitOfWork
-
         return TaskContext(
             uow=SqlUnitOfWork(self._session_factory),
             session_factory=self._session_factory,
@@ -605,62 +557,130 @@ class TaskExecutor:
         return TaskResult(summary=str(result_val))
 
 
-# ==== 分区: scheduler ====
+# ==== 分区: cron ticker ====
 
-# Lifecycle (start/stop), the scheduler-wide error listener, and cron jobs
-# derived from the ``scheduled_tasks`` table.  Actual execution is delegated
-# back to the manager through the *enqueue* callback, so this class knows
-# nothing about history rows or contexts.
+# Cron schedules are evaluated in-process: ``croniter`` computes the next
+# occurrence and a 30s asyncio tick loop fires due entries through the same
+# *enqueue* callback used by manual runs.  The ``scheduled_tasks`` table is
+# the source of truth; ``{scheduled_id: next_run}`` is only a cache, so a
+# restart simply recomputes it (missed windows are skipped, never replayed).
+#
+# Nothing here knows about history rows or contexts — execution is the
+# manager's job.
 
 
-class CronScheduler:
-    """Owns the AsyncIOScheduler and the cron jobs built from the DB."""
+def next_occurrence(cron: str, after: datetime) -> datetime:
+    """Return the first cron occurrence strictly after *after*.
+
+    The expression must have exactly five whitespace-separated fields
+    (minute hour day-of-month month day-of-week), preserving the contract
+    the previous 5-field crontab validator enforced.  A naive
+    *after* is interpreted in :data:`CRON_TIMEZONE` (the process-local
+    timezone, same as the previous scheduler behaviour); an aware *after*
+    keeps its own timezone.
+
+    Raises:
+        ValueError: the expression has the wrong field count or is
+            otherwise invalid (``croniter`` raises ``ValueError``
+            subclasses; they propagate unchanged).
+    """
+    if not isinstance(cron, str) or len(cron.split()) != 5:
+        raise ValueError(
+            "Cron expression must have exactly 5 whitespace-separated "
+            f"fields: {cron!r}"
+        )
+    if after.tzinfo is None:
+        after = after.replace(tzinfo=CRON_TIMEZONE)
+    return croniter(cron, after).get_next(datetime)
+
+
+@dataclass
+class _CronEntry:
+    """One loaded cron row and its cached next occurrence."""
+
+    scheduled_id: int
+    display_name: str
+    func_name: str
+    params: dict
+    cron: str
+    next_run: datetime
+
+
+class CronTicker:
+    """In-memory cron ticker driven by ``scheduled_tasks`` rows.
+
+    Loaded entries live in ``self._entries`` keyed by scheduled-task id.
+    ``next_run`` is preserved across reloads while the row's cron
+    expression is unchanged, so an API edit that does not touch the
+    schedule never resets the timer.
+    """
 
     def __init__(self, session_factory):
         self._session_factory = session_factory
-        self.scheduler = AsyncIOScheduler()
-        self.scheduler.add_listener(
-            self._on_job_error,
-            EVENT_JOB_ERROR | EVENT_JOB_MISSED | EVENT_JOB_MAX_INSTANCES,
-        )
+        self._entries: dict[int, _CronEntry] = {}
+        self._enqueue = None
+        self._task: asyncio.Task | None = None
+        self._stopped = False
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def start(self) -> None:
-        """Start the scheduler (cron jobs are loaded separately)."""
-        self.scheduler.start()
-
-    def stop(self) -> None:
-        """Shut down the scheduler gracefully."""
-        if self.scheduler.running:
-            try:
-                self.scheduler.shutdown(wait=False)
-            except Exception:
-                logger.exception("Error shutting down scheduler.")
-        logger.info("CronScheduler stopped.")
-
-    # ------------------------------------------------------------------
-    # Cron job management
-    # ------------------------------------------------------------------
-
-    def reload_cron_jobs(self, enqueue) -> None:
-        """Remove all cron jobs and reload from the database.
-
-        *enqueue* is ``manager.run_scheduled`` — the single execution
-        entry point shared with manual runs.
-        """
-        for job in self.scheduler.get_jobs():
-            if job.id.startswith("cron_"):
-                job.remove()
+    def start(self, enqueue) -> None:
+        """Load the current cron rows and start the tick loop."""
+        self._stopped = False
         self.load_cron_jobs(enqueue)
+        self._task = asyncio.create_task(self._run())
 
-    def load_cron_jobs(self, enqueue) -> None:
-        """Read ``scheduled_tasks`` and register a cron job per enabled row."""
-        from copixiv.tasks.history_repo import (
-            SQLAlchemyTaskRepository,
-        )
+    async def stop(self) -> None:
+        """Stop the tick loop (cancelling the sleep) and clear the task."""
+        self._stopped = True
+        task = self._task
+        self._task = None
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        logger.info("CronTicker stopped.")
+
+    async def _run(self) -> None:
+        """Sleep for one tick, fire due entries, repeat until stopped."""
+        while not self._stopped:
+            await asyncio.sleep(CRON_TICK_SECONDS)
+            try:
+                self._fire_due(datetime.now(CRON_TIMEZONE))
+            except Exception:
+                # One bad tick (e.g. a transient DB error while enqueuing)
+                # must never kill the loop.
+                logger.exception("Cron ticker iteration failed.")
+
+    # ------------------------------------------------------------------
+    # Cron loading
+    # ------------------------------------------------------------------
+
+    def reload_cron_jobs(self, enqueue, *, now: datetime | None = None) -> None:
+        """Reload all cron entries from the database."""
+        self.load_cron_jobs(enqueue, now=now)
+
+    def load_cron_jobs(
+        self, enqueue, *, now: datetime | None = None
+    ) -> None:
+        """Read ``scheduled_tasks`` and rebuild the in-memory entry map.
+
+        *enqueue* is ``manager.run_scheduled`` — the single execution entry
+        point shared with manual runs.  *now* is injectable for tests and
+        defaults to the current local time.
+
+        Disabled rows and rows referencing an unregistered task function
+        are skipped.  A row with an invalid cron expression is warned about
+        and skipped too; it never aborts the whole load.  The new entry map
+        is assigned atomically (a new dict) because the tick loop may be
+        iterating the previous one.
+        """
+        if now is None:
+            now = datetime.now(CRON_TIMEZONE)
+        elif now.tzinfo is None:
+            now = now.replace(tzinfo=CRON_TIMEZONE)
 
         with self._session_factory() as session:
             try:
@@ -673,96 +693,103 @@ class CronScheduler:
                 )
                 return
 
-            for task in tasks:
-                if not task.is_enabled:
-                    continue
+        entries: dict[int, _CronEntry] = {}
+        for task in tasks:
+            if not task.is_enabled:
+                continue
 
-                spec = get_spec(task.task)
-                if spec is None:
-                    logger.warning(
-                        "Scheduled task '{}' references unknown function "
-                        "'{}' — skipped.",
-                        task.name,
-                        task.task,
-                    )
-                    continue
+            if get_spec(task.task) is None:
+                logger.warning(
+                    "Scheduled task '{}' references unknown function "
+                    "'{}' — skipped.",
+                    task.name,
+                    task.task,
+                )
+                continue
 
-                params = TaskHistoryRecorder.parse_params(task.params)
-
+            existing = self._entries.get(task.id)
+            if existing is not None and existing.cron == task.cron:
+                # Same row, same schedule: keep the timer so an unrelated
+                # API edit (name/params/enabled) does not re-anchor it.
+                next_run = existing.next_run
+            else:
                 try:
-                    self.scheduler.add_job(
-                        self._trigger_cron_job,
-                        trigger=CronTrigger.from_crontab(task.cron),
-                        id=f"cron_{task.id}",
-                        # Args are (function_name, display_name, enqueue,
-                        # params).  At fire time the manager records the
-                        # history row under *display_name* (the user's UI
-                        # label) and resolves the task function by
-                        # *function_name* (the ``task`` column) — so a custom
-                        # display name can never break the lookup, yet the
-                        # task-history list still shows the user's label.
-                        args=(task.task, task.name, enqueue, params),
-                        replace_existing=True,
-                        max_instances=1,
-                        misfire_grace_time=60,
-                    )
-                    logger.info(
-                        "Registered cron job: {} (id={}, cron='{}')",
+                    next_run = next_occurrence(task.cron, now)
+                except ValueError:
+                    logger.warning(
+                        "Scheduled task '{}' (id={}) has invalid cron "
+                        "'{}' — skipped.",
                         task.name,
                         task.id,
                         task.cron,
                     )
-                except Exception:
-                    logger.exception(
-                        "Failed to register cron job '%s' (id=%s).",
-                        task.name,
-                        task.id,
-                    )
+                    continue
 
-    def _trigger_cron_job(
-        self, task_name: str, display_name: str, enqueue, params: dict
-    ) -> None:
-        """Fires when a cron trigger is hit.  Enqueues via the manager.
-
-        *task_name* is the registered task *function* name (``task.task``
-        column); *display_name* is the ``task.name`` free-form UI label.
-        *enqueue* is :meth:`TaskManagerSystem.run_scheduled`, which records
-        the history row under *display_name* and resolves the task function
-        (and its args model) by *task_name* — matching
-        :meth:`TaskManagerSystem.run_task_now` exactly.
-
-        A cron firing while a manual run of the same task is still active
-        is skipped (the duplicate-run guard raises) instead of stacking a
-        concurrent duplicate.
-        """
-        logger.info("Cron triggered: {}", display_name)
-        try:
-            enqueue(display_name, task_name, params=params)
-        except TaskAlreadyRunningError:
-            logger.warning(
-                "Cron for '{}' skipped — a run is already pending/running.",
-                display_name,
+            entries[task.id] = _CronEntry(
+                scheduled_id=task.id,
+                display_name=task.name,
+                func_name=task.task,
+                # JSONB column → plain dict (never a JSON string here).
+                params=task.params or {},
+                cron=task.cron,
+                next_run=next_run,
+            )
+            logger.info(
+                "Registered cron job: {} (id={}, cron='{}', next_run={})",
+                task.name,
+                task.id,
+                task.cron,
+                next_run,
             )
 
+        self._entries = entries
+        self._enqueue = enqueue
+
     # ------------------------------------------------------------------
-    # APScheduler error listener
+    # Firing
     # ------------------------------------------------------------------
 
-    def _on_job_error(self, event) -> None:
-        code_names = {
-            EVENT_JOB_ERROR: "JOB_ERROR",
-            EVENT_JOB_MISSED: "JOB_MISSED",
-            EVENT_JOB_MAX_INSTANCES: "JOB_MAX_INSTANCES",
-        }
-        code_label = code_names.get(event.code, f"UNKNOWN({event.code})")
-        logger.error(
-            "APScheduler event: type={}, job_id={}, exception={}, "
-            "scheduled_run_time={}",
-            code_label,
-            event.job_id,
-            getattr(event, "exception", None),
-            getattr(event, "scheduled_run_time", None),
-        )
+    def _fire_due(self, now: datetime) -> None:
+        """Enqueue every entry due at *now* and advance its next run.
+
+        Missed windows (more than :data:`CRON_MISFIRE_GRACE_SECONDS` late)
+        are skipped with a warning and advanced past *now* — never
+        back-filled.  On-time occurrences enqueue through the manager's
+        callback; an enqueue failure is logged but does not abort the tick.
+        Advancing ``next_run`` before returning makes a repeated
+        ``_fire_due`` with the same *now* a no-op (no double-fire).
+        """
+        for entry in list(self._entries.values()):
+            while entry.next_run <= now:
+                late = (now - entry.next_run).total_seconds()
+                if late > CRON_MISFIRE_GRACE_SECONDS:
+                    logger.warning(
+                        "Cron task '{}' (id={}, cron='{}') missed its "
+                        "scheduled run at {} ({}s late) — skipped, next run "
+                        "advanced past now.",
+                        entry.display_name,
+                        entry.scheduled_id,
+                        entry.cron,
+                        entry.next_run,
+                        late,
+                    )
+                    entry.next_run = next_occurrence(entry.cron, now)
+                    break
+
+                logger.info("Cron triggered: {}", entry.display_name)
+                try:
+                    self._enqueue(
+                        entry.display_name,
+                        entry.func_name,
+                        params=entry.params,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to enqueue cron task '{}' (id={}).",
+                        entry.display_name,
+                        entry.scheduled_id,
+                    )
+                entry.next_run = next_occurrence(entry.cron, entry.next_run)
 
 
 # ==== 分区: manager ====
@@ -771,8 +798,16 @@ class CronScheduler:
 
 # - :class:`TaskHistoryRecorder` — task_history row ownership
 # - :class:`TaskExecutor` — context building + execution + lifecycle
-# - :class:`CronScheduler` — APScheduler ownership + cron jobs
+# - :class:`CronTicker` / :func:`next_occurrence` — in-memory cron tick loop
 # - :class:`TaskSpec` / :func:`discover_tasks` — task manifests + discovery
+
+# The manager owns exactly one worker coroutine.  ``task_history`` is the
+# queue: every entry point (manual API runs, cron fires, scheduled "run
+# now") inserts a ``pending`` row and wakes the worker, which repeatedly
+# selects the oldest pending row and runs it to completion.  Serialization
+# is therefore structural — there is no lock, no per-enqueue asyncio task
+# and no in-memory run list.  ``enqueue`` → ``Event.set()`` gives immediate
+# dispatch; the worker's 1s poll is the fallback for anything missed.
 
 # Business tasks are discovered via :func:`discover_tasks` (the built-in
 # task module list), receive a validated Pydantic args object plus
@@ -781,13 +816,27 @@ class CronScheduler:
 # guessing based on ``isinstance(result, list)``.
 
 
+@dataclass
+class _PendingTask:
+    """Snapshot of one pending history row (read with the session open)."""
+
+    task_id: int
+    name: str
+    task_func: str | None
+    arguments: str | None
+
+
 class TaskManagerSystem:
     """Manages background tasks and scheduled cron jobs.
 
-    On ``start()``, recovers stale history rows, starts the scheduler and
-    registers a cron job for each enabled ``scheduled_tasks`` row.  Manual
-    runs (via the API) are dispatched through the same enqueue path so
-    history is recorded consistently.
+    On ``start()``, recovers stale history rows (a previous process's
+    leftover ``pending``/``running`` rows → ``interrupted``, never resumed),
+    starts the queue worker, then loads the cron entries and starts the
+    in-process tick loop.  Manual runs (via the API) and cron fires share
+    the same enqueue path — a ``pending`` history row — so history is
+    recorded consistently and rows execute in enqueue (id) order, one at a
+    time.  A process-local ``_adhoc_specs`` map carries explicit-function
+    runs, whose ``TaskSpec`` cannot be recovered from the DB row alone.
 
     Dependencies (PixivClient, FileStorage, ...) are captured at
     construction time and travel to task functions exclusively through
@@ -805,8 +854,6 @@ class TaskManagerSystem:
         config=None,
         notifier=None,
     ):
-        from copixiv.db.write_lock import DbWriteLock
-
         discover_tasks()
 
         self._session_factory = session_factory
@@ -825,43 +872,183 @@ class TaskManagerSystem:
                 "notifier": notifier,
             },
         )
-        self._scheduler = CronScheduler(session_factory)
+        self._ticker = CronTicker(session_factory)
 
-        # Process-wide execution serialization: only one task body runs at
-        # a time.  Jobs that fire while another task is executing wait on
-        # this lock, keeping their history row in "pending" until the
-        # previous task finishes — which is what makes the UI's queued
-        # (yellow clock) vs running (blue spinner) distinction actually
-        # visible, and makes tasks complete in enqueue order.  Intra-task
-        # concurrency (fan-out downloads via asyncio.gather inside a single
-        # task) is unaffected: those are direct calls, not separate
-        # run_and_record invocations.  Same coroutine always acquires the
-        # task-lock before entering a write transaction, so no deadlock.
-        self._task_lock = asyncio.Lock()
-
-    @property
-    def scheduler(self):
-        """The underlying APScheduler (compat access for tests/ops)."""
-        return self._scheduler.scheduler
+        # Worker dispatch.  ``_loop`` is captured in ``start()``; sync
+        # callers (threadpool endpoints) hand the wake-up back to that loop
+        # via ``call_soon_threadsafe``.  ``_adhoc_specs`` holds the
+        # TaskSpec of explicit-function runs keyed by task id, because the
+        # DB row only stores the name (populated before the wake, popped
+        # when the worker picks the row up).
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._wake = asyncio.Event()
+        self._worker_task: asyncio.Task | None = None
+        self._stopping = False
+        self._adhoc_specs: dict[int, TaskSpec] = {}
+        self._started = False
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def start(self) -> None:
-        """Start the scheduler, recover stale tasks, load cron jobs."""
-        self._scheduler.start()
+    async def start(self) -> None:
+        """Recover stale rows, start the queue worker, then the ticker."""
+        if self._started:
+            return
+        self._loop = asyncio.get_running_loop()
+        # asyncio primitives bind to the loop that first waits on them;
+        # lifespan restarts (e.g. TestClient) may run on a fresh loop, so
+        # rebind the wake event while no worker exists yet.
+        self._wake = asyncio.Event()
+        self._stopping = False
+        # Recovery must happen before the worker starts: leftover
+        # pending/running rows are crash artifacts, never resumed.
         self._recorder.recover_stale()
-        self._scheduler.load_cron_jobs(self.run_scheduled)
-        logger.info("TaskManagerSystem started — cron jobs loaded.")
+        self._worker_task = asyncio.create_task(self._worker_loop())
+        self._ticker.start(self.run_scheduled)
+        self._started = True
+        logger.info(
+            "TaskManagerSystem started — queue worker running, cron jobs loaded."
+        )
 
-    def stop(self) -> None:
-        """Shut down the scheduler gracefully."""
-        self._scheduler.stop()
+    async def stop(self) -> None:
+        """Stop the cron ticker and cancel the queue worker."""
+        self._stopping = True
+        self._loop = None
+        await self._ticker.stop()
+
+        worker, self._worker_task = self._worker_task, None
+        if worker is not None:
+            worker.cancel()
+            with suppress(asyncio.CancelledError):
+                await worker
+
+        self._started = False
+        logger.info("TaskManagerSystem stopped.")
+
+    # ------------------------------------------------------------------
+    # Internal: the queue worker
+    # ------------------------------------------------------------------
+
+    async def _worker_loop(self) -> None:
+        """Drain ``pending`` history rows one at a time, oldest first.
+
+        Sleeps on the wake event with a 1s polling fallback (covers rows
+        inserted by a path that did not wake us).  Unexpected exceptions
+        are logged and end the current drain pass — the worker itself must
+        never die — while cancellation propagates (the executor records the
+        in-flight row as ``interrupted`` on its way out).
+        """
+        while not self._stopping:
+            try:
+                await asyncio.wait_for(self._wake.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
+            self._wake.clear()
+            try:
+                while not self._stopping:
+                    pending = self._next_pending()
+                    if pending is None:
+                        break
+                    await self._run_pending(pending)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Never let the worker die: log and retry on the next pass
+                # (the row, if any, stays pending for that retry).
+                logger.exception("Task worker iteration failed — will retry.")
+
+    def _next_pending(self) -> _PendingTask | None:
+        """Return the oldest pending row as a detached snapshot."""
+        with self._session_factory() as session:
+            row = SQLAlchemyTaskRepository(session).get_next_pending_sync()
+            if row is None:
+                return None
+            return _PendingTask(
+                task_id=row.id,
+                name=row.name,
+                task_func=row.task_func,
+                arguments=row.arguments,
+            )
+
+    async def _run_pending(self, pending: _PendingTask) -> None:
+        """Resolve, parse and execute one pending history row.
+
+        The ``arguments`` column is TEXT: an unparseable (or non-object)
+        value fails the row with a clear summary instead of running the
+        task with silently empty arguments.
+        """
+        spec = self._adhoc_specs.pop(pending.task_id, None)
+        if spec is None and pending.task_func:
+            spec = get_spec(pending.task_func)
+        if spec is None:
+            summary = f"未知任务函数：{pending.task_func or '(空)'}"
+            logger.error(
+                "Task '{}' (id={}) cannot run: {}", pending.name,
+                pending.task_id, summary,
+            )
+            await self._recorder.update(
+                pending.task_id, "failed",
+                result=json.dumps({"summary": summary}, ensure_ascii=False),
+            )
+            return
+
+        params: Any = {}
+        if pending.arguments:
+            try:
+                params = json.loads(pending.arguments)
+            except json.JSONDecodeError:
+                params = None
+        if not isinstance(params, dict):
+            summary = "任务参数解析失败：arguments 不是合法的 JSON 对象"
+            logger.error(
+                "Task '{}' (id={}) cannot run: {}", pending.name,
+                pending.task_id, summary,
+            )
+            await self._recorder.update(
+                pending.task_id, "failed",
+                result=json.dumps({"summary": summary}, ensure_ascii=False),
+            )
+            return
+
+        await self._executor.run_and_record(
+            spec, params, pending.task_id,
+            recorder=self._recorder,
+            notifier=self._notifier,
+        )
+
+    def _wake_worker(self) -> None:
+        """Wake the worker from sync code (loop thread or threadpool).
+
+        The loop may be absent (enqueue before ``start()``/after
+        ``stop()``): the worker's 1s poll will catch the row then.  Sync
+        API endpoints run in a threadpool, hence ``call_soon_threadsafe``;
+        a shutting-down loop must not raise into the caller.
+        """
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            self._wake.set()
+            return
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        if running_loop is loop:
+            self._wake.set()
+            return
+
+        try:
+            loop.call_soon_threadsafe(self._wake.set)
+        except RuntimeError:
+            # Loop closed between the check and the call — the poll covers it.
+            with suppress(RuntimeError):
+                self._wake.set()
 
     def reload_cron_jobs(self) -> None:
-        """Remove all cron jobs and reload from the database."""
-        self._scheduler.reload_cron_jobs(self.run_scheduled)
+        """Reload cron entries from the database (no ticker restart)."""
+        self._ticker.reload_cron_jobs(self.run_scheduled)
 
     # ------------------------------------------------------------------
     # Task execution (enqueue)
@@ -873,36 +1060,31 @@ class TaskManagerSystem:
         func: Callable | None = None,
         params: dict | None = None,
     ) -> int:
-        """Enqueue a task for immediate background execution.
+        """Enqueue a task for background execution (single worker queue).
 
         Entry point for manually-triggered runs — batch endpoints, tests,
         and ad-hoc callers that enqueue an explicit function.  Cron-
         triggered runs and the scheduled "run now" endpoint go through
         :meth:`run_scheduled` (which records history under the scheduled
         row's display name and resolves the function by its task column).
-        The task is scheduled as a one-shot APScheduler job so that
-        history recording and error handling happen in the executor's
-        lifecycle wrapper.
+        The row is inserted as ``pending`` and the worker executes it in
+        enqueue order; there is no dedup.
 
         Args:
-            name: Task function name (``TaskSpec.name``) — also the dedup
-                key stored in ``task_history.task_func``.  When *func* is
-                None the registry manifest is resolved by this name
-                (unknown names raise ``ValidationError``).
+            name: Task function name (``TaskSpec.name``), recorded as
+                ``task_history.task_func``.  When *func* is None the registry
+                manifest is resolved by this name (unknown names raise
+                ``ValidationError``).
             func: Explicit task function — used by tests and legacy
                 callers that enqueue ad-hoc functions.  Explicit functions
                 run without an args model (params are ignored by the
-                executor).
+                executor); their ``TaskSpec`` is kept in memory because the
+                history row only stores the name.
             params: JSON-serializable argument dict, validated against the
                 task's Pydantic args model at execution time.
 
         Returns:
             The new task-history row id (the task id).
-
-        Raises:
-            TaskAlreadyRunningError: If the same task *function* already has
-                a pending/running history row (the DB partial unique index
-                ``ux_task_history_running``).
         """
         if func is not None:
             spec = TaskSpec(name=name, description="", func=func)
@@ -910,37 +1092,32 @@ class TaskManagerSystem:
             spec = get_spec(name)
             if spec is None:
                 raise ValidationError(f"Unknown task function: {name}")
-        return self._enqueue(name, spec, params)
+        return self._enqueue(name, spec, params, adhoc=func is not None)
 
-    def _enqueue(self, name: str, spec: TaskSpec, params: dict | None) -> int:
-        """Shared enqueue path: history row (DB dedup) + one-shot job.
+    def _enqueue(
+        self,
+        name: str,
+        spec: TaskSpec,
+        params: dict | None,
+        *,
+        adhoc: bool = False,
+    ) -> int:
+        """Shared enqueue path: insert the history row, then wake the worker.
 
         ``name`` is the display name recorded on the history row; ``spec.name``
-        (the registered function name) is recorded as ``task_func`` and is the
-        dedup key.  The manual path uses the same value for both (spec.name ==
-        name); the scheduled path passes display_name as *name* and resolves
-        spec by the function name.
+        (the registered function name) is recorded as ``task_func``.  The
+        manual path uses the same value for both (spec.name == name); the
+        scheduled path passes display_name as *name* and resolves spec by the
+        function name.  No dedup: a second enqueue inserts another pending row.
+
+        Stays synchronous (the API signature is unchanged).  An *adhoc*
+        run's ``TaskSpec`` is registered in ``_adhoc_specs`` before the
+        wake, so the worker has it when it follows the wake-up.
         """
-        params = self._recorder.parse_params(params or {})
-        task_func = spec.name
-
-        # Duplicate-run guard is a single DB constraint: the partial unique
-        # index ``ux_task_history_running`` rejects a second pending/running
-        # row for the same ``task_func``.  This covers both in-process
-        # re-entry and rows left over from a previous process lifetime.
-        try:
-            task_id = self._recorder.enqueue(name, params, task_func)
-        except IntegrityError as exc:
-            raise TaskAlreadyRunningError(
-                f"任务 '{task_func}' 已存在 pending/running 记录"
-            ) from exc
-
-        self._scheduler.scheduler.add_job(
-            self._run_task_wrapper,
-            args=(task_id, spec, params),
-            id=f"manual_{task_id}",
-            max_instances=1,
-        )
+        task_id = self._recorder.enqueue(name, params or {}, spec.name)
+        if adhoc:
+            self._adhoc_specs[task_id] = spec
+        self._wake_worker()
         return task_id
 
     def run_scheduled(
@@ -958,13 +1135,10 @@ class TaskManagerSystem:
         by *func_name* (the ``scheduled_tasks.task`` column).  This keeps a
         custom display name from ever breaking the registry lookup *and*
         makes the task-history list show the user's label instead of the
-        function name.  The duplicate-run guard keys on *func_name* (the
-        ``task_history.task_func`` column), so two scheduled rows sharing a
-        function but differing in display name are deduplicated.
+        function name.
 
         Raises:
             ValidationError: *func_name* is not a registered task function.
-            TaskAlreadyRunningError: *func_name* already pending/running.
         """
         spec = get_spec(func_name)
         if spec is None:
@@ -974,53 +1148,26 @@ class TaskManagerSystem:
     def run_task_now(self, task_id: int) -> None:
         """Look up a scheduled task by DB id and run it immediately.
 
-        Used by the ``POST /api/tasks/scheduled/{id}/run`` endpoint.  The
-        dedup key is the scheduled row's ``task`` (the registered function
-        name), so two scheduled rows sharing a function but differing in
-        display name are deduplicated.
+        Used by the ``POST /api/tasks/scheduled/{id}/run`` endpoint.
 
         Raises:
             NotFoundError: unknown scheduled-task id.
             ValidationError: the scheduled task references an unknown
                 task function.
         """
-        from copixiv.tasks.history_repo import (
-            SQLAlchemyTaskRepository,
-        )
-
         with self._session_factory() as session:
             repo = SQLAlchemyTaskRepository(session)
             tasks = repo.get_scheduled_tasks_sync()
             task = next((t for t in tasks if t.id == task_id), None)
             if task is None:
                 raise NotFoundError(f"Scheduled task id={task_id} not found.")
-            params = self._recorder.parse_params(task.params)
+            # ``scheduled_task.params`` is JSONB → already a dict.
+            params = task.params or {}
 
         # The scheduled row's *name* is a display label; the function to run
         # comes from its ``task`` column.  Delegate to run_scheduled so the
         # cron path and this endpoint share one enqueue path (history records
-        # the display name, the function — the dedup key — is resolved by the
-        # task column, the args model + duplicate-guard semantics stay
-        # identical).
+        # the display name, the function and args model are resolved by the
+        # task column; no dedup — repeated runs queue).
         self.run_scheduled(task.name, task.task, params)
-
-    # ------------------------------------------------------------------
-    # Internal: the one-shot job wrapper
-    # ------------------------------------------------------------------
-
-    async def _run_task_wrapper(
-        self, task_id: int, spec: TaskSpec, params: dict
-    ) -> None:
-        """One-shot APScheduler job body → executor lifecycle.
-
-        Serialized by ``self._task_lock``: while one task runs, every other
-        enqueued job waits here with its history row still ``pending``.
-        See ``__init__`` for the full rationale.
-        """
-        async with self._task_lock:
-            await self._executor.run_and_record(
-                spec, params, task_id,
-                recorder=self._recorder,
-                notifier=self._notifier,
-            )
 

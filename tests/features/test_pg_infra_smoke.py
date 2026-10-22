@@ -76,10 +76,6 @@ def test_partial_and_gin_indexes(pg_engine, clean_db):
     sf = indexdef("ix_author_special_follow")
     assert sf and "WHERE is_special_follow" in sf, "author special-follow partial index"
 
-    running = indexdef("ux_task_history_running")
-    assert running and "WHERE" in running and "status" in running, \
-        "task_history partial unique index (predicate normalized to = ANY(...))"
-
     gin = indexdef("novel_search_bigm")
     assert gin and "USING gin" in gin, "novel_search bigram GIN index"
     assert gin and "gin_bigm_ops" in gin, \

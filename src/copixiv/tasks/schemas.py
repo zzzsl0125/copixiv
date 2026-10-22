@@ -35,12 +35,24 @@ class ScheduledTaskCreate(BaseModel):
     @field_validator("cron")
     @classmethod
     def _validate_cron(cls, v: str) -> str:
-        """Reject malformed cron expressions at the API boundary (422)
-        instead of letting them fail silently inside the scheduler."""
-        from apscheduler.triggers.cron import CronTrigger
+        """Reject malformed cron expressions at the API boundary (422).
 
+        Keeps the previous 5-field crontab contract: exactly five
+        whitespace-separated fields (minute hour day month weekday).
+        Validity itself is delegated to :func:`copixiv.tasks.kernel.next_occurrence`
+        (croniter), whose ``ValueError`` becomes a Pydantic 422.
+        """
+        from datetime import timezone
+
+        from copixiv.tasks.kernel import next_occurrence
+
+        if len(v.split()) != 5:
+            raise ValueError(
+                "Invalid cron expression: exactly 5 fields are required "
+                "(minute hour day-of-month month day-of-week)"
+            )
         try:
-            CronTrigger.from_crontab(v)
+            next_occurrence(v, datetime.now(timezone.utc))
         except ValueError as exc:
             raise ValueError(f"Invalid cron expression: {exc}") from exc
         return v
@@ -96,14 +108,8 @@ class TaskHistoryListResponse(BaseModel):
     total: int
 
 
-class TaskArgument(BaseModel):
-    name: str
-    type: str
-    default: Any | None = None
-    required: bool
-
-
 class TaskMethod(BaseModel):
     name: str
     description: str | None = None
-    arguments: list[TaskArgument]
+    # The task's Pydantic ``model_json_schema()``; ``None`` = no arguments.
+    arguments: dict[str, Any] | None = None

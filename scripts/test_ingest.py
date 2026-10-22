@@ -196,12 +196,14 @@ def cmd_list() -> None:
     """Print all available registered tasks with their arguments."""
     print("Available tasks:\n")
     for m in describe_tasks():
+        schema = m["arguments"] or {}
+        required = set(schema.get("required") or ())
         params = []
-        for a in m["arguments"]:
-            if a["required"]:
-                params.append(a["name"])
+        for name, prop in (schema.get("properties") or {}).items():
+            if name in required:
+                params.append(name)
             else:
-                params.append(f"{a['name']}={a['default']!r}")
+                params.append(f"{name}={prop.get('default')!r}")
         first_line = (m["description"] or "").splitlines()[0] if m["description"] else ""
         print(f"  {m['name']}({', '.join(params)})  — {first_line}")
     print()

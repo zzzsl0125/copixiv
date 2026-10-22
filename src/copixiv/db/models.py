@@ -362,17 +362,8 @@ class TaskHistory(Base):
     duration = Column(Float)
     result = Column(JSONB)
     progress = Column(JSONB)
-
-    __table_args__ = (
-        # Partial unique index: only pending/running rows constrain re-enqueue.
-        # NULL ``task_func`` (legacy rows) are not constrained.
-        Index(
-            "ux_task_history_running",
-            "task_func",
-            unique=True,
-            postgresql_where=sa_text("status IN ('pending', 'running')"),
-        ),
-    )
+    # No dedup index: repeated enqueues for the same ``task_func`` insert
+    # separate pending rows and queue up (task ordering is the worker's job).
 
 
 class Token(Base):

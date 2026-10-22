@@ -99,7 +99,6 @@ def setup_logging(log_dir: str = "log") -> None:
 
     # Quiet noisy third-party loggers
     logging.getLogger("urllib3").setLevel(logging.WARNING)
-    logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
     # Replace uvicorn's handlers so those logs also go through loguru
     for logger_name in ["uvicorn", "uvicorn.error", "uvicorn.access"]:
