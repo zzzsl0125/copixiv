@@ -1,6 +1,5 @@
 """Author repository."""
 
-import asyncio
 from datetime import datetime, timezone
 
 from sqlalchemy import update as _update, delete as _delete, select as _select, func
@@ -10,6 +9,7 @@ from sqlalchemy.orm import Session
 from copixiv.db import models
 from copixiv.db import constants as C
 from copixiv.db.base import BaseRepository, model_to_dict, update_summary
+from copixiv.core.offload import offload
 
 
 class SQLAlchemyAuthorRepository(BaseRepository):
@@ -74,11 +74,9 @@ class SQLAlchemyAuthorRepository(BaseRepository):
             return (datetime.now(timezone.utc) - last).days > 0
         return True
 
-    async def update_summary(self, author_ids: set[int] | None = None) -> None:
+    @offload
+    def update_summary(self, author_ids: set[int] | None = None) -> None:
         """Recalculate author aggregates (runs in a worker thread)."""
-        await asyncio.to_thread(self._update_summary_sync, author_ids)
-
-    def _update_summary_sync(self, author_ids: set[int] | None = None) -> None:
         update_summary(
             self.session, models.Author, C.COL_AUTHOR_ID, author_ids,
             extra_columns=[

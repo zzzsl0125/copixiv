@@ -16,20 +16,21 @@ import asyncio
 import zipfile
 from pathlib import Path
 
-from copixiv.core.models import Novel
+from copixiv.core.draft import NovelDraft
 from copixiv.storage.epub.builder import EpubBuilder
 from copixiv.storage.image_downloader import ImageDownloader
 from copixiv.tasks import maintenance
 
 
-def _novel(tmp_path: Path, novel_id: int, body: str) -> tuple[Path, Novel]:
+def _novel(tmp_path: Path, novel_id: int, body: str) -> tuple[Path, NovelDraft]:
     d = tmp_path / str(novel_id)
     d.mkdir(parents=True, exist_ok=True)
     txt = d / f"novel{novel_id}.txt"
     txt.write_text(body, encoding="utf-8")
-    return txt, Novel(
+    return txt, NovelDraft(
         id=novel_id, title="t", author_id=0, path=str(txt),
         images={"1": {"urls": {"original": "http://x/1.png"}}},
+        content=body,
     )
 
 
@@ -69,12 +70,9 @@ class TestCorruptEpubRegenerates:
         Image.new("RGB", (2, 2), (255, 0, 0)).save(
             txt.parent / "32_u_1.jpg"
         )
-        from copixiv.core.draft import NovelDraft
-
         assert EpubBuilder().create_epub(NovelDraft(
             id=32, title="t", author_id=0, path=str(txt), images={"1": {}},
         )) is True
-        novel.content = "正文 [uploadedimage:1]"
 
         dl = ImageDownloader(max_workers=1, epub_builder=EpubBuilder())
         called: list[str] = []

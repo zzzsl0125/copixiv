@@ -18,9 +18,7 @@ Keyword-search query construction lives in ``copixiv.features.novels.search``.
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
@@ -35,6 +33,7 @@ from sqlalchemy.orm import Session
 from copixiv.db import models
 from copixiv.db import constants as C
 from copixiv.core.models import Novel, EpubStatus
+from copixiv.core.offload import offload
 from copixiv.core.draft import NovelDraft
 from copixiv.core.services import (
     EXCLUDE_BLOCKED_SETTING_KEY,
@@ -52,7 +51,7 @@ from copixiv.features.novels.search import keyword_condition
 
 
 # =========================================================================
-# Query builder — base (pagination/ordering)
+# Query builder — time axis + pagination/ordering
 # =========================================================================
 
 
@@ -72,13 +71,67 @@ def time_axis_col(model):
     return func.abs(model.id)
 
 
-class BaseQueryBuilder:
-    """Shared helpers for pagination, ordering, and FTS query building."""
+# =========================================================================
+# Query builder — single-phase Novel list/count builder (PostgreSQL)
+# =========================================================================
 
-    def __init__(self, session: Session, main_model: type):
-        self.session = session
-        self.main_model = main_model
+
+def blocked_tags_excluded(names):
+    """Build a ``NOT (tags && ARRAY[...])`` clause excluding blocked novels.
+
+    Returns None for an empty name set so callers can skip the condition
+    entirely (zero overhead when nothing is blocked).
+    """
+    if not names:
+        return None
+    return ~models.Novel.tags.overlap(list(names))
+
+
+class NovelQueryBuilder:
+    """Builds single-phase Novel list and count queries (PostgreSQL forms).
+
+    Query structure (conceptual)::
+
+        SELECT novel.*, (SELECT is_special_follow FROM author WHERE author_id=novel.author_id)
+        FROM novel
+        WHERE novel.tags @> ARRAY[...]                 -- tag filters (AND)
+          AND NOT (novel.tags && ARRAY[blocked])       -- blocked exclusion
+          AND novel.search_lower LIKE lower(:pN) ...   -- keyword (per segment)
+          AND [thresholds / author_id / series_id / cursor]
+        ORDER BY ...
+        LIMIT ...
+
+    ``is_favourite`` is a direct ``novel`` column; ``is_special_follow`` comes
+    from ``author``.  Tag filtering uses ``tags @> ARRAY[...]`` (all names
+    present = AND); blocked exclusion uses ``NOT (tags && ...)``.  Keyword
+    search is a per-segment substring match against the generated column
+    ``novel.search_lower`` (``pg_bigm`` GIN index, migration 0007;
+    :func:`copixiv.features.novels.search.keyword_condition`) — no join and no
+    separate search table.
+    """
+
+    def __init__(
+        self,
+        repo,
+        spec: QuerySpec,
+        *,
+        ids: list[int] | None = None,
+        restrict_ids: list[int] | None = None,
+        blocked_tag_names: frozenset[str] = frozenset(),
+    ):
+        self.session: Session = repo.session
+        self.main_model = models.Novel
         self.params: dict[str, Any] = {}
+        self.repo = repo
+        self.spec = spec
+        self.ids = ids
+        self.restrict_ids = restrict_ids
+        self.blocked_tag_names = blocked_tag_names
+
+    # ------------------------------------------------------------------
+    # Pagination / ordering (this builder has one model, so the helpers
+    # live here rather than in a single-subclass base class)
+    # ------------------------------------------------------------------
 
     def _apply_cursor(
         self, stmt: Select, cursor: dict | None, order_by: str,
@@ -149,85 +202,18 @@ class BaseQueryBuilder:
         """Apply LIMIT clause."""
         return stmt.limit(limit)
 
-
-# =========================================================================
-# Query builder — single-phase Novel list/count builder (PostgreSQL)
-# =========================================================================
-
-
-def blocked_tags_excluded(names):
-    """Build a ``NOT (tags && ARRAY[...])`` clause excluding blocked novels.
-
-    Returns None for an empty name set so callers can skip the condition
-    entirely (zero overhead when nothing is blocked).
-    """
-    if not names:
-        return None
-    return ~models.Novel.tags.overlap(list(names))
-
-
-class NovelQueryBuilder(BaseQueryBuilder):
-    """Builds single-phase Novel list and count queries (PostgreSQL forms).
-
-    Query structure (conceptual)::
-
-        SELECT novel.*, (SELECT is_special_follow FROM author WHERE author_id=novel.author_id)
-        FROM novel
-        WHERE novel.tags @> ARRAY[...]                 -- tag filters (AND)
-          AND NOT (novel.tags && ARRAY[blocked])       -- blocked exclusion
-          AND novel.search_lower LIKE lower(:pN) ...   -- keyword (per segment)
-          AND [thresholds / author_id / series_id / cursor]
-        ORDER BY ...
-        LIMIT ...
-
-    ``is_favourite`` is a direct ``novel`` column; ``is_special_follow`` comes
-    from ``author``.  Tag filtering uses ``tags @> ARRAY[...]`` (all names
-    present = AND); blocked exclusion uses ``NOT (tags && ...)``.  Keyword
-    search is a per-segment substring match against the generated column
-    ``novel.search_lower`` (``pg_bigm`` GIN index, migration 0007;
-    :func:`copixiv.features.novels.search.keyword_condition`) — no join and no
-    separate search table.
-    """
-
-    def __init__(
-        self,
-        repo,
-        spec: QuerySpec,
-        *,
-        ids: list[int] | None = None,
-        restrict_ids: list[int] | None = None,
-        blocked_tag_names: frozenset[str] = frozenset(),
-    ):
-        super().__init__(repo.session, models.Novel)
-        self.repo = repo
-        self.spec = spec
-        self.ids = ids
-        self.restrict_ids = restrict_ids
-        self.blocked_tag_names = blocked_tag_names
-
     # ------------------------------------------------------------------
     # Public entry points
     # ------------------------------------------------------------------
 
     def build(self) -> tuple[Select, dict]:
-        """Build the main list query."""
-        conditions = self.spec.conditions
-        tags, keywords, field_filters = self._categorize(conditions)
+        """Build the main list query.
 
+        ``restrict_ids`` is deliberately not applied here (the list surface
+        narrows via conditions, not via the count-only id restriction).
+        """
         main = self._base_select()
-        main = self._join_field_filter_tables(main, field_filters)
-        main = self._where_tag_filter(main, tags)
-        main = self._where_fts_filter(main, keywords)
-        main = self._where_field_filters(main, field_filters)
-        main = self._where_thresholds(main)
-
-        blocked = self.blocked_tag_names
-        if blocked:
-            main = main.where(blocked_tags_excluded(blocked))
-
-        exclude_ids = self.spec.exclude_ids
-        if exclude_ids:
-            main = main.where(self.main_model.id.not_in(exclude_ids))
+        main = self._apply_filters(main, apply_restrict_ids=False)
 
         main = self._apply_cursor(
             main, self.spec.cursor, self.spec.order_by,
@@ -249,52 +235,23 @@ class NovelQueryBuilder(BaseQueryBuilder):
         physical row order (vacuum/insert churn), which is untestable and
         surprising for clients.  The sort is over the matched id set only.
         """
-        conditions = self.spec.conditions
-        tags, keywords, field_filters = self._categorize(conditions)
-
         stmt = select(self.main_model.id).select_from(self.main_model)
-        stmt = self._join_field_filter_tables(stmt, field_filters)
-        stmt = self._where_tag_filter(stmt, tags)
-        stmt = self._where_fts_filter(stmt, keywords)
-        stmt = self._where_field_filters(stmt, field_filters)
-        stmt = self._where_thresholds(stmt)
-
-        id_set = self.ids
-        if id_set:
-            stmt = stmt.where(self.main_model.id.in_(id_set))
-
-        if self.blocked_tag_names:
-            stmt = stmt.where(
-                ~models.Novel.tags.overlap(list(self.blocked_tag_names))
-            )
-
-        exclude_ids = self.spec.exclude_ids
-        if exclude_ids:
-            stmt = stmt.where(self.main_model.id.not_in(exclude_ids))
+        stmt = self._apply_filters(stmt, ids=self.ids)
         return stmt.order_by(self.main_model.id)
 
     def build_ids_in_scope(
         self, novel_ids: list[int], blocked_tag_names: frozenset[str],
     ) -> Select:
-        """Build an ID query intersecting *novel_ids* with *spec*, minus blocked."""
-        conditions = self.spec.conditions
-        tags, keywords, field_filters = self._categorize(conditions)
+        """Build an ID query intersecting *novel_ids* with *spec*, minus blocked.
 
+        Ordered by id for the same determinism reason as :meth:`build_ids`
+        (the caller's ``match-ids`` response is asserted as a list).
+        """
         stmt = select(self.main_model.id).select_from(self.main_model)
-        stmt = self._join_field_filter_tables(stmt, field_filters)
-        stmt = self._where_tag_filter(stmt, tags)
-        stmt = self._where_fts_filter(stmt, keywords)
-        stmt = self._where_field_filters(stmt, field_filters)
-        stmt = self._where_thresholds(stmt)
-        stmt = stmt.where(self.main_model.id.in_(novel_ids))
-        if blocked_tag_names:
-            stmt = stmt.where(
-                ~models.Novel.tags.overlap(list(blocked_tag_names))
-            )
-        exclude_ids = self.spec.exclude_ids
-        if exclude_ids:
-            stmt = stmt.where(self.main_model.id.not_in(exclude_ids))
-        return stmt
+        stmt = self._apply_filters(
+            stmt, ids=novel_ids, blocked_tag_names=blocked_tag_names,
+        )
+        return stmt.order_by(self.main_model.id)
 
     def build_count(
         self, *, count_blocked: bool = False,
@@ -312,14 +269,14 @@ class NovelQueryBuilder(BaseQueryBuilder):
             return None
 
         stmt = select(func.count()).select_from(self.main_model)
-        return self._apply_scope_filters(stmt, count_blocked=count_blocked)
+        return self._apply_filters(stmt, count_blocked=count_blocked)
 
     def build_count_bounded(
         self, cap: int, *, count_blocked: bool = False,
     ) -> Select:
         """Build a bounded COUNT: ``SELECT count(*) FROM (SELECT 1 … LIMIT cap+1) x``.
 
-        与 :meth:`build_count` 共享同一套 WHERE（:meth:`_apply_scope_filters`），
+        与 :meth:`build_count` 共享同一套 WHERE（:meth:`_apply_filters`），
         只差两处：
 
         * **恒返回语句** —— 无过滤 = 全库，同样走有界子查询。PG 凑够 ``cap+1``
@@ -330,7 +287,7 @@ class NovelQueryBuilder(BaseQueryBuilder):
           见 :meth:`SQLAlchemyNovelReadRepository._count_with_spec`）。
         """
         inner = select(literal_column("1")).select_from(self.main_model)
-        inner = self._apply_scope_filters(inner, count_blocked=count_blocked)
+        inner = self._apply_filters(inner, count_blocked=count_blocked)
         return select(func.count()).select_from(inner.limit(cap + 1).subquery())
 
     def build_existence(
@@ -350,7 +307,7 @@ class NovelQueryBuilder(BaseQueryBuilder):
             return None
 
         stmt = select(literal_column("1")).select_from(self.main_model)
-        stmt = self._apply_scope_filters(stmt, count_blocked=count_blocked)
+        stmt = self._apply_filters(stmt, count_blocked=count_blocked)
         return stmt.limit(1)
 
     def _has_scope_filters(self) -> bool:
@@ -366,15 +323,35 @@ class NovelQueryBuilder(BaseQueryBuilder):
             or self.blocked_tag_names
         )
 
-    def _apply_scope_filters(
-        self, stmt: Select, *, count_blocked: bool = False,
+    def _apply_filters(
+        self,
+        stmt: Select,
+        *,
+        count_blocked: bool = False,
+        ids: list[int] | None = None,
+        blocked_tag_names: frozenset[str] | None = None,
+        apply_restrict_ids: bool = True,
     ) -> Select:
-        """Apply the shared filter conditions (tags / keyword / field
-        filters / thresholds / blocked exclusion / exclude_ids).
+        """Apply the one shared WHERE chain to *stmt*.
 
-        Shared by the count and existence queries so both stay in lock-step
-        with the list query's WHERE clauses.  ``count_blocked=True`` swaps
-        the blocked-tag exclusion for its positive form (``tags && ...``).
+        The only owner of the filter order: field-filter joins, tag filter,
+        keyword filter, field filters, thresholds, then the optional id set,
+        ``restrict_ids``, blocked-tag handling, and ``exclude_ids``.  Every
+        caller (list / ids / ids-in-scope / count / bounded count / existence)
+        goes through here — the four copy-pasted chains had already drifted
+        (``build_ids`` ignored ``restrict_ids``, ``build_ids_in_scope`` had no
+        ORDER BY).
+
+        Options, not forks:
+
+        * ``count_blocked`` — the blocked-tag clause's positive form
+          (``tags && ...``) instead of its negative form, for the "excluded"
+          count/existence queries.
+        * ``ids`` — ``id IN (ids)`` intersection (``None`` = not applied).
+        * ``blocked_tag_names`` — overrides ``self.blocked_tag_names`` when not
+          ``None`` (``build_ids_in_scope`` receives the names explicitly).
+        * ``apply_restrict_ids`` — whether to narrow to ``self.restrict_ids``
+          (the list query intentionally does not).
         """
         conditions = self.spec.conditions
         tags, keywords, field_filters = self._categorize(conditions)
@@ -385,10 +362,17 @@ class NovelQueryBuilder(BaseQueryBuilder):
         stmt = self._where_field_filters(stmt, field_filters)
         stmt = self._where_thresholds(stmt)
 
-        if self.restrict_ids:
+        if ids is not None:
+            stmt = stmt.where(self.main_model.id.in_(ids))
+
+        if apply_restrict_ids and self.restrict_ids:
             stmt = stmt.where(self.main_model.id.in_(self.restrict_ids))
 
-        blocked = self.blocked_tag_names
+        blocked = (
+            self.blocked_tag_names
+            if blocked_tag_names is None
+            else blocked_tag_names
+        )
         if blocked:
             cond = models.Novel.tags.overlap(list(blocked))
             stmt = stmt.where(cond if count_blocked else ~cond)
@@ -578,23 +562,17 @@ class NovelCount:
 def _novel_from_orm(obj) -> Novel:
     """Convert an ORM ``Novel`` to the domain :class:`Novel` model.
 
-    ``create_time`` is a ``timestamptz`` (``datetime``) in PostgreSQL; the
-    domain model keeps a string contract, so it is converted to an ISO string.
-    ``tags`` comes directly from the ``novel.tags`` column.
+    ``create_time`` is a ``timestamptz`` (``datetime``) in PostgreSQL and the
+    domain model carries it as-is — no conversion.  ``tags`` comes directly
+    from the ``novel.tags`` column.
     """
     d = {c.name: getattr(obj, c.name) for c in obj.__table__.columns}
-    ct = d.get(C.COL_CREATE_TIME)
-    if isinstance(ct, datetime):
-        d[C.COL_CREATE_TIME] = ct.isoformat()
     return Novel(**d)
 
 
 def _novel_from_mapping(mapping) -> Novel:
     """Convert a row ``RowMapping`` (column-based select) to a domain Novel."""
     d = dict(mapping)
-    ct = d.get(C.COL_CREATE_TIME)
-    if isinstance(ct, datetime):
-        d[C.COL_CREATE_TIME] = ct.isoformat()
     # ``is_special_follow`` comes from a scalar subquery over ``author``: a
     # novel whose ``author_id`` is NULL (local uploads, migration orphans) or
     # whose author row is gone makes the subquery return *no rows*, and a
@@ -671,7 +649,8 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
             return []
         return self._blocked_novel_ids(self._blocked_tag_names())
 
-    async def sort_novel_ids(
+    @offload
+    def sort_novel_ids(
         self,
         novel_ids: list[int],
         order_by: str = C.COL_LIKES,
@@ -680,18 +659,9 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         """Return *novel_ids* ordered by a novel column (id / like / text).
 
         Pushes the sort to PostgreSQL: ``WHERE id = ANY($1) ORDER BY <col>``.
-        Missing IDs are dropped.  Runs in a worker thread.
+        Missing IDs are dropped.  The public coroutine runs it in a worker
+        thread (``@offload``).
         """
-        return await asyncio.to_thread(
-            self._sort_novel_ids_sync, novel_ids, order_by, order_direction,
-        )
-
-    def _sort_novel_ids_sync(
-        self,
-        novel_ids: list[int],
-        order_by: str = C.COL_LIKES,
-        order_direction: str = "DESC",
-    ) -> list[int]:
         if not novel_ids or order_by not in (C.COL_ID, C.COL_LIKES, C.COL_TEXTS):
             return list(novel_ids)
 
@@ -711,11 +681,9 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         )
         return list(self.session.execute(stmt).scalars())
 
-    async def get_novels(self, spec: QuerySpec) -> dict:
+    @offload
+    def get_novels(self, spec: QuerySpec) -> dict:
         """Retrieve a paginated, filtered list of novels per *spec*."""
-        return await asyncio.to_thread(self._get_novels_sync, spec)
-
-    def _get_novels_sync(self, spec: QuerySpec) -> dict:
         if spec.order_by:
             self._validate_query_field(spec.order_by)
         self._validate_order_direction(spec.order_direction)
@@ -770,15 +738,13 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
 
         return {"novels": novels, "cursor": cursor_out}
 
-    async def count_novels(self, spec: QuerySpec) -> NovelCount:
+    @offload
+    def count_novels(self, spec: QuerySpec) -> NovelCount:
         """Count VISIBLE novels matching *spec* (bounded, worker thread).
 
         返回 :class:`NovelCount` 而不是裸 int：调用方要能区分「精确值」与
         「≥ COUNT_CAP 的下界」（前者可直接展示，后者只能显示 ``N+``）。
         """
-        return await asyncio.to_thread(self._count_novels_sync, spec)
-
-    def _count_novels_sync(self, spec: QuerySpec) -> NovelCount:
         for q_type, _qvalue in spec.conditions:
             self._validate_query_field(q_type)
 
@@ -815,11 +781,9 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
             return NovelCount(COUNT_CAP, truncated=True)
         return NovelCount(matched)
 
-    async def count_excluded_novels(self, spec: QuerySpec) -> NovelCount:
+    @offload
+    def count_excluded_novels(self, spec: QuerySpec) -> NovelCount:
         """Count novels matching *spec* that carry blocked tags (同样有界)."""
-        return await asyncio.to_thread(self._count_excluded_novels_sync, spec)
-
-    def _count_excluded_novels_sync(self, spec: QuerySpec) -> NovelCount:
         if not self._exclusion_active(spec.exclude_blocked_tags):
             return NovelCount(0)
         for q_type, _qvalue in spec.conditions:
@@ -832,16 +796,14 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
             spec, blocked_tag_names=blocked_names, count_blocked=True,
         )
 
-    async def has_excluded_novels(self, spec: QuerySpec) -> bool:
+    @offload
+    def has_excluded_novels(self, spec: QuerySpec) -> bool:
         """Whether any novel matching *spec* carries blocked tags.
 
         Mirror-predicate existence query (``SELECT 1 ... LIMIT 1``) instead
         of a full COUNT — powers the ExclusionBar visibility on the first
         page response without an extra request.
         """
-        return await asyncio.to_thread(self._has_excluded_novels_sync, spec)
-
-    def _has_excluded_novels_sync(self, spec: QuerySpec) -> bool:
         if not self._exclusion_active(spec.exclude_blocked_tags):
             return False
         for q_type, _qvalue in spec.conditions:
@@ -858,11 +820,9 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
             return False
         return self.session.execute(stmt).first() is not None
 
-    async def list_matching_ids(self, spec: QuerySpec) -> list[int]:
+    @offload
+    def list_matching_ids(self, spec: QuerySpec) -> list[int]:
         """Return every VISIBLE novel ID matching *spec*, unpaginated."""
-        return await asyncio.to_thread(self._list_matching_ids_sync, spec)
-
-    def _list_matching_ids_sync(self, spec: QuerySpec) -> list[int]:
         for q_type, _qvalue in spec.conditions:
             self._validate_query_field(q_type)
 
@@ -877,21 +837,13 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         stmt = builder.build_ids()
         return list(self.session.execute(stmt).scalars())
 
-    async def filter_ids_in_scope(
+    @offload
+    def filter_ids_in_scope(
         self,
         novel_ids: list[int],
         spec: QuerySpec,
     ) -> list[int]:
         """Return the subset of *novel_ids* matching *spec*."""
-        return await asyncio.to_thread(
-            self._filter_ids_in_scope_sync, novel_ids, spec,
-        )
-
-    def _filter_ids_in_scope_sync(
-        self,
-        novel_ids: list[int],
-        spec: QuerySpec,
-    ) -> list[int]:
         if not novel_ids:
             return []
         for q_type, _qvalue in spec.conditions:
@@ -908,14 +860,12 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         )
         return list(self.session.execute(stmt).scalars())
 
-    async def get_novels_by_ids(self, novel_ids: list[int]) -> list[Novel]:
+    @offload
+    def get_novels_by_ids(self, novel_ids: list[int]) -> list[Novel]:
         """Return full novel models for the given IDs, in the given order.
 
         Missing IDs are silently dropped.
         """
-        return await asyncio.to_thread(self._get_novels_by_ids_sync, novel_ids)
-
-    def _get_novels_by_ids_sync(self, novel_ids: list[int]) -> list[Novel]:
         if not novel_ids:
             return []
         rows = self.session.execute(
@@ -1044,17 +994,11 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             C.FIELD_IS_SPECIAL_FOLLOW, C.ORDER_BY_NONE, C.ORDER_BY_RANDOM,
         }
 
-    async def upsert_novels(
+    @offload
+    def upsert_novels(
         self, novels: list[NovelDraft], force_update: list[str] | None = None
     ) -> int:
         """Insert or update novels and sync their tags."""
-        return await asyncio.to_thread(
-            self._upsert_novels_sync, novels, force_update,
-        )
-
-    def _upsert_novels_sync(
-        self, novels: list[NovelDraft], force_update: list[str] | None = None
-    ) -> int:
         if not novels:
             return 0
 
@@ -1306,16 +1250,14 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
 
     # ---- batch operations ----------------------------------------------------
 
-    async def delete_many(self, novel_ids: list[int]) -> list[str]:
+    @offload
+    def delete_many(self, novel_ids: list[int]) -> list[str]:
         """Delete many novels.
 
         Returns the ``path`` of each deleted novel (best-effort file cleanup
         is the caller's job).  The ``failed_novel`` ledger is cleaned
         explicitly and the trigger maintains ``reference_count``.
         """
-        return await asyncio.to_thread(self._delete_many_sync, novel_ids)
-
-    def _delete_many_sync(self, novel_ids: list[int]) -> list[str]:
         if not novel_ids:
             return []
         paths = list(self.session.execute(
@@ -1333,7 +1275,8 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         )
         return [p for p in paths if p]
 
-    async def add_tags_to_novels(
+    @offload
+    def add_tags_to_novels(
         self, novel_ids: list[int], tags: set[str]
     ) -> int:
         """Add *tags* to every listed novel.
@@ -1343,13 +1286,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         ``novel.tags``).  Returns the number of novels that actually received
         at least one new tag.
         """
-        return await asyncio.to_thread(
-            self._add_tags_to_novels_sync, novel_ids, tags,
-        )
-
-    def _add_tags_to_novels_sync(
-        self, novel_ids: list[int], tags: set[str]
-    ) -> int:
         if not novel_ids or not tags:
             return 0
         tag_names = sorted(set(tags))
@@ -1376,7 +1312,8 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         ).scalars().all())
         return len(changed)
 
-    async def filter_ids_by_source(
+    @offload
+    def filter_ids_by_source(
         self, novel_ids: list[int], sources: set[str]
     ) -> list[int]:
         """把 id 列表收窄到来源属于 *sources* 的那些（批量编辑只作用于本地书）。
@@ -1392,13 +1329,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         因此是确定的（``build_ids`` 出于同一个理由排序）。调用方要的是集合语义，
         顺序只是可复现性的保证。
         """
-        return await asyncio.to_thread(
-            self._filter_ids_by_source_sync, novel_ids, sources,
-        )
-
-    def _filter_ids_by_source_sync(
-        self, novel_ids: list[int], sources: set[str]
-    ) -> list[int]:
         if not novel_ids or not sources:
             return []
         # ``= ANY(:array)`` 而不是 ``IN (...)``：模块 docstring 那句"``id = ANY($1)``
@@ -1416,7 +1346,8 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         )
         return list(self.session.execute(stmt).scalars().all())
 
-    async def update_metadata_many(
+    @offload
+    def update_metadata_many(
         self,
         novel_ids: list[int],
         values: dict[str, Any],
@@ -1453,16 +1384,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         而不是把没变化的行也算成"改过"。用 ``RETURNING`` 而不是 ``rowcount``
         是因为后者在"匹配到但值相同"时同样会报数，说不了真话。
         """
-        return await asyncio.to_thread(
-            self._update_metadata_many_sync, novel_ids, values, only_where_null,
-        )
-
-    def _update_metadata_many_sync(
-        self,
-        novel_ids: list[int],
-        values: dict[str, Any],
-        only_where_null: str | None = None,
-    ) -> int:
         if not novel_ids or not values:
             # 空 values 拼不出合法 UPDATE（``SET`` 后面不能空），返回 0 而不是
             # 让 PostgreSQL 报语法错：用例已先行拒掉"两个键都不提交"。
@@ -1503,20 +1424,14 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         ).scalars().all())
         return len(changed)
 
-    async def remove_tags_from_novels(
+    @offload
+    def remove_tags_from_novels(
         self, novel_ids: list[int], tags: set[str]
     ) -> int:
         """Remove *tags* from every listed novel.
 
         Returns the number of novels that actually lost at least one tag.
         """
-        return await asyncio.to_thread(
-            self._remove_tags_from_novels_sync, novel_ids, tags,
-        )
-
-    def _remove_tags_from_novels_sync(
-        self, novel_ids: list[int], tags: set[str]
-    ) -> int:
         if not novel_ids or not tags:
             return 0
         tag_names = sorted(set(tags))
@@ -1579,11 +1494,9 @@ class SQLAlchemySeriesRepository(BaseRepository):
             return None
         return model_to_dict(series)
 
-    async def update_summary(self, series_ids: set[int] | None = None) -> None:
+    @offload
+    def update_summary(self, series_ids: set[int] | None = None) -> None:
         """Recalculate series aggregates (runs in a worker thread)."""
-        await asyncio.to_thread(self._update_summary_sync, series_ids)
-
-    def _update_summary_sync(self, series_ids: set[int] | None = None) -> None:
         update_summary(
             self.session, models.Series, C.COL_SERIES_ID, series_ids,
             extra_columns=[

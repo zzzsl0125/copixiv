@@ -39,6 +39,11 @@ class TestNovel:
         assert n.series_index == 1
         assert n.tags == ["tag1", "tag2"]
         assert n.is_favourite == 1
+        # A date string still parses: the field is ``datetime | None`` now
+        # (the DB column is ``timestamptz``), and Pydantic coerces the legacy
+        # string form the read path used to return.
+        from datetime import datetime
+        assert n.create_time == datetime(2024, 1, 15)
 
     def test_default_values(self):
         n = Novel(id=1, title="T", author_id=1)

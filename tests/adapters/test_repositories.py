@@ -64,7 +64,6 @@ class TestSQLAlchemyNovelRepository:
         novel = NovelModel(
             id=1, title="带图的小说", author_id=10, path="/tmp/n1.txt",
             has_epub=EpubStatus.PENDING, tags=["R-18", "NTR"],
-            content="正文" * 100,
         )
 
         try:
@@ -428,6 +427,7 @@ class TestSQLAlchemyTaskRepository:
             assert task is not None
             assert task.name == "test-task"
             assert task.status == "running"
+
     def test_enqueue_same_task_func_twice_inserts_two_pending_rows(
         self, session_factory,
     ):
@@ -451,7 +451,6 @@ class TestSQLAlchemyTaskRepository:
             ).scalars().all()
         assert [r.id for r in rows] == [first_id, second_id]
         assert [r.status for r in rows] == ["pending", "pending"]
-
 
     def test_update_task_with_result_and_duration(self, session_factory):
         from copixiv.tasks.history_repo import SQLAlchemyTaskRepository

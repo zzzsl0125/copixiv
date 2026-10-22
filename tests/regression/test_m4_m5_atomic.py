@@ -24,7 +24,7 @@ import pytest
 
 from copixiv.storage.epub.builder import EpubBuilder
 from copixiv.storage.file_storage import FileStorage
-from copixiv.core.models import Novel
+from copixiv.core.draft import NovelDraft
 from copixiv.storage.image_downloader import ImageDownloader
 
 
@@ -162,7 +162,7 @@ def test_process_novel_assets_dedups_inflight_id(tmp_path, monkeypatch):
 
     monkeypatch.setattr(dl, "_download_assets", slow_work)
 
-    data = Novel(
+    data = NovelDraft(
         id=1,
         title="novel1",
         author_id=0,
@@ -195,7 +195,7 @@ def _epub_data(tmp_path):
     novel_dir.mkdir()
     text_path = novel_dir / "novel1.txt"
     text_path.write_text("Hello world", encoding="utf-8")
-    return Novel(
+    return NovelDraft(
         id=1,
         title="Test Novel",
         author_name="Author",
@@ -253,7 +253,7 @@ def test_create_epub_long_title_fits_name_max(tmp_path):
     novel_dir.mkdir()
     text_path = novel_dir / "novel1.txt"
     text_path.write_text("Hello world", encoding="utf-8")
-    data = Novel(
+    data = NovelDraft(
         id=12345678,
         title=title,
         author_name="Author",
@@ -290,7 +290,7 @@ def _epub_data_with_placeholder(tmp_path, body: str):
     novel_dir.mkdir()
     text_path = novel_dir / "novel7.txt"
     text_path.write_text(body, encoding="utf-8")
-    return Novel(
+    return NovelDraft(
         id=7, title="缺图", author_name="A", author_id=0, path=str(text_path),
     ), novel_dir
 
@@ -340,7 +340,7 @@ def test_corrupt_epub_is_not_treated_as_done(tmp_path, monkeypatch):
         # The corrupt file must NOT satisfy the "already done" guard.
         assert asyncio.run(
             dl.process_novel_assets(
-                Novel(
+                NovelDraft(
                     id=9, title="t", author_id=0, path=str(text_path),
                     images={"1": {"urls": {"original": "http://x/1.png"}}},
                 )
@@ -359,7 +359,7 @@ def test_valid_epub_still_short_circuits(tmp_path):
     novel_dir.mkdir()
     text_path = novel_dir / "novel8.txt"
     text_path.write_text("正文", encoding="utf-8")
-    data = Novel(
+    data = NovelDraft(
         id=8, title="t", author_id=0, path=str(text_path),
     )
     assert EpubBuilder().create_epub(data) is True
@@ -368,7 +368,7 @@ def test_valid_epub_still_short_circuits(tmp_path):
     try:
         asyncio.run(
             dl.process_novel_assets(
-                Novel(
+                NovelDraft(
                     id=8, title="t", author_id=0, path=str(text_path),
                     images={"1": {}},
                 )

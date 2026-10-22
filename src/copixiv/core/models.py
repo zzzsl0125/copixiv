@@ -48,9 +48,16 @@ class Novel(BaseModel):
     factory functions in ``core/draft.py``); plain dicts only
     appear at the HTTP wire boundary.
 
-    Types mirror the database columns — ``create_time`` is a *string*
-    (ISO date/time from the Pixiv API, stored in a String column), not a
-    ``datetime`` object.
+    Types mirror the database columns: ``create_time`` is a ``timestamptz``
+    in PostgreSQL, so the read model carries a ``datetime`` (the *write*
+    carrier, :class:`~copixiv.core.draft.NovelDraft`, keeps the source's
+    string and converts it at persist time).
+
+    The transient asset fields (``content`` / ``images`` / ``illusts`` /
+    ``cover_url``) intentionally live **only** on ``NovelDraft``: their real
+    readers (``storage/image_downloader.py``,
+    ``storage/epub/builder.py``) take the write carrier, so a copy on the
+    read model would have no consumer and would mislead.
     """
 
     id: int
@@ -68,7 +75,7 @@ class Novel(BaseModel):
     series_id: int | None = None
     series_name: str | None = None
     series_index: int | None = None
-    create_time: str | None = None
+    create_time: datetime | None = None
     # Shuffle key for random browsing — persisted column.  The write path
     # assigns a random value on insert (never overwritten on refresh);
     # the read path uses it for keyset pagination in random order.
@@ -84,12 +91,8 @@ class Novel(BaseModel):
     # NULL for Pixiv rows.
     source_key: str | None = None
 
-    # Transient — not persisted, popped before the DB upsert
+    # Tags are the ``novel.tags text[]`` column (read straight from the row).
     tags: list[str] = Field(default_factory=list)
-    content: str | None = None
-    images: dict | None = None
-    illusts: dict | None = None
-    cover_url: str | None = None
 
     # Display flags — not persisted, joined from other tables
     is_favourite: bool = False

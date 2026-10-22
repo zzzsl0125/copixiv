@@ -7,6 +7,7 @@ freely (kept in sync with the client bundle).
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import (
@@ -22,6 +23,18 @@ from copixiv.features.novels import field_policy
 # ---------------------------------------------------------------------------
 
 class NovelBase(BaseModel):
+    """小说列表 / 详情的响应模型。
+
+    字段与领域模型 :class:`copixiv.core.models.Novel` 逐条对应（`path` /
+    `shuffle` / `source_key` 三个内部字段除外），字段集由
+    ``tests/features/test_schema_drift.py`` 钉住。刻意**不**继承领域模型：
+    Pydantic 的 ``ConfigDict(exclude=...)`` 会静默失效、``Field(exclude=True)``
+    挡不住 JSON Schema，而这份 schema 正是前端 codegen 的契约源（§7.4）。
+
+    ``create_time`` 是 ``timestamptz`` → ``datetime``，JSON 里是 ISO 字符串；
+    写侧的 ``NovelUpdateRequest`` 仍收字符串（PATCH 接受日期字面量）。
+    """
+
     id: int
     title: str
     author_id: int | None = None
@@ -30,7 +43,7 @@ class NovelBase(BaseModel):
     view: int = 0
     text: int = 0
     caption: str | None = None
-    create_time: str | None = None
+    create_time: datetime | None = None
     has_epub: EpubStatus = EpubStatus.NO
     tags: list[str] = []
     is_favourite: int = 0
@@ -125,6 +138,11 @@ class NovelUpdateRequest(BaseModel):
     ``author_id`` / ``series_id`` 显式 null = 解除关联，收尾见
     ``update_metadata.py::_series_columns``：作者保留显示名，系列连名字与章节号
     一起清，2026-09-22）。
+
+    注意 ``create_time`` 在这里仍是**字符串**（写侧载体）：HTTP 边界接受
+    ``YYYY-MM-DD`` 之类的日期字面量，由 ``update_metadata._create_time``
+    解析成 ``datetime`` 后写库。响应模型 ``NovelBase.create_time`` 才是
+    ``datetime``（DB 列是 ``timestamptz``）。
     """
 
     model_config = ConfigDict(extra="forbid")

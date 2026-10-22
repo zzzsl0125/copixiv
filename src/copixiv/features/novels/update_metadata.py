@@ -153,7 +153,7 @@ class UpdateNovelMetadataUseCase:
             await self._authors.update_author_name(*resolved_author)
 
         # 系列只写"这一个系列行"的名字：系列名的规范方向是 novel → series
-        # （`_update_summary_sync` 取 max(novel.series_name)），改写同系列其它
+        # （`update_summary` 取 max(novel.series_name)），改写同系列其它
         # 小说行既没必要也会覆盖来源值。见 `update_series_name` 的注释。
         if resolved_series is not None:
             await self._series.update_series_name(*resolved_series)

@@ -9,8 +9,8 @@ This script measures what the *user* actually pays for on the migrated stack:
   * ``check``  — environment/data sanity (row counts, indexes, ANALYZE state,
                  PG runtime settings, blocked-tag config).  Run this first.
   * ``bench``  — warm query matrix: list / count / keyword / pagination, via the
-                 real repository methods (``_get_novels_sync`` /
-                 ``_count_novels_sync``) on the production database.
+                 real repository methods (``get_novels`` / ``count_novels``)
+                 on the production database.
   * ``cold``   — cold-start measurement: stops/starts the local PG instance
                  (``scripts/pg_dev.py``), then times the *first* query of each
                  scenario from a brand-new engine (new process pool), plus
@@ -35,6 +35,7 @@ other processes depend on without warning.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import signal
 import statistics
 import subprocess
@@ -58,6 +59,15 @@ from copixiv.features.novels.repo import (  # noqa: E402
 )
 
 DEFAULT_URL = "postgresql+psycopg2://postgres@127.0.0.1:5433/copixiv"
+
+# The repository's public API is async (``@offload``); this script is a sync
+# harness.  One persistent loop avoids paying loop creation per measured call.
+_BENCH_LOOP = asyncio.new_event_loop()
+
+
+def _call(coro):
+    """Run one ``@offload`` repository coroutine to completion."""
+    return _BENCH_LOOP.run_until_complete(coro)
 PG_DEV = ROOT / "scripts" / "pg_dev.py"
 
 # Scenario constants matching the old SQLite benchmark / the front-end UX.
@@ -313,7 +323,7 @@ def bench_lists(session: Session, n: int) -> list[tuple[str, float, float]]:
     rows: list[tuple[str, float, float]] = []
     for label, kwargs in LIST_CASES:
         s = spec(**kwargs)
-        mn, md, _ = bench(lambda: repo._get_novels_sync(s), n=n, session=session)
+        mn, md, _ = bench(lambda: _call(repo.get_novels(s)), n=n, session=session)
         rows.append((label, mn, md))
     return rows
 
@@ -323,12 +333,12 @@ def bench_counts(session: Session, n: int) -> list[tuple[str, float, float]]:
     rows: list[tuple[str, float, float]] = []
     for label, kwargs in COUNT_CASES:
         s = spec(**kwargs, min_like=0, min_text=0)
-        mn, md, _ = bench(lambda: repo._count_novels_sync(s), n=n, session=session)
+        mn, md, _ = bench(lambda: _call(repo.count_novels(s)), n=n, session=session)
         rows.append((label, mn, md))
     # excluded count (blocked-tag novels) — only meaningful when blocked exist
     try:
-        mn, md, _ = bench(lambda: repo._count_excluded_novels_sync(
-            spec(min_like=0, min_text=0)), n=n, session=session)
+        mn, md, _ = bench(lambda: _call(repo.count_excluded_novels(
+            spec(min_like=0, min_text=0))), n=n, session=session)
         rows.append(("计数-被排除(blocked)", mn, md))
     except Exception as exc:
         print(f"  [计数-被排除] 错误: {exc.__class__.__name__}: {exc}")
@@ -348,7 +358,7 @@ def _paginate(repo, s: QuerySpec, depth: int, order_by: str):
     for _ in range(depth):
         page_spec = s.model_copy(update={"cursor": curs})
         t = time.perf_counter()
-        result = repo._get_novels_sync(page_spec)
+        result = _call(repo.get_novels(page_spec))
         per_times.append((time.perf_counter() - t) * 1000)
         curs = result["cursor"]
         reached += 1
@@ -393,9 +403,9 @@ def cmd_bench(args: argparse.Namespace) -> int:
 
     # warm shared buffers / plan cache
     repo = _build_read_repo(session)
-    repo._get_novels_sync(spec())
-    repo._get_novels_sync(spec(queries="keyword:恋"))
-    repo._count_novels_sync(spec(queries="keyword:恋", min_like=0, min_text=0))
+    _call(repo.get_novels(spec()))
+    _call(repo.get_novels(spec(queries="keyword:恋")))
+    _call(repo.count_novels(spec(queries="keyword:恋", min_like=0, min_text=0)))
 
     list_rows = bench_lists(session, n)
     print_table("A. 当前列表查询（warm）", list_rows)
@@ -475,7 +485,7 @@ def _stmt_to_sql(session: Session, s: QuerySpec, depth: int | None = None,
         curs = None
         for _ in range(depth - 1):
             page_spec = s.model_copy(update={"cursor": curs})
-            result = read_repo._get_novels_sync(page_spec)
+            result = _call(read_repo.get_novels(page_spec))
             curs = result["cursor"]
             if curs is None:
                 break
@@ -557,14 +567,14 @@ def cmd_cold(args: argparse.Namespace) -> int:
         s = spec(**kwargs)
         if label.startswith("冷-首查计数"):
             mn, md, _ = bench(
-                lambda: repo._count_novels_sync(s), n=args.n, session=session)
+                lambda: _call(repo.count_novels(s)), n=args.n, session=session)
         elif depth > 1:
             per_times, _curs, _reached = _paginate(
                 repo, s, depth, kwargs.get("order_by", "like"))
             mn, md = min(per_times), statistics.median(per_times)
         else:
             mn, md, _ = bench(
-                lambda: repo._get_novels_sync(s), n=args.n, session=session)
+                lambda: _call(repo.get_novels(s)), n=args.n, session=session)
         warm_rows.append((label, mn, md))
     session.close()
     engine.dispose()
@@ -593,11 +603,11 @@ def cmd_cold(args: argparse.Namespace) -> int:
         t = time.perf_counter()
         try:
             if is_count:
-                run_with_timeout(lambda: repo_cold._count_novels_sync(s), 60.0)
+                run_with_timeout(lambda: _call(repo_cold.count_novels(s)), 60.0)
             elif depth > 1:
                 _paginate(repo_cold, s, depth, kwargs.get("order_by", "like"))
             else:
-                run_with_timeout(lambda: repo_cold._get_novels_sync(s), 60.0)
+                run_with_timeout(lambda: _call(repo_cold.get_novels(s)), 60.0)
             first_ms = (time.perf_counter() - t) * 1000
         except Timeout:
             first_ms = None
@@ -612,13 +622,13 @@ def cmd_cold(args: argparse.Namespace) -> int:
         if first_ms is not None:
             if is_count:
                 m2, m3, _ = bench(
-                    lambda: repo_cold._count_novels_sync(s), n=3,
+                    lambda: _call(repo_cold.count_novels(s)), n=3,
                     session=session_cold)
             elif depth > 1:
                 m2, m3 = first_ms, first_ms
             else:
                 m2, m3, _ = bench(
-                    lambda: repo_cold._get_novels_sync(s), n=3,
+                    lambda: _call(repo_cold.get_novels(s)), n=3,
                     session=session_cold)
             cold_first_rows[-1] = (label, first_ms, m3)
 

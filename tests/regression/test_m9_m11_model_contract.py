@@ -1,7 +1,8 @@
 """M9/M11 复现：领域模型双轨漂移 + text=None 崩溃。
 
 M9 期望（Pydantic 统一）：
-- Novel.create_time 标注为 str | None（与 DB/String 一致）
+- Novel.create_time 是 ``datetime | None``（与 DB 的 ``timestamptz`` 一致；
+  2026-10 F 块①把当年的 ``str | None`` 类型谎言改正）
 - 工厂函数返回 NovelDraft（frozen dataclass，写路径载体，带瞬态字段）
 - 标签键统一为模型字段 ``tags``（不再有 dict 键 "tag"）
 - build_from_novel_info 对 has_epub 用 None 表示「不覆盖」
@@ -59,10 +60,15 @@ class _Webview:
 # M9 -------------------------------------------------------------
 
 
-def test_novel_create_time_annotation_is_str():
-    """模型标注必须与 DB（String 列）一致：str | None。"""
+def test_novel_create_time_annotation_is_datetime():
+    """模型标注必须与 DB（``timestamptz`` 列）一致：datetime | None。
+
+    SQLite 时代这一列是 String，领域模型跟着写成 ``str``；postgres-migration
+    之后列已是 ``DateTime(timezone=True)``，F 块①把注释与类型一起改正。
+    """
+    from datetime import datetime
     from typing import get_type_hints
-    assert get_type_hints(Novel)["create_time"] == str | None
+    assert get_type_hints(Novel)["create_time"] == datetime | None
 
 
 def test_build_novel_returns_novel_draft():

@@ -50,7 +50,7 @@ async def test_get_novels_default_list(seeded_db, session_factory):
     n0 = novels[0]
     assert isinstance(n0.tags, list)
     assert isinstance(n0.is_favourite, bool)
-    assert isinstance(n0.create_time, str)
+    assert isinstance(n0.create_time, datetime)
     # cursor present (we fetched more than per_page).
     assert res["cursor"] is not None
 

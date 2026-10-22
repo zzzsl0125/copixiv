@@ -3,14 +3,14 @@
 import asyncio
 import time
 
-from copixiv.core.models import Novel
+from copixiv.core.draft import NovelDraft
 from copixiv.storage.epub.builder import EpubBuilder
 from copixiv.storage.image_downloader import ImageDownloader
 
 
-def _asset_data(tmp_path, nid: int) -> Novel:
-    """A novel model that passes process_novel_assets' early-return checks."""
-    return Novel(
+def _asset_data(tmp_path, nid: int) -> NovelDraft:
+    """A write-path draft that passes process_novel_assets' early-return checks."""
+    return NovelDraft(
         id=nid,
         title=f"novel{nid}",
         author_id=0,
@@ -211,7 +211,7 @@ class TestDrainOutcomes:
             max_workers=1, min_interval=0, epub_builder=EpubBuilder(),
         )
         try:
-            await dl.process_novel_assets(Novel(
+            await dl.process_novel_assets(NovelDraft(
                 id=1, title="novel1", author_id=0, path=str(path),
                 content=body,
             ))
@@ -224,7 +224,7 @@ class TestDrainOutcomes:
     async def test_done_when_valid_epub_already_exists(self, tmp_path):
         body = "正文 [uploadedimage:1]"
         path = self._text(tmp_path, 6, body)
-        assert EpubBuilder().create_epub(Novel(
+        assert EpubBuilder().create_epub(NovelDraft(
             id=6, title="novel6", author_id=0, path=str(path),
         )) is True
 
@@ -232,7 +232,7 @@ class TestDrainOutcomes:
             max_workers=1, min_interval=0, epub_builder=EpubBuilder(),
         )
         try:
-            await dl.process_novel_assets(Novel(
+            await dl.process_novel_assets(NovelDraft(
                 id=6, title="novel6", author_id=0, path=str(path),
                 content=body, images={"1": {}},
             ))
@@ -250,7 +250,7 @@ class TestDrainOutcomes:
         try:
             # images is non-empty, so the guard lets the worker decide from
             # the body — the builder then returns True without writing.
-            await dl.process_novel_assets(Novel(
+            await dl.process_novel_assets(NovelDraft(
                 id=2, title="novel2", author_id=0, path=str(path),
                 content="纯文字正文", images={"1": {}},
             ))
@@ -264,7 +264,7 @@ class TestDrainOutcomes:
         """Early return (no assets and no placeholder) → skipped, no submit."""
         dl = ImageDownloader(max_workers=1)
         try:
-            await dl.process_novel_assets(Novel(
+            await dl.process_novel_assets(NovelDraft(
                 id=3, title="novel3", author_id=0,
                 path=str(tmp_path / "3" / "novel3.txt"),
                 content="纯文字正文",
@@ -277,8 +277,9 @@ class TestDrainOutcomes:
     async def test_skipped_without_path(self):
         dl = ImageDownloader(max_workers=1)
         try:
-            await dl.process_novel_assets(Novel(
-                id=4, title="novel4", author_id=0, path=None,
+            # An empty draft path (the dataclass default) means "no local file".
+            await dl.process_novel_assets(NovelDraft(
+                id=4, title="novel4", author_id=0,
                 content="正文 [uploadedimage:1]",
             ))
             assert dl.drain_outcomes() == {4: "skipped"}
@@ -297,7 +298,7 @@ class TestDrainOutcomes:
             max_workers=1, min_interval=0, epub_builder=FailingBuilder(),
         )
         try:
-            await dl.process_novel_assets(Novel(
+            await dl.process_novel_assets(NovelDraft(
                 id=5, title="novel5", author_id=0, path=str(path),
                 content=body,
             ))

@@ -515,25 +515,26 @@ def create_app(config_path: str | None = None):
     # Cold-start mitigation: PG has no built-in pre-warm here (128MB default
     # shared_buffers, no pg_prewarm contrib), so the first user request after a
     # restart would pay cold-buffer page reads.  Touch the hot query shapes once
-    # (~100ms, runs in a worker thread) to pull those pages into PG buffer +
-    # OS page cache; failures are logged and non-fatal.
-    def _warm_database(session_factory) -> None:
+    # (~100ms) to pull those pages into PG buffer + OS page cache; failures are
+    # logged and non-fatal.  The repository methods are ``@offload`` coroutines,
+    # so each query still runs in a worker thread rather than on the loop.
+    async def _warm_database_async(session_factory) -> None:
         from copixiv.core.services import QuerySpec
         from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 
-        with session_factory() as session:
-            repo = SQLAlchemyNovelRepository(session)
-            repo._get_novels_sync(QuerySpec(
-                order_by="like", per_page=30, min_like=500, min_text=3000))
-            repo._get_novels_sync(QuerySpec(order_by="random", per_page=30))
-            repo._get_novels_sync(QuerySpec(
-                conditions=[("keyword", "恋")], order_by="like",
-                min_like=0, min_text=0))
-            repo._count_novels_sync(QuerySpec(min_like=500, min_text=3000))
-
-    async def _warm_database_async(session_factory) -> None:
         try:
-            await asyncio.to_thread(_warm_database, session_factory)
+            with session_factory() as session:
+                repo = SQLAlchemyNovelRepository(session)
+                await repo.get_novels(QuerySpec(
+                    order_by="like", per_page=30, min_like=500,
+                    min_text=3000))
+                await repo.get_novels(QuerySpec(
+                    order_by="random", per_page=30))
+                await repo.get_novels(QuerySpec(
+                    conditions=[("keyword", "恋")], order_by="like",
+                    min_like=0, min_text=0))
+                await repo.count_novels(QuerySpec(
+                    min_like=500, min_text=3000))
             logger.info("数据库预热完成（4 个热查询形态）")
         except Exception:
             logger.exception("数据库预热失败（非致命，继续启动）")
