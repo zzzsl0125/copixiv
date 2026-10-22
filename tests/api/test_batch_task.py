@@ -21,7 +21,6 @@ from copixiv.db.models import (
     Author, Novel, Tag, TaskHistory,
 )
 from copixiv.db.uow import SqlUnitOfWork
-from copixiv.db.write_lock import DbWriteLock
 from copixiv.features.novels import api as novels
 from copixiv.tasks.batch import batch_operation
 
@@ -195,7 +194,6 @@ async def _run_task(session_factory, tmp_path, *, operation, novel_ids,
             ),
             batch.TaskContext(
                 uow=uow,
-                write_lock=DbWriteLock(),
                 file_storage=_FakeFileStorage(tmp_path),
                 task_id=task_id,
             ),
@@ -246,10 +244,15 @@ class TestBatchOperationTask:
 
         with session_factory() as s:
             row = s.query(TaskHistory).one()
-            # The wrapper would overwrite result at the end; the task itself
-            # leaves "running" + live progress in the `progress` column (not
-            # `result` — progress must be visible without polluting result).
-            assert row.status == "running"
+            # The task writes progress ONLY: it must not touch ``status``
+            # (the executor owns the running → terminal transition) and must
+            # not pollute ``result``.  The row was seeded as ``pending`` and
+            # this task was invoked directly, so it stays pending.
+            #
+            # Writing "running" here used to resurrect finished rows: the
+            # progress write is fire-and-forget (run_coroutine_threadsafe), so
+            # a late one could land after the executor recorded success.
+            assert row.status == "pending"
             assert row.progress
             assert "进行中" in row.progress
             assert "进行中" not in (row.result or "")
@@ -332,7 +335,6 @@ class TestBatchExportTask:
         import io
 
         from copixiv.db.uow import SqlUnitOfWork
-        from copixiv.db.write_lock import DbWriteLock
         from copixiv.tasks.batch import BatchExportArgs, batch_export
         from copixiv.tasks.kernel import TaskContext
 
@@ -359,7 +361,6 @@ class TestBatchExportTask:
             ),
             TaskContext(
                 uow=SqlUnitOfWork(session_factory),
-                write_lock=DbWriteLock(),
                 file_storage=_FakeFileStorage(tmp_path),
                 task_id=task_id,
             ),
@@ -386,7 +387,6 @@ class TestBatchExportTask:
         import asyncio
 
         from copixiv.db.uow import SqlUnitOfWork
-        from copixiv.db.write_lock import DbWriteLock
         from copixiv.tasks.batch import BatchExportArgs, batch_export
         from copixiv.tasks.kernel import TaskContext
 
@@ -395,7 +395,9 @@ class TestBatchExportTask:
                 BatchExportArgs(novel_ids=[999999]),
                 TaskContext(
                     uow=SqlUnitOfWork(session_factory),
-                    write_lock=DbWriteLock(),
-                    file_storage=_FakeFileStorage(tmp_path),
+                        file_storage=_FakeFileStorage(tmp_path),
+                    # A real run always has one (it names the download file);
+                    # without it batch_export refuses up front.
+                    task_id=1,
                 ),
             ))

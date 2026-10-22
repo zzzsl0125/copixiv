@@ -4,19 +4,21 @@ and batch export (ZIP building).
 Registered under ``batch_operation`` / ``batch_export``.  Runs inside the
 task system (the user can close the page — the operation continues).
 
-Chunking policy — decided by benchmarking on the real 232k database:
+Chunking policy — the original numbers came from the SQLite era and no longer
+apply (PostgreSQL has no ``MAX_VARIABLE_NUMBER``), so this is now purely a
+**safety/observability** choice, not a hard limit:
 
-- A single whole-library delete of 232,531 rows completes in ~60s in ONE
-  transaction — no SQLite variable-limit error (232k < 250k compiled
-  MAX_VARIABLE_NUMBER) and no per-chunk fixed overhead.  Atomicity is a
-  bonus: a crash mid-delete rolls everything back instead of leaving a
-  half-deleted library.
-- Splitting into small chunks was measured to be strictly worse: each
-  chunk pays a fixed FTS/tag-maintenance overhead, turning 60s of total
-  work into ~10+ minutes of lock contention.
-- Chunking is therefore only a SAFETY fallback for selections beyond
-  :data:`BATCH_TASK_SAFETY_CHUNK` (200k) — where a single ``IN (...)``
-  would approach SQLite's variable limit.
+- A single whole-library delete of 232,531 rows completed in ~60 s in ONE
+  transaction on the old SQLite database.  That measurement is why the design
+  used to argue against chunking.
+- Under PostgreSQL, one statement addressing 200 k+ ids is legal but holds a
+  single very long transaction and reports no intermediate progress.  Chunking
+  at :data:`BATCH_TASK_SAFETY_CHUNK` keeps each transaction short, lets the
+  task write live progress between chunks, and means one bad chunk cannot
+  discard the whole run (each chunk is retried independently by
+  ``run_write_transaction``).
+- The trade-off is per-chunk fixed overhead; at 30 k rows per chunk that is
+  negligible next to the row work.
 
 Tasks self-report progress into their own ``task_history`` row (``task_id``
 travels through the TaskContext), so the 「任务管理」page shows live
@@ -50,9 +52,9 @@ from .kernel import register
 BATCH_TASK_NAME = "batch_operation"
 EXPORT_TASK_NAME = "batch_export"
 
-# Only chunk when a single IN-list would approach SQLite's
-# MAX_VARIABLE_NUMBER (250000 compiled).  Measured whole-library ops
-# (232k) run fine — and faster — as a single transaction.
+# Chunk size for a background batch operation.  Not a database limit any more
+# (PostgreSQL has none for ``IN`` lists) — see the module docstring: it bounds
+# transaction length, keeps progress reporting alive, and contains failures.
 BATCH_TASK_SAFETY_CHUNK = BATCH_ID_CHUNK_SIZE
 
 _OP_LABELS = {
@@ -123,7 +125,13 @@ async def batch_operation(
     failed_chunks = 0
 
     async def report_progress(stage: str) -> None:
-        """Write live progress into the task-history row (best-effort)."""
+        """Write live progress into the task-history row (best-effort).
+
+        ``status=None``: a progress write must never change the row's state.
+        The executor owns ``running`` → terminal; a late progress write that
+        carried ``"running"`` would resurrect a finished row (the call below
+        is fire-and-forget, so it can land after the final update).
+        """
         if ctx.task_id is None:
             return
         try:
@@ -131,7 +139,7 @@ async def batch_operation(
                 ctx.uow,
                 lambda uw: SQLAlchemyTaskRepository(uw.session).update_task(
                     ctx.task_id,
-                    "running",
+                    None,
                     progress=f"{_OP_LABELS[args.operation]}进行中：{stage}",
                 ),
             )
@@ -212,11 +220,19 @@ async def batch_export(args: BatchExportArgs, ctx: TaskContext) -> TaskResult:
         raise ValidationError("没有可导出的小说")
     total = len(ids)
 
+    # The download endpoint resolves ``batch_export_{task_id}.zip`` from the
+    # history row id, so an absent task id cannot produce a reachable file.
+    # ``task_id or 0`` used to write ``batch_export_0.zip`` — silently
+    # unreachable, and overwritten by the next such run.  Fail loudly instead.
+    if ctx.task_id is None:
+        raise ValidationError("导出任务缺少 task_id，无法生成可下载的文件")
+
     export_dir = Path(ctx.file_storage.download_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
     _sweep_old_exports(export_dir)
 
     async def report_progress(stage: str) -> None:
+        """See the batch_operation counterpart: progress-only, no status."""
         if ctx.task_id is None:
             return
         try:
@@ -224,7 +240,7 @@ async def batch_export(args: BatchExportArgs, ctx: TaskContext) -> TaskResult:
                 ctx.uow,
                 lambda uw: SQLAlchemyTaskRepository(uw.session).update_task(
                     ctx.task_id,
-                    "running",
+                    None,
                     progress=f"批量导出进行中：{stage}",
                 ),
             )
@@ -266,7 +282,7 @@ async def batch_export(args: BatchExportArgs, ctx: TaskContext) -> TaskResult:
     except ValueError as exc:
         raise ValidationError(str(exc)) from exc
 
-    out_path = export_dir / f"{EXPORT_FILE_PREFIX}{ctx.task_id or 0}.zip"
+    out_path = export_dir / f"{EXPORT_FILE_PREFIX}{ctx.task_id}.zip"
     zip_buf.seek(0)
     with open(out_path, "wb") as f:
         while chunk := zip_buf.read(1 << 20):
