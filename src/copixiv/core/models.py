@@ -238,7 +238,8 @@ class TaskResult(BaseModel):
 
     Attributes:
         summary: Human-readable one-line summary used in notifications and
-            log output.  Always populated.
+            log output.  Always populated.  **Never parse this** — it is UI
+            copy, and a wording change would silently break the caller.
         new_novel_titles: Titles of novels that were **newly discovered and
             persisted** during this task run.  Only populated by tasks that
             actually fetch/download novels (e.g. ``novel_follow``,
@@ -246,11 +247,17 @@ class TaskResult(BaseModel):
         new_novel_count: Total count of newly persisted novels.  Always
             mirrors ``len(new_novel_titles)`` (enforced by a validator), so
             callers never need to set it explicitly.
+        failed_ids: IDs this task attempted and could **not** complete — the
+            machine-readable counterpart of "this one failed".  Callers that
+            need per-item outcomes must read this instead of pattern-matching
+            ``summary`` (``failed_retry`` tested ``"获取失败" not in summary``,
+            which broke on any wording change).
     """
 
     summary: str = ""
     new_novel_titles: list[str] = Field(default_factory=list)
     new_novel_count: int = 0
+    failed_ids: list[int] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _sync_count(self) -> "TaskResult":

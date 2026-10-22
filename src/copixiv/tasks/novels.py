@@ -144,6 +144,9 @@ async def novel_fetch(args: NovelFetchArgs, ctx: TaskContext) -> TaskResult:
     return TaskResult(
         summary=summary,
         new_novel_titles=out.titles,
+        # Machine-readable outcome: callers must not infer success/failure from
+        # the summary text (see TaskResult.failed_ids).
+        failed_ids=([args.id] if out.failed else []),
     )
 
 
@@ -408,16 +411,19 @@ async def failed_retry(args: FailedRetryArgs, ctx: TaskContext) -> TaskResult:
     )
 
     titles: list[str] = []
-    failed = 0
+    failed_ids: list[int] = []
     for nid, result in zip(ids, results):
-        if isinstance(result, TaskResult) and "获取失败" not in result.summary:
+        # Per-item outcome comes from the child's structured ``failed_ids``,
+        # never from its human-readable summary.
+        if isinstance(result, TaskResult) and not result.failed_ids:
             titles.extend(result.new_novel_titles)
         else:
-            failed += 1
+            failed_ids.append(nid)
             logger.error(f"failed_retry: #{nid} 重试失败: {result!r}")
 
-    ok = len(ids) - failed
+    ok = len(ids) - len(failed_ids)
     return TaskResult(
         summary=f"重试失败小说: 成功 {ok}/{len(ids)}",
         new_novel_titles=titles,
+        failed_ids=failed_ids,
     )
