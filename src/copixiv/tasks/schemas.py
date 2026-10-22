@@ -93,7 +93,15 @@ class TaskHistoryResponse(BaseModel):
     start_time: datetime
     end_time: datetime | None = None
     duration: float | None = None
+    # ``result`` is the stored JSONB object **without its ``log`` key** — the
+    # list endpoint strips it because it was 96 % of a 7.4 MB response while
+    # the UI only shows it after clicking 「日志」.  Fetch it separately from
+    # ``GET /api/tasks/history/{id}/log``.
     result: dict | None = None
+    # True when the row *has* stored log text, so the UI can enable/disable
+    # the log button without downloading the log to find out.  ``None`` on
+    # legacy rows that predate the column.
+    has_log: bool = False
     # ``progress`` is a JSONB column.  Tasks write a plain message string; keep
     # it permissive (Any) so a future dict-shaped progress doesn't break the
     # wire contract.
@@ -102,6 +110,24 @@ class TaskHistoryResponse(BaseModel):
 
     _parse_arguments = field_validator("arguments", mode="before")(_parse_json_str)
     _parse_result = field_validator("result", mode="before")(_parse_json_str)
+
+
+class TaskHistoryLogResponse(BaseModel):
+    """The stored execution log for one task-history row."""
+
+    id: int
+    log: str
+
+
+class TaskBusyResponse(BaseModel):
+    """Task functions that currently have a pending or running history row.
+
+    Deliberately its own endpoint: the front-end needs exactly this set to
+    gray out the "run" buttons, and reusing the history list for it meant
+    polling a ~7.4 MB page every 5 seconds.
+    """
+
+    funcs: list[str]
 
 
 class TaskHistoryListResponse(BaseModel):

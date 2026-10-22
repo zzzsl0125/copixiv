@@ -386,6 +386,102 @@ class TestTasksEndpoints:
         assert r.status_code == 422
         assert client.app.state.task_manager.reloads == 0
 
+    def test_busy_endpoint_returns_distinct_running_functions(
+        self, client, session_factory,
+    ):
+        """The busy set is computed server-side (one tiny query)."""
+        from datetime import datetime, timezone
+
+        with session_factory() as session:
+            for name, func, status in (
+                ("a", "batch_export", "pending"),
+                ("b", "batch_export", "running"),
+                ("c", "check_epub", "running"),
+                ("d", "failed_retry", "success"),      # terminal → excluded
+                ("e", None, "pending"),                # legacy, unattributable
+            ):
+                session.add(TaskHistory(
+                    name=name, task_func=func, arguments="{}", status=status,
+                    start_time=datetime.now(timezone.utc),
+                ))
+            session.commit()
+
+        r = client.get("/api/tasks/busy")
+        assert r.status_code == 200
+        assert r.json()["funcs"] == ["batch_export", "check_epub"]
+
+    def test_history_list_omits_log_and_flags_it(self, client, session_factory):
+        """The list must not inline log text; ``has_log`` says where to get it."""
+        from datetime import datetime, timezone
+
+        with session_factory() as session:
+            row = TaskHistory(
+                name="withlog", task_func="check_epub", arguments="{}",
+                status="success", start_time=datetime.now(timezone.utc),
+                result={"summary": "done", "log": "x" * 5000},
+            )
+            session.add(row)
+            session.commit()
+            task_id = row.id
+
+        r = client.get("/api/tasks/history?limit=10")
+        assert r.status_code == 200
+        item = next(i for i in r.json()["items"] if i["id"] == task_id)
+        assert item["has_log"] is True
+        assert "log" not in (item["result"] or {})
+        assert item["result"]["summary"] == "done"
+
+        log = client.get(f"/api/tasks/history/{task_id}/log")
+        assert log.status_code == 200
+        assert log.json()["log"] == "x" * 5000
+
+    def test_history_log_404_for_row_without_log(self, client, session_factory):
+        from datetime import datetime, timezone
+
+        with session_factory() as session:
+            row = TaskHistory(
+                name="nolog", task_func="check_epub", arguments="{}",
+                status="success", start_time=datetime.now(timezone.utc),
+                result={"summary": "done"},
+            )
+            session.add(row)
+            session.commit()
+            task_id = row.id
+
+        assert client.get(f"/api/tasks/history/{task_id}/log").status_code == 404
+
+    def test_create_scheduled_rejects_params_that_fail_the_args_model(self, client):
+        """Params are validated against the task's Pydantic model at write time.
+
+        Production had a ``novel_fetch`` schedule stored with ``{"id": null}``:
+        the API accepted it and the failure only surfaced when the cron fired.
+        """
+        r = client.post("/api/tasks/scheduled", json={
+            "name": "bad params", "task": "novel_fetch", "cron": "0 0 * * *",
+            "params": {"id": None},
+        })
+        assert r.status_code == 400, r.text
+        assert "参数无效" in r.json()["detail"]
+
+    def test_create_scheduled_accepts_valid_params(self, client):
+        r = client.post("/api/tasks/scheduled", json={
+            "name": "ok params", "task": "novel_fetch", "cron": "0 0 * * *",
+            "params": {"id": 123},
+        })
+        assert r.status_code == 200, r.text
+
+    def test_update_scheduled_rejects_params_for_the_stored_task(self, client):
+        created = client.post("/api/tasks/scheduled", json={
+            "name": "upd", "task": "novel_fetch", "cron": "0 0 * * *",
+            "params": {"id": 123},
+        })
+        assert created.status_code == 200
+        task_id = created.json()["id"]
+        r = client.put(f"/api/tasks/scheduled/{task_id}", json={
+            "params": {"id": None},
+        })
+        assert r.status_code == 400, r.text
+
     def test_update_scheduled_rejects_invalid_cron(self, client):
         created = client.post("/api/tasks/scheduled", json={
             "name": "测试", "task": "rebuild_fts", "cron": "0 4 * * 1",
