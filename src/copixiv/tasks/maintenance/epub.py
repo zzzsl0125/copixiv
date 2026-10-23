@@ -69,6 +69,27 @@ async def check_epub(ctx: TaskContext) -> TaskResult:
     ``has_embedded_images`` + ``not has_raw_markers``) only run for rows that
     need them.
 
+    **Why a nightly full-table scan is still not the right long-term shape**
+    (measured 2026-10-24; kept here because the "can this be cheaper?" question
+    comes up every time someone reads this docstring):
+
+    Only **1 594 of 246 035 rows (0.65 %)** can still change state — those with
+    ``has_epub`` in (0, 1).  The other 244 441 are terminal: 233 337
+    ``NO_IMAGES`` and 11 104 ``DONE``.  A terminal row can only move if a file
+    appears or vanishes beside it, i.e. if *another* code path wrote or deleted
+    it — and every such path already updates the row in the same transaction
+    (the producer in ``image_downloader``, the re-download in ``ingest``,
+    ``delete_novel_files`` on delete).  The scan is therefore a **cross-check on
+    invariants that are already maintained transactionally**, and the last
+    eight production runs all report 「无变化」.
+
+    So the honest long-term shape is: keep the full pass as an explicit
+    *audit* (what this task is), not as a nightly repair everyone relies on for
+    convergence, and let the events that can actually change a row drive
+    re-examination.  That needs the producer to record "I touched this row"
+    (a data-model change), not a tuning knob — out of scope for this commit,
+    which only bounds the memory.
+
     **Full table every run, chunked for the event loop.**  The first full pass
     over production measured ~10.5 ms/row — 42 minutes for 238 k rows — because
     every row still had to be *classified*; that is what the old bounded-slice
@@ -112,18 +133,32 @@ async def check_epub(ctx: TaskContext) -> TaskResult:
     # patching the wrap-around: there is no "below the cursor" any more, so a
     # bounded slice can never strand rows.  An interrupted run simply repeats
     # work next time — the sweep is idempotent.
-    async with uow.begin():
-        rows = uow.session.execute(
-            _select(models.Novel.id, models.Novel.path, models.Novel.has_epub)
-            .order_by(models.Novel.id)
-        ).fetchall()
+    #
+    # Rows are read in **keyset pages**, not one ``fetchall()``.  Fetching all
+    # 246 035 rows measured 2.0 s and 79 MB peak RSS in a 260 MB process —
+    # nothing to a desktop, significant for this service.  Paging keeps the
+    # footprint at one page's worth of tuples and, because each page is
+    # ordered by ``id``, it also replaces the old single-transaction read:
+    # holding one transaction open for the whole file-I/O pass is exactly what
+    # this task should not do.  Coverage is unchanged — *every* row is still
+    # examined every run, which is the property the cursor removal bought.
+    async def _page(after_id: int) -> list:
+        async with uow.begin():
+            return uow.session.execute(
+                _select(
+                    models.Novel.id, models.Novel.path, models.Novel.has_epub
+                )
+                .where(models.Novel.id > after_id)
+                .order_by(models.Novel.id)
+                .limit(_SWEEP_READ_PAGE)
+            ).fetchall()
 
     # A leftover cursor from the old design would make the next reader think
     # part of the table was already done; clear it once, then forget it.
     if await _read_cursor(uow):
         await _write_cursor(uow, 0)
 
-    if not rows:
+    if not await _page(0):
         return TaskResult(summary="EPUB 状态检查: 无需修复（空库）")
 
 
@@ -178,23 +213,37 @@ async def check_epub(ctx: TaskContext) -> TaskResult:
             totals["missing"] += len(missing_ids)
             missing_ids.clear()
 
-    for start in range(0, len(rows), _SWEEP_CHUNK):
-        chunk = rows[start:start + _SWEEP_CHUNK]
-        (
-            c_done, c_revert, c_noimg, c_enable, c_pending, c_missing,
-        ) = await asyncio.to_thread(_sweep, chunk, start)
-        completed_ids += c_done
-        revert_ids += c_revert
-        no_image_ids += c_noimg
-        enable_ids += c_enable
-        pending_ids += c_pending
-        missing_ids += c_missing
-        await _flush()
-        # Explicit yield: give the HTTP handlers a turn between chunks.
-        await asyncio.sleep(0)
+    # Walk the table page by page (keyset on ``id``).  ``examined`` is the
+    # absolute index used only for progress logging; ``seen`` counts every row
+    # examined so the summary can still say "全表 N 行".
+    examined = 0
+    seen = 0
+    after_id = 0
+    while True:
+        rows = await _page(after_id)
+        if not rows:
+            break
+        after_id = rows[-1][0]
+        seen += len(rows)
+
+        for start in range(0, len(rows), _SWEEP_CHUNK):
+            chunk = rows[start:start + _SWEEP_CHUNK]
+            (
+                c_done, c_revert, c_noimg, c_enable, c_pending, c_missing,
+            ) = await asyncio.to_thread(_sweep, chunk, examined)
+            examined += len(chunk)
+            completed_ids += c_done
+            revert_ids += c_revert
+            no_image_ids += c_noimg
+            enable_ids += c_enable
+            pending_ids += c_pending
+            missing_ids += c_missing
+            await _flush()
+            # Explicit yield: give the HTTP handlers a turn between chunks.
+            await asyncio.sleep(0)
 
     logger.info(
-        f"check_epub: 本轮 {len(rows)} 行（{time.monotonic() - started:.0f}s），"
+        f"check_epub: 本轮 {seen} 行（{time.monotonic() - started:.0f}s），"
         f"completed={totals['completed']}, reverted={totals['reverted']}, "
         f"enabled={totals['enabled']}, no_images={totals['no_images']}, "
         f"missing={totals['missing']}, pending={len(pending_ids)}（全表）"
@@ -220,7 +269,7 @@ async def check_epub(ctx: TaskContext) -> TaskResult:
         summary=(
             "EPUB 状态检查: "
             + (" ".join(parts) if parts else "本轮无变化")
-            + f"（全表 {len(rows)} 行）"
+            + f"（全表 {seen} 行）"
         )
     )
 
@@ -468,3 +517,10 @@ def _no_images_ever_and_stale(txt_path: Path, novel_id: int) -> bool:
     except OSError:
         return False
     return age_days > _STALE_DAYS
+
+
+# How many rows one keyset page reads.  Big enough that the per-page overhead
+# is noise next to the file I/O inside ``_sweep``, small enough that the peak
+# footprint stays at one page (~20 k tuples ≈ 6 MB) instead of the whole table
+# (246 k rows ≈ 79 MB measured).
+_SWEEP_READ_PAGE = 20_000

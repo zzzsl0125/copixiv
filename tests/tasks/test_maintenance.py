@@ -1680,3 +1680,72 @@ class TestFixSeriesIndexDeadLetter:
         # 本轮照常收尾：整页唯一一个候选失败 → 专用摘要，任务正常返回，
         # 没有把台账的写失败升级成任务崩溃。下一轮该系列仍是候选（游标越过）。
         assert "全部失败" in result.summary
+
+
+class TestCheckEpubPaging:
+    """Keyset paging must not change *coverage* — every row, every run.
+
+    The sweep used to ``fetchall()`` the whole table (2.0 s / 79 MB peak on
+    production's 246 k rows).  It now reads 20 k-row pages ordered by ``id``,
+    which keeps the footprint at one page.  Coverage is the property the
+    cursor removal bought, so it is what these tests pin: a table spanning
+    several pages must still be classified completely in one run.
+    """
+
+    async def test_multiple_pages_are_all_examined(
+        self, session_factory, tmp_path, monkeypatch,
+    ):
+        from copixiv.tasks.maintenance import epub as epub_task
+
+        # Shrink the page so a small fixture spans several pages: the paging
+        # logic is what is under test, not the constant.
+        monkeypatch.setattr(epub_task, "_SWEEP_READ_PAGE", 2)
+
+        for nid in range(51, 60):        # 9 rows → 5 pages of 2
+            await _seed(
+                session_factory, nid, "纯文字无图", False, tmp_path,
+                status=EpubStatus.NO,
+            )
+
+        result = await check_epub(TaskContext(uow=SqlUnitOfWork(session_factory)))
+
+        for nid in range(51, 60):
+            assert _get_status(session_factory, nid) == EpubStatus.NO_IMAGES
+        # The summary counts every examined row, not just the last page.
+        assert "全表 9 行" in result.summary
+
+    async def test_paging_does_not_hold_one_transaction(
+        self, session_factory, tmp_path, monkeypatch,
+    ):
+        """Each page opens its own short transaction.
+
+        Holding one transaction across the whole file-I/O pass is what the
+        single ``fetchall()`` did; it keeps a snapshot open for the task's
+        entire duration.  Assert the number of ``begin()`` calls grows with the
+        page count rather than being one per run.
+        """
+        from copixiv.tasks.maintenance import epub as epub_task
+
+        monkeypatch.setattr(epub_task, "_SWEEP_READ_PAGE", 2)
+        for nid in range(71, 79):        # 8 rows → 5 pages including the empty
+            await _seed(
+                session_factory, nid, "纯文字无图", False, tmp_path,
+                status=EpubStatus.NO,
+            )
+
+        uow = SqlUnitOfWork(session_factory)
+        entered = 0
+        real_begin = uow.begin
+
+        def _counting_begin():
+            nonlocal entered
+            entered += 1
+            return real_begin()
+
+        monkeypatch.setattr(uow, "begin", _counting_begin)
+
+        await check_epub(TaskContext(uow=uow))
+
+        # 5 data pages + the final empty one; also more than the fixed handful
+        # of writes ``_flush`` performs, so "one transaction per run" is gone.
+        assert entered >= 5, f"预期按页开事务，实际只开了 {entered} 次"
