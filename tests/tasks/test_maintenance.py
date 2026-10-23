@@ -1749,3 +1749,72 @@ class TestCheckEpubPaging:
         # 5 data pages + the final empty one; also more than the fixed handful
         # of writes ``_flush`` performs, so "one transaction per run" is gone.
         assert entered >= 5, f"预期按页开事务，实际只开了 {entered} 次"
+
+
+class TestGiveUpIsNotVetoedByABrokenFile:
+    """A broken EPUB on disk must not stop the give-up rule from settling a row.
+
+    A blanket veto ("a marker-bearing file means it still needs a rebuild, so
+    never give up") looked right and was wrong in production: the 2026-03 rows
+    that need it most are *exactly* marker-bearing files whose images are gone
+    for good.  The veto re-satisfied itself every night, so those rows stayed
+    PENDING **forever** — the same "rule written but unreachable" shape the
+    review warns about, reintroduced by the veto itself.
+
+    The distinction that matters is not "is the file broken" but "can the
+    images still arrive".  That is answered by the body's mtime, which is what
+    the rule already used.
+    """
+
+    @staticmethod
+    def _real_epub_with_markers(txt, novel_id):
+        """An EPUB that is readable AND still carries a raw image marker."""
+        import zipfile
+        from pathlib import Path
+
+        epub = Path(txt).with_suffix(".epub")
+        with zipfile.ZipFile(epub, "w") as zf:
+            zf.writestr("mimetype", "application/epub+zip")
+            zf.writestr(
+                "OEBPS/content.xhtml",
+                f"<html><body>正文 [uploadedimage:{novel_id}] 尾巴</body></html>",
+            )
+        return epub
+
+    async def test_stale_marker_bearing_epub_still_settles_as_no_images(
+        self, session_factory, tmp_path,
+    ):
+        """The production shape: images never landed, text untouched for months."""
+        import os
+        import time as _time
+
+        txt = await _seed_pending(
+            session_factory, 71, "正文 [uploadedimage:1]", False, tmp_path,
+        )
+        self._real_epub_with_markers(txt, 71)
+        old = _time.time() - 200 * 86400
+        os.utime(txt, (old, old))
+
+        result = await _run_check_epub(session_factory)
+
+        assert _get_status(session_factory, 71) == EpubStatus.NO_IMAGES, (
+            "图片确实没了：必须收敛，而不是每夜重新判成 pending"
+        )
+        assert "确认为无图" in result.summary
+
+    async def test_fresh_marker_bearing_epub_stays_pending(
+        self, session_factory, tmp_path,
+    ):
+        """Mirror case: a fresh attempt means the images may still arrive.
+
+        This is what the veto was *trying* to protect, and the mtime rule
+        already protects it — no separate file-content check needed.
+        """
+        txt = await _seed_pending(
+            session_factory, 72, "正文 [uploadedimage:1]", False, tmp_path,
+        )
+        self._real_epub_with_markers(txt, 72)
+
+        await _run_check_epub(session_factory)
+
+        assert _get_status(session_factory, 72) == EpubStatus.PENDING
