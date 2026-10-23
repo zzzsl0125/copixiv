@@ -10,6 +10,7 @@ from .account import (
     AccountInvalidError,
     RateLimitError,
 )
+from .errors import PremiumRequiredError
 
 from copixiv.log import logger
 
@@ -50,11 +51,25 @@ class AccountPool:
         if not candidates:
             raise RuntimeError("No valid Pixiv accounts available")
 
-        # Filter by premium requirement
+        # Premium requirement — fatal when unmet.
+        #
+        # This used to fall through to the unfiltered candidate list when no
+        # premium account existed, which made ``search_novel(order=
+        # "popular_desc")`` run on a free token: Pixiv then answers with an
+        # error *or* an unfiltered list of unrelated works, the caller sees
+        # "success, 0 new novels", and a bad batch pollutes the library.
+        # Retrying cannot fix a missing subscription, so the only honest
+        # outcome is to fail the task here, once, with a message the operator
+        # can act on.  ``select()`` is the single owner of account choice —
+        # deciding this in the task instead would duplicate the rule.
         if strat.need_premium:
             premium = [a for a in candidates if a.token_info.premium]
-            if premium:
-                candidates = premium
+            if not premium:
+                raise PremiumRequiredError(
+                    "该任务需要 pixiv 会员账号（会员已到期或账号池里没有 "
+                    "premium 账号），已停止执行"
+                )
+            candidates = premium
 
         # Force the designated「追更账号」(is_follow on the tokens table).
         # Single source of truth — the flagged account owns the Pixiv

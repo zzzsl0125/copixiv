@@ -61,6 +61,26 @@ class TestAccountPool:
         # Without the requirement, LRU picks the free one (idle longest)
         assert pool.select(AccountStrategy()) is free
 
+    def test_premium_requirement_is_fatal_when_unmet(self):
+        """No premium account → raise, never silently use a free one.
+
+        Falling back to a free account made ``search_novel(order=
+        "popular_desc")`` return an error or an unfiltered pile of unrelated
+        works, which the task recorded as "success, 0 new novels" while it
+        polluted the library.  A missing subscription cannot be retried, so the
+        only honest outcome is a hard failure.
+        """
+        from copixiv.pixiv.errors import PremiumRequiredError
+
+        pool = AccountPool()
+        pool.add_account(_account("free"))
+        pool.add_account(_account("free2"))
+
+        with pytest.raises(PremiumRequiredError):
+            pool.select(AccountStrategy(need_premium=True))
+        # Without the requirement those same accounts are still usable.
+        assert pool.select(AccountStrategy()) is not None
+
     def test_force_account_by_username(self):
         pool = AccountPool()
         a, b = _account("alpha"), _account("beta")
@@ -437,3 +457,149 @@ class TestAccountExecute:
         result = await acc.execute("novel_ranking")
         assert calls["n"] == 2
         assert result == {"novels": []}
+
+
+# ---------------------------------------------------------------------------
+# Vendor signature alignment (2026-10)
+# ---------------------------------------------------------------------------
+#
+# The client is an anti-corruption layer over pixivpy3, but nothing used to
+# verify that its forwarded keywords actually exist on the vendor method —
+# ``search_novel`` forwarded ``search_type=`` / ``order=`` for months while
+# pixivpy3 had renamed them to ``search_target=`` / ``sort=``.  The task that
+# used it could never run, and no test noticed because none of them call a
+# typed client method.  These tests bind the real vendor signature.
+
+def _vendor_bound_kwargs(client_call: dict) -> dict:
+    """Strip the client-local pagination knobs from a forwarded-kwargs dict."""
+    return {
+        k: v for k, v in client_call.items()
+        if k not in ("fetch_all", "fetch_til", "fetch_minlike")
+    }
+
+
+class TestVendorSignatureAlignment:
+    @staticmethod
+    def _vendor(method: str):
+        from copixiv.pixiv import patch
+
+        patch.apply()          # novel_ranking is added by a monkey patch
+        return getattr(AppPixivAPI, method)
+
+    def test_search_novel_keywords_exist_on_vendor(self):
+        """``search_type``/``order`` must be forwarded as the vendor's names."""
+        import inspect
+
+        from copixiv.pixiv.client import PixivClient
+
+        forwarded = {
+            "search_target": "keyword",
+            "sort": "popular_desc",
+            "start_date": None,
+            "end_date": None,
+        }
+        # Raises TypeError if any keyword is not part of the vendor signature.
+        inspect.signature(self._vendor("search_novel")).bind(
+            object(), "R-18", **forwarded,
+        )
+
+    def test_every_typed_client_method_binds_to_vendor(self):
+        """Every ``_call`` target of the typed client methods must exist."""
+        import inspect
+
+        from copixiv.pixiv.client import PixivClient
+
+        cases = {
+            "webview_novel": ((42,), {}),
+            "user_novels": ((42,), {}),
+            "user_detail": ((42,), {}),
+            "user_follow_add": ((42,), {}),
+            "user_follow_delete": ((42,), {}),
+            "novel_follow": ((), {}),
+            "novel_series": ((42,), {}),
+            "novel_ranking": ((), {"mode": "day_r18", "date": None}),
+        }
+        for method, (args, kwargs) in cases.items():
+            inspect.signature(self._vendor(method)).bind(
+                object(), *args, **_vendor_bound_kwargs(kwargs),
+            )
+
+    async def test_search_novel_forwards_vendor_names_end_to_end(self):
+        """The real client must reach the vendor method without TypeError."""
+        from copixiv.pixiv import patch
+        from copixiv.pixiv.client import PixivClient
+
+        patch.apply()
+        seen: dict = {}
+
+        def _search_novel(*args, **kwargs):
+            seen.update(kwargs)
+            return {"novels": [], "next_url": None}
+
+        acc = _account_raising()
+        acc.state["api"] = SimpleNamespace(
+            auth=lambda **kw: None, search_novel=_search_novel,
+        )
+
+        async def execute(method, *args, **kwargs):
+            # Forward exactly as the real adapter would.
+            return getattr(acc.state["api"], method)(*args, **kwargs)
+
+        acc.execute = execute
+        client = PixivClient(_ScriptedPool([acc]))
+
+        await client.search_novel("R-18", "keyword", "popular_desc")
+        assert seen["search_target"] == "keyword"
+        assert seen["sort"] == "popular_desc"
+        assert "search_type" not in seen
+        # A client-local pagination stop condition, never sent to the vendor.
+        assert "fetch_minlike" not in seen
+
+
+# ---------------------------------------------------------------------------
+# Permanent (4xx) failures are not retried
+# ---------------------------------------------------------------------------
+
+class TestPermanentErrors:
+    async def test_404_is_not_retried(self):
+        """A 404 costs exactly one request.
+
+        Retrying it also switches accounts, so a dead series cost four requests
+        across four accounts per cron item — that is how ``fix_series_index``
+        burned its 30-minute budget and timed out on 2026-10-07.
+        """
+        acc = _ready_account_raising_http(404)
+        client = PixivClient(_ScriptedPool([acc]))
+
+        with pytest.raises(PixivApiError) as exc_info:
+            await client.user_novels(42)
+
+        assert exc_info.value.status_code == 404
+        assert acc.state["calls"] == 1
+
+    async def test_5xx_is_still_retried(self):
+        """Transient server errors keep the retry ladder."""
+        acc = _ready_account_raising_http(503)
+        client = PixivClient(_ScriptedPool([acc]))
+
+        with pytest.raises(PixivApiError):
+            await client.user_novels(42)
+
+        assert acc.state["calls"] == client._MAX_RETRIES + 1
+
+
+def _ready_account_raising_http(status_code: int):
+    """Account double whose ``execute`` raises the *translated* error.
+
+    ``PixivAccount.execute`` converts ``PixivHttpError`` into ``PixivApiError``
+    (carrying the status code) before it reaches the client's retry loop, so
+    that is what the double must raise — raising the raw HTTP error would test
+    a path the client never sees.
+    """
+    state = {"calls": 0}
+
+    async def execute(method, *args, **kwargs):  # noqa: ARG001
+        state["calls"] += 1
+        raise PixivApiError(f"HTTP {status_code}", status_code=status_code)
+
+    return SimpleNamespace(execute=execute, state=state)

@@ -171,7 +171,9 @@ class PixivAccount:
                 if e.status_code in (400, 401):
                     self.status = AccountStatus.INVALID
                     raise AccountInvalidError(str(self)) from e
-                raise PixivApiError(str(e)) from e
+                raise PixivApiError(
+                    str(e), status_code=e.status_code,
+                ) from e
             except PixivError as e:
                 if "auth() failed" in str(e).lower():
                     self.status = AccountStatus.INVALID
@@ -276,7 +278,11 @@ class PixivAccount:
                     # next attempt instead of retrying with the dead token.
                     self.status = AccountStatus.INACTIVE
                     self._last_auth_time = 0.0
-                raise PixivApiError(str(e)) from e
+                # Keep the status code on the translated error: the client's
+                # retry loop needs it to tell a permanent 404 from a
+                # transient 5xx (``_is_permanent``).  Dropping it here made
+                # every 4xx look retryable.
+                raise PixivApiError(str(e), status_code=e.status_code) from e
             except (RateLimitError, AccountInvalidError, PixivApiError) as e:
                 # Already classified (raised by the error-body fallback
                 # inside the try) — never re-classify.

@@ -123,6 +123,11 @@ src/copixiv/
   args 模型推导，无反射）
 - 内置业务任务：`tasks/novels.py`（单本/关注/作者/排行/搜索）、`tasks/batch.py`
   （批量操作/导出）、`tasks/maintenance.py`（搜索索引/EPUB/系列索引等）
+- 会员门禁：`account_rule(need_premium=True)` 在账号池里**找不到 premium 账号时硬失败**
+  （`PremiumRequiredError`），不回退免费账号——按喜好数排序的搜索在免费账号上会返回
+  错误或一堆无关作品，而任务会记成"成功 0 本"。让任务行红掉比静默污染库诚实。
+- 永久失败不重试：4xx（除 408/429）由 `PixivClient._execute_with_retry` 直接抛出，
+  既不消耗重试阶梯也不换账号（已下架的系列曾经每条烧掉 4 次请求 × 4 个账号）。
 
 ## 7. 配置
 

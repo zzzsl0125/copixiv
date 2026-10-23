@@ -36,6 +36,26 @@ def _get_novels(result) -> list:
     return safe_get(result, "novels") or []
 
 
+# 4xx statuses that *are* worth retrying: 408 (request timeout) and 429
+# (rate limited — handled elsewhere, but keep the predicate conservative).
+_TRANSIENT_4XX: frozenset[int] = frozenset({408, 429})
+
+
+def _is_permanent(exc: "PixivApiError") -> bool:
+    """True when retrying *exc* cannot change the outcome.
+
+    A 4xx other than 408/429 means the request itself is wrong or the
+    resource is gone (deleted novel / removed series).  No number of retries
+    or account switches can fix that — and each attempt costs
+    ``min_interval`` seconds plus a cooldown risk, which is how a cron task
+    burns its 30-minute budget on permanently-404 items.
+    """
+    status = exc.status_code
+    if status is None:
+        return False
+    return 400 <= status < 500 and status not in _TRANSIENT_4XX
+
+
 class PixivClient:
     """Pixiv API client with explicit methods, account pooling, and pagination.
 
@@ -135,12 +155,24 @@ class PixivClient:
         end_date=None,
         fetch_minlike: int | None = None,
     ) -> dict:
-        """Search novels by keyword."""
+        """Search novels by keyword.
+
+        ``search_type`` / ``order`` are this project's names for the vendor's
+        ``search_target`` / ``sort``; the wire keywords are translated here
+        because this is the only place that knows both vocabularies.  Values
+        are identical in both (``keyword`` / ``title_and_caption``,
+        ``popular_desc`` / ``date_desc`` / ``date_asc``) — only the parameter
+        *names* differ, so the public signature stays stable for task code.
+
+        ``fetch_minlike`` is deliberately **not** forwarded: it is a local
+        pagination stop condition, consumed by :meth:`_call`.  The vendor has
+        no such parameter (passing it would be a ``TypeError``).
+        """
         return await self._call(
             "search_novel",
             keyword,
-            search_type=search_type,
-            order=order,
+            search_target=search_type or "partial_match_for_tags",
+            sort=order or "date_desc",
             start_date=start_date,
             end_date=end_date,
             fetch_minlike=fetch_minlike,
@@ -205,11 +237,31 @@ class PixivClient:
                 last_error = RateLimitError(str(account))
                 if attempt < self._MAX_RETRIES:
                     await asyncio.sleep(self._backoff(attempt))
-            except (PixivApiError, RequestException, ConnectionError) as e:
-                # PixivApiError covers API-level errors translated by
-                # account.execute(); RequestException covers requests' own
-                # network errors; builtin ConnectionError is kept as a
-                # network-error stand-in used by the existing test suite.
+            except PixivApiError as e:
+                if _is_permanent(e):
+                    # 4xx other than 408/429 — the request itself is wrong or
+                    # the resource is gone.  Retrying it burns the account
+                    # pool (both the retry ladder *and* the account switch lie
+                    # on this path) and, for a cron task, minutes of budget
+                    # per dead work: this is what timed out ``fix_series_index``
+                    # on 2026-10-07, where every 404 cost 4 requests across 4
+                    # accounts.  Fail immediately so the caller can skip the
+                    # item and move on.
+                    logger.warning(
+                        f"Permanent API error on {account} "
+                        f"({e.status_code}): {e} — not retrying"
+                    )
+                    raise
+                logger.warning(
+                    f"API error on {account}: {e}, "
+                    f"retry {attempt + 1}/{self._MAX_RETRIES + 1}"
+                )
+                last_error = e
+                if attempt < self._MAX_RETRIES:
+                    await asyncio.sleep(self._backoff(attempt))
+            except (RequestException, ConnectionError) as e:
+                # Requests' own network errors; builtin ConnectionError is
+                # kept as a network-error stand-in used by the test suite.
                 logger.warning(
                     f"API error on {account}: {e}, "
                     f"retry {attempt + 1}/{self._MAX_RETRIES + 1}"
