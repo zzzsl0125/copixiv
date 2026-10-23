@@ -72,12 +72,20 @@ class NovelSearchArgs(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+# How many ``author_fetch`` branches may run at once during a ranking/search
+# fan-out.  Each branch opens its own session/transaction, and the engine pool
+# is ``pool_size=6 + max_overflow=12``; a ranking page can name 20+ authors, so
+# without a gate the persist phase alone could exhaust the pool and turn a
+# transient checkout wait into a task failure.
+_FAN_OUT_LIMIT = 8
+
+
 async def _fan_out_author_fetch(
     novels: list,
     *,
     force: bool,
     ctx: TaskContext,
-) -> list[str]:
+) -> tuple[list[str], list[int]]:
     """Given a list of Pixiv API novel objects, filter to Chinese novels,
     extract unique author IDs, and fan out ``author_fetch`` concurrently.
 
@@ -89,39 +97,63 @@ async def _fan_out_author_fetch(
     *and* short database write transactions, with LockNotAvailable retried
     on a fresh session (``run_write_transaction``).
 
-    Returns the combined list of newly-downloaded novel titles.
+    Returns ``(titles, failed_ids)``.  The failures of each child
+    ``author_fetch`` must travel up: a ranking day where one of twenty authors
+    failed still reports "success" otherwise, and the operator has no way to
+    tell a quiet day from a broken one.
     """
     cn = _filter_chinese_novels(novels)
     if not cn:
-        return []
+        return [], []
 
     authors = {
         safe_get(n, "user.id")
         for n in cn if safe_get(n, "user")
     }
     if not authors:
-        return []
+        return [], []
 
     async with ctx.client.account_rule():
-        results = await asyncio.gather(*[
-            author_fetch(
-                AuthorFetchArgs(author_id=a, force=force),
-                ctx.with_uow(ctx.child_uow()),
-            )
-            for a in authors
-        ])
+        gate = asyncio.Semaphore(_FAN_OUT_LIMIT)
 
-    # Each author_fetch returns a TaskResult; flatten their titles.
+        async def _one(author_id: int):
+            async with gate:
+                return await author_fetch(
+                    AuthorFetchArgs(author_id=author_id, force=force),
+                    ctx.with_uow(ctx.child_uow()),
+                )
+
+        results = await asyncio.gather(*[_one(a) for a in authors])
+
+    # Each author_fetch returns a TaskResult; flatten titles and failures.
     titles: list[str] = []
+    failed_ids: list[int] = []
     for r in results:
         if isinstance(r, TaskResult):
             titles.extend(r.new_novel_titles)
-    return titles
+            failed_ids.extend(r.failed_ids)
+    return titles, failed_ids
 
 
 # ---------------------------------------------------------------------------
 # Registered tasks
 # ---------------------------------------------------------------------------
+
+
+def _batch_summary(prefix: str, out) -> str:
+    """One-line result summary that does not hide partial failure.
+
+    ``f"{prefix}: 新增 {n} 本小说"`` is the wording the UI and the Telegram
+    notifier have always shown, and it reads as "all good" even when half the
+    batch failed.  The counts are now appended whenever something failed;
+    ``failed_ids`` carries the machine-readable list for anyone who needs the
+    ids rather than a count.
+    """
+    failed = len(out.failed_ids)
+    summary = f"{prefix}: 新增 {len(out.titles)} 本小说"
+    if failed:
+        summary += f"，失败 {failed} 本"
+    return summary
 
 
 @register("novel_fetch", description="抓取指定 ID 的小说", args=NovelFetchArgs)
@@ -180,8 +212,9 @@ async def novel_follow(args: NovelFollowArgs, ctx: TaskContext) -> TaskResult:
     )
 
     return TaskResult(
-        summary=f"关注更新: 新增 {len(out.titles)} 本小说",
+        summary=_batch_summary("关注更新", out),
         new_novel_titles=out.titles,
+        failed_ids=out.failed_ids,
     )
 
 
@@ -249,8 +282,9 @@ async def author_fetch(args: AuthorFetchArgs, ctx: TaskContext) -> TaskResult:
 
     label = name or f"#{args.author_id}"
     return TaskResult(
-        summary=f"作者 {label}: 新增 {len(out.titles)} 本小说",
+        summary=_batch_summary(f"作者 {label}", out),
         new_novel_titles=out.titles,
+        failed_ids=out.failed_ids,
     )
 
 
@@ -305,6 +339,13 @@ async def author_special_follow(ctx: TaskContext) -> TaskResult:
         if novels:
             all_novels.extend(novels)
 
+    # Same language rule every other fetching task applies.  Without it this
+    # task was the one path that imported whatever the followed authors
+    # published — Japanese works included — into a Chinese-only library
+    # (1,528 non-Chinese rows already in production, from before this task
+    # existed in its current form).
+    all_novels = _filter_chinese_novels(all_novels)
+
     out = await ingest(
         all_novels, session_factory=ctx.session_factory,
         client=ctx.client, file_storage=ctx.file_storage,
@@ -312,8 +353,9 @@ async def author_special_follow(ctx: TaskContext) -> TaskResult:
     )
 
     return TaskResult(
-        summary=f"特别关注: 新增 {len(out.titles)} 本小说",
+        summary=_batch_summary("特别关注", out),
         new_novel_titles=out.titles,
+        failed_ids=out.failed_ids,
     )
 
 
@@ -325,6 +367,7 @@ async def author_special_follow(ctx: TaskContext) -> TaskResult:
 async def novel_ranking(args: NovelRankingArgs, ctx: TaskContext) -> TaskResult:
     """Fetch novel rankings."""
     titles: list[str] = []
+    failed_ids: list[int] = []
     for delta in range(1, args.days + 1):  # days=3 → 昨天/前天/大前天（当天榜单不全，跳过）
         target = datetime.now().astimezone() - timedelta(days=delta)
         resp = await ctx.client.novel_ranking(
@@ -333,12 +376,17 @@ async def novel_ranking(args: NovelRankingArgs, ctx: TaskContext) -> TaskResult:
         novels = safe_get(resp, "novels", [])
         if not novels:
             continue
-        t = await _fan_out_author_fetch(novels, force=args.force, ctx=ctx)
+        t, f = await _fan_out_author_fetch(novels, force=args.force, ctx=ctx)
         titles.extend(t)
+        failed_ids.extend(f)
 
+    summary = f"排行榜 ({args.mode}): 新增 {len(titles)} 本小说"
+    if failed_ids:
+        summary += f"，失败 {len(set(failed_ids))} 本"
     return TaskResult(
-        summary=f"排行榜 ({args.mode}): 新增 {len(titles)} 本小说",
+        summary=summary,
         new_novel_titles=titles,
+        failed_ids=list(dict.fromkeys(failed_ids)),
     )
 
 
@@ -358,6 +406,7 @@ async def novel_search(args: NovelSearchArgs, ctx: TaskContext) -> TaskResult:
     end_date = datetime(end.year, end.month, end.day)
 
     all_titles: list[str] = []
+    failed_ids: list[int] = []
     async with ctx.client.account_rule(need_premium=True):
         for start_date, end_date in _month_ranges(end_date, args.months):
             logger.info(f"Searching {start_date.date()} ~ {end_date.date()}")
@@ -369,12 +418,19 @@ async def novel_search(args: NovelSearchArgs, ctx: TaskContext) -> TaskResult:
             novels = safe_get(resp, "novels", [])
             if not novels:
                 continue
-            t = await _fan_out_author_fetch(novels, force=args.force, ctx=ctx)
+            t, f = await _fan_out_author_fetch(
+                novels, force=args.force, ctx=ctx,
+            )
             all_titles.extend(t)
+            failed_ids.extend(f)
 
+    summary = f"搜索 ({args.keyword}): 新增 {len(all_titles)} 本小说"
+    if failed_ids:
+        summary += f"，失败 {len(set(failed_ids))} 本"
     return TaskResult(
-        summary=f"搜索 ({args.keyword}): 新增 {len(all_titles)} 本小说",
+        summary=summary,
         new_novel_titles=all_titles,
+        failed_ids=list(dict.fromkeys(failed_ids)),
     )
 
 

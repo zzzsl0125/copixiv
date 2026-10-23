@@ -572,12 +572,28 @@ class TaskExecutor:
         duration = time.time() - start_time
         result = self._normalize_result(result_val)
 
+        # A failed run must never be summarised as 「完成」.  ``_normalize_result``
+        # maps a missing return value to that generic summary, which is right
+        # for a task that returned nothing on the success path — but on the
+        # failure path it leaves rows saying "failed / 完成", hiding the actual
+        # error from the UI (32 such rows in production).
+        if status == "failed" and not result.failed_ids and (
+            not result.summary or result.summary == "完成"
+        ):
+            result = result.model_copy(
+                update={"summary": error_msg or "任务失败（未记录原因）"},
+            )
+
         result_data = json.dumps(
             {
                 "log": log_output,
                 "summary": result.summary,
                 "new_novels_count": result.new_novel_count,
                 "new_novel_titles": result.new_novel_titles,
+                # Machine-readable per-item failures.  Without this the only
+                # trace of a novel that failed mid-batch was the ledger and the
+                # log text; the task row still read "success, N new".
+                "failed_ids": result.failed_ids,
             },
             ensure_ascii=False,
         )

@@ -26,7 +26,13 @@ import pytest
 
 from copixiv.db.models import TaskHistory
 from copixiv.tasks import kernel
-from copixiv.tasks.kernel import TaskHistoryRecorder, TaskManagerSystem
+from copixiv.core.models import TaskResult
+from copixiv.tasks.kernel import (
+    TaskHistoryRecorder,
+    TaskManagerSystem,
+    register,
+    unregister,
+)
 
 TERMINAL = ("success", "failed", "interrupted")
 
@@ -522,3 +528,58 @@ async def test_stop_clears_adhoc_specs(session_factory):
 
     assert manager._adhoc_specs == {}
     assert manager._recorder._live_pending == set()
+
+
+async def test_result_carries_machine_readable_failed_ids(session_factory):
+    """``failed_ids`` must survive into ``result`` JSONB.
+
+    It used to be dropped on the floor: the executor persisted only
+    log/summary/counts, so a batch that half-failed was indistinguishable from
+    a clean one (and ``failed_retry``'s structured outcome never reached the
+    database at all).
+    """
+    manager = TaskManagerSystem(session_factory=session_factory)
+
+    @register("a4_result_with_failures")
+    async def _task(ctx):      # noqa: ARG001
+        return TaskResult(summary="新增 2 本，失败 1 本", failed_ids=[7])
+
+    try:
+        task_id = manager.run_task("a4_result_with_failures")
+        await manager.start()
+        assert await _wait_terminal(session_factory, [task_id]) == ["success"]
+    finally:
+        await manager.stop()
+        unregister("a4_result_with_failures")
+
+    with session_factory() as session:
+        row = session.get(TaskHistory, task_id)
+        assert row.result["failed_ids"] == [7]
+        assert row.result["summary"] == "新增 2 本，失败 1 本"
+
+
+async def test_failed_row_never_summarises_as_done(session_factory):
+    """A raising task must not end up with the generic 「完成」 summary.
+
+    ``_normalize_result`` maps a missing return value to 「完成」, which is fine
+    on the success path but hid the real error on the failure path (32 such
+    rows in production).
+    """
+    manager = TaskManagerSystem(session_factory=session_factory)
+
+    @register("a4_always_raises")
+    async def _task(ctx):      # noqa: ARG001
+        raise RuntimeError("boom")
+
+    try:
+        task_id = manager.run_task("a4_always_raises")
+        await manager.start()
+        assert await _wait_terminal(session_factory, [task_id]) == ["failed"]
+    finally:
+        await manager.stop()
+        unregister("a4_always_raises")
+
+    with session_factory() as session:
+        row = session.get(TaskHistory, task_id)
+        assert row.result["summary"] != "完成"
+        assert "boom" in row.result["summary"]
