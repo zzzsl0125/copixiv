@@ -25,6 +25,10 @@ TABLE_FAVOURITE = "favourite"
 # ``author.is_special_follow``.
 TABLE_SPECIAL_FOLLOW = "special_follow"
 TABLE_FAILED_NOVEL = "failed_novel"
+# Ledger of series pixiv no longer serves (``novel_series`` keeps answering
+# 404).  A *verdict* table, not entity data: it only tells the repair task's
+# candidate query which series are not worth re-fetching.
+TABLE_SERIES_DEAD_LETTER = "series_dead_letter"
 TABLE_SEARCH_HISTORY = "search_history"
 TABLE_AUTHOR_CACHE = "author_cache"
 TABLE_SERIES_CACHE = "series_cache"

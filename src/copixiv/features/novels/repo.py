@@ -87,6 +87,21 @@ def blocked_tags_excluded(names):
     return ~models.Novel.tags.overlap(list(names))
 
 
+def _retired_series_subquery():
+    """Series ids pixiv no longer serves — excluded from repair candidates.
+
+    A subquery rather than a materialised Python set: the repair task's
+    candidate queries already run inside the caller's transaction, and the
+    ledger is tiny (a few dozen rows), so letting PostgreSQL do the anti-join
+    keeps the "is this series dead?" rule in exactly one place
+    (``series_dead_letter.retired_at IS NOT NULL``) instead of being
+    re-implemented at every call site.
+    """
+    return _select(models.SeriesDeadLetter.series_id).where(
+        models.SeriesDeadLetter.retired_at.isnot(None)
+    )
+
+
 class NovelQueryBuilder:
     """Builds single-phase Novel list and count queries (PostgreSQL forms).
 
@@ -1558,11 +1573,19 @@ class SQLAlchemySeriesRepository(BaseRepository):
         ).scalar_one())
 
     async def series_with_empty_index(self) -> list[int]:
+        """Series with at least one chapter number missing.
+
+        Dead series are excluded: a series that pixiv keeps answering 404 for
+        can never be filled, so keeping it in the candidate set makes the task
+        spend its whole budget on guaranteed failures (183 of 200 candidates
+        in one measured run).  See ``features/novels/series_ledger.py``.
+        """
         return list(self.session.execute(
             _select(models.Novel.series_id)
             .where(
                 models.Novel.series_id.isnot(None),
                 models.Novel.series_index.is_(None),
+                ~models.Novel.series_id.in_(_retired_series_subquery()),
             )
             .distinct()
         ).scalars().all())
@@ -1648,12 +1671,17 @@ class SQLAlchemySeriesRepository(BaseRepository):
 
         单本系列**也在内**：单本系列的号同样可能是错的（名册才是权威，库里只有
         一本不代表 pixiv 只有一本）。按 ``series_id`` 升序（游标推进）。
+
+        已判死的系列同样排除——全量复查是「号可能错」的复查，不是「再试一次
+        pixiv 上不存在的系列」。要让死系列复活，显式清掉台账行
+        （见 ``features/novels/series_ledger.py``）。
         """
         stmt = (
             _select(models.Novel.series_id)
             .where(
                 models.Novel.series_id.isnot(None),
                 models.Novel.series_id > after_id,
+                ~models.Novel.series_id.in_(_retired_series_subquery()),
             )
             .group_by(models.Novel.series_id)
             .having(func.count(models.Novel.series_index) > 0)

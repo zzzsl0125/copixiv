@@ -9,6 +9,7 @@ from pydantic import BaseModel, field_validator
 
 from copixiv.core.models import TaskResult
 from copixiv.db.write_lock import run_write_transaction
+from copixiv.features.novels import series_ledger
 from copixiv.features.novels.repo import SQLAlchemySeriesRepository
 from copixiv.log import logger
 
@@ -248,7 +249,16 @@ async def fix_series_index(args: FixSeriesIndexArgs, ctx: TaskContext) -> TaskRe
     rosters: dict[int, list | None] = {}
 
     async def _roster(series_id: int) -> list | None:
-        """该系列的名册（作者章节顺序：从旧到新）；None = 本轮拿不到。"""
+        """该系列的名册（作者章节顺序：从旧到新）；None = 本轮拿不到。
+
+        失败会先记进死系列台账（``features/novels/series_ledger.py``）：
+        **只有「确定性 404」累加计数**，连续 N 轮才判死并从候选集移除。
+        网络超时 / 5xx / 限流不累加——它们说明「这轮运气不好」，不说明
+        「pixiv 上没有这个系列」，让它们计数会在 pixiv 抖动的一夜误杀一片。
+
+        判死之后这个系列不再进候选集，所以不会再被请求：生产实测一轮 200 个
+        候选里 183 个是这种死系列，占 80% 的运行时间（每轮 1740s 补 0–47 本）。
+        """
         if series_id not in rosters:
             try:
                 resp = await ctx.client.novel_series(series_id, fetch_all=True)
@@ -257,10 +267,44 @@ async def fix_series_index(args: FixSeriesIndexArgs, ctx: TaskContext) -> TaskRe
                     f"fix_series_index: 系列 {series_id} 名册请求失败: {exc}"
                 )
                 rosters[series_id] = None
+                await _note_roster_failure(series_id, exc)
             else:
                 novels = safe_get(resp, "novels", None)
                 rosters[series_id] = list(novels) if novels else None
+                # 拿得到名册（哪怕空）= pixiv 认这个系列，台账记录作废。
+                if rosters[series_id] is not None or novels is not None:
+                    await _note_roster_success(series_id)
         return rosters[series_id]
+
+    async def _note_roster_failure(series_id: int, exc: BaseException) -> None:
+        """Run one short transaction to record the verdict (best-effort).
+
+        Best-effort on purpose: a ledger write must never turn a fetch failure
+        into a task crash — the cursor still advances and the series stays a
+        candidate for the next round, which is exactly the pre-ledger
+        behaviour.
+        """
+        async def _record(uw) -> None:
+            series_ledger.note_failure(uw.session, series_id, exc)
+
+        try:
+            await run_write_transaction(uow, _record)
+        except Exception:                                # noqa: BLE001
+            logger.exception(
+                f"fix_series_index: 系列 {series_id} 台账写入失败（不影响本轮）"
+            )
+
+    async def _note_roster_success(series_id: int) -> None:
+        """Clear a series' ledger entry after a successful fetch (best-effort)."""
+        async def _clear(uw) -> None:
+            series_ledger.note_success(uw.session, series_id)
+
+        try:
+            await run_write_transaction(uow, _clear)
+        except Exception:                                # noqa: BLE001
+            logger.exception(
+                f"fix_series_index: 系列 {series_id} 台账清理失败（不影响本轮）"
+            )
 
     async def _apply_roster(
         series_id: int,

@@ -400,6 +400,50 @@ class FailedNovel(Base):
     )
 
 
+class SeriesDeadLetter(Base):
+    """Verdicts about series pixiv no longer serves.
+
+    The ``fix_series_index`` candidate set is "``series_id`` set,
+    ``series_index`` NULL", and that predicate cannot tell "could not fetch
+    this round" from "will never fetch".  A series deleted on pixiv keeps
+    matching forever, so it is re-requested every night and can never
+    succeed: 183 of 200 candidates in one measured run were such series,
+    which is why a 30-minute task filled 0–47 chapter numbers per run.
+
+    This is deliberately **not** a column on ``series``.  ``series`` is an
+    entity that ``update_summary`` aggregates into and that the author page /
+    series preview / batch edit all read; adding an operational "this row is
+    not really there" flag would force every reader to consult it.  A ledger
+    row is a verdict, like ``failed_novel`` — separate table, separate owner,
+    invisible to business reads.
+
+    ``consecutive_failures`` guards against a single 404: pixiv can answer
+    404 transiently, so a series is retired only after
+    :data:`copixiv.features.novels.series_ledger.RETIRE_AFTER_FAILURES`
+    consecutive *definitive* 404s.  Any success resets the count and clears
+    ``retired_at``, so a mis-retired series comes back on its own.
+    """
+
+    __tablename__ = C.TABLE_SERIES_DEAD_LETTER
+
+    # Same shape as ``failed_novel``: the business key, no ForeignKey (a
+    # verdict may exist before/without a ``series`` row, and deleting a
+    # ``series`` row must not silently resurrect the fetch attempts).
+    series_id = Column(BigInteger, primary_key=True)
+    consecutive_failures = Column(Integer, default=0, nullable=False)
+    last_error = Column(Text, nullable=True)
+    last_failed_at = Column(DateTime(timezone=True), nullable=True)
+    # NULL = still worth trying; set = excluded from the candidate query.
+    retired_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index(
+            "ix_series_dead_letter_retired_at", "retired_at",
+            postgresql_where=sa_text("retired_at IS NOT NULL"),
+        ),
+    )
+
+
 class SearchHistory(Base):
     __tablename__ = C.TABLE_SEARCH_HISTORY
     id = Column(BigInteger, Identity(), primary_key=True)

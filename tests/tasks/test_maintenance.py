@@ -791,28 +791,45 @@ def _webview(nid: int, *, series_id=None, series_title=None, nav=None, user_id=1
 
 
 class _FakeSeriesClient:
-    """``novel_series`` / ``webview_novel`` 替身：记录调用，可注入失败。"""
+    """``novel_series`` / ``webview_novel`` 替身：记录调用，可注入失败。
+
+    *error* lets a test choose **which** failure the fake raises.  It matters
+    for the dead-series ledger, whose whole rule is "only a definitive 404
+    counts": a plain ``RuntimeError`` stands for a transient problem (timeout,
+    connection reset) and must not advance the counter, while
+    ``PixivApiError(status_code=404)`` stands for "pixiv says this series is
+    gone" and must.
+    """
 
     def __init__(
         self, series=None, webviews=None, fail_series=(), fail_webview=(),
+        error: BaseException | None = None,
     ):
         self.series = series or {}
         self.webviews = webviews or {}
         self.fail_series = set(fail_series)
         self.fail_webview = set(fail_webview)
+        self.error = error
         self.series_calls: list[int] = []
         self.webview_calls: list[int] = []
+
+    def _raise(self):
+        # A shared instance is fine for tests: the code under test only
+        # inspects ``status_code``, never the traceback or the message.
+        raise self.error if self.error is not None else RuntimeError(
+            "pixiv unavailable"
+        )
 
     async def novel_series(self, series_id: int, fetch_all: bool = False) -> dict:
         self.series_calls.append(series_id)
         if series_id in self.fail_series:
-            raise RuntimeError("pixiv unavailable")
+            self._raise()
         return {"novels": list(self.series.get(series_id, [])), "next_url": None}
 
     async def webview_novel(self, novel_id: int):
         self.webview_calls.append(novel_id)
         if novel_id in self.fail_webview:
-            raise RuntimeError("pixiv unavailable")
+            self._raise()
         return self.webviews.get(novel_id)
 
 
@@ -1504,3 +1521,162 @@ class TestFixSeriesIndexStarvation:
         assert _series_cols(session_factory, 831)[2] is None      # 失败行没动
         assert _series_cols(session_factory, 832)[2] == 1         # 后面的修好了
         assert "失败 1" in result.summary
+
+
+class TestFixSeriesIndexDeadLetter:
+    """死系列台账：确定性 404 连续 N 轮才判死，判死后不再进候选集。
+
+    生产动机（task_history 1564 / 1569 实测）：候选 200 个里 183 个是 pixiv
+    已删的系列，每一轮都重发一次必然失败的请求 —— 1740s 换来补号 0–47 本。
+    病根不是预算不够，是候选集里混着死数据。规则：
+
+    * **只有确定性 404 累加计数**（``DEFINITIVE_STATUSES``）。超时 / 5xx /
+      限流不算 —— 它们描述「这轮运气不好」，不描述「系列没了」。
+    * 连续 ``RETIRE_AFTER_FAILURES`` 轮才判死。
+    * 一次成功把计数清零、把台账行删掉（判死可逆）。
+    * 判死后不再出现在 ``series_with_empty_index()`` / ``series_with_stored_index()``。
+    """
+
+    async def _fail_rounds(self, session_factory, series_id, n, error):
+        """Drive *n* full task rounds against a series that always fails."""
+        client = _FakeSeriesClient(fail_series={series_id}, error=error)
+        for _ in range(n):
+            await fix_series_index(FixSeriesIndexArgs(), _ctx(session_factory, client))
+        return client
+
+    async def test_one_404_does_not_retire(self, session_factory):
+        """单次 404 可能只是 pixiv 抖动，不能据此判死。"""
+        from copixiv.features.novels.series_ledger import RETIRE_AFTER_FAILURES
+        from copixiv.pixiv.errors import PixivApiError
+
+        _seed_novel(session_factory, 901, series_id=1900, series_index=None)
+        await self._fail_rounds(
+            session_factory, 1900, 1, PixivApiError("gone", status_code=404),
+        )
+
+        with session_factory() as s:
+            retired = s.execute(text(
+                "select retired_at from series_dead_letter where series_id=1900"
+            )).scalar()
+        assert retired is None, "一轮 404 还不构成判决"
+        assert RETIRE_AFTER_FAILURES >= 2
+
+    async def test_consecutive_404s_retire_and_drop_from_candidates(
+        self, session_factory,
+    ):
+        """连续 N 轮 404 → 判死 → 该系列不再进候选集，也不再发请求。"""
+        from copixiv.features.novels.series_ledger import RETIRE_AFTER_FAILURES
+        from copixiv.pixiv.errors import PixivApiError
+
+        _seed_novel(session_factory, 902, series_id=1901, series_index=None)
+        err = PixivApiError("gone", status_code=404)
+        client = await self._fail_rounds(
+            session_factory, 1901, RETIRE_AFTER_FAILURES, err,
+        )
+        assert client.series_calls == [1901] * RETIRE_AFTER_FAILURES
+
+        with session_factory() as s:
+            row = s.execute(text(
+                "select consecutive_failures, retired_at, last_error "
+                "from series_dead_letter where series_id=1901"
+            )).one()
+        assert row[0] == RETIRE_AFTER_FAILURES
+        assert row[1] is not None, "达到阈值必须置 retired_at"
+        assert "404" in row[2]
+
+        # 下一轮：判死的系列不进候选集，所以一次请求都不发。
+        clean = _FakeSeriesClient(fail_series={1901})
+        result = await fix_series_index(
+            FixSeriesIndexArgs(), _ctx(session_factory, clean),
+        )
+        assert clean.series_calls == [], "判死的系列不该再被请求"
+        assert "无需修复" in result.summary
+
+    async def test_transient_failure_is_not_counted(self, session_factory):
+        """超时 / 5xx 不累加计数：那不是在说「系列没了」。"""
+        from copixiv.pixiv.errors import PixivApiError
+
+        _seed_novel(session_factory, 903, series_id=1902, series_index=None)
+        # 5xx 是「服务端此刻坏了」，不是「这个系列不存在」。
+        await self._fail_rounds(
+            session_factory, 1902, 5, PixivApiError("boom", status_code=503),
+        )
+
+        with session_factory() as s:
+            rows = s.execute(text(
+                "select count(*) from series_dead_letter where series_id=1902"
+            )).scalar()
+        assert rows == 0, "瞬时失败不该在台账里留下任何痕迹"
+
+    async def test_success_clears_a_partial_count(self, session_factory):
+        """两次 404 之后成功一次 → 计数清零（不会「差一轮就判死」）。"""
+        from copixiv.features.novels.series_ledger import RETIRE_AFTER_FAILURES
+        from copixiv.pixiv.errors import PixivApiError
+
+        assert RETIRE_AFTER_FAILURES > 2
+        _seed_novel(session_factory, 904, series_id=1903, series_index=None)
+        await self._fail_rounds(
+            session_factory, 1903, 2, PixivApiError("gone", status_code=404),
+        )
+        with session_factory() as s:
+            assert s.execute(text(
+                "select consecutive_failures from series_dead_letter "
+                "where series_id=1903"
+            )).scalar() == 2
+
+        # 第三轮 pixiv 恢复了：拿到名册 → 台账行整个消失。
+        client = _FakeSeriesClient(series={1903: [_info(904, 1903)]})
+        await fix_series_index(FixSeriesIndexArgs(), _ctx(session_factory, client))
+        assert _series_cols(session_factory, 904)[2] == 1
+
+        with session_factory() as s:
+            assert s.execute(text(
+                "select count(*) from series_dead_letter where series_id=1903"
+            )).scalar() == 0
+
+    async def test_retired_series_is_revivable(self, session_factory):
+        """判死不是删除：清掉台账行，系列重新回到候选集。"""
+        from copixiv.features.novels.series_ledger import RETIRE_AFTER_FAILURES
+        from copixiv.pixiv.errors import PixivApiError
+
+        _seed_novel(session_factory, 905, series_id=1904, series_index=None)
+        await self._fail_rounds(
+            session_factory, 1904, RETIRE_AFTER_FAILURES,
+            PixivApiError("gone", status_code=404),
+        )
+        with session_factory() as s:
+            s.execute(text("delete from series_dead_letter where series_id=1904"))
+            s.commit()
+
+        client = _FakeSeriesClient(series={1904: [_info(905, 1904)]})
+        await fix_series_index(FixSeriesIndexArgs(), _ctx(session_factory, client))
+
+        assert client.series_calls == [1904]
+        assert _series_cols(session_factory, 905)[2] == 1
+
+    async def test_ledger_write_failure_does_not_break_the_round(
+        self, session_factory, monkeypatch,
+    ):
+        """台账写失败只能记日志：它不该把一次抓取失败升级成任务崩溃。"""
+        from copixiv.features.novels import series_ledger
+        from copixiv.pixiv.errors import PixivApiError
+
+        _seed_novel(session_factory, 906, series_id=1905, series_index=None)
+
+        def _boom(*a, **kw):
+            raise RuntimeError("ledger unavailable")
+
+        monkeypatch.setattr(series_ledger, "note_failure", _boom)
+        client = _FakeSeriesClient(
+            fail_series={1905},
+            error=PixivApiError("gone", status_code=404),
+        )
+
+        result = await fix_series_index(
+            FixSeriesIndexArgs(), _ctx(session_factory, client),
+        )
+
+        assert client.series_calls == [1905]
+        # 本轮照常收尾：整页唯一一个候选失败 → 专用摘要，任务正常返回，
+        # 没有把台账的写失败升级成任务崩溃。下一轮该系列仍是候选（游标越过）。
+        assert "全部失败" in result.summary

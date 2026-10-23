@@ -37,7 +37,7 @@ TEST_DATABASE_URL = f"postgresql+psycopg2://postgres@127.0.0.1:5433/{TEST_DB}"
 # separation from TRUNCATE matters: TRUNCATE costs ~2s per call on slow
 # filesystems, DELETE is ~30x faster with the same observable result.
 _ALL_TABLES = (
-    "failed_novel", "tag_preference", "tag_alias",
+    "failed_novel", "series_dead_letter", "tag_preference", "tag_alias",
     "task_history", "search_history", "scheduled_task", "token",
     "setting", "novel", "tag", "series", "author",
 )
