@@ -23,6 +23,30 @@ class FileStorage:
     def novel_epub_path(self, novel_id: int, title: str) -> Path:
         return formats.sibling_path(self.novel_text_path(novel_id, title), formats.EPUB)
 
+    def adopt_anchor(self, anchor: str | None) -> str | None:
+        """Return *anchor* when it is a usable write target, else ``None``.
+
+        ``novel.path`` comes from the database, so it is trusted only after
+        this containment check — the same rule :meth:`delete_novel_files`
+        applies before unlinking.  A row whose stored path escapes the
+        download root is a polluted row, not a reason to fail the download:
+        returning ``None`` makes the caller fall back to a freshly computed
+        path, so the novel stays fetchable while the bad value is ignored
+        (and logged).
+        """
+        if not anchor:
+            return None
+        try:
+            resolved = Path(anchor).resolve()
+        except OSError:
+            return None
+        if not resolved.is_relative_to(Path(self.download_dir).resolve()):
+            logger.warning(
+                "忽略 download 根之外的 path，按标题重新计算：%s", anchor,
+            )
+            return None
+        return anchor
+
     def local_novel_path(
         self, novel_id: int, title: str, kind: str = formats.TEXT,
     ) -> Path:
@@ -48,9 +72,20 @@ class FileStorage:
         title: str,
         content: str,
         force: bool = False,
+        anchor: str | Path | None = None,
     ) -> Path:
-        """Write novel text to disk. Returns the file path."""
-        path = self.novel_text_path(novel_id, title)
+        """Write novel text to disk. Returns the file path.
+
+        *anchor* is the file path to write to.  Callers that already know the
+        row's stored ``path`` must pass it: ``novel.path`` is written once and
+        then only filled when NULL, while ``build_path`` recomputes from the
+        current title.  A source-side rename would otherwise store the new
+        body under a new filename while every reader keeps resolving the old
+        one (stale text in downloads / exports, and "did the body change?"
+        comparing against a file that does not exist).  Omitted → derive from
+        ``(novel_id, title)``, which is correct only for first-time writes.
+        """
+        path = Path(anchor) if anchor else self.novel_text_path(novel_id, title)
         if path.exists() and not force and path.stat().st_size > 0:
             logger.debug(f"下载: #{novel_id} \"{title}\" 已存在，跳过")
             return path
@@ -60,15 +95,20 @@ class FileStorage:
         )
         return path
 
-    def read_novel_text(self, novel_id: int, title: str) -> str | None:
+    def read_novel_text(
+        self, novel_id: int, title: str, anchor: str | Path | None = None,
+    ) -> str | None:
         """Read the stored text — ``None`` when there is no usable local copy.
 
         Used by the refresh path's content-change detection
         (``features/novels/download_novel.py``): missing file, unreadable
         file, or empty content all mean "nothing to compare against", and the
         caller then behaves exactly as before this check existed.
+
+        *anchor* must match what :meth:`save_novel_text` was given, or the
+        comparison reads a different file than the one being written.
         """
-        path = self.novel_text_path(novel_id, title)
+        path = Path(anchor) if anchor else self.novel_text_path(novel_id, title)
         try:
             if not path.is_file() or path.stat().st_size == 0:
                 return None

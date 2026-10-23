@@ -386,3 +386,48 @@ async def test_redownload_ignores_the_local_copy(tmp_path):
 
     assert downloader.force is True
     assert draft.has_epub == EpubStatus.NO_IMAGES, "强制路径照旧写状态"
+
+
+async def test_download_uses_stored_anchor_after_source_rename(tmp_path):
+    """A source-side rename must not move the body off the reader's path.
+
+    ``novel.path`` is written once and then only filled when NULL (a file
+    anchor), while ``build_path`` recomputes from the current title.  Writing
+    with the recomputed path stored the body at ``新标题_<id>.txt`` while every
+    reader (download / export / delete) kept resolving ``旧标题_<id>.txt``:
+    the reader got stale text, and the "did the body change?" check compared
+    against a file that did not exist, so it always reported "changed".
+
+    With the anchor passed in, the new body lands on the stored path and the
+    old file is the one being updated — no orphan appears.
+    """
+    storage = FileStorage(str(tmp_path))
+    downloader = _RecordingDownloader()
+
+    # The row already exists under the OLD title.
+    stored = storage.save_novel_text(NID, "旧标题", "旧正文")
+
+    draft = await fetch_novel_and_assets(
+        NID, _FakeClient(_payload("新正文")), storage, downloader,
+        stored_path=str(stored),
+    )
+
+    assert draft.path == str(stored), "draft 必须采用库里的锚"
+    assert stored.read_text(encoding="utf-8") == "新正文"
+    # No orphan file under the new title.
+    siblings = sorted(p.name for p in stored.parent.iterdir())
+    assert siblings == [stored.name]
+
+
+async def test_anchor_outside_download_root_is_ignored(tmp_path):
+    """A polluted ``path`` must not become an arbitrary write target."""
+    storage = FileStorage(str(tmp_path))
+    downloader = _RecordingDownloader()
+
+    draft = await fetch_novel_and_assets(
+        NID, _FakeClient(_payload("正文")), storage, downloader,
+        stored_path="/etc/not-our-file.txt",
+    )
+
+    assert draft.path != "/etc/not-our-file.txt"
+    assert str(draft.path).startswith(str(tmp_path)), "回退到根内路径"

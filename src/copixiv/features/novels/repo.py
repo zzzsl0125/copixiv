@@ -613,6 +613,29 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         stmt = select(models.Novel.id).where(models.Novel.id.in_(novel_ids))
         return set(self.session.execute(stmt).scalars().all())
 
+    async def get_stored_paths(self, novel_ids: set[int]) -> dict[int, str]:
+        """``{id: path}`` for the given ids — the on-disk anchor of each row.
+
+        ``novel.path`` is written once and then only ever filled when NULL
+        (the "non-empty wins" rule in ``_upsert_rows``): it is a *file
+        anchor*, not a derived value.  Recomputing it from the current title
+        (``build_path``) drifts the moment a title changes at the source, and
+        the write path then stores the new body under a filename nobody
+        reads.  Download code therefore asks for this map instead of calling
+        ``build_path`` for rows that already exist.
+        """
+        if not novel_ids:
+            return {}
+        stmt = select(models.Novel.id, models.Novel.path).where(
+            models.Novel.id.in_(novel_ids),
+            models.Novel.path.isnot(None),
+        )
+        return {
+            nid: path
+            for nid, path in self.session.execute(stmt).all()
+            if path
+        }
+
     # ---- blocked-tag exclusion helpers -------------------------------------
 
     def _exclusion_active(self, explicit: bool | None) -> bool:

@@ -34,6 +34,7 @@ async def fetch_novel_and_assets(
     file_storage: FileStorage,
     image_downloader: ImageDownloader,
     redownload: bool = False,
+    stored_path: str | None = None,
 ) -> NovelDraft | None:
     """Fetch a novel from Pixiv and persist its text + assets.
 
@@ -41,6 +42,16 @@ async def fetch_novel_and_assets(
     persists later, inside the write lock).  This is the first part of the
     download journey; the repository write happens in ``ingest``'s persist
     phase.
+
+    *stored_path* is the row's existing ``novel.path`` (``None`` for a novel
+    new to this database).  When it is a usable write target — inside the
+    download root — the fetched draft adopts it instead of recomputing
+    ``build_path`` from the current title: the stored path is the anchor every
+    reader resolves (download / export / delete all use it), so writing the
+    body anywhere else makes the fresh text unreachable.  A stored path
+    outside the root is ignored (the row is polluted) and a fresh path is
+    computed, so the novel stays fetchable.  See
+    :meth:`FileStorage.save_novel_text` for the same reasoning.
 
     Returns the canonical :class:`~copixiv.core.draft.NovelDraft`
     (transient ``content`` still attached — the repository's column
@@ -58,6 +69,8 @@ async def fetch_novel_and_assets(
         return None
 
     data = build_from_webview(resp, file_storage.download_dir)
+    if anchor := file_storage.adopt_anchor(stored_path):
+        data = replace(data, path=anchor)
 
     # Text: write it only when it actually differs from the local copy.
     # ``rewrote`` is the single decision this module makes, and it drives two
@@ -73,13 +86,19 @@ async def fetch_novel_and_assets(
     # overruled, so it must not be allowed to veto the write a second time.
     unchanged = False
     if data.content:
-        local = file_storage.read_novel_text(data.id, data.title)
+        local = file_storage.read_novel_text(
+            data.id, data.title, anchor=data.path,
+        )
         unchanged = (not redownload) and body_unchanged(local, data.content)
 
     rewrote = bool(data.content) and not unchanged
     if rewrote:
         file_storage.save_novel_text(
             data.id, data.title, data.content, force=True,
+            # ``data.path`` is the anchor: the stored path for a known row,
+            # the freshly computed ``build_path`` for a first-time one.  Read
+            # and write therefore always agree on the same file.
+            anchor=data.path,
         )
     elif data.content:
         logger.info(f"下载: #{data.id} 正文未变，保留本地副本")
