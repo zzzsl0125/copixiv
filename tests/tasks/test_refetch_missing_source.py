@@ -60,6 +60,26 @@ def _ledger(sf, nid: int, times: int = 1) -> None:
         s.commit()
 
 
+@pytest.fixture(autouse=True)
+def _restore_novel_fetch():
+    """Undo every ``novel_fetch`` swap a test makes.
+
+    ``refetch_missing_source`` imports ``novel_fetch`` lazily (inside the
+    function) precisely so tests can replace it, but replacing it on the module
+    is **global** state: without this fixture the stub survives into other test
+    files, which then see a ``novel_fetch`` that does nothing.  That showed up
+    as 19 unrelated failures in ``test_task_queue`` / ``test_maintenance`` when
+    the whole suite ran together, while each file alone was green.
+    """
+    import copixiv.tasks.novels as novels_mod
+
+    original = novels_mod.novel_fetch
+    try:
+        yield
+    finally:
+        novels_mod.novel_fetch = original
+
+
 def _ctx(sf, *results, calls=None) -> TaskContext:
     """A context whose ``novel_fetch`` is replaced by a scripted stub."""
     import copixiv.tasks.novels as novels_mod
@@ -70,7 +90,7 @@ def _ctx(sf, *results, calls=None) -> TaskContext:
         outcome = results[0] if results else TaskResult(summary="ok")
         return outcome
 
-    novels_mod.novel_fetch = _fake_fetch        # monkeypatch at module level
+    novels_mod.novel_fetch = _fake_fetch
     return TaskContext(
         uow=SqlUnitOfWork(sf), session_factory=sf, client=object(),
         file_storage=object(),

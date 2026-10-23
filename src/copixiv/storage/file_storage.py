@@ -33,6 +33,17 @@ class FileStorage:
         returning ``None`` makes the caller fall back to a freshly computed
         path, so the novel stays fetchable while the bad value is ignored
         (and logged).
+
+        **A stored path can also be too long to write through.**  Paths written
+        before ``build_path`` learned to reserve the ``.tmp`` suffix sit at 253
+        bytes; the atomic write appends ``.tmp`` and needs 257, so every
+        download through such an anchor dies with ``OSError: [Errno 36] File
+        name too long`` in the temporary file — before anything reaches the
+        final path.  Three production novels are in exactly that state
+        (27001932 / 27038159 / 28571161).  They are refused here so the caller
+        recomputes a path that fits, which is also the only way those rows can
+        ever be recovered: re-downloading them cannot succeed while the old name
+        is reused.
         """
         if not anchor:
             return None
@@ -45,7 +56,25 @@ class FileStorage:
                 "忽略 download 根之外的 path，按标题重新计算：%s", anchor,
             )
             return None
+        if not self._fits_name_max(resolved.name):
+            logger.warning(
+                "stored path 加上原子写的 .tmp 会超过 NAME_MAX，"
+                "按标题重新计算：%s", anchor,
+            )
+            return None
         return anchor
+
+    @staticmethod
+    def _fits_name_max(basename: str, limit: int = 255) -> bool:
+        """Whether ``basename`` still fits *limit* bytes with ``.tmp`` appended.
+
+        ``NAME_MAX`` counts **bytes**, not characters — a Chinese title is
+        three bytes per glyph, so a 90-character name is already ~270 bytes.
+        ``atomic_write`` appends ``.tmp`` to the *whole* suffix chain
+        (``x.txt`` → ``x.txt.tmp``), so the budget has to include those four
+        extra bytes.
+        """
+        return len(basename.encode("utf-8")) + len(".tmp") <= limit
 
     def local_novel_path(
         self, novel_id: int, title: str, kind: str = formats.TEXT,

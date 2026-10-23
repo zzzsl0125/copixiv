@@ -268,7 +268,23 @@ async def _persist_batch(
 
     if downloaded:
         success_ids = {d.id for d in downloaded}
-        upserted = await batch_upsert(downloaded, uow)
+        # ``path`` is fill-once by default ("non-empty wins"), because it is the
+        # anchor every reader resolves and rewriting it would orphan the file
+        # that is already there.  The download path is the one writer allowed to
+        # replace it: ``FileStorage.adopt_anchor`` refuses a stored path that
+        # escapes the root, or that is too long to write a ``.tmp`` beside (253
+        # bytes stored + ".tmp" > NAME_MAX — three production rows), and the
+        # body is then written to a freshly computed name.  The row must follow,
+        # or the file lands where nothing reads it.
+        #
+        # Scoped to *this* call site rather than added to the repository's
+        # global ``update_fields_set``: ``sync_novel`` also upserts drafts, and
+        # its contract is explicitly "a source-side rename must NOT move the
+        # path" (``tests/api/test_novel_sync.py``).  Downloading is the only
+        # path that may have just written a different file.
+        upserted = await batch_upsert(
+            downloaded, uow, force_update=["path"],
+        )
         new_count += upserted
         if failed_repo is not None:
             # A novel that both downloaded successfully AND has a recorded
