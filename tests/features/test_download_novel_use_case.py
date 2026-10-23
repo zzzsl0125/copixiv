@@ -57,17 +57,23 @@ class FakeStorage:
         self.saved: list[tuple[int, str, bool]] = []
         self.texts: dict[int, str] = {}
 
-    def save_novel_text(self, novel_id, title, content, force=False):
+    def save_novel_text(self, novel_id, title, content, force=False, anchor=None):
         self.saved.append((novel_id, title, force))
         self.texts[novel_id] = content
 
-    def read_novel_text(self, novel_id, title):
+    def read_novel_text(self, novel_id, title, anchor=None):
         """Local-copy lookup for the content-change detection.
 
         Mirrors ``FileStorage.read_novel_text``: no stored text → ``None``
-        ("nothing to compare against").
+        ("nothing to compare against").  ``anchor`` is accepted and ignored —
+        this double keys by id, so the path argument cannot change its answer.
         """
         return self.texts.get(novel_id) or None
+
+    def adopt_anchor(self, anchor):
+        """Mirrors ``FileStorage.adopt_anchor``: this double has no download
+        root to police, so it declines every anchor."""
+        return None
 
 
 class FakeImageDownloader:
@@ -80,7 +86,8 @@ class FakeImageDownloader:
         # data is now a write-path NovelDraft (K3 contract)
         self.processed.append(data.id)
 
-    async def await_all(self):
+    async def await_all(self, ids=None):
+        """``ids`` mirrors the real scoped signature; this double ignores it."""
         return list(self._failures)
 
     def drain_outcomes(self, ids=None) -> dict[int, str]:
@@ -329,3 +336,42 @@ class TestPersistNovels:
         async with uow.begin():
             assert await persist_novels(uow, []) == 0
             assert await persist_novels(uow, [None]) == 0
+
+
+class TestIngestDedup:
+    async def test_duplicate_id_in_one_batch_is_downloaded_once(
+        self, session_factory, tmp_path,
+    ):
+        """The same id twice in a discovered batch must not break the batch.
+
+        Offset pagination can return one novel on two adjacent pages.  Keeping
+        both downloaded the body twice and then INSERTed the same primary key
+        twice in one transaction — a UniqueViolation that rolled back the
+        *whole* batch, losing every other novel in it.
+        """
+        from copixiv.features.novels.ingest import ingest
+        from copixiv.storage.file_storage import FileStorage
+
+        client = FakeClient(_webview(100))
+        storage = FileStorage(str(tmp_path / "download"))
+        downloader = FakeImageDownloader()
+
+        novel = SimpleNamespace(
+            id=100, title="新小说", caption="中文标题", tags=[{"name": "中文"}],
+            user=SimpleNamespace(id=1, name="作者"), series=None,
+            total_bookmarks=5, total_view=10, text_length=4,
+            create_date="2026-01-01",
+        )
+        out = await ingest(
+            [novel, novel],        # the same work twice
+            session_factory=session_factory, client=client,
+            file_storage=storage, image_downloader=downloader,
+        )
+
+        assert out.new_count == 1
+        assert out.failed == []
+        with session_factory() as s:
+            rows = s.execute(
+                __import__("sqlalchemy").text("select id from novel")
+            ).scalars().all()
+        assert rows == [100]

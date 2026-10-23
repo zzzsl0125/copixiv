@@ -109,12 +109,17 @@ async def _download_novels(
     file_storage,
     image_downloader,
     redownload: bool = False,
+    stored_paths: dict[int, str] | None = None,
 ) -> tuple[list[NovelDraft], list[tuple[int, str]]]:
     """Download novels via webview concurrently.
 
     Fires all webview_novel calls in parallel — the client semaphore + LRU
     account selection distribute the load across accounts automatically.
     Each novel's text, images, and EPUB are processed as it completes.
+
+    *stored_paths* maps already-known ids to their ``novel.path`` so the body
+    is written to the file the read path actually resolves (see
+    ``_plan_batch``); ids not in it are new and get a freshly computed path.
 
     Pure download phase: no database access at all (no write transaction
     is ever held across network I/O).  Failed downloads are returned as
@@ -132,6 +137,7 @@ async def _download_novels(
     async def _fetch_one(nid: int) -> NovelDraft | None:
         data = await fetch_novel_and_assets(
             nid, client, file_storage, image_downloader, redownload,
+            stored_path=(stored_paths or {}).get(nid),
         )
         if data is None:
             logger.warning(f"下载: #{nid} webview 返回空")
@@ -171,19 +177,31 @@ async def _plan_batch(
     uow,
     redownload: bool = False,
     failed_repo=None,
-) -> tuple[list[NovelDraft], list[int]]:
+) -> tuple[list[NovelDraft], list[int], dict[int, str]]:
     """Plan phase (read-only): decide what to download and what to upsert.
 
     Must run outside the write transaction — it only reads.  Returns
-    ``(existing_meta, download_ids)`` where ``existing_meta`` holds the
-    metadata dicts of already-known novels (empty when ``redownload``),
-    and ``download_ids`` are the novel IDs that still need downloading.
+    ``(existing_meta, download_ids, stored_paths)`` where ``existing_meta``
+    holds the metadata dicts of already-known novels (empty when
+    ``redownload``), ``download_ids`` are the novel IDs that still need
+    downloading, and ``stored_paths`` maps every already-known id to the file
+    anchor in the database.
+
+    ``stored_paths`` exists because ``novel.path`` is written once and then
+    only ever filled when NULL: it is a file anchor, not a derived value.
+    The download phase must write to *that* path rather than to
+    ``build_path(id, current_title)`` — otherwise a work the author renames
+    gets its body stored under a new filename while the read path (download
+    / export / delete) keeps resolving the old one, so readers silently get
+    stale text and the "did the body change?" check compares against a file
+    that does not exist.
     """
     if not novels:
-        return [], []
+        return [], [], {}
 
     ids = {n.id for n in novels}
-    existing = await SQLAlchemyNovelRepository(uow.session).get_existing_ids(ids)
+    repo = SQLAlchemyNovelRepository(uow.session)
+    existing = await repo.get_existing_ids(ids)
 
     # Exclude novels that have already failed too many times
     skip_ids: set[int] = set()
@@ -205,8 +223,18 @@ async def _plan_batch(
             build_from_novel_info(n) for n in novels if n.id in existing
         ]
 
-    download_ids = [n.id for n in novels if n.id in need_download]
-    return existing_meta, download_ids
+    # Dedup: the same id can appear twice in one discovered batch (a ranking
+    # / search page shifted between two offset requests).  Keeping both would
+    # download the body twice and then INSERT the same primary key twice in
+    # one transaction — a UniqueViolation that rolls back the *whole* batch,
+    # losing every other novel in it.
+    download_ids = list(dict.fromkeys(
+        n.id for n in novels if n.id in need_download
+    ))
+    stored_paths = (
+        await repo.get_stored_paths(set(download_ids)) if download_ids else {}
+    )
+    return existing_meta, download_ids, stored_paths
 
 
 async def _persist_batch(
@@ -293,6 +321,18 @@ class IngestOutcome:
     failed: list[tuple[int, str]] = field(default_factory=list)
     new_count: int = 0
 
+    @property
+    def failed_ids(self) -> list[int]:
+        """The ids behind :attr:`failed`, in first-seen order and deduped.
+
+        Task adapters put this on :class:`~copixiv.core.models.TaskResult` so
+        the outcome of a batch is machine-readable.  Without it a partially
+        failed run is indistinguishable from a clean one: the summary says
+        "新增 N 本" either way, and the per-item failures only exist in the
+        ledger and the log text.
+        """
+        return list(dict.fromkeys(nid for nid, _ in self.failed))
+
 
 # ---------------------------------------------------------------------------
 # The pipeline
@@ -338,13 +378,22 @@ async def ingest(
     # 1. Plan — read-only, short transaction, no lock.
     if novels:
         async with uow.begin():
-            existing_meta, download_ids = await _plan_batch(
+            existing_meta, download_ids, stored_paths = await _plan_batch(
                 novels, uow, redownload=force,
                 failed_repo=FailedNovelRepository(uow.session),
             )
     else:
         existing_meta: list[NovelDraft] = []
-        download_ids: list[int] = list(ids or [])
+        stored_paths: dict[int, str] = {}
+        download_ids: list[int] = list(dict.fromkeys(ids or []))
+        # Single-novel path: the id may already be known (re-download), in
+        # which case its body must go to the stored anchor, not to a path
+        # recomputed from a title that may have changed at the source.
+        if download_ids:
+            async with uow.begin():
+                stored_paths = await SQLAlchemyNovelRepository(
+                    uow.session
+                ).get_stored_paths(set(download_ids))
 
     # 2. Download — concurrent network/file I/O, no database.
     downloaded: list[NovelDraft] = []
@@ -352,7 +401,7 @@ async def ingest(
     if download_ids and client is not None:
         downloaded, failed_records = await _download_novels(
             download_ids, client, file_storage, image_downloader,
-            redownload=force,
+            redownload=force, stored_paths=stored_paths,
         )
     elif download_ids:
         logger.warning(
@@ -367,7 +416,15 @@ async def ingest(
     asset_failures: list[tuple[int, str]] = []
     asset_outcomes: dict[int, str] = {}
     if image_downloader is not None:
-        asset_failures = await image_downloader.await_all()
+        # Scoped to this round's ids, exactly like ``drain_outcomes`` below.
+        # The ImageDownloader is application-wide and concurrent ingests
+        # share it (fan-out tasks gather several ``author_fetch``, each of
+        # which reaches this line), so an unscoped wait would let the first
+        # round claim another round's futures and leave that round gating on
+        # nothing — its EPUBs land on disk but ``has_epub`` stays PENDING.
+        asset_failures = await image_downloader.await_all(
+            d.id for d in downloaded
+        )
         # Producer-reported outcomes: the EPUB pipeline itself says which
         # novels it finished ("done"), did not need ("skipped") or failed
         # ("failed").  Drained right after the gate — every worker of this

@@ -1,11 +1,22 @@
 """Tests for ImageDownloader.await_all() — the persist-phase gate."""
 
 import asyncio
+import io
 import time
+from pathlib import Path
 
 from copixiv.core.draft import NovelDraft
 from copixiv.storage.epub.builder import EpubBuilder
 from copixiv.storage.image_downloader import ImageDownloader
+
+
+def _jpeg_bytes() -> bytes:
+    """A minimal decodable JPEG — enough for the builder to embed."""
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (2, 2), (0, 0, 255)).save(buf, format="JPEG")
+    return buf.getvalue()
 
 
 def _asset_data(tmp_path, nid: int) -> NovelDraft:
@@ -205,6 +216,69 @@ class TestDrainOutcomes:
         return path
 
     async def test_done_after_epub_written(self, tmp_path):
+        """DONE means the file is actually *complete*, not merely written.
+
+        The body needs the image and the payload carries it; with the image
+        on disk the builder embeds it, so ``state.is_complete`` agrees and the
+        producer reports ``done``.
+        """
+        body = "正文 [uploadedimage:1]"
+        path = self._text(tmp_path, 1, body)
+        Path(path.parent, "1_u_1.jpg").write_bytes(_jpeg_bytes())
+        dl = ImageDownloader(
+            max_workers=1, min_interval=0, epub_builder=EpubBuilder(),
+        )
+        try:
+            await dl.process_novel_assets(NovelDraft(
+                id=1, title="novel1", author_id=0, path=str(path),
+                content=body, images={"1": {}},
+            ))
+            assert await dl.await_all() == []
+            assert dl.drain_outcomes() == {1: "done"}
+            assert dl.drain_outcomes() == {}      # drained: second read is empty
+        finally:
+            dl.shutdown()
+
+    async def test_done_only_when_epub_is_complete(self, tmp_path):
+        """A 缺图框 shell is NOT done — the producer must agree with the reconciler.
+
+        Regression pin for the disagreement: the builder returns True while
+        degrading every missing image to a visible box, so the file is
+        readable, marker-free and has no ``images/`` member.  Reporting DONE
+        put the asset pipeline on the opposite side of ``check_epub`` (which
+        refuses to promote it) and, once the give-up rule fired, left a
+        reader-visible broken book terminal.  Now a payload that *offered*
+        images but landed none is a failure, not a success.
+        """
+        body = "正文 [uploadedimage:1]"
+        path = self._text(tmp_path, 1, body)
+        dl = ImageDownloader(
+            max_workers=1, min_interval=0, epub_builder=EpubBuilder(),
+        )
+        try:
+            # images present in the payload, but nothing downloadable at that
+            # URL → every attempt fails.
+            await dl.process_novel_assets(NovelDraft(
+                id=1, title="novel1", author_id=0, path=str(path),
+                content=body,
+                images={"1": {"urls": {"original": "not-a-url"}}},
+            ))
+            failures = await dl.await_all()
+            assert dl.drain_outcomes() == {1: "failed"}
+            assert failures == [(1, "EPUB 不完整: novel 1")]
+        finally:
+            dl.shutdown()
+
+    async def test_no_images_offered_leaves_pending_for_reconciler(self, tmp_path):
+        """Body wants images, payload carried none → neither done nor failed.
+
+        The author deleted the images (or the API omitted them): there is
+        nothing to fetch, so this is not a download failure to retry and it is
+        certainly not a finished book.  Recording **no** outcome leaves the
+        row PENDING, which is exactly where ``check_epub`` applies its
+        give-up rule (``_no_images_ever_and_stale``) and moves it to the
+        terminal ``NO_IMAGES``.
+        """
         body = "正文 [uploadedimage:1]"
         path = self._text(tmp_path, 1, body)
         dl = ImageDownloader(
@@ -216,8 +290,7 @@ class TestDrainOutcomes:
                 content=body,
             ))
             assert await dl.await_all() == []
-            assert dl.drain_outcomes() == {1: "done"}
-            assert dl.drain_outcomes() == {}      # drained: second read is empty
+            assert dl.drain_outcomes() == {}
         finally:
             dl.shutdown()
 
@@ -278,10 +351,14 @@ class TestDrainOutcomes:
             ))
             # Not short-circuited: a worker was actually submitted.
             assert dl._futures != []
-            await dl.await_all()
-            # The rebuild still cannot embed the (still missing) image, so the
-            # "done" here comes from one builder run — never from the guard.
-            assert dl.drain_outcomes() == {61: "done"}
+            failures = await dl.await_all()
+            # The rebuild still cannot embed the (still missing) image.  The
+            # old contract reported ``done`` here purely because the builder
+            # returned True; the producer now asks ``state.is_complete`` and
+            # agrees with ``check_epub`` that the file is unfinished — so the
+            # novel is retried instead of being blessed as a finished book.
+            assert dl.drain_outcomes() == {61: "failed"}
+            assert failures == [(61, "EPUB 不完整: novel 61")]
         finally:
             dl.shutdown()
 
@@ -351,3 +428,54 @@ class TestDrainOutcomes:
             assert dl.drain_outcomes() == {5: "failed"}
         finally:
             dl.shutdown()
+
+
+class TestScopedAwaitAll:
+    """``await_all(ids)`` must scope to one round, like ``drain_outcomes(ids)``.
+
+    The downloader is a single application-wide instance shared by concurrent
+    ``ingest()`` calls (fan-out tasks gather several ``author_fetch``).  An
+    unscoped wait handed the first round *every* in-flight future, so the
+    second gated on nothing and never learned its own EPUBs had finished —
+    leaving ``has_epub=PENDING`` for files that exist on disk.
+    """
+
+    async def test_each_round_waits_only_for_its_own(self, tmp_path, monkeypatch):
+        import threading
+
+        dl = ImageDownloader(max_workers=2)
+        entered = {1: threading.Event(), 2: threading.Event()}
+
+        def slow_work(data):
+            entered[data.id].set()
+            time.sleep(0.2)
+
+        monkeypatch.setattr(dl, "_download_assets", slow_work)
+        await dl.process_novel_assets(_asset_data(tmp_path, 1))
+        await dl.process_novel_assets(_asset_data(tmp_path, 2))
+        for ev in entered.values():
+            assert ev.wait(2)
+
+        # Round A owns novel 1, round B owns novel 2.
+        waited_a = await dl.await_all([1])
+        assert dl._futures == [(2, dl._futures[0][1])]  # round 2 still queued
+        waited_b = await dl.await_all([2])
+        assert dl._futures == []
+        # Neither round waited on a future it did not own.
+        assert waited_a == [] and waited_b == []
+        dl.shutdown()
+
+    async def test_unscoped_wait_still_drains_everything(self, tmp_path, monkeypatch):
+        """``ids=None`` keeps the old contract for single-round callers."""
+        dl = ImageDownloader(max_workers=2)
+
+        def failing_work(data):
+            return f"boom for {data.id}"
+
+        monkeypatch.setattr(dl, "_download_assets", failing_work)
+        await dl.process_novel_assets(_asset_data(tmp_path, 1))
+        await dl.process_novel_assets(_asset_data(tmp_path, 2))
+
+        assert sorted(await dl.await_all()) == [(1, "boom for 1"), (2, "boom for 2")]
+        assert dl._futures == []
+        dl.shutdown()

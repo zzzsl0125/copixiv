@@ -312,25 +312,43 @@ class ImageDownloader:
                 self._outcomes.pop(nid, None)
             return outcomes
 
-    async def await_all(self) -> list[tuple[int, str]]:
-        """Wait for all in-flight asset tasks (image download + EPUB) to finish.
+    async def await_all(self, ids: Iterable[int] | None = None) -> list[tuple[int, str]]:
+        """Wait for in-flight asset tasks (image download + EPUB) to finish.
 
         Downloads stay fire-and-forget, but callers that need "files are
         ready before I persist" — the ingest pipeline before its persist
-        phase, single-novel tasks before their upsert — must ``await``
-        this.  Uses ``asyncio.wrap_future`` so waiting never blocks the
-        event loop.
+        phase — must ``await`` this.  Uses ``asyncio.wrap_future`` so waiting
+        never blocks the event loop.
 
         Returns ``[(novel_id, reason), ...]`` for every task that failed,
         so callers can persist the failures into ``failed_novel`` inside
         their write transaction (previously these errors were swallowed
         by the worker thread).
 
-        The in-flight list is swapped out first: tasks submitted while we
-        are waiting land in a fresh list and are NOT waited on (they
-        belong to the next round, which will gate on them).
+        *ids* scopes the wait to one round's novels — the same rule
+        :meth:`drain_outcomes` follows, and for the same reason.  This
+        downloader is a single application-wide instance (``app.py``) shared
+        by concurrent ``ingest()`` calls: fan-out tasks (``novel_ranking`` /
+        ``novel_search`` gather 5–20 ``author_fetch``) each enter ``ingest``
+        and each calls this.  An unscoped wait would hand round A *every*
+        in-flight future — including B's — and leave B waiting on an empty
+        list, so B never learns that its own EPUBs finished and persists
+        ``has_epub=PENDING`` for files that exist on disk.
+
+        Futures belonging to *ids* outside the scope stay queued for their
+        owner.  Tasks submitted while we are waiting land in a later batch
+        and are NOT waited on (they belong to the next round).
+
+        ``ids=None`` waits on everything, which is right for single-round
+        callers (tests, scripts) and wrong for the shared-instance fan-out.
         """
-        futures, self._futures = self._futures, []
+        with self._in_flight_lock:
+            if ids is None:
+                futures, self._futures = self._futures, []
+            else:
+                wanted = set(ids)
+                futures = [(n, f) for n, f in self._futures if n in wanted]
+                self._futures = [(n, f) for n, f in self._futures if n not in wanted]
         failures: list[tuple[int, str]] = []
         for novel_id, future in futures:
             try:
@@ -419,6 +437,43 @@ class ImageDownloader:
                 ):
                     self._record_outcome(novel.id, "failed")
                     return f"EPUB 生成失败: novel {novel_id}"
+                # ``needs_epub=False``: the builder returned True without
+                # writing anything (the body has no image placeholder), so
+                # there is no new EPUB to call DONE — that is a ``skipped``.
+                #
+                # Otherwise the builder's ``True`` still is not proof of a
+                # finished book: an image whose download failed degrades to a
+                # visible 缺图框 box, so the file exists, carries no raw
+                # marker, and embeds nothing.  Blessing that as DONE is what put
+                # the producer and the reconciler (``check_epub`` →
+                # ``state.is_complete``) on opposite sides of the same file.
+                #
+                # The verdict distinguishes "we failed" from "there is nothing
+                # to get", because only the first deserves a retry and a
+                # ledger entry:
+                #   * an image was offered and none landed → genuine failure
+                #     (the retry reuses whatever did land);
+                #   * the payload offered no image at all → not our failure;
+                #     record **no** outcome, leaving the row PENDING so
+                #     ``check_epub`` applies its give-up rule (images deleted
+                #     by the author are terminal, not an error).
+                epub_path = formats.sibling_path(Path(novel.path), formats.EPUB)
+                if needs_epub is False:
+                    self._record_outcome(novel.id, "skipped")
+                elif state.is_complete(epub_path):
+                    self._record_outcome(novel.id, "done")
+                elif images or illusts:
+                    self._record_outcome(novel.id, "failed")
+                    logger.warning(
+                        f"下载: #{novel_id} EPUB 未完成（图片下载失败）"
+                    )
+                    return f"EPUB 不完整: novel {novel_id}"
+                else:
+                    logger.warning(
+                        f"下载: #{novel_id} 正文有图片占位符但来源未给图片，"
+                        f"交给检查任务判定"
+                    )
+                    return None
                 logger.info(
                     f"下载: #{novel_id} EPUB 完成 "
                     f"(已清理 {len(downloaded_files)} 张临时图片)",
@@ -428,12 +483,6 @@ class ImageDownloader:
                         os.remove(f)
                     except OSError:
                         pass
-                # ``needs_epub=False``: the builder returned True without
-                # writing anything (the body has no image placeholder), so
-                # there is no new EPUB to call DONE — that is a ``skipped``.
-                self._record_outcome(
-                    novel.id, "skipped" if needs_epub is False else "done",
-                )
             else:
                 # No builder wired → no EPUB can be produced.  Never claim
                 # DONE for a file that does not exist (the app always wires

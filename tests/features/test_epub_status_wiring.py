@@ -56,14 +56,26 @@ class FakeClient:
         return {"user": {"name": self._user_name}}
 
 
-def _webview(novel_id: int, text: str, title: str = "新小说"):
+def _webview(novel_id: int, text: str, title: str = "新小说", with_images: bool = False):
+    """Canned ``webview_novel`` payload.
+
+    *with_images* controls whether the payload actually offers an image for
+    the ``[uploadedimage:1]`` marker.  It matters because the producer's
+    verdict now distinguishes "the image failed to download" from "the source
+    offered no image at all" — the first is a retryable failure, the second
+    is left PENDING for ``check_epub``'s give-up rule.
+    """
     return SimpleNamespace(
         id=novel_id, title=title, user_id=1,
         rating=SimpleNamespace(bookmark=5, view=10),
         text=text, caption="中文标题", series_id=None,
         series_title=None, series_navigation=None,
         cdate="2026-01-01T00:00:00", tags=["中文"],
-        images=None, illusts=None, cover_url=None,
+        images=(
+            {"1": {"urls": {"original": "https://i.pximg.net/x.jpg"}}}
+            if with_images else None
+        ),
+        illusts=None, cover_url=None,
     )
 
 
@@ -85,12 +97,47 @@ def _prebuilt_epub(path: Path) -> None:
         zf.writestr("mimetype", "application/epub+zip")
 
 
-async def _run_ingest(novel_id, text, storage, downloader, session_factory):
+def _prebuilt_complete_epub(path: Path) -> None:
+    """A readable *and finished* EPUB — satisfies ``state.is_complete``.
+
+    One embedded illustration under ``images/`` and no raw marker: the
+    predicate the producer and the reconciler now share.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("mimetype", "application/epub+zip")
+        zf.writestr("images/1.jpg", _jpeg_bytes())
+        zf.writestr(
+            "content.xhtml", "<html><body>正文</body></html>",
+        )
+
+
+def _jpeg_bytes() -> bytes:
+    """A minimal decodable JPEG."""
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (2, 2), (0, 0, 255)).save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+def _write_jpeg_to_disk(url, save_path, session=None) -> bool:
+    """``ImageDownloader.download_image`` stand-in: writes a decodable JPEG."""
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(save_path).write_bytes(_jpeg_bytes())
+    return True
+
+
+async def _run_ingest(
+    novel_id, text, storage, downloader, session_factory, with_images=False,
+):
     try:
         return await ingest(
             ids=[novel_id],
             session_factory=session_factory,
-            client=FakeClient(_webview(novel_id, text)),
+            client=FakeClient(_webview(novel_id, text, with_images=with_images)),
             file_storage=storage,
             image_downloader=downloader,
         )
@@ -100,44 +147,84 @@ async def _run_ingest(novel_id, text, storage, downloader, session_factory):
 
 class TestProducerMarksDone:
     async def test_written_epub_marks_has_epub_done(
-        self, session_factory, tmp_path,
+        self, session_factory, tmp_path, monkeypatch,
     ):
-        """EPUB 生成成功 → 同一事务结束后 has_epub == 2（DONE）。"""
+        """EPUB 生成成功且**完整** → 同一事务结束后 has_epub == 2（DONE）。
+
+        图片必须真的落到磁盘：生产侧的 DONE 现在问的是
+        ``state.is_complete``（有 ``images/`` 成员且无未替换占位符），
+        只"写出一个文件"不算完成。
+        """
         storage = FileStorage(str(tmp_path / "download"))
         downloader = ImageDownloader(
             max_workers=1, min_interval=0, epub_builder=EpubBuilder(),
         )
+        monkeypatch.setattr(
+            downloader, "download_image", _write_jpeg_to_disk,
+        )
 
         out = await _run_ingest(
             100, TEXT_WITH_IMAGE, storage, downloader, session_factory,
+            with_images=True,
         )
 
         assert out.new_count == 1
         assert out.failed == []
         # 磁盘上确实有 EPUB —— 不是"标成 2 却没有文件"（事故的另一半：
-        # 216 本残缺 EPUB 被记成完成）。
-        assert state.is_readable_container(
-            storage.novel_epub_path(100, "新小说")
-        )
+        # 216 本残缺 EPUB 被记成完成）；而且它是**完整**的。
+        epub_path = storage.novel_epub_path(100, "新小说")
+        assert state.is_readable_container(epub_path)
+        assert state.is_complete(epub_path)
 
         with session_factory() as s:
             novel = s.get(Novel, 100)
             assert novel is not None
             assert novel.has_epub == EpubStatus.DONE
 
-    async def test_existing_valid_epub_also_marks_done(
+    async def test_unfinished_epub_is_not_marked_done(
         self, session_factory, tmp_path,
     ):
-        """EPUB 本来就已存在且有效（早退分支，记 done）→ 同样置 2。"""
+        """payload 给了图片但一张也没下载到 → 不算 DONE，进失败台账。
+
+        这是生产侧与巡检侧判据不一致的回归钉：builder 在缺图时仍返回
+        True（把占位符降级成缺图框），旧代码据此记 ``done``；而
+        ``check_epub`` 用 ``state.is_complete`` 拒绝提升，等放弃规则一触发
+        就变成终端 NO_IMAGES，读者拿到的坏书永远不会被重建。
+        """
+        storage = FileStorage(str(tmp_path / "download"))
+        downloader = ImageDownloader(
+            max_workers=1, min_interval=0, epub_builder=EpubBuilder(),
+        )
+
+        out = await _run_ingest(
+            102, TEXT_WITH_IMAGE, storage, downloader, session_factory,
+            with_images=True,   # offered → 下载失败是"失败"，不是"没有图"
+        )
+
+        assert out.failed == [(102, "EPUB 不完整: novel 102")]
+        with session_factory() as s:
+            assert s.get(Novel, 102).has_epub == EpubStatus.PENDING
+
+    async def test_existing_valid_epub_also_marks_done(
+        self, session_factory, tmp_path, monkeypatch,
+    ):
+        """EPUB 本来就已存在且**完整**（早退分支，记 done）→ 同样置 2。
+
+        图片替身必须成功：早退分支只在文件已经完整时命中，而"完整"要
+        真有 ``images/`` 成员。这里让下载成功，验证的是早退路径本身
+        （``_futures`` 为空、原有字节不动），不是"缺图也算完成"。
+        """
         storage = FileStorage(str(tmp_path / "download"))
         epub_path = storage.novel_epub_path(200, "新小说")
-        _prebuilt_epub(epub_path)
+        _prebuilt_complete_epub(epub_path)
 
         downloader = ImageDownloader(
             max_workers=1, min_interval=0, epub_builder=EpubBuilder(),
         )
+        monkeypatch.setattr(downloader, "download_image", _write_jpeg_to_disk)
         out = await _run_ingest(
             200, TEXT_WITH_IMAGE, storage, downloader, session_factory,
+            with_images=True,
         )
 
         assert out.failed == []
