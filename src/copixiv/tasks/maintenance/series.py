@@ -10,7 +10,10 @@ from pydantic import BaseModel, field_validator
 from copixiv.core.models import TaskResult
 from copixiv.db.write_lock import run_write_transaction
 from copixiv.features.novels import series_ledger
-from copixiv.features.novels.repo import SQLAlchemySeriesRepository
+from copixiv.features.novels.repo import (
+    SQLAlchemyNovelRepository,
+    SQLAlchemySeriesRepository,
+)
 from copixiv.log import logger
 
 from ._cursor import _read_cursor, _write_cursor
@@ -186,6 +189,33 @@ async def fix_series_index(args: FixSeriesIndexArgs, ctx: TaskContext) -> TaskRe
     series_cursor = await _read_cursor(uow, key=_SERIES_CURSOR_KEY)
     orphan_cursor = await _read_cursor(uow, key=_ORPHAN_CURSOR_KEY)
     sweep_cursor = await _read_cursor(uow, key=_SWEEP_CURSOR_KEY)
+
+    # ---- ⓪ 单本系列：库里只有这一本，章节号只能是 1（无需网络）----
+    #
+    # These are the largest single block of the backlog (240 of 462 candidate
+    # series) and the roster request was pure ceremony: it returns one entry, so
+    # its position is always 1.  Filling them from the row count costs nothing.
+    #
+    # This runs *before* the candidate queries and outside the cap: it needs no
+    # network, so it cannot starve the series that do.  ``series_index`` is
+    # fill-once, so this only ever writes to a NULL.
+    single_book_ids = []
+    async with uow.begin():
+        single_book_ids = await SQLAlchemySeriesRepository(
+            uow.session
+        ).single_book_series_missing_index()
+
+    if single_book_ids:
+        async def _fill_single(uw) -> None:
+            await SQLAlchemyNovelRepository(uw.session).update_metadata_many(
+                single_book_ids, {"series_index": 1},
+            )
+
+        await run_write_transaction(uow, _fill_single)
+        logger.info(
+            f"fix_series_index: 单本系列直接标 1 号 {len(single_book_ids)} 本"
+            f"（免去 {len(single_book_ids)} 次名册请求）"
+        )
 
     # ---- 候选集：缺号系列（②）+ 孤儿号行（③）+ 号齐全系列（④，sweep_all）----
     async with uow.begin():

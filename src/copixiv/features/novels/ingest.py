@@ -32,6 +32,7 @@ from copixiv.core.language import is_chinese
 from copixiv.core.services import safe_get
 from copixiv.features.novels.download_novel import fetch_novel_and_assets
 from copixiv.features.novels.persist import persist_novels
+from copixiv.features.novels.series_index import resolve_series_indices
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.features.failures.repo import FailedNovelRepository
 from copixiv.features.authors.resolve_names import collect_author_names, writeback_author_names
@@ -160,6 +161,15 @@ async def _download_novels(
             failed_records.append((nid, "webview_novel 返回空"))
         else:
             valid.append(result)
+
+    # Chapter numbers that the webview navigation could not anchor (the series'
+    # only volume, a missing neighbour pointer) are resolved here, from the
+    # series roster — the same authority the nightly repair uses, fetched once
+    # per series per round.  Doing it *now* is the point: the value is written
+    # in the same transaction that inserts the row, and ``series_index`` is
+    # fill-once, so nothing re-derives it afterwards.
+    if valid and client is not None:
+        valid = await resolve_series_indices(valid, client)
 
     logger.info(
         f"_download_novels: {len(valid)}/{len(novel_ids)} downloaded successfully",

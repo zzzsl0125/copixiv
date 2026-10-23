@@ -1572,6 +1572,40 @@ class SQLAlchemySeriesRepository(BaseRepository):
             .where(models.Novel.series_id == series_id)
         ).scalar_one())
 
+    async def single_book_series_missing_index(self) -> list[int]:
+        """Rows that are the only volume of their series and have no index.
+
+        Such a row's chapter number can only be 1: the database holds exactly
+        one work under that ``series_id``, so whatever pixiv says, there is no
+        neighbour to be before or after.  Marking it stops the repair task from
+        spending a roster request per series to learn what the row count already
+        says — 240 of 462 production candidates were exactly this shape.
+
+        The false-positive case the rule accepts: an author deleted every other
+        volume, leaving one.  Labelling that ``1`` matches what pixiv now shows
+        (the roster returns a single entry), and if the series is ever restored
+        the nightly repair corrects it — ``series_index`` is only overwritten by
+        a *different* roster-derived value, never by a guess.
+
+        Excludes rows whose series is retired, for the same reason the roster
+        candidates do.
+        """
+        return list(self.session.execute(
+            _select(models.Novel.id)
+            .where(
+                models.Novel.series_id.isnot(None),
+                models.Novel.series_index.is_(None),
+                ~models.Novel.series_id.in_(_retired_series_subquery()),
+                ~models.Novel.series_id.in_(
+                    # A series with more than one row is not single-book.
+                    _select(models.Novel.series_id)
+                    .where(models.Novel.series_id.isnot(None))
+                    .group_by(models.Novel.series_id)
+                    .having(func.count(models.Novel.id) > 1)
+                ),
+            )
+        ).scalars().all())
+
     async def series_with_empty_index(self) -> list[int]:
         """Series with at least one chapter number missing.
 

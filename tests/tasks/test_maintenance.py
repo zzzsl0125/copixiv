@@ -849,6 +849,34 @@ def _seed_novel(
         s.commit()
 
 
+#: Offset for the throwaway sibling added by :func:`_make_multi_book`.  Kept
+#: far from every id the tests themselves seed (they cluster around 100-900 and
+#: the 9xx series), because a sibling landing on a seeded id raises a primary-key
+#: violation rather than a useful assertion.
+_SIBLING_ID_BASE = 800_000
+
+
+def _make_multi_book(sf, series_id: int, *, sibling_id: int | None = None) -> int:
+    """Give *series_id* a second member so it is no longer a single-book series.
+
+    ``fix_series_index`` now fills single-book series with ``1`` **without any
+    network call** — the row count already answers the question, and the roster
+    would only return one entry.  Tests that assert on the *roster* path
+    therefore need a series with more than one row, or the fill short-circuits
+    before the fake client is ever called.
+
+    Returns the sibling's id (derived from the series when *sibling_id* is not
+    given, so one call site does not collide with another).
+    """
+    if sibling_id is None:
+        sibling_id = _SIBLING_ID_BASE + series_id
+    _seed_novel(
+        sf, sibling_id, series_id=series_id, series_name=f"s{series_id}",
+        series_index=1,
+    )
+    return sibling_id
+
+
 def _series_cols(sf, nid: int) -> tuple:
     """``(series_id, series_name, series_index)``。"""
     with sf() as s:
@@ -1184,6 +1212,7 @@ class TestFixSeriesIndexCursor:
     async def test_series_cursor_advances_then_resumes(self, session_factory):
         for nid, sid in ((601, 801), (602, 802)):
             _seed_novel(session_factory, nid, series_id=sid, series_name=f"s{sid}")
+            _make_multi_book(session_factory, sid)
         client = _FakeSeriesClient(series={
             801: [_info(601, 801)], 802: [_info(602, 802)],
         })
@@ -1412,6 +1441,7 @@ class TestFixSeriesIndexStarvation:
                 session_factory, nid, series_id=sid, series_name=f"s{sid}",
                 series_index=None,
             )
+            _make_multi_book(session_factory, sid)
         client = _FakeSeriesClient(
             series={971: [_info(802, 971)]}, fail_series={970},
         )
@@ -1444,6 +1474,7 @@ class TestFixSeriesIndexStarvation:
             _seed_novel(
                 session_factory, nid, series_id=sid, series_name=f"s{sid}",
             )
+            _make_multi_book(session_factory, sid)
         client = _FakeSeriesClient(
             series={980: [_info(811, 980)], 981: [_info(812, 981)]},
             fail_series={980},
@@ -1508,6 +1539,11 @@ class TestFixSeriesIndexStarvation:
             session_factory, 832, series_id=1244950, series_name="好系列",
             series_index=None,
         )
+        # Both series need a second member: a single-book series is now filled
+        # with 1 without any roster call, which would bypass the very code path
+        # this test is about (the cursor advancing past a permanent failure).
+        _make_multi_book(session_factory, 1244949)
+        _make_multi_book(session_factory, 1244950)
         client = _FakeSeriesClient(
             series={1244950: [_info(832, 1244950)]},
             fail_series={1244949},
@@ -1550,6 +1586,7 @@ class TestFixSeriesIndexDeadLetter:
         from copixiv.pixiv.errors import PixivApiError
 
         _seed_novel(session_factory, 901, series_id=1900, series_index=None)
+        _make_multi_book(session_factory, 1900)
         await self._fail_rounds(
             session_factory, 1900, 1, PixivApiError("gone", status_code=404),
         )
@@ -1569,6 +1606,7 @@ class TestFixSeriesIndexDeadLetter:
         from copixiv.pixiv.errors import PixivApiError
 
         _seed_novel(session_factory, 902, series_id=1901, series_index=None)
+        _make_multi_book(session_factory, 1901)
         err = PixivApiError("gone", status_code=404)
         client = await self._fail_rounds(
             session_factory, 1901, RETIRE_AFTER_FAILURES, err,
@@ -1597,6 +1635,7 @@ class TestFixSeriesIndexDeadLetter:
         from copixiv.pixiv.errors import PixivApiError
 
         _seed_novel(session_factory, 903, series_id=1902, series_index=None)
+        _make_multi_book(session_factory, 1902)
         # 5xx 是「服务端此刻坏了」，不是「这个系列不存在」。
         await self._fail_rounds(
             session_factory, 1902, 5, PixivApiError("boom", status_code=503),
@@ -1615,6 +1654,7 @@ class TestFixSeriesIndexDeadLetter:
 
         assert RETIRE_AFTER_FAILURES > 2
         _seed_novel(session_factory, 904, series_id=1903, series_index=None)
+        _make_multi_book(session_factory, 1903)
         await self._fail_rounds(
             session_factory, 1903, 2, PixivApiError("gone", status_code=404),
         )
@@ -1640,6 +1680,7 @@ class TestFixSeriesIndexDeadLetter:
         from copixiv.pixiv.errors import PixivApiError
 
         _seed_novel(session_factory, 905, series_id=1904, series_index=None)
+        _make_multi_book(session_factory, 1904)
         await self._fail_rounds(
             session_factory, 1904, RETIRE_AFTER_FAILURES,
             PixivApiError("gone", status_code=404),
@@ -1662,6 +1703,7 @@ class TestFixSeriesIndexDeadLetter:
         from copixiv.pixiv.errors import PixivApiError
 
         _seed_novel(session_factory, 906, series_id=1905, series_index=None)
+        _make_multi_book(session_factory, 1905)
 
         def _boom(*a, **kw):
             raise RuntimeError("ledger unavailable")
@@ -1818,3 +1860,85 @@ class TestGiveUpIsNotVetoedByABrokenFile:
         await _run_check_epub(session_factory)
 
         assert _get_status(session_factory, 72) == EpubStatus.PENDING
+
+
+class TestSingleBookSeriesFill:
+    """单本系列：章节号只能是 1，不需要任何名册请求。
+
+    生产里 462 个缺号系列中有 240 个是这种形态——库里只有一本书。名册对它们
+    只会返回一条，位置恒为 1，所以那次请求纯属仪式。改用行数直接填空：
+
+    * 省掉 240 次/轮的 API 请求；
+    * 让候选集只留「真的需要问 pixiv」的系列；
+    * 而且它只写 NULL（``series_index`` 是 fill-once），不会动任何已有值。
+    """
+
+    async def test_single_book_series_is_filled_with_one(self, session_factory):
+        _seed_novel(
+            session_factory, 3001, series_id=1950, series_name="s1950",
+            series_index=None,
+        )
+        client = _FakeSeriesClient()
+
+        await fix_series_index(
+            FixSeriesIndexArgs(), _ctx(session_factory, client),
+        )
+
+        assert _series_cols(session_factory, 3001)[2] == 1
+        assert client.series_calls == [], "单本系列不该发名册请求"
+
+    async def test_multi_book_series_still_uses_the_roster(self, session_factory):
+        """多本系列不受影响：仍按名册位置编号。"""
+        _seed_novel(
+            session_factory, 3011, series_id=1951, series_name="s1951",
+            series_index=None,
+        )
+        _make_multi_book(session_factory, 1951)
+        client = _FakeSeriesClient(series={1951: [_info(3011, 1951)]})
+
+        await fix_series_index(
+            FixSeriesIndexArgs(), _ctx(session_factory, client),
+        )
+
+        assert client.series_calls == [1951]
+        assert _series_cols(session_factory, 3011)[2] == 1
+
+    async def test_it_never_overwrites_an_existing_index(self, session_factory):
+        """已有号的行不在候选里：单本系列的填充只针对 NULL。"""
+        _seed_novel(
+            session_factory, 3021, series_id=1952, series_name="s1952",
+            series_index=7,
+        )
+        client = _FakeSeriesClient()
+
+        await fix_series_index(
+            FixSeriesIndexArgs(), _ctx(session_factory, client),
+        )
+
+        assert _series_cols(session_factory, 3021)[2] == 7, "已有值不可被动"
+        assert client.series_calls == []
+
+    async def test_retired_series_is_not_filled(self, session_factory):
+        """已判死的系列连这个便宜也不占：它根本不该再被处理。"""
+        from copixiv.db import models as m
+
+        _seed_novel(
+            session_factory, 3031, series_id=1953, series_name="s1953",
+            series_index=None,
+        )
+        with session_factory() as s:
+            s.add(m.SeriesDeadLetter(
+                series_id=1953, consecutive_failures=3,
+                retired_at=__import__("datetime").datetime.now(
+                    __import__("datetime").timezone.utc
+                ),
+            ))
+            s.commit()
+        client = _FakeSeriesClient()
+
+        await fix_series_index(
+            FixSeriesIndexArgs(), _ctx(session_factory, client),
+        )
+
+        assert _series_cols(session_factory, 3031)[2] is None
+        assert client.series_calls == []
