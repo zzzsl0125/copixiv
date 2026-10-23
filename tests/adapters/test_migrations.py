@@ -31,7 +31,7 @@ def _head_revision() -> str:
 EXPECTED_TABLES = {
     "author", "series", "novel", "tag", "tag_alias",
     "tag_preference", "setting", "scheduled_task", "task_history",
-    "token", "failed_novel", "search_history",
+    "token", "failed_novel", "search_history", "series_dead_letter",
 }
 
 # Tables that the greenfield schema eliminated (replaced by novel.tags /
@@ -160,3 +160,68 @@ def test_fresh_database_upgrades_to_head():
         assert rev == _head_revision()
     finally:
         engine.dispose()
+
+
+@pytest.mark.slow
+def test_jsonb_string_rows_are_repaired_to_objects(tmp_path):
+    """0015 rewrites the ``jsonb_typeof='string'`` rows into objects.
+
+    Regression for the ``recover_stale`` bug: it stored ``json.dumps`` output
+    into a JSONB column, so ``result->>'summary'`` was NULL and the UI showed an
+    empty summary.  The writer is fixed; this migration repairs the rows that
+    were already written.
+
+    Runs on a scratch database so it can seed the corrupt rows before upgrading
+    past 0014.  Verifies both halves: a decodable object is unwrapped, and a
+    string that is *not* an object is left alone (that is history, not encoding).
+    """
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import create_engine
+
+    db = "copixiv_jsonb_repair_test"
+    url = f"postgresql+psycopg2://postgres@127.0.0.1:5433/{db}"
+    subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "pg_dev.py"),
+         "createdb", db],
+        check=True,
+    )
+
+    cfg = Config(str(REPO_ROOT / "alembic.ini"))
+    cfg.set_main_option("sqlalchemy.url", url)
+    cfg.set_main_option("script_location", str(REPO_ROOT / "alembic"))
+
+    # Land on the revision *before* the repair, then seed the corrupt shapes.
+    # ``downgrade`` first: the scratch DB may already sit at head from an
+    # earlier run, and ``upgrade`` to an old revision is a no-op from head.
+    command.downgrade(cfg, "0014_task_history_retention")
+
+    engine = create_engine(url)
+    with engine.begin() as conn:
+        # The scratch DB outlives one run; start from an empty table so the
+        # seeded ids cannot collide on a rerun.
+        conn.execute(text("DELETE FROM task_history"))
+        conn.execute(text("""
+            INSERT INTO task_history (id, name, status, start_time, result)
+            VALUES
+              (1, 'legacy', 'interrupted', now(),
+               '"{\\"summary\\": \\"服务重启导致中断\\"}"'::jsonb),
+              (2, 'plain-log', 'success', now(), '"just text"'::jsonb),
+              (3, 'healthy', 'success', now(), '{"summary": "ok"}'::jsonb)
+        """))
+
+    command.upgrade(cfg, "head")
+
+    with engine.connect() as conn:
+        rows = dict(conn.execute(text(
+            "select id, result from task_history"
+        )).all())
+        kinds = dict(conn.execute(text(
+            "select id, jsonb_typeof(result) from task_history"
+        )).all())
+
+    assert kinds[1] == "object", "可还原的字符串应变成对象"
+    assert rows[1] == {"summary": "服务重启导致中断"}
+    assert kinds[2] == "string", "不可还原的字符串保持原样（那是历史内容）"
+    assert kinds[3] == "object", "本来就正常的行不受影响"
+    engine.dispose()

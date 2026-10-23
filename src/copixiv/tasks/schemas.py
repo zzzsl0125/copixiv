@@ -87,6 +87,7 @@ class TaskHistoryResponse(BaseModel):
     # user-facing display label.  NULL on legacy rows written before the
     # column existed.
     task_func: str | None = None
+    # Same rule as ``result``: coerced, never fatal.
     arguments: dict | None = None
     status: str
     # timestamptz → datetime; Pydantic serializes to an ISO string on the wire.
@@ -97,6 +98,15 @@ class TaskHistoryResponse(BaseModel):
     # list endpoint strips it because it was 96 % of a 7.4 MB response while
     # the UI only shows it after clicking 「日志」.  Fetch it separately from
     # ``GET /api/tasks/history/{id}/log``.
+    #
+    # Stays ``dict`` on the wire — the generated front-end types depend on it —
+    # but a malformed row is **coerced**, never allowed to fail validation.
+    # The column is JSONB, so any JSON value can be in it; an older
+    # ``recover_stale`` wrote ``json.dumps`` output there, leaving a bare
+    # string.  Under a strict ``dict`` such a row raised and took the **whole
+    # page** down with a 500 — one bad row, no history at all.  Production
+    # holds three ``jsonb_typeof = 'string'`` rows today that only escape that
+    # fate by happening to parse into a dict one level in.
     result: dict | None = None
     # True when the row *has* stored log text, so the UI can enable/disable
     # the log button without downloading the log to find out.  ``None`` on
@@ -108,8 +118,32 @@ class TaskHistoryResponse(BaseModel):
     progress: Any | None = None
     model_config = ConfigDict(from_attributes=True)
 
-    _parse_arguments = field_validator("arguments", mode="before")(_parse_json_str)
-    _parse_result = field_validator("result", mode="before")(_parse_json_str)
+    @field_validator("arguments", "result", mode="before")
+    @classmethod
+    def _normalize_json_column(cls, v: Any) -> Any:
+        """Wrap a non-object JSON value instead of rejecting the row.
+
+        A scalar here is *historical corruption*, not a caller error: the only
+        writer that produced it (``recover_stale`` printing ``json.dumps`` into
+        a JSONB column) is fixed, and the three surviving rows are old.  The
+        list endpoint must still render, so the value is preserved verbatim
+        under ``raw`` rather than dropped — an operator can see what is actually
+        in the column instead of an empty cell and no explanation.
+        """
+        # Parse first, then judge: a JSON *string* that decodes to an object is
+        # a normal stored value, not corruption.  Doing this in one validator
+        # keeps the order explicit — two ``mode="before"`` validators would run
+        # in declaration order and could coerce before parsing.
+        v = _parse_json_str(v)
+        # A JSON *string* that itself encodes an object is the exact shape the
+        # legacy ``recover_stale`` left behind (``json.dumps`` output stored as
+        # a JSONB string, so it arrives quoted a second time).  Unwrap that one
+        # extra layer — it is the same value the writer meant to store.
+        if isinstance(v, str):
+            v = _parse_json_str(v)
+        if v is None or isinstance(v, dict):
+            return v
+        return {"raw": v}
 
 
 class TaskHistoryLogResponse(BaseModel):

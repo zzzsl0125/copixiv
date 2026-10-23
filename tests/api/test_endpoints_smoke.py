@@ -864,3 +864,53 @@ class TestTaskHistoryShape:
 
         legacy_running = next(i for i in body["items"] if i["name"] == "rebuild_fts")
         assert legacy_running["task_func"] is None
+
+
+class TestMalformedJsonbRows:
+    """One corrupt JSONB row must not 500 the whole history page.
+
+    ``task_history.result`` is JSONB, so any JSON value can be in it.  An older
+    ``recover_stale`` wrote ``json.dumps`` output *into* the column, landing a
+    JSON **string** instead of an object; three such rows exist in production.
+    They survive today only because the string happens to parse into a dict one
+    level in.  With a strict ``dict`` schema, a row that does not (a bare
+    "plain text log", a number, an array) raises and the endpoint answers 500 for
+    **every** row on the page.
+    """
+
+    def _seed(self, session_factory, rows):
+        from copixiv.db.models import TaskHistory
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        with session_factory() as s:
+            for task_id, result, arguments in rows:
+                s.add(TaskHistory(
+                    id=task_id, name=f"t{task_id}", task_func="x",
+                    status="success", start_time=now, end_time=now,
+                    arguments=arguments, result=result,
+                ))
+            s.commit()
+
+    def test_scalar_result_does_not_break_the_page(
+        self, client, session_factory,
+    ):
+        self._seed(session_factory, [
+            # The legacy shape: a JSON *string* holding json.dumps output.
+            (901, '"{\\"summary\\": \\"服务重启导致中断\\"}"', '{"id": 1}'),
+            # Shapes that cannot be salvaged into an object.
+            (902, '"plain text log"', "not-json"),
+            (903, "123", '{"id": 3}'),
+        ])
+
+        r = client.get("/api/tasks/history?limit=50")
+        assert r.status_code == 200, "一行坏数据不能让整页 500"
+
+        items = {i["id"]: i for i in r.json()["items"]}
+        # Salvageable: parsed through to the object it encodes.
+        assert items[901]["result"] == {"summary": "服务重启导致中断"}
+        # Unsolvageable: preserved verbatim under ``raw``, not dropped — an
+        # operator needs to see what is actually in the column.
+        assert items[902]["result"] == {"raw": "plain text log"}
+        assert items[903]["result"] == {"raw": 123}
+        assert items[902]["arguments"] == {"raw": "not-json"}
