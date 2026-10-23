@@ -60,6 +60,7 @@ from sqlalchemy import select as _select
 from copixiv.core.models import TaskResult
 from copixiv.db import models
 from copixiv.log import logger
+from copixiv.storage import assets
 
 from ..kernel import TaskContext
 from ..kernel import register
@@ -117,13 +118,17 @@ def _id_of(name_stem: str) -> int | None:
         return None
     tokens = name_stem.split("_")
 
-    # Assets first: ``{id}_u_{image_id}`` / ``{id}_c_cover``.  Their *last*
-    # token is an image id or a literal ("cover", "u"), never the novel id, so
-    # the novel rule below must not see them.  Getting this order wrong reads
-    # a novel id out of ``…_u_25414623`` as 25414623 and reports a live book's
-    # illustrations as orphans — i.e. it deletes them.
-    if "u" in tokens[1:2] or "c" in tokens[1:2]:
-        return int(tokens[0]) if tokens[0].isdigit() else None
+    # Assets first: ``{id}_u_{image_id}`` / ``{id}_c_cover`` / ``{id}_p_{id}``.
+    # Their *last* token is an image id or a literal ("cover"), never the novel
+    # id, so the novel rule below must not see them.  Getting this order wrong
+    # reads a novel id out of ``…_u_25414623`` as 25414623 and reports a live
+    # book's illustrations as orphans — i.e. it deletes them.  The convention
+    # itself is owned by ``storage.assets`` (which also knows ``p``); asking it
+    # here is what keeps this parse from drifting from the one that *writes*
+    # those names.
+    asset_novel_id = assets.novel_id_of(name_stem)
+    if asset_novel_id is not None:
+        return asset_novel_id
 
     # Novels: ``{safe_title}_{id}`` -- the id is the trailing token.
     if tokens[-1].isdigit():

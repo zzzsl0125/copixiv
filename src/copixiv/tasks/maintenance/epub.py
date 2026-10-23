@@ -21,6 +21,7 @@ from copixiv.core.services import (
 )
 from copixiv.db.write_lock import run_write_transaction
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
+from copixiv.storage import assets
 from copixiv.storage.epub import state
 from copixiv.log import logger
 
@@ -498,8 +499,9 @@ def _no_images_ever_and_stale(txt_path: Path, novel_id: int) -> bool:
     Freshly-downloaded novels are never abandoned: their mtime is recent,
     so they stay pending and can retry.
     """
-    parent = txt_path.parent
-    if any(parent.glob(f"{novel_id}_u_*")) or any(parent.glob(f"{novel_id}_p_*")):
+    # 资产命名约定归 ``storage.assets``：这里问的是"盘上还有没有插图资产"
+    # （封面不算 —— 只有封面的 EPUB 不能证明插图曾经落地）。
+    if assets.has_illustration_assets(txt_path.parent, novel_id):
         return False
     try:
         age_days = (time.time() - txt_path.stat().st_mtime) / 86400

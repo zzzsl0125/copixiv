@@ -23,6 +23,7 @@ import requests
 from copixiv.core import formats
 from copixiv.core.draft import NovelDraft
 from copixiv.pixiv.http import create_image_session, pick_image_url
+from copixiv.storage import assets
 from copixiv.storage.atomic import atomic_write
 from copixiv.storage.epub import state
 from copixiv.log import logger
@@ -365,130 +366,14 @@ class ImageDownloader:
         Returns ``None`` on success, or a failure reason string so the
         caller (``await_all``) can persist it into ``failed_novel``.
         """
-        from copixiv.log import logger
-
-        base_path = Path(novel.path).parent
+        base_dir = Path(novel.path).parent
         novel_id = str(novel.id)
-        images = novel.images or {}
-        illusts = novel.illusts or {}
-        cover_url = novel.cover_url
-
-        # The body decides whether an EPUB is warranted at all: a novel with
-        # no ``[uploadedimage:…]`` placeholder has nothing to embed.  The
-        # webview draft carries the text; a metadata-only draft (content is
-        # None) leaves the decision to the builder.
         needs_epub = state.needs_epub(novel.content)
-
-        downloaded_files: list[Path] = []
         session = create_image_session(self._proxy_http, self._proxy_https)
 
         try:
-            # Cover
-            if cover_url:
-                logger.debug(f"下载: #{novel_id} 封面 → {cover_url}")
-                ext = Path(cover_url).suffix or ".jpg"
-                path = base_path / f"{novel_id}_c_cover{ext}"
-                if self.download_image(cover_url, path, session):
-                    downloaded_files.append(path)
-                    logger.debug(f"下载: #{novel_id} 封面 OK")
-
-            # Uploaded images
-            if images:
-                logger.debug(
-                    f"下载: #{novel_id} 内嵌图片 {len(images)} 张",
-                )
-                for img_id, img_info in images.items():
-                    url = pick_image_url(img_info.get("urls"))
-                    if url:
-                        ext = Path(url).suffix or ".jpg"
-                        path = base_path / f"{novel_id}_u_{img_id}{ext}"
-                        if self.download_image(url, path, session):
-                            downloaded_files.append(path)
-
-            # Linked illustrations
-            if illusts:
-                logger.debug(
-                    f"下载: #{novel_id} 关联插图 {len(illusts)} 张",
-                )
-                for illust_id, wrapper in illusts.items():
-                    illust_data = (
-                        wrapper.get("illust")
-                        if isinstance(wrapper, dict)
-                        else wrapper
-                    )
-                    if isinstance(illust_data, dict):
-                        url = pick_image_url(
-                            illust_data.get("images"),
-                            order=("original", "medium", "small"),
-                        )
-                        if url:
-                            ext = Path(url).suffix or ".jpg"
-                            path = base_path / f"{novel_id}_p_{illust_id}{ext}"
-                            if self.download_image(url, path, session):
-                                downloaded_files.append(path)
-
-            # EPUB —— 只有成功才清理临时图片。
-            # ``needs_epub=False``（正文没有图片占位符）时跳过，避免为一本
-            # 无图小说留下一个空壳 EPUB；正文占位符判定与 has_epub 同一套
-            # 规则（storage.epub.state.needs_epub → core.services）。
-            if self._epub_builder is not None:
-                if not self._epub_builder.create_epub(
-                    novel, needs_epub=needs_epub,
-                ):
-                    self._record_outcome(novel.id, "failed")
-                    return f"EPUB 生成失败: novel {novel_id}"
-                # ``needs_epub=False``: the builder returned True without
-                # writing anything (the body has no image placeholder), so
-                # there is no new EPUB to call DONE — that is a ``skipped``.
-                #
-                # Otherwise the builder's ``True`` still is not proof of a
-                # finished book: an image whose download failed degrades to a
-                # visible 缺图框 box, so the file exists, carries no raw
-                # marker, and embeds nothing.  Blessing that as DONE is what put
-                # the producer and the reconciler (``check_epub`` →
-                # ``state.is_complete``) on opposite sides of the same file.
-                #
-                # The verdict distinguishes "we failed" from "there is nothing
-                # to get", because only the first deserves a retry and a
-                # ledger entry:
-                #   * an image was offered and none landed → genuine failure
-                #     (the retry reuses whatever did land);
-                #   * the payload offered no image at all → not our failure;
-                #     record **no** outcome, leaving the row PENDING so
-                #     ``check_epub`` applies its give-up rule (images deleted
-                #     by the author are terminal, not an error).
-                epub_path = formats.sibling_path(Path(novel.path), formats.EPUB)
-                if needs_epub is False:
-                    self._record_outcome(novel.id, "skipped")
-                elif state.is_complete(epub_path):
-                    self._record_outcome(novel.id, "done")
-                elif images or illusts:
-                    self._record_outcome(novel.id, "failed")
-                    logger.warning(
-                        f"下载: #{novel_id} EPUB 未完成（图片下载失败）"
-                    )
-                    return f"EPUB 不完整: novel {novel_id}"
-                else:
-                    logger.warning(
-                        f"下载: #{novel_id} 正文有图片占位符但来源未给图片，"
-                        f"交给检查任务判定"
-                    )
-                    return None
-                logger.info(
-                    f"下载: #{novel_id} EPUB 完成 "
-                    f"(已清理 {len(downloaded_files)} 张临时图片)",
-                )
-                for f in downloaded_files:
-                    try:
-                        os.remove(f)
-                    except OSError:
-                        pass
-            else:
-                # No builder wired → no EPUB can be produced.  Never claim
-                # DONE for a file that does not exist (the app always wires
-                # one — ``app.py``; this guards test/degraded assembly).
-                self._record_outcome(novel.id, "skipped")
-            return None
+            downloaded = self._download_all_images(novel, base_dir, session)
+            return self._build_epub(novel, downloaded, needs_epub)
         except Exception:
             self._record_outcome(novel.id, "failed")
             logger.exception(f"Error processing assets for novel {novel_id}")
@@ -499,6 +384,108 @@ class ImageDownloader:
             return f"资产处理异常: novel {novel_id}"
         finally:
             session.close()
+
+    def _download_all_images(
+        self, novel: NovelDraft, base_dir: Path, session: requests.Session,
+    ) -> list[Path]:
+        """下载封面 / 内嵌图 / 关联插图 → 落盘的路径列表。
+
+        三组的 URL 来源与目录名不同，但动作完全一样（挑一个 URL、落到
+        ``{id}_{kind}_{asset}``、成功就记账），所以循环只有一份。
+        """
+        novel_id = novel.id
+        downloaded: list[Path] = []
+
+        jobs: list[tuple[str, str | int, str]] = []
+        if novel.cover_url:
+            jobs.append((assets.COVER, "", novel.cover_url))
+        for img_id, img_info in (novel.images or {}).items():
+            url = pick_image_url(img_info.get("urls"))
+            if url:
+                jobs.append((assets.UPLOADED, img_id, url))
+        for illust_id, wrapper in (novel.illusts or {}).items():
+            illust_data = (
+                wrapper.get("illust") if isinstance(wrapper, dict) else wrapper
+            )
+            if isinstance(illust_data, dict):
+                url = pick_image_url(
+                    illust_data.get("images"),
+                    order=("original", "medium", "small"),
+                )
+                if url:
+                    jobs.append((assets.ILLUSTRATION, illust_id, url))
+
+        for kind, asset_id, url in jobs:
+            path = assets.asset_path(
+                base_dir, novel_id, kind, asset_id, assets.asset_suffix(url),
+            )
+            if self.download_image(url, path, session):
+                downloaded.append(path)
+            elif kind == assets.COVER:
+                logger.debug(f"下载: #{novel_id} 封面失败 → {url}")
+
+        return downloaded
+
+    def _build_epub(
+        self, novel: NovelDraft, downloaded: list[Path], needs_epub: bool | None,
+    ) -> str | None:
+        """让 builder 产出 EPUB，并判定这条 novel 的资产结局。
+
+        返回值与 :meth:`_download_assets` 一致：``None`` = 没有要上报的失败，
+        字符串 = 这条要进失败台账的原因。
+
+        结局的三分法是刻意的 —— 只有第一种值得重试、值得记台账：
+
+        * **来源给了图、一张都没落地** → 真失败（重试会复用已落地的那些）；
+        * **正文不需要 EPUB** → ``skipped``（builder 也没写文件）；
+        * **来源压根没给图** → 不记 outcome，行留在 PENDING，让 ``check_epub``
+          用它的放弃规则判定（作者删掉的图是终态，不是错误）。
+        """
+        novel_id = novel.id
+        if self._epub_builder is None:
+            # 没有接 builder → 产不出 EPUB。绝不为一个不存在的文件宣称 DONE
+            # （应用装配总会接上，见 app.py；这里兜的是测试 / 降级装配）。
+            self._record_outcome(novel_id, "skipped")
+            return None
+
+        if not self._epub_builder.create_epub(novel, needs_epub=needs_epub):
+            self._record_outcome(novel_id, "failed")
+            return f"EPUB 生成失败: novel {novel_id}"
+
+        if needs_epub is False:
+            # builder 没写任何东西（正文没有图片占位符）→ 没有新 EPUB 可宣称
+            # DONE，这是 ``skipped``。
+            self._record_outcome(novel_id, "skipped")
+            return None
+
+        # builder 的 True **不是**成品证明：某张图下载失败会退化成可见的
+        # 缺图框，于是文件存在、没有 raw 标记、却一张图都没嵌进去。把它宣称为
+        # DONE 正是"生产方与对账方对同一个文件给出相反结论"的由来。
+        epub_path = formats.sibling_path(Path(novel.path), formats.EPUB)
+        has_source_images = bool(novel.images or novel.illusts)
+        if state.is_complete(epub_path):
+            self._record_outcome(novel_id, "done")
+        elif has_source_images:
+            self._record_outcome(novel_id, "failed")
+            logger.warning(f"下载: #{novel_id} EPUB 未完成（图片下载失败）")
+            return f"EPUB 不完整: novel {novel_id}"
+        else:
+            logger.warning(
+                f"下载: #{novel_id} 正文有图片占位符但来源未给图片，"
+                f"交给检查任务判定"
+            )
+            return None
+
+        logger.info(
+            f"下载: #{novel_id} EPUB 完成 "
+            f"(已清理 {len(downloaded)} 张临时图片)",
+        )
+        for path in downloaded:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        return None
 
     def shutdown(self) -> None:
         """Wait for all in-flight downloads to finish."""

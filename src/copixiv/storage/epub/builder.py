@@ -8,6 +8,7 @@ from PIL import Image
 from ebooklib import epub
 
 from copixiv.core import formats
+from copixiv.storage import assets
 from copixiv.core.draft import NovelDraft
 from copixiv.core.services import IMAGE_PLACEHOLDER_PATTERN
 from copixiv.storage.epub import state
@@ -271,33 +272,21 @@ class EpubBuilder:
     def _build_image_map(
         parent_dir: Path, novel_id: str, novel: NovelDraft
     ) -> dict[str, Path]:
-        image_map: dict[str, Path] = {}
+        """``{占位符 id: 盘上文件}`` —— 名字约定归 :mod:`copixiv.storage.assets`。
+
+        先按 manifest 里声明过的 id 精确找；一个都没找到就退化成目录扫描（畸形
+        或手改过的语料里 OPF 声明可能不全，但盘上确实有图）。
+        """
         known: list[tuple[str, str]] = []
-
         if isinstance(novel.images, dict):
-            known.extend((k, "u") for k in novel.images.keys())
+            known.extend((assets.UPLOADED, k) for k in novel.images)
         if isinstance(novel.illusts, dict):
-            known.extend((k, "p") for k in novel.illusts.keys())
+            known.extend((assets.ILLUSTRATION, k) for k in novel.illusts)
 
-        for img_id, img_type in known:
-            for ext in (".jpg", ".png", ".jpeg", ".gif"):
-                img_path = parent_dir / f"{novel_id}_{img_type}_{img_id}{ext}"
-                if img_path.exists():
-                    image_map[img_id] = img_path
-                    break
-
-        # Fallback: directory scan
-        if not image_map:
-            for f in parent_dir.iterdir():
-                if not f.name.startswith(f"{novel_id}_"):
-                    continue
-                if f.suffix.lower() not in (".jpg", ".png", ".jpeg", ".gif"):
-                    continue
-                parts = f.stem.split("_")
-                if len(parts) >= 3 and parts[1] in ("u", "p"):
-                    image_map[parts[2]] = f
-
-        return image_map
+        image_map = assets.iter_assets(
+            parent_dir, novel_id, [(kind, aid) for kind, aid in known],
+        )
+        return image_map or assets.scan_assets(parent_dir, novel_id)
 
     # ------------------------------------------------------------------
     # Cover & CSS
@@ -305,11 +294,7 @@ class EpubBuilder:
 
     @staticmethod
     def _find_cover(parent_dir: Path, novel_id: str) -> Path | None:
-        for ext in (".jpg", ".png", ".jpeg"):
-            candidate = parent_dir / f"{novel_id}_c_cover{ext}"
-            if candidate.exists():
-                return candidate
-        return None
+        return assets.find_cover(parent_dir, novel_id)
 
     @staticmethod
     def _set_cover(book: epub.EpubBook, cover_path: Path | None) -> None:
