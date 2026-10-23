@@ -389,34 +389,11 @@ def _series_index(raw: Any) -> int | None:
     return raw
 
 
-def _author_id(raw: Any) -> int:
-    """正整数 pixiv 作者 id（显式 null 由调用方在更早处处理）。"""
-    return _positive_id(raw, "作者", "pixiv 用户 ID")
-
-
-def _series_id(raw: Any) -> int:
-    """正整数 pixiv 系列 id（显式 null 由调用方在更早处处理）。"""
-    return _positive_id(raw, "系列", "pixiv 系列 ID")
-
-
-def _positive_id(raw: Any, label: str, hint: str) -> int:
-    """正整数 pixiv id —— ``author_id`` 与 ``series_id`` 共用的那一条规则。
-
-    为什么必须是 ``int`` 而不是"能转成数字的字符串"：这两条字段都是**身份**，
-    不是展示值——前端的名字预览、作者页 / 系列页跳转、``author_id:`` /
-    ``series_id:`` 搜索全按它们工作。Pydantic 的 ``int`` 字段已经把 ``"123"``
-    收成 ``123``（宽松模式），这里只拦下"解析后仍然不是整数"（``true`` /
-    浮点）与无意义的 0 / 负数。
-
-    上界用 BIGINT：列是 ``BigInteger``，超出会在驱动层报错，不如在这里给 400。
-    """
-    if isinstance(raw, bool) or not isinstance(raw, int):
-        raise ValidationError(f"{label} ID 必须是整数")
-    if raw <= 0:
-        raise ValidationError(f"{label} ID 必须是正整数（{hint}）")
-    if raw > 2**63 - 1:
-        raise ValidationError(f"{label} ID 超出取值范围")
-    return raw
+# ``_author_id`` / ``_series_id`` 的规则现在归 ``core/ids.py``（三个切片共用，
+# 不该从某一个切片里 import 私有函数）。这两个别名只为既有调用点保留 ——
+# 新代码请直接 import ``copixiv.core.ids``。
+from copixiv.core.ids import author_id as _author_id  # noqa: E402
+from copixiv.core.ids import series_id as _series_id  # noqa: E402
 
 
 def _create_time(raw: Any) -> datetime | None:

@@ -65,10 +65,9 @@ from copixiv.features.novels.repo import (
     SQLAlchemySeriesRepository,
 )
 from copixiv.features.novels.resolve_series import lookup_series_profile
+from copixiv.core.ids import author_id as _author_id, series_id as _series_id
 from copixiv.features.novels.update_metadata import (
     UNKNOWN_AUTHOR,
-    _author_id,
-    _series_id,
 )
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
 from copixiv.pixiv.client import PixivClient
