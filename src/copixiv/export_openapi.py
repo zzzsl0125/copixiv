@@ -6,7 +6,7 @@ import json
 
 from fastapi import FastAPI
 
-from copixiv.app import _mount_routers
+from copixiv.app import mount_routers
 
 
 def build_openapi() -> dict:
@@ -18,7 +18,7 @@ def build_openapi() -> dict:
     matter for the generated client types.
     """
     app = FastAPI(title="Novel Database API")
-    _mount_routers(app)
+    mount_routers(app)
     return app.openapi()
 
 

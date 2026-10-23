@@ -59,7 +59,28 @@
 （形态①的接线纪律）与 `::test_self_managed_write_endpoints_are_declared`
 （形态②的自管写事务必须被证明，不能只靠声明）。
 
-> 这两条是**仅剩的**测试执法边界；其余规则在 §2 与 §4，皆为约定，违反不会红。
+### 3.3 不许跨切片 import 私有名字
+
+一个**公开的规则**不该住在另一个切片的私有函数里。审查 2026-10-24 时全仓有 5 处
+`from copixiv.<其他切片>.<模块> import _xxx`，每一处都指向同一个根因——规则放错了
+owner：
+
+| 私有引用 | 真实问题 | 处理 |
+|---|---|---|
+| `tasks/novels.py` → `novels.ingest._month_ranges` | 纯日期工具住在小说抓取管线里 | → `core/calendar.py` |
+| `tasks/novels.py` → `novels.ingest._filter_chinese_novels` | 只被任务层用的列表封装 | → `core/language.py` |
+| `library/api.py` → `novels.update_metadata._author_id` | 三个**不同切片**共用的校验规则 | → `core/ids.py` |
+| `novels/batch_edit_metadata.py` → 同上 | 同上 | 同上 |
+| `export_openapi.py` → `app._mount_routers` | 它有第二个**合法**调用方，下划线在撒谎 | 改名 `mount_routers` |
+
+两种正确出口：规则真通用 → 搬到 `core/` 或给一个公开名字；确实是本切片的内部
+细节 → 就别让别的切片用它。**同一切片内部**（`features/novels` 自己的文件之间、
+`tasks/maintenance` 包内）用私有名是正常封装，不执法。
+
+执法：`tests/architecture/test_no_private_cross_slice.py`（AST 扫 `src/copixiv`，
+跨 owner 的私有 import 即失败；另有一条"守卫会红"的自证）。
+
+> 这三条是**仅剩的**测试执法边界；其余规则在 §2 与 §4，皆为约定，违反不会红。
 
 ## 4. 约法三章（新增代码的默认姿势）
 

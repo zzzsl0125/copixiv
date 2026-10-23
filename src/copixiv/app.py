@@ -486,12 +486,15 @@ def _build(config_path: str | None = None) -> _AppSingletons:
 # ---------------------------------------------------------------------------
 
 
-def _mount_routers(app: FastAPI) -> None:
+def mount_routers(app: FastAPI) -> None:
     """Mount every API router on *app* (same prefixes/tags/order as before).
 
-    Kept separate from :func:`create_app` so the OpenAPI export
-    (``copixiv.export_openapi``) can build the schema without constructing
-    the container (no config.yaml, no DB, no startup).
+    **Public on purpose.**  Kept separate from :func:`create_app` so the OpenAPI
+    export (``copixiv.export_openapi``) can build the schema without
+    constructing the container (no ``config.yaml``, no DB, no startup).  That
+    export is a second, legitimate caller — the leading underscore it used to
+    carry claimed otherwise, and forced a cross-module private import for a
+    function that is genuinely part of this module's surface.
     """
     from copixiv.tasks import api as tasks
     from copixiv.features.novels import api as novels
@@ -727,7 +730,7 @@ def create_app(config_path: str | None = None):
         ),
     )
 
-    _mount_routers(app)
+    mount_routers(app)
 
     return app
 
