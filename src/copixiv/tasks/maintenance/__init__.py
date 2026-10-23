@@ -28,6 +28,9 @@ knowledge — into four task modules plus a shared cursor module:
   machine.
 * :mod:`.history` — ``prune_task_history``: trims the audit/queue table by
   "keep newest N rows **and** keep the last N days" (dry-run by default).
+* :mod:`.refetch` — ``refetch_missing_source``: re-downloads novels whose text
+  file vanished (``has_epub=4``).  The reconciler only *labels* them; nothing
+  was fetching them back.
 
 Importing this package executes every ``@register(...)`` decorator, because
 the re-exports below import all four task modules — that is what keeps
@@ -54,6 +57,7 @@ from .epub import (
     check_epub,
 )
 from .files import PruneOrphanFilesArgs, prune_orphan_files
+from .refetch import RefetchMissingSourceArgs, refetch_missing_source
 from .history import (
     DEFAULT_KEEP,
     DEFAULT_MAX_AGE_DAYS,
@@ -84,6 +88,8 @@ __all__ = [
     "PruneOrphanFilesArgs",
     "prune_task_history",
     "PruneTaskHistoryArgs",
+    "refetch_missing_source",
+    "RefetchMissingSourceArgs",
     "RETENTION_SETTING_KEY",
     "_scan_placeholder",
     "_sweep",
