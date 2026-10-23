@@ -122,7 +122,15 @@ src/copixiv/
 - 任务清单以运行时 `/api/tasks/methods` 为准（`describe_tasks()` 从 Pydantic
   args 模型推导，无反射）
 - 内置业务任务：`tasks/novels.py`（单本/关注/作者/排行/搜索）、`tasks/batch.py`
-  （批量操作/导出）、`tasks/maintenance.py`（搜索索引/EPUB/系列索引等）
+  （批量操作/导出）、`tasks/maintenance/`（搜索索引 / EPUB 对账 / 系列章节号 /
+  孤儿文件回收 / 任务历史裁剪）。后两个是**默认试运行**的运维任务：
+  `prune_orphan_files` 与 `prune_task_history` 只在参数里显式 `apply: true` 时
+  才真正删除，第一次跑应当先看作一份报告
+- 死系列台账：`features/novels/series_ledger.py` + `series_dead_letter` 表。
+  `fix_series_index` 的候选集无法区分「这轮拿不到」与「永远拿不到」，而 pixiv
+  已删的系列会每轮重新成为候选（实测一轮 200 个候选里 183 个是死系列，占 80%
+  运行时间）。规则：**只有确定性 404/410 累加计数**，连续 3 轮才判死并移出候选
+  集；任何一次成功都会清掉台账行，所以判死可逆
 - 会员门禁：`account_rule(need_premium=True)` 在账号池里**找不到 premium 账号时硬失败**
   （`PremiumRequiredError`），不回退免费账号——按喜好数排序的搜索在免费账号上会返回
   错误或一堆无关作品，而任务会记成"成功 0 本"。让任务行红掉比静默污染库诚实。
