@@ -445,9 +445,23 @@ def _no_images_ever_and_stale(txt_path: Path, novel_id: int) -> bool:
 
     Freshly-downloaded novels are never abandoned: their mtime is recent,
     so they stay pending and can retry.
+
+    **A built EPUB that still carries raw markers vetoes giving up.**  The
+    verdict this rule feeds is "nothing will ever be built for this row", so
+    it must not fire while the file on disk is *known to be broken* — those
+    rows need a rebuild, not a terminal state.  Without the veto, the
+    producer/consumers mismatch (builder returning True for an image-less
+    shell) upgraded 5 production books from "wrongly DONE" straight to
+    "never rebuilt", leaving literal ``[uploadedimage:…]`` visible to
+    readers.  The check is a zip walk, but this branch is only reached for
+    rows whose body has placeholders and which have no image file — a few
+    hundred rows at most.
     """
     parent = txt_path.parent
     if any(parent.glob(f"{novel_id}_u_*")) or any(parent.glob(f"{novel_id}_p_*")):
+        return False
+    epub_path = formats.sibling_path(txt_path, formats.EPUB)
+    if epub_path.is_file() and state.has_raw_markers(epub_path):
         return False
     try:
         age_days = (time.time() - txt_path.stat().st_mtime) / 86400
