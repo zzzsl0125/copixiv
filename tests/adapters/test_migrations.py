@@ -106,6 +106,31 @@ class TestMigrations:
         assert "config" not in ScheduledTask.__table__.columns
 
 
+    def test_hot_tables_analyze_on_a_nightly_write_volume(self, pg_engine):
+        """0013 lowers the analyze thresholds for ``novel`` / ``tag``.
+
+        Both carry statistics that decide *query plans* (``search_lower``'s
+        bigram selectivity, ``tag.reference_count``'s ordering histogram), and
+        the project runs no ``ANALYZE`` itself.  With PostgreSQL's defaults a
+        246 k-row table is only re-analyzed after ~24.7 k rows change — several
+        nights of ``novel_follow`` — so plans can run on stale statistics;
+        ``docs/perf`` measured a 7.3 s plan degrading to 1.7 ms once analyzed.
+        """
+        reloptions = dict(pg_engine.connect().execute(text(
+            "select relname, reloptions from pg_class "
+            "where relname in ('novel','tag')"
+        )).all())
+
+        for table, scale in (("novel", 0.02), ("tag", 0.05)):
+            opts = reloptions[table] or []
+            assert any(
+                o == f"autovacuum_analyze_scale_factor={scale}" for o in opts
+            ), f"{table} 的 analyze 阈值没被下调：{opts}"
+            assert any(
+                o.startswith("autovacuum_analyze_threshold=") for o in opts
+            ), f"{table} 的 analyze threshold 没设置：{opts}"
+
+
 @pytest.mark.slow
 def test_fresh_database_upgrades_to_head():
     """A brand-new PostgreSQL database upgrades to head from an empty baseline."""
