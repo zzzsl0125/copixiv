@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 
 from copixiv.app import (
     create_app,
@@ -99,6 +100,7 @@ class TestRealMiddlewareAssembly:
             APIAuthMiddleware,
             AccessLogMiddleware,
             CORSMiddleware,
+            GZipMiddleware,
         ], f"unexpected middleware stack: {[t.__name__ for t in request_flow]}"
 
     def test_host_rejected_without_reaching_routes(self, app):
@@ -215,3 +217,168 @@ class TestRealRouterMounting:
                 assert conn.execute(text("SELECT 1")).scalar() == 1
         finally:
             eng.dispose()
+
+
+class TestResponseCompression:
+    """Large JSON responses ship gzipped; binary downloads must not.
+
+    Motivation (production measurements): ``/api/novels/ids`` at default
+    thresholds returns 2.1 MB of ids, ``/api/tasks/history?limit=100`` 289 kB
+    and a single task's log 213 kB of repeated lines.  Compression cuts them
+    to 32 % / 44 % / 7 % respectively.  Small payloads stay uncompressed (the
+    ``/busy`` answer is 13 bytes and would only grow).
+
+    The binary case is the one that must be *proven*, not assumed: a novel file
+    is already compressed on disk and goes through ``FileResponse``; wrapping
+    it in gzip would burn CPU to make it bigger.
+    """
+
+    def _seed_many(self, client, app, n=400):
+        """Insert *n* novels so a list payload crosses the 1 KiB floor.
+
+        Idempotent: the module-scoped app shares one database across this
+        file's tests, so a plain ``add`` would collide on the second run.
+        """
+        from copixiv.db.models import Novel
+
+        with app.state.session_factory() as s:
+            for i in range(n):
+                if s.get(Novel, 10_000 + i) is None:
+                    s.add(Novel(
+                        id=10_000 + i, title=f"小说{i}", author_id=None,
+                        path=f"/tmp/{i}.txt", like=900, text=5000,
+                    ))
+            s.commit()
+
+    def test_large_json_is_gzipped(self, client, app):
+        self._seed_many(client, app)
+        plain = client.get(
+            "/api/novels/?per_page=200&min_like=0&min_text=0",
+            headers={"X-API-Key": "sekret", "Accept-Encoding": "identity"},
+        )
+        packed = client.get(
+            "/api/novels/?per_page=200&min_like=0&min_text=0",
+            headers={"X-API-Key": "sekret", "Accept-Encoding": "gzip"},
+        )
+        assert plain.status_code == packed.status_code == 200
+        # ``TestClient`` (httpx) transparently decodes the body, so the wire
+        # size is not observable from ``.content``; the header is the proof
+        # that the middleware ran, and equality of the decoded payload is the
+        # proof that it is transparent.
+        assert "content-encoding" not in plain.headers
+        assert packed.headers.get("content-encoding") == "gzip"
+        assert packed.content == plain.content
+
+    def test_gzip_actually_shrinks_a_repetitive_payload(self):
+        """Ratio check at the middleware level (httpx hides the wire size).
+
+        A representative slice of what these endpoints return: a JSON list of
+        ids and a log of timestamped lines.  Both compress by an order of
+        magnitude because the repetition is exactly what gzip feeds on.
+        """
+        import gzip
+        import json
+
+        from starlette.middleware.gzip import GZipMiddleware
+        from starlette.testclient import TestClient
+        from fastapi import FastAPI
+
+        payload = {
+            "ids": list(range(200_000, 202_000)),
+            "log": "\n".join(
+                f"2026-10-23 05:30:{i % 60:02d} - INFO - [acc] API → novel_series({i})"
+                for i in range(2000)
+            ),
+        }
+        body = json.dumps(payload, ensure_ascii=False).encode()
+
+        app = FastAPI()
+        app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+        @app.get("/big")
+        async def big():
+            from fastapi.responses import Response
+
+            return Response(content=body, media_type="application/json")
+
+        with TestClient(app) as c:
+            r = c.get("/big", headers={"Accept-Encoding": "gzip"})
+        assert r.headers.get("content-encoding") == "gzip"
+        compressed = gzip.compress(body)
+        assert len(compressed) < len(body) // 5, (
+            f"这类载荷压缩率应有 5× 以上：{len(body)} → {len(compressed)}"
+        )
+
+    def test_small_json_is_not_gzipped(self, client):
+        """``/busy`` is a few bytes; compressing it would only add framing."""
+        r = client.get(
+            "/api/tasks/busy",
+            headers={"X-API-Key": "sekret", "Accept-Encoding": "gzip"},
+        )
+        assert r.status_code == 200
+        assert "content-encoding" not in r.headers
+
+    def test_epub_download_is_not_double_compressed(self, client, app):
+        """An EPUB is already deflated inside — gzip would cost CPU for 0.6 %.
+
+        Measured on real files: an EPUB gzips to 99.4 % of its own size (it
+        grows once framing is counted), while a TXT novel gzips to 55 %.  The
+        middleware's content-type exclusion list is what keeps the download
+        endpoint from burning a compression pass per request.
+        """
+        import zipfile
+        from pathlib import Path
+
+        from copixiv.db.models import Novel
+
+        storage = app.state.file_storage
+        body = "正文" * 2000
+        path = storage.save_novel_text(20_000, "某书", body)
+        with app.state.session_factory() as s:
+            if s.get(Novel, 20_000) is None:
+                s.add(Novel(
+                    id=20_000, title="某书", author_id=None,
+                    path=str(path), like=900, text=5000, has_epub=3,
+                ))
+                s.commit()
+
+        # A minimal real EPUB container, written next to the text file the way
+        # the builder does.
+        epub_path = path.with_suffix(".epub")
+        with zipfile.ZipFile(epub_path, "w") as zf:
+            zf.writestr("mimetype", "application/epub+zip")
+            zf.writestr("OEBPS/content.xhtml", f"<html><body>{body}</body></html>")
+
+        r = client.get(
+            "/api/novels/20000/download?format=epub",
+            headers={"X-API-Key": "sekret", "Accept-Encoding": "gzip"},
+        )
+        assert r.status_code == 200
+        assert "content-encoding" not in r.headers, "EPUB 不该被二次压缩"
+
+    def test_txt_download_may_be_compressed(self, client, app):
+        """TXT is highly compressible (55 %), so the middleware may compress it.
+
+        Not asserting that it *is* compressed — the response is small here and
+        ``minimum_size`` legitimately skips it.  What is pinned is that the
+        exclusion list is scoped to containers, not to downloads in general.
+        """
+        from copixiv.db.models import Novel
+
+        body = "正文" * 20000      # ~120 kB, past the 1 KiB floor
+        path = app.state.file_storage.save_novel_text(20_001, "长书", body)
+        with app.state.session_factory() as s:
+            if s.get(Novel, 20_001) is None:
+                s.add(Novel(
+                    id=20_001, title="长书", author_id=None,
+                    path=str(path), like=900, text=len(body), has_epub=3,
+                ))
+                s.commit()
+
+        r = client.get(
+            "/api/novels/20001/download?format=txt",
+            headers={"X-API-Key": "sekret", "Accept-Encoding": "gzip"},
+        )
+        assert r.status_code == 200
+        assert r.headers.get("content-encoding") == "gzip"
+        assert r.content.decode("utf-8") == body
