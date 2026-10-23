@@ -37,6 +37,9 @@ dev = [
     "pgserver>=0.1.4",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    # 覆盖率要能被复核 —— 在 2026-10-24 的模块审查之前，全仓只能"按端点数
+    # 粗估"哪些模块没测（`tasks/novels.py` 因此被估错：它其实只有 31%）。
+    "pytest-cov>=5.0",
 ]
 
 [project.scripts]
@@ -55,3 +58,6 @@ pythonpath = ["src"]
 markers = [
     "slow: long-running tests (migration chains / heavy concurrency). CI runs '-m not slow' as the fast gate; run plain 'pytest' for the full suite.",
 ]
+# 是否开覆盖率由 CLI 决定（``--cov=src/copixiv``），不在配置里强制 ——
+# 常规快跑不该为统计付时间。门槛写在 ``scripts/check_coverage.sh`` 里：
+# 实测基线 89%（2026-10-24），门槛取 85% 留出拆分 / 重构的余量。
