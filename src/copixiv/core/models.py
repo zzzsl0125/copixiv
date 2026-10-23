@@ -3,6 +3,7 @@
 Merged from ``domain/models/*`` (8 files + ``__init__.py`` re-exports).
 """
 
+import random
 from datetime import datetime
 from enum import IntEnum, StrEnum
 
@@ -47,6 +48,27 @@ class EpubStatus(IntEnum):
     DONE = 2
     NO_IMAGES = 3
     MISSING_SOURCE = 4
+
+
+# ---------------------------------------------------------------------------
+# ``novel.shuffle`` — 随机浏览的预计算排序键。
+# ---------------------------------------------------------------------------
+#
+# **唯一所有者是这里。** 新建行时两条写路径都要给一个随机值：抓取
+# （``novels/repo.py::_upsert_rows``）与上传（``features/library/ingest.py``）。
+# 各自抄一份 ``random.randint(0, 2**31 - 1)`` 正是那种"约定漂移一次、随机浏览
+# 就退化"的形状，而且它属于**领域词汇**（"这本新书在随机序列里排哪儿"），
+# 不属于任何一条写路径。
+#
+# 范围取 int4 正半区：列是 ``Integer``，而负值会让 ``ORDER BY shuffle`` 的
+# 顺序扫描与"从随机偏移开始 seek"这两条读法分叉（见
+# ``repo.py::_get_random_novels_shuffle``）。
+SHUFFLE_KEY_MAX = 2**31 - 1
+
+
+def new_shuffle_key(rng=random) -> int:
+    """一个新的随机浏览键（``0..SHUFFLE_KEY_MAX``，两端都可能取到）。"""
+    return rng.randint(0, SHUFFLE_KEY_MAX)
 
 
 class Novel(BaseModel):

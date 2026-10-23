@@ -1,9 +1,11 @@
-"""「我的上传」入库管线测试 —— 单测 + 行为不变量。
+"""「我的上传」入库管线测试 —— 管线行为与不变量。
 
 权威：``docs/LIBRARY_DESIGN.md`` §4（上传管线）与 §7（不变量）。
 
-单测覆盖编码探测（UTF-8 / UTF-8 BOM / UTF-16 BOM / GB18030 与 Big5 的评分
-择一 / 乱码宁可报错 / 可疑占比阈值两侧）、规范化、指纹、文件名解析各形态；
+**只管管线。** 解码规则（``decode.py``）与文件名解析（``filenames.py``）各自
+有专属测试文件——它们不落库、不取锁，改动理由与管线完全不同。这里留下的断言
+都是"这条文件进没进库、进了长什么样、并发下会不会撞车"这一类事实。
+
 行为测试钉住落库列值（``source`` / ``source_key`` / ``has_epub=3`` /
 ``author_name`` 非 NULL / ``path`` 在 ``download/local/`` / ``text`` /
 ``like=view=0``）、失败条目不写任何库表（尤其 ``failed_novel``）、同一份正文
@@ -30,23 +32,16 @@ from sqlalchemy import delete, event, func, select, text
 from copixiv.core.draft import NovelDraft
 from copixiv.core.models import EpubStatus
 from copixiv.db.models import Author, FailedNovel, Novel
-from copixiv.features.library import ingest
 from copixiv.features.library.ingest import (
     DECODE_ERROR,
     EMPTY_ERROR,
-    MAX_SUSPICIOUS_RATIO,
     STATUS_CREATED,
     STATUS_DUPLICATE,
     STATUS_FAILED,
     UNKNOWN_AUTHOR,
-    TextDecodeError,
     body_fingerprint,
-    decode_txt,
     ingest_uploads,
-    is_suspicious_char,
     normalize_text,
-    parse_filename,
-    suspicious_ratio,
 )
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.storage import atomic
@@ -158,117 +153,10 @@ def _seed_pixiv_watermark(session_factory, novel_id: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# 1. 解码（契约 §4-1）
+# 解码 / 文件名解析：规则本身在各自模块的测试里（test_library_decode.py /
+# test_library_filenames.py）。这里只保留「读不出来 → 这条不写任何库表」
+# 这类**管线**断言（见 TestFailuresDoNotWriteTables）。
 # ---------------------------------------------------------------------------
-
-
-class TestDecode:
-    def test_utf8_with_bom(self):
-        assert decode_txt(b"\xef\xbb\xbf" + "我的书".encode("utf-8")) == "我的书"
-
-    def test_utf8_plain(self):
-        assert decode_txt("中文正文".encode("utf-8")) == "中文正文"
-
-    def test_ascii(self):
-        assert decode_txt(b"plain ascii text\n") == "plain ascii text\n"
-
-    def test_gb18030(self):
-        assert decode_txt("中文正文测试".encode("gb18030")) == "中文正文测试"
-
-    def test_utf16_with_bom(self):
-        assert decode_txt("中文正文测试".encode("utf-16")) == "中文正文测试"
-
-    def test_utf16_is_bom_gated(self):
-        """CPython 的 ``utf-16`` 无 BOM 时**不报错**，按本机字节序硬解
-        （反证：``b"ab".decode("utf-16") == "扡"``）。所以门控必须自己写 ——
-        否则偶数长度的二进制流会在评分之前被静默吃成乱码。"""
-        assert b"ab".decode("utf-16") == "扡"
-        # 偶数长度、无 BOM、两个评分解码器都拒 → 必须报错而不是 UTF-16 乱码
-        with pytest.raises(TextDecodeError):
-            decode_txt(b"\x80\x81" * 8)
-
-    def test_all_encodings_fail(self):
-        with pytest.raises(TextDecodeError) as excinfo:
-            decode_txt(UNDECODABLE)
-        assert str(excinfo.value) == DECODE_ERROR
-
-    # -- 评分择一：Big5 不再被 GB18030 静默抢走 ------------------------------
-
-    def test_big5_traditional_decodes_exactly(self):
-        """Big5 正文逐字解出 —— 不能被 GB18030 解成乱码（静默数据损坏）。"""
-        data = BIG5_TEXT.encode("big5")
-
-        # 分支确实被触发：GB18030 也能"成功"解这些字节，但满是私有区乱码
-        garbled = data.decode("gb18030")
-        assert garbled != BIG5_TEXT
-        assert suspicious_ratio(garbled) > MAX_SUSPICIOUS_RATIO
-
-        assert decode_txt(data) == BIG5_TEXT
-
-    def test_gb18030_simplified_is_not_stolen_by_big5(self):
-        """真 GB18030：两个解码器都零可疑字符 → 并列取先者（gb18030）。"""
-        data = GB18030_TEXT.encode("gb18030")
-
-        # Big5 解得出「像中文的」错字（占比 0），所以并列规则必须站在 gb18030
-        assert suspicious_ratio(data.decode("big5")) == 0.0
-
-        assert decode_txt(data) == GB18030_TEXT
-
-    def test_implausible_bytes_are_rejected_not_mojibake(self):
-        """解不出可信文本就报错（宁可 failed，也不静默导入乱码）。"""
-        with pytest.raises(TextDecodeError):
-            decode_txt(UNDECODABLE)
-        # 随机二进制（结构性非法，两个解码器都拒）
-        with pytest.raises(TextDecodeError):
-            decode_txt(bytes(range(0xF5, 0xFF)) * 8)
-
-    def test_candidate_above_threshold_is_rejected(self, monkeypatch):
-        """最佳候选的可疑占比仍 > 2% → 判失败（钉住阈值本身）。"""
-        monkeypatch.setattr(ingest, "_SCORED_ENCODINGS", ("gb18030",))
-        # 3 / 13 ≈ 23% 私有区字符
-        data = ("阿" * 10 + "\ue000" * 3).encode("gb18030")
-        with pytest.raises(TextDecodeError) as excinfo:
-            decode_txt(data)
-        assert str(excinfo.value) == DECODE_ERROR
-
-
-# ---------------------------------------------------------------------------
-# 可疑字符占比：阈值两侧的边界行为（构造样本，不依赖真实文件）
-# ---------------------------------------------------------------------------
-
-
-class TestSuspiciousRatio:
-    def test_empty_text_is_zero(self):
-        assert suspicious_ratio("") == 0.0
-
-    def test_suspicious_categories(self):
-        assert is_suspicious_char("\ue000")      # Co 私有区
-        assert is_suspicious_char("\ufffd")      # 替换符（类别其实是 So）
-        assert is_suspicious_char("\x00")        # Cc 控制
-        assert is_suspicious_char("\u200b")      # Cf 格式（零宽空格）
-        assert not is_suspicious_char("中")
-        assert not is_suspicious_char("A")
-        for benign in ("\t", "\n", "\r"):
-            assert not is_suspicious_char(benign), "换行/制表符不算可疑"
-
-    def test_ratio_math(self):
-        assert suspicious_ratio("阿" * 98 + "\ue000" * 2) == pytest.approx(0.02)
-        assert suspicious_ratio("阿" * 97 + "\ue000" * 3) == pytest.approx(0.03)
-        assert suspicious_ratio("正文\t第一行\n第二行\r") == 0.0
-
-    def test_exactly_at_threshold_is_accepted(self, monkeypatch):
-        """占比恰好 == 阈值不算超（判据是 ``> MAX_SUSPICIOUS_RATIO``）。"""
-        monkeypatch.setattr(ingest, "_SCORED_ENCODINGS", ("gb18030",))
-        sample = "阿" * 98 + "\ue000" * 2
-        assert suspicious_ratio(sample) == pytest.approx(MAX_SUSPICIOUS_RATIO)
-        assert decode_txt(sample.encode("gb18030")) == sample
-
-    def test_just_above_threshold_is_rejected(self, monkeypatch):
-        monkeypatch.setattr(ingest, "_SCORED_ENCODINGS", ("gb18030",))
-        sample = "阿" * 97 + "\ue000" * 3
-        assert suspicious_ratio(sample) > MAX_SUSPICIOUS_RATIO
-        with pytest.raises(TextDecodeError):
-            decode_txt(sample.encode("gb18030"))
 
 
 # ---------------------------------------------------------------------------
@@ -290,44 +178,6 @@ class TestNormalizeAndFingerprint:
         assert body_fingerprint(normalize_text("甲\r\n乙")) == body_fingerprint(
             normalize_text("甲\n乙")
         )
-
-
-# ---------------------------------------------------------------------------
-# 5. 文件名解析（契约 §4-5）
-# ---------------------------------------------------------------------------
-
-
-class TestParseFilename:
-    @pytest.mark.parametrize(
-        ("filename", "expected"),
-        [
-            ("【作者】标题(完结).txt", ("标题", "作者")),
-            ("【作者】标题.txt", ("标题", "作者")),
-            ("[作者] 标题.txt", ("标题", "作者")),
-            ("作者 - 标题.txt", ("标题", "作者")),
-            ("作者 － 标题.txt", ("标题", "作者")),
-            ("纯标题.txt", ("纯标题", UNKNOWN_AUTHOR)),
-            ("标题（完结）.txt", ("标题", UNKNOWN_AUTHOR)),
-            ("标题[全本].txt", ("标题", UNKNOWN_AUTHOR)),
-            # 半角连字符不带空白不当分隔符 —— 否则标题被误拆成作者
-            ("魔法少女-小圆.txt", ("魔法少女-小圆", UNKNOWN_AUTHOR)),
-            # 无扩展名照旧解析
-            ("没有扩展名", ("没有扩展名", UNKNOWN_AUTHOR)),
-            # 客户端可能带上目录部分
-            ("C:\\books\\【作者】标题.txt", ("标题", "作者")),
-        ],
-    )
-    def test_forms(self, filename, expected):
-        assert parse_filename(filename) == expected
-
-    @pytest.mark.parametrize(
-        "filename",
-        ["纯标题.txt", "...txt", "【】.txt", " - .txt", "（完结）.txt"],
-    )
-    def test_author_is_never_empty(self, filename):
-        """§3.3：``author_name`` 必须非 NULL，解析不出即「未知作者」。"""
-        _, author = parse_filename(filename)
-        assert author.strip() != ""
 
 
 # ---------------------------------------------------------------------------
@@ -758,6 +608,31 @@ class TestPresetAuthor:
         row = _row(session_factory, results[0].novel_id)
         assert row.author_id is None
         assert row.author_name == "文件名作者"
+
+    def test_a_missing_author_row_is_created_not_blamed_on_a_conflict(
+        self, session_factory, tmp_path,
+    ):
+        """``author`` 占位行缺失 → 管线自己补，而不是整批报"入库冲突"。
+
+        ``novel.author_id`` 有外键，而 "占位行由调用方保证存在" 是一条**不可
+        执行**的约定（``ingest_uploads`` 是公开函数）。没有这一补，flush 里的
+        FK 违例会被 ``IntegrityError`` 分支接住，于是每一条都得到一个与事实
+        无关的错误消息，而且整批全失败。与 ``persist_novels`` 的
+        ``ensure_exists`` 同一姿势。
+        """
+        results = _ingest(
+            session_factory, tmp_path / "download",
+            [("甲.txt", "甲正文".encode()), ("乙.txt", "乙正文".encode())],
+            preset_author_id=PRESET_AUTHOR_ID, preset_author_name="预设作者",
+        )
+
+        assert [r.status for r in results] == [STATUS_CREATED, STATUS_CREATED]
+        assert _author(session_factory, PRESET_AUTHOR_ID) is not None
+        for result in results:
+            row = _row(session_factory, result.novel_id)
+            assert (row.author_id, row.author_name) == (
+                PRESET_AUTHOR_ID, "预设作者",
+            )
 
 
 # ---------------------------------------------------------------------------
