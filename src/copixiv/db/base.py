@@ -1,7 +1,7 @@
 """Base repository — shared SQLAlchemy helpers."""
 
 from typing import Any, TypeVar
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 from sqlalchemy.orm import Session
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 
@@ -27,14 +27,33 @@ def update_summary(
     ids: set[int] | int | None = None,
     extra_columns: list | None = None,
 ) -> None:
-    """Update aggregate stats (count/views/likes/texts) on author/series rows.
+    """Recompute the aggregate columns of *model_class* rows for *ids*.
 
-    Queries the Novel table grouped by *id_column_name* and upserts the
-    computed aggregates into *model_class*.  This is a standalone helper
-    used by :class:`SQLAlchemyAuthorRepository` and
-    :class:`SQLAlchemySeriesRepository` — it
-    does not belong in ``BaseRepository`` because it hardcodes ``Novel``
-    as the source table.
+    ``author`` / ``series`` carry rolled-up statistics over the novels that point
+    at them (``novel_count`` / ``like`` / ``view`` / ``text``, plus the name
+    derived from the novels themselves).  This function is the **only** place
+    that turns ``novel`` rows into those numbers — the ingest pipeline
+    (``features/novels/persist.py``), the editor's writeback and the delete
+    paths all call it, so the arithmetic exists once.
+
+    ``ids=None`` is a no-op (not "every id"): the callers always know which rows
+    they just touched, and an accidental "refresh the whole table" is not
+    something this helper should be able to do.
+
+    **Call it after the write, in the same transaction, for every row whose
+    novel set changed — including deletions.**  An aggregate that is only
+    refreshed on insert drifts upward forever, and nothing else recomputes it:
+    the weekly reconciler sweeps EPUB state, not author counters.
+
+    ``extra_columns`` are additional aggregate expressions over ``Novel`` (the
+    two repositories pass ``func.max(Novel.author_name)`` /
+    ``func.max(Novel.series_name)`` to derive the display name from its novels);
+    each must be labelled with the target column name.
+
+    Rows with no novels left are **zeroed rather than deleted**: the row is
+    still an entity (the user may re-attach a work to it, and the ``author`` /
+    ``series`` foreign keys require it to exist), and a missing row would read
+    as "unknown id" everywhere.
     """
     from . import models
 
@@ -42,13 +61,14 @@ def update_summary(
         return
     if isinstance(ids, int):
         ids = {ids}
-    if len(ids) == 0:
+    if not ids:
         return
 
     pk_col = getattr(model_class, id_column_name)
+    source_col = getattr(models.Novel, id_column_name)
 
     columns_to_select = [
-        getattr(models.Novel, id_column_name),
+        source_col,
         func.count(models.Novel.id).label(C.COL_NOVEL_COUNT),
         func.sum(models.Novel.view).label(C.COL_VIEWS),
         func.sum(models.Novel.like).label(C.COL_LIKES),
@@ -57,18 +77,16 @@ def update_summary(
     if extra_columns:
         columns_to_select.extend(extra_columns)
 
-    select_stmt = (
-        select(*columns_to_select)
-        .where(getattr(models.Novel, id_column_name).in_(ids))
-        .group_by(getattr(models.Novel, id_column_name))
-    )
+    rows = session.execute(
+        select(*columns_to_select).where(source_col.in_(ids)).group_by(source_col)
+    ).all()
 
-    results = session.execute(select_stmt).all()
-
-    for row in results:
+    for row in rows:
         mapping = row._mapping
         target_id = mapping[id_column_name]
         if target_id is None:
+            # An orphaned ``novel`` row (no author / series) has nothing to
+            # aggregate into — and NULL is not a legal key here.
             continue
 
         values = {
@@ -77,21 +95,60 @@ def update_summary(
             C.COL_LIKES: mapping[C.COL_LIKES],
             C.COL_TEXTS: mapping[C.COL_TEXTS],
         }
+        # Derived extras (``author_name`` / ``series_name``): a NULL ``max``
+        # means no novel carries a name — leave the stored value rather than
+        # blanking it on every refresh.
+        values.update({
+            key: val
+            for key, val in mapping.items()
+            if key != id_column_name and key not in values and val is not None
+        })
+        _upsert_summary_row(session, model_class, pk_col, target_id, values)
 
-        for key, val in mapping.items():
-            if key != id_column_name and key not in values and val is not None:
-                values[key] = val
-
-        insert_values = {pk_col.name: target_id, **values}
-        stmt = (
-            postgresql_insert(model_class)
-            .values(insert_values)
-            # index_elements is a keyword: passing it as the first positional
-            # arg would bind it to ``constraint`` and crash.  (bugfix:
-            # postgres-migration)
-            .on_conflict_do_update(index_elements=[pk_col], set_=values)
+    # Ids with no novels left: zero their aggregates so a delete is reflected.
+    # ``ids - grouped`` is computed in Python because every caller passes a small
+    # set (one batch's authors / series), not the whole table.
+    seen = {row._mapping[id_column_name] for row in rows}
+    emptied = {i for i in ids if i is not None and i not in seen}
+    if emptied:
+        session.execute(
+            update(model_class)
+            .where(pk_col.in_(emptied))
+            .values(_zeroed_summary())
         )
-        session.execute(stmt)
+
+
+def _zeroed_summary() -> dict:
+    """Aggregate columns reset to their "no novels" values.
+
+    Only the four counters.  A *derived name* column (``author_name`` /
+    ``series_name``) is deliberately left alone: "this row has no novels left"
+    says nothing about the name the user still sees on the author / series page.
+    """
+    return {
+        C.COL_NOVEL_COUNT: 0,
+        C.COL_VIEWS: 0,
+        C.COL_LIKES: 0,
+        C.COL_TEXTS: 0,
+    }
+
+
+def _upsert_summary_row(
+    session: Session,
+    model_class: type[ModelType],
+    pk_col,
+    target_id: int,
+    values: dict,
+) -> None:
+    """``INSERT … ON CONFLICT DO UPDATE`` one aggregate row."""
+    insert_values = {pk_col.name: target_id, **values}
+    session.execute(
+        postgresql_insert(model_class)
+        # ``index_elements`` must be a keyword: as a positional arg it binds to
+        # ``constraint`` and crashes.
+        .values(insert_values)
+        .on_conflict_do_update(index_elements=[pk_col], set_=values)
+    )
 
 
 class BaseRepository:

@@ -77,6 +77,15 @@ class SQLAlchemyAuthorRepository(BaseRepository):
     @offload
     def update_summary(self, author_ids: set[int] | None = None) -> None:
         """Recalculate author aggregates (runs in a worker thread)."""
+        self.update_summary_sync(author_ids)
+
+    def update_summary_sync(self, author_ids: set[int] | None = None) -> None:
+        """Same as :meth:`update_summary`, without the thread hop.
+
+        For call sites that are already inside a transaction on this session —
+        a delete path must not hand its connection to a worker thread.  The
+        statements live here once; the decorated half only adds the hop.
+        """
         update_summary(
             self.session, models.Author, C.COL_AUTHOR_ID, author_ids,
             extra_columns=[

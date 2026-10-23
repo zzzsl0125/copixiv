@@ -46,6 +46,7 @@ from copixiv.db.base import (
     model_to_dict,
     update_summary,
 )
+from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
 from copixiv.features.novels.search import keyword_condition
 
@@ -1023,6 +1024,14 @@ BATCH_METADATA_COLUMNS = frozenset({
 })
 
 
+def _summary_ids(novel) -> tuple[set[int], set[int]]:
+    """The ``(author_ids, series_ids)`` a novel row contributes to."""
+    return (
+        {novel.author_id} if novel.author_id else set(),
+        {novel.series_id} if novel.series_id else set(),
+    )
+
+
 class SQLAlchemyNovelWriteRepository(BaseRepository):
     def __init__(self, session: Session):
         super().__init__(session)
@@ -1212,6 +1221,26 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
 
         return new_ids
 
+    def _refresh_summaries(self, parent_ids: tuple[set[int], set[int]]) -> None:
+        """Recompute the author / series aggregates a novel write affected.
+
+        Must run **after** the rows changed and **inside the same transaction**:
+        the counters are derived from ``novel`` rows, so a delete (or a
+        re-parent) leaves them wrong until someone recomputes them.  Insert
+        paths already did that through ``persist_novels``; deletion did not, so
+        author ``novel_count`` / ``like`` / ``text`` only ever drifted upward.
+
+        Both repository methods are ``@offload``-decorated (they hop to a worker
+        thread); this is the **synchronous** counterpart, and it exists because a
+        delete path runs inside a transaction that must not be handed to another
+        thread's connection.
+        """
+        author_ids, series_ids = parent_ids
+        if author_ids:
+            SQLAlchemyAuthorRepository(self.session).update_summary_sync(author_ids)
+        if series_ids:
+            SQLAlchemySeriesRepository(self.session).update_summary_sync(series_ids)
+
     async def delete(self, novel_id: int) -> None:
         """Delete a novel row.
 
@@ -1224,12 +1253,18 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         novel = self.session.get(models.Novel, novel_id)
         if novel is None:
             return
+        # Capture the aggregates' identities *before* the row is gone: the
+        # author / series counters and the derived name are rolled up from the
+        # novels that point at them, so removing one changes them too.
+        parent_ids = _summary_ids(novel)
         self.session.execute(
             _delete(models.FailedNovel).where(
                 models.FailedNovel.novel_id == novel_id
             )
         )
         self.session.delete(novel)
+        self.session.flush()
+        self._refresh_summaries(parent_ids)
 
     async def toggle_favourite(self, novel_id: int) -> None:
         from copixiv.core.exceptions import NotFoundError
@@ -1298,9 +1333,10 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         """
         if not novel_ids:
             return []
-        paths = list(self.session.execute(
-            select(models.Novel.path).where(models.Novel.id.in_(novel_ids))
-        ).scalars().all())
+        rows = self.session.execute(
+            select(models.Novel.path, models.Novel.author_id, models.Novel.series_id)
+            .where(models.Novel.id.in_(novel_ids))
+        ).all()
         # failed_novel has no FK by design (failures can be recorded for
         # never-persisted novels) — clean its ledger rows explicitly.
         self.session.execute(
@@ -1311,7 +1347,11 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         self.session.execute(
             _delete(models.Novel).where(models.Novel.id.in_(novel_ids))
         )
-        return [p for p in paths if p]
+        self.session.flush()
+        self._refresh_summaries(
+            ({row.author_id for row in rows}, {row.series_id for row in rows})
+        )
+        return [row.path for row in rows if row.path]
 
     @offload
     def add_tags_to_novels(
@@ -1535,6 +1575,11 @@ class SQLAlchemySeriesRepository(BaseRepository):
     @offload
     def update_summary(self, series_ids: set[int] | None = None) -> None:
         """Recalculate series aggregates (runs in a worker thread)."""
+        self.update_summary_sync(series_ids)
+
+    def update_summary_sync(self, series_ids: set[int] | None = None) -> None:
+        """Same as :meth:`update_summary`, without the thread hop — see the
+        author repository's counterpart for why a delete path needs it."""
         update_summary(
             self.session, models.Series, C.COL_SERIES_ID, series_ids,
             extra_columns=[
