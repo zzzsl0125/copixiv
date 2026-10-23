@@ -19,17 +19,14 @@ adapters pass the fields they need (``session_factory``, ``client``,
 """
 
 import asyncio
-import calendar
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.db.write_lock import run_write_transaction
 
 from copixiv.core.draft import NovelDraft, NovelInfoLike, build_from_novel_info
 from copixiv.core.models import EpubStatus
-from copixiv.core.language import is_chinese
-from copixiv.core.services import safe_get
 from copixiv.features.novels.download_novel import fetch_novel_and_assets
 from copixiv.features.novels.persist import persist_novels
 from copixiv.features.novels.series_index import resolve_series_indices
@@ -38,38 +35,6 @@ from copixiv.features.failures.repo import FailedNovelRepository
 from copixiv.features.authors.resolve_names import collect_author_names, writeback_author_names
 
 from copixiv.log import logger
-
-
-# ---------------------------------------------------------------------------
-# Pure helpers (no side effects)
-# ---------------------------------------------------------------------------
-
-
-def _month_ranges(end_date: datetime, months: int):
-    for offset in range(months):
-        if offset == 0:
-            yield end_date.replace(day=1), end_date
-        else:
-            y, m = end_date.year, end_date.month
-            for _ in range(offset):
-                m -= 1
-                if m == 0:
-                    m = 12
-                    y -= 1
-            last_day = calendar.monthrange(y, m)[1]
-            yield datetime(y, m, 1), datetime(y, m, last_day)
-
-
-def _filter_chinese_novels(novels: list) -> list:
-    """Return only Chinese-language novels from a Pixiv API response list."""
-    return [
-        n for n in novels
-        if is_chinese(
-            title=safe_get(n, "title", ""),
-            caption=safe_get(n, "caption", ""),
-            tags=[safe_get(t, "name", str(t)) for t in safe_get(n, "tags", [])],
-        )
-    ]
 
 
 # ---------------------------------------------------------------------------
@@ -247,34 +212,32 @@ async def _plan_batch(
     return existing_meta, download_ids, stored_paths
 
 
-async def _persist_batch(
+async def _upsert_batch(
     existing_meta: list[NovelDraft],
     downloaded: list[NovelDraft],
     uow,
-    failed_records: list[tuple[int, str]] | None = None,
-    failed_repo=None,
-    titles: dict[int, str] | None = None,
-) -> tuple[list[str], set[int], int]:
-    """Persist phase (write-only): run inside a short write transaction
-    (``run_write_transaction`` + ``uow.begin()``).
+    *,
+    failed_records: list[tuple[int, str]],
+    failed_repo,
+    titles: dict[int, str],
+) -> tuple[list[str], int]:
+    """Persist phase（只写）：在调用方的短写事务里跑。
 
-    Records download failures, upserts existing metadata + downloaded
-    novels, and forgets success markers — all in the caller's write
-    transaction.  Returns ``(titles, new_author_ids, new_count)`` where
-    ``new_count`` is the number of newly-inserted novels.
+    记录失败、upsert 已有元数据与刚下载的条目、清掉成功项的失败标记 —— 全部
+    落在**调用方**的事务里（本函数从不自己开事务，也不 commit）。返回
+    ``(本轮下载到的标题, 新插入行数)``。
+
+    失败记录写在 upsert **之后**：一本既下载成功、又 asset 处理失败的书会被
+    上面那条路径写进库（于是满足了 ``failed_novel`` 的外键）。而在持久化之前
+    就失败的**新**书没有 ``novel`` 行、按外键记不进去——那些被跳过，下一轮抓取
+    自然重试（见 ``FailedNovelRepository.record``）。
     """
-    title_map = titles or {}
-    titles: list[str] = []
-    new_author_ids: set[int] = set()
-    new_count: int = 0
+    new_count = 0
+    titles_out: list[str] = []
 
-    # Metadata-only upsert for existing
     if existing_meta:
-        upserted = await batch_upsert(existing_meta, uow)
-        new_count += upserted
-        logger.info(
-            f"_persist_batch: metadata upsert done for {upserted} existing novels",
-        )
+        new_count += await batch_upsert(existing_meta, uow)
+        logger.info(f"_upsert_batch: metadata upsert done for {new_count} existing novels")
 
     if downloaded:
         success_ids = {d.id for d in downloaded}
@@ -292,36 +255,20 @@ async def _persist_batch(
         # its contract is explicitly "a source-side rename must NOT move the
         # path" (``tests/api/test_novel_sync.py``).  Downloading is the only
         # path that may have just written a different file.
-        upserted = await batch_upsert(
-            downloaded, uow, force_update=["path"],
-        )
-        new_count += upserted
-        if failed_repo is not None:
-            # A novel that both downloaded successfully AND has a recorded
-            # failure (e.g. an asset-processing failure) keeps its ledger
-            # entry — forgetting it would erase the "downloaded but asset
-            # failed" trace.  Only clean successes clear the ledger.
-            failed_ids = {nid for nid, _ in (failed_records or [])}
-            failed_repo.forget_many(success_ids - failed_ids)
-        titles = [d.title for d in downloaded if d.title]
-        new_author_ids = {d.author_id for d in downloaded if d.author_id}
-        logger.info(
-            f"_persist_batch: {len(downloaded)} novels downloaded and upserted",
-        )
+        new_count += await batch_upsert(downloaded, uow, force_update=["path"])
+        # A novel that both downloaded successfully AND has a recorded failure
+        # (e.g. an asset-processing failure) keeps its ledger entry — forgetting
+        # it would erase the "downloaded but asset failed" trace.  Only clean
+        # successes clear the ledger.
+        failed_ids = {nid for nid, _ in failed_records}
+        failed_repo.forget_many(success_ids - failed_ids)
+        titles_out = [d.title for d in downloaded if d.title]
+        logger.info(f"_upsert_batch: {len(downloaded)} novels downloaded and upserted")
 
-    # Failed downloads — recorded AFTER the upserts above so a novel that was
-    # both downloaded AND failed asset processing (and is therefore persisted
-    # in this transaction) satisfies the ``failed_novel`` FK.  A brand-new
-    # novel that failed before persistence has no ``novel`` row and cannot be
-    # recorded under the FK — those are skipped (the download flow retries
-    # them naturally on the next run); see ``FailedNovelRepository.record``.
-    if failed_records and failed_repo is not None:
-        for nid, reason in failed_records:
-            failed_repo.record(
-                nid, "download", reason, title=title_map.get(nid),
-            )
+    for nid, reason in failed_records:
+        failed_repo.record(nid, "download", reason, title=titles.get(nid))
 
-    return titles, new_author_ids, new_count
+    return titles_out, new_count
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +310,146 @@ class IngestOutcome:
 # ---------------------------------------------------------------------------
 # The pipeline
 # ---------------------------------------------------------------------------
+#
+# ``ingest`` 读起来应该就是它自己的编号：plan → download → gate → collect →
+# persist。每一步都在这里是一个**命名函数**，因为它各有一条自己的纪律（哪一步
+# 可以碰数据库、哪一步不能持写事务），而且各自有独立的失败语义。写成一步一个
+# 内联块的时候，这些纪律只能靠注释区分；写成函数之后函数边界就是它们。
+
+@dataclass(frozen=True)
+class _RoundPlan:
+    """整轮的计划：已知的元数据、真正要下载的 id、已有行的落盘锚点。"""
+
+    existing_meta: list[NovelDraft]
+    download_ids: list[int]
+    stored_paths: dict[int, str]
+
+
+@dataclass(frozen=True)
+class _AssetOutcome:
+    """图片 / EPUB 收尾的结果：本轮的失败、以及真的做完的 id。"""
+
+    failures: list[tuple[int, str]]
+    done_ids: list[int]
+
+
+@dataclass(frozen=True)
+class _AuthorNames:
+    """已解析的作者名，连同"这一轮见过哪些作者"一起带走。"""
+
+    mapping: dict[int, str]
+    author_ids: set[int]
+
+
+async def _plan_round(
+    novels: list[NovelInfoLike] | None,
+    ids: list[int] | None,
+    uow: SqlUnitOfWork,
+    *,
+    force: bool,
+) -> _RoundPlan:
+    """Plan phase（只读、短事务）—— 决定下载什么、upsert 什么。
+
+    *novels* 与 *ids* 是两条入口：前者带来源元数据，后者只是"我要这些编号"
+    （单本 ``novel_fetch``）。两条都归结成一个 :class:`_RoundPlan`，之后的
+    阶段因此不必再问"是哪条入口进来的"。
+    """
+    if novels:
+        existing_meta, download_ids, stored_paths = await _plan_batch(
+            novels, uow, redownload=force,
+            failed_repo=FailedNovelRepository(uow.session),
+        )
+        return _RoundPlan(existing_meta, download_ids, stored_paths)
+
+    download_ids = list(dict.fromkeys(ids or []))
+    stored_paths: dict[int, str] = {}
+    # Single-novel path: the id may already be known (re-download), in which
+    # case its body must go to the stored anchor, not to a path recomputed
+    # from a title that may have changed at the source.
+    if download_ids:
+        async with uow.begin():
+            stored_paths = await SQLAlchemyNovelRepository(
+                uow.session
+            ).get_stored_paths(set(download_ids))
+    return _RoundPlan([], download_ids, stored_paths)
+
+
+async def _download_round(
+    download_ids: list[int],
+    client,
+    file_storage,
+    image_downloader,
+    *,
+    force: bool,
+    stored_paths: dict[int, str],
+) -> tuple[list[NovelDraft], list[tuple[int, str]]]:
+    """Download phase —— 并发网络 / 文件 I/O，**不碰数据库**。
+
+    没有 client 时只记一条 warning：装配阶段被裁掉的客户端不该让整轮变成异常，
+    而"这些 id 需要下载"这件事本身仍然是真的。
+    """
+    if not download_ids:
+        return [], []
+    if client is None:
+        logger.warning(
+            f"ingest: {len(download_ids)} novels need download "
+            f"but no client provided — skipping download",
+        )
+        return [], []
+    return await _download_novels(
+        download_ids, client, file_storage, image_downloader,
+        redownload=force, stored_paths=stored_paths,
+    )
+
+
+async def _settle_assets(image_downloader, downloaded: list[NovelDraft]) -> _AssetOutcome:
+    """Gate phase —— 等本轮的后台图片 / EPUB 任务收尾。
+
+    写事务因此只看见文件**确实在盘上**的条目（没有"下载完了但 EPUB 还没好"
+    的竞态）。失败与"真的做完了"一起带回去，与下载失败在同一个事务里落库。
+
+    ``await_all`` / ``drain_outcomes`` **都必须按本轮 id 限定**：ImageDownloader
+    是应用级单例、并发的 ingest 共享它（扇出任务会 gather 若干个
+    ``author_fetch``，每个都走到这里）。不限定的话，先到的那一轮会把别人那一轮
+    的 future 领走，于是它 gate 了个寂寞——EPUB 落盘了而 ``has_epub`` 停在
+    PENDING；drain 不限定则会把别人那一轮的 outcome 偷来，那条 UPDATE 打在本
+    事务还没写入的行上，DONE 就丢了。
+    """
+    if image_downloader is None:
+        return _AssetOutcome([], [])
+
+    ids = [d.id for d in downloaded]
+    failures = await image_downloader.await_all(ids)
+    if failures:
+        logger.warning(
+            f"ingest: {len(failures)} novels failed image/EPUB processing",
+        )
+
+    # 生产方自报的结果：EPUB 管线自己说哪些做完了（"done"）、哪些不需要
+    # （"skipped"）、哪些失败了。gate 之后立刻 drain —— 本轮每个 worker 到那时
+    # 都已经登记过了。"done" 就是让 draft 的 has_epub=PENDING 在持久事务里变成
+    # DONE 的依据，而不是等每周的对账任务（2026-09 根因："做完不置位"）。
+    outcomes = image_downloader.drain_outcomes(ids)
+    done_ids = [nid for nid, outcome in outcomes.items() if outcome == "done"]
+    return _AssetOutcome(failures, done_ids)
+
+
+async def _collect_names(
+    downloaded: list[NovelDraft], uow: SqlUnitOfWork, client,
+) -> _AuthorNames:
+    """Collect phase —— 作者名解析，**在写事务之外**（免锁读 + 网络）。
+
+    把"见到过哪些作者"和"解析出哪些名字"一起返回，因为它们来自同一批 draft
+    的同一个字段：调用方要么两个都要（persist 收尾 + 任务结果），要么两个都不
+    要。分成两次推导会让"这一轮见过的作者"在一个阶段被重算一遍。
+    """
+    author_ids = {d.author_id for d in downloaded if d.author_id}
+    if not author_ids or client is None:
+        return _AuthorNames({}, author_ids)
+    return _AuthorNames(
+        await collect_author_names(author_ids, uow=uow, client=client),
+        author_ids,
+    )
 
 
 async def ingest(
@@ -375,24 +462,36 @@ async def ingest(
     file_storage=None,
     image_downloader=None,
 ) -> IngestOutcome:
-    """Process a batch of novels end-to-end: plan → download → persist.
+    """Process a batch of novels end-to-end: plan → download → gate → collect → persist.
 
-    The pipeline keeps every database write inside one short write
-    transaction and never holds a transaction across network downloads.
-    Concurrent calls are safe: the plan phase reads without writing, the
-    download phase touches no database, the collect phase resolves author
-    names without a write transaction, and the persist phase is a short
-    ``run_write_transaction`` that retries transient LockNotAvailable
-    instead of serializing every write through a global lock.
+    The body below *is* that list — one named step per phase, each owning its
+    own rule about when it may touch the database:
 
-    When *novels* is provided, the plan phase decides what to download.
-    When *novels* is omitted but *ids* is given, every id is downloaded
+    ==================  ====================  ===================================
+    phase               database              why it is shaped that way
+    ==================  ====================  ===================================
+    ``_plan_round``     read-only, short       decides what to download; must not
+                        transaction           hold anything across the network
+    ``_download_round`` **none**              concurrent webview + file I/O
+    ``_settle_assets``  **none**              waits for in-flight image/EPUB work
+    ``_collect_names``  lock-free reads       author names, local table first
+    ``_persist_round``  one short write       upsert + status + writeback, atomic
+                        transaction
+    ==================  ====================  ===================================
+
+    Concurrent calls are safe: no phase holds a write transaction across network
+    I/O, and the persist phase is a ``run_write_transaction`` that retries
+    transient LockNotAvailable instead of serializing every write through a
+    global lock.
+
+    When *novels* is provided, the plan phase decides what to download.  When
+    *novels* is omitted but *ids* is given, every id is downloaded
     unconditionally (no plan) — this is the single-novel path
     (``novel_fetch``); the failure ledger still gets its record/forget
     semantics through the persist phase.
 
-    Author-name resolution is two-phase: :func:`collect_author_names` runs
-    *outside* the write transaction (lock-free reads + network), and
+    Author-name resolution is two-phase: :func:`_collect_names` (i.e.
+    :func:`collect_author_names`) runs *outside* the write transaction, and
     :func:`writeback_author_names` runs *inside* the same short persist
     transaction — the final D3 shape.
     """
@@ -401,136 +500,90 @@ async def ingest(
 
     uow = SqlUnitOfWork(session_factory)
 
-    # 1. Plan — read-only, short transaction, no lock.
-    if novels:
-        async with uow.begin():
-            existing_meta, download_ids, stored_paths = await _plan_batch(
-                novels, uow, redownload=force,
-                failed_repo=FailedNovelRepository(uow.session),
-            )
-    else:
-        existing_meta: list[NovelDraft] = []
-        stored_paths: dict[int, str] = {}
-        download_ids: list[int] = list(dict.fromkeys(ids or []))
-        # Single-novel path: the id may already be known (re-download), in
-        # which case its body must go to the stored anchor, not to a path
-        # recomputed from a title that may have changed at the source.
-        if download_ids:
-            async with uow.begin():
-                stored_paths = await SQLAlchemyNovelRepository(
-                    uow.session
-                ).get_stored_paths(set(download_ids))
+    plan = await _plan_round(novels, ids, uow, force=force)
 
-    # 2. Download — concurrent network/file I/O, no database.
-    downloaded: list[NovelDraft] = []
-    failed_records: list[tuple[int, str]] = []
-    if download_ids and client is not None:
-        downloaded, failed_records = await _download_novels(
-            download_ids, client, file_storage, image_downloader,
-            redownload=force, stored_paths=stored_paths,
-        )
-    elif download_ids:
-        logger.warning(
-            f"ingest: {len(download_ids)} novels need download "
-            f"but no client provided — skipping download",
-        )
+    downloaded, failed_records = await _download_round(
+        plan.download_ids, client, file_storage, image_downloader,
+        force=force, stored_paths=plan.stored_paths,
+    )
 
-    # 2.5 Gate — wait for in-flight image/EPUB tasks before persisting, so
-    # the write transaction only sees novels whose files are actually on
-    # disk (no "downloaded but EPUB not ready yet" race).  Failures are
-    # collected and persisted in the same transaction as the downloads.
-    asset_failures: list[tuple[int, str]] = []
-    asset_outcomes: dict[int, str] = {}
-    if image_downloader is not None:
-        # Scoped to this round's ids, exactly like ``drain_outcomes`` below.
-        # The ImageDownloader is application-wide and concurrent ingests
-        # share it (fan-out tasks gather several ``author_fetch``, each of
-        # which reaches this line), so an unscoped wait would let the first
-        # round claim another round's futures and leave that round gating on
-        # nothing — its EPUBs land on disk but ``has_epub`` stays PENDING.
-        asset_failures = await image_downloader.await_all(
-            d.id for d in downloaded
-        )
-        # Producer-reported outcomes: the EPUB pipeline itself says which
-        # novels it finished ("done"), did not need ("skipped") or failed
-        # ("failed").  Drained right after the gate — every worker of this
-        # round has registered by then.  "done" is what turns the draft's
-        # has_epub=1 (PENDING) into 2 (DONE) in the persist transaction,
-        # instead of waiting for the weekly reconciler (2026-09 根因:
-        # "做完不置位").
-        #
-        # Scoped to this round's ids: the ImageDownloader is application-wide
-        # and concurrent ingests (``failed_retry`` gathers several) share it,
-        # so an unscoped drain would let another round steal these outcomes —
-        # its UPDATE would then hit rows this transaction has not written yet
-        # and the DONE would be lost.
-        asset_outcomes = image_downloader.drain_outcomes(
-            d.id for d in downloaded
-        )
-        if asset_failures:
-            logger.warning(
-                f"ingest: {len(asset_failures)} novels failed "
-                f"image/EPUB processing",
-            )
+    assets = await _settle_assets(image_downloader, downloaded)
 
-    # 3. Collect author names — lock-free, before the write transaction.
-    new_author_ids: set[int] = {
-        d.author_id for d in downloaded if d.author_id
-    }
-    mapping: dict[int, str] = {}
-    if new_author_ids and client is not None:
-        mapping = await collect_author_names(new_author_ids, uow=uow, client=client)
+    names = await _collect_names(downloaded, uow, client)
 
-    # 4. Persist — one short write transaction, with LockNotAvailable
-    # retried on a fresh transaction/session (fan-out tasks do not hold a
-    # global write lock; brief contention on a hot tag row must self-heal).
-    # Titles accompany the failure records so the "下载失败" view can show
-    # a human-readable label without querying Pixiv again.  In the *ids*
-    # path there is no novelInfo payload, so downloaded titles fill in the
-    # label for asset failures.
-    titles_by_id: dict[int, str] = {}
-    for n in (novels or []):
-        if getattr(n, "title", None):
-            titles_by_id.setdefault(n.id, n.title)
-    for d in downloaded:
-        if d.title:
-            titles_by_id.setdefault(d.id, d.title)
-
-    done_ids = [
-        nid for nid, outcome in asset_outcomes.items() if outcome == "done"
-    ]
-
-    async def _persist(uow) -> tuple[list[str], int]:
-        titles, _new_author_ids, new_count = await _persist_batch(
-            existing_meta, downloaded, uow,
-            failed_records=failed_records + asset_failures,
-            failed_repo=FailedNovelRepository(uow.session),
-            titles=titles_by_id,
-        )
-        # Producer-side status write: the EPUB pipeline reports "done" only
-        # after the file is actually written, so the same transaction that
-        # upserted has_epub=1 (PENDING, from the draft) flips it to 2
-        # (DONE).  Order matters — upsert first, status second — and the
-        # single write transaction leaves no intermediate state visible.
-        # NOTE: the repository method is a coroutine (repo.py:1244) — the
-        # contract snippet omits the ``await``; without it the write is
-        # silently dropped.
-        if done_ids:
-            await SQLAlchemyNovelRepository(uow.session).update_has_epub_status(
-                done_ids, EpubStatus.DONE,
-            )
-            logger.info(
-                f"_persist: {len(done_ids)} novels marked EPUB DONE",
-            )
-        if mapping:
-            await writeback_author_names(mapping, uow)
-        return titles, new_count
-
-    titles, new_count = await run_write_transaction(uow, _persist)
+    titles, new_count = await run_write_transaction(
+        uow,
+        lambda write_uow: _persist_round(
+            write_uow,
+            plan.existing_meta,
+            downloaded,
+            failed_records=failed_records + assets.failures,
+            titles=_titles_by_id(novels, downloaded),
+            done_ids=assets.done_ids,
+            mapping=names.mapping,
+        ),
+    )
 
     return IngestOutcome(
         titles=titles,
-        new_author_ids=new_author_ids,
-        failed=failed_records + asset_failures,
+        new_author_ids=names.author_ids,
+        failed=failed_records + assets.failures,
         new_count=new_count,
     )
+
+
+def _titles_by_id(
+    novels: list[NovelInfoLike] | None, downloaded: list[NovelDraft],
+) -> dict[int, str]:
+    """``{novel_id: title}`` —— 失败台账里给人看的标签，**不为此再问 pixiv**。
+
+    ``novels`` 里的条目优先（来源元数据本来就在手上），``downloaded`` 补上它的
+    空档。单本路径（只有 ``ids``）没有元数据入口，于是 asset 失败靠下载到的
+    draft 填标签；两处都没有的，标签就留空——那是"这条失败没有可显示的名字"，
+    比编一个 ID 字符串好。
+    """
+    titles: dict[int, str] = {}
+    for n in (novels or []):
+        if getattr(n, "title", None):
+            titles.setdefault(n.id, n.title)
+    for draft in downloaded:
+        if draft.title:
+            titles.setdefault(draft.id, draft.title)
+    return titles
+
+
+async def _persist_round(
+    uow: SqlUnitOfWork,
+    existing_meta: list[NovelDraft],
+    downloaded: list[NovelDraft],
+    *,
+    failed_records: list[tuple[int, str]],
+    titles: dict[int, str],
+    done_ids: list[int],
+    mapping: dict[int, str],
+) -> tuple[list[str], int]:
+    """Persist phase —— 一个短写事务里的全部写操作，**没有全局写锁**。
+
+    ``run_write_transaction`` 在 LockNotAvailable（SQLSTATE 55P03）上退避重试，
+    而不是把每一次写都串行化：扇出任务并不持全局锁，热点标签行上短暂的争用
+    应该自愈。
+
+    顺序是有意义的：先 upsert（draft 的 has_epub=PENDING 落库），再按生产方
+    自报的结果把它翻成 DONE。同一个事务里没有中间态对外可见。
+    """
+    titles_out, new_count = await _upsert_batch(
+        existing_meta, downloaded, uow,
+        failed_records=failed_records,
+        failed_repo=FailedNovelRepository(uow.session),
+        titles=titles,
+    )
+    if done_ids:
+        # 仓库方法是协程（``repo.py::update_has_epub_status``）：漏掉 ``await``
+        # 是一次**静默丢写**，不会报错。
+        await SQLAlchemyNovelRepository(uow.session).update_has_epub_status(
+            done_ids, EpubStatus.DONE,
+        )
+        logger.info(f"_persist: {len(done_ids)} novels marked EPUB DONE")
+    if mapping:
+        await writeback_author_names(mapping, uow)
+    return titles_out, new_count

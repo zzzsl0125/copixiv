@@ -114,4 +114,38 @@ def is_chinese(
     return han / max(han + latin, 1) >= _MIN_HAN_RATIO
 
 
-__all__ = ["is_chinese"]
+def filter_chinese(novels: list) -> list:
+    """只留下中文作品的那几条（列表级封装，规则仍归 :func:`is_chinese`）。
+
+    pixiv 的列表响应里每一条都有 ``title`` / ``caption`` / ``tags`` 三个字段，
+    但形状各不相同（真实 API 对象、测试里的 dict、局部替身）。逐个按字段取值
+    的胶水代码原本住在 ``features/novels/ingest.py``，却是 ``tasks/novels.py``
+    的**四个**调用点在用 —— 一个只被任务层使用、与抓取管线无关的工具，住在
+    管线里纯属历史偶然。规则（哪个算中文）在 :func:`is_chinese`；这里只做
+    "从一条响应里把字段取出来喂给它"。
+    """
+    return [
+        n for n in novels
+        if is_chinese(
+            title=_field(n, "title", ""),
+            caption=_field(n, "caption", ""),
+            tags=[_field(t, "name", str(t)) for t in _field(n, "tags", None) or []],
+        )
+    ]
+
+
+def _field(obj, path: str, default):
+    """读取一个（可能嵌套的）字段 —— 容器与 pydantic 对象都吃。
+
+    与 ``core.services.safe_get`` 同一条语义，但这里只需要**一层**键，且
+    ``core.language`` 不该为了这一个动作依赖 ``core.services``（后者带着
+    pydantic 模型与一整套解析工具）。一层就是这里的全部需求。
+    """
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(path, default)
+    return getattr(obj, path, default)
+
+
+__all__ = ["filter_chinese", "is_chinese"]

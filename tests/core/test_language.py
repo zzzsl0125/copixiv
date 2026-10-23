@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from copixiv.core.language import is_chinese
+from copixiv.core.language import filter_chinese, is_chinese
 
 
 class TestTagPriority:
@@ -141,3 +141,45 @@ class TestNoClassifierDependency:
         # No I/O, no caching surprises: same input, same answer.
         sample = ("道歉", "", ["R-18"])
         assert [is_chinese(*sample) for _ in range(3)] == [True, True, True]
+
+
+class TestFilterChinese:
+    """列表级封装：形状适配归这里，规则仍归 ``is_chinese``。
+
+    ``features/novels/ingest.py`` 曾经自己抄了一份这个循环，而唯一的调用者是
+    ``tasks/novels.py`` 的四条任务路径 —— 一个与抓取管线无关的工具住在管线里。
+    """
+
+    def test_dict_and_object_entries_are_both_accepted(self):
+        from types import SimpleNamespace
+
+        novels = [
+            {"title": "中文作品", "caption": "", "tags": []},
+            SimpleNamespace(title="中文作品二", caption="", tags=[]),
+            {"title": "Roll over", "caption": "", "tags": []},     # 拉丁 → 拒
+        ]
+
+        kept = filter_chinese(novels)
+
+        # 返回原对象（不做拷贝）：调用方后面还要拿它们去下载。
+        titles = [n["title"] if isinstance(n, dict) else n.title for n in kept]
+        assert titles == ["中文作品", "中文作品二"]
+
+    def test_a_tag_name_may_be_a_dict_or_a_string(self):
+        novels = [
+            {"title": "x", "caption": "", "tags": [{"name": "中文"}]},
+            {"title": "y", "caption": "", "tags": ["中文"]},
+        ]
+
+        assert len(filter_chinese(novels)) == 2
+
+    def test_missing_fields_default_to_empty(self):
+        """形状不全的条目不该抛异常 —— 缺字段就是"没有这条信息"。"""
+        assert filter_chinese([{"title": "中文作品"}]) != []
+        assert filter_chinese([{}]) == []
+
+    def test_an_empty_input_is_an_empty_output(self):
+        assert filter_chinese([]) == []
+
+    def test_entries_without_a_title_or_caption_are_dropped(self):
+        assert filter_chinese([{"tags": ["其他"]}]) == []

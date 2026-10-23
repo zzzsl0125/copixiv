@@ -18,7 +18,9 @@ from datetime import datetime, timedelta
 from pydantic import BaseModel
 
 from copixiv.features.authors.resolve_names import collect_author_names, writeback_author_names
-from copixiv.features.novels.ingest import ingest, _filter_chinese_novels, _month_ranges
+from copixiv.core.language import filter_chinese
+from copixiv.core.calendar import month_ranges
+from copixiv.features.novels.ingest import ingest
 from copixiv.core.models import TaskResult
 from copixiv.core.services import safe_get
 from copixiv.db.write_lock import run_write_transaction
@@ -102,7 +104,7 @@ async def _fan_out_author_fetch(
     failed still reports "success" otherwise, and the operator has no way to
     tell a quiet day from a broken one.
     """
-    cn = _filter_chinese_novels(novels)
+    cn = filter_chinese(novels)
     if not cn:
         return [], []
 
@@ -203,7 +205,7 @@ async def novel_follow(args: NovelFollowArgs, ctx: TaskContext) -> TaskResult:
     ):
         resp = await ctx.client.novel_follow(fetch_til=fetch_til)
 
-    novels = _filter_chinese_novels(safe_get(resp, "novels", []))
+    novels = filter_chinese(safe_get(resp, "novels", []))
     out = await ingest(
         novels, force=args.force,
         session_factory=ctx.session_factory,
@@ -252,7 +254,7 @@ async def author_fetch(args: AuthorFetchArgs, ctx: TaskContext) -> TaskResult:
 
     # Collect — pure network, pages accumulate into resp.novels.
     resp = await ctx.client.user_novels(args.author_id, fetch_all=True)
-    novels = _filter_chinese_novels(safe_get(resp, "novels", []))
+    novels = filter_chinese(safe_get(resp, "novels", []))
 
     # Persist — plan → download → write, each write is a short retried
     # transaction (no global lock).
@@ -344,7 +346,7 @@ async def author_special_follow(ctx: TaskContext) -> TaskResult:
     # published — Japanese works included — into a Chinese-only library
     # (1,528 non-Chinese rows already in production, from before this task
     # existed in its current form).
-    all_novels = _filter_chinese_novels(all_novels)
+    all_novels = filter_chinese(all_novels)
 
     out = await ingest(
         all_novels, session_factory=ctx.session_factory,
@@ -408,7 +410,7 @@ async def novel_search(args: NovelSearchArgs, ctx: TaskContext) -> TaskResult:
     all_titles: list[str] = []
     failed_ids: list[int] = []
     async with ctx.client.account_rule(need_premium=True):
-        for start_date, end_date in _month_ranges(end_date, args.months):
+        for start_date, end_date in month_ranges(end_date, args.months):
             logger.info(f"Searching {start_date.date()} ~ {end_date.date()}")
             resp = await ctx.client.search_novel(
                 args.keyword, "keyword", "popular_desc",
