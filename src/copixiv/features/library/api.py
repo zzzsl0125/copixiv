@@ -34,8 +34,14 @@ multipart，字段名 ``files``（可重复，承载多文件）；可选表单�
 响应契约（前端 ``frontend/src/types/uploads.ts`` 已按此实现）：
 
 * ``200`` + 逐条结果 —— 部分成功（有的入库、有的重复、有的失败）也是 200；
-* ``400`` —— 一个文件都没带；``author_id`` 不是正整数（0 / 负数）；
+* ``400`` —— 一个文件都没带；单个文件超过 :data:`MAX_UPLOAD_BYTES`；
+  ``author_id`` 不是正整数（0 / 负数）；
 * ``422`` —— ``author_id`` 不是整数（``"abc"``，FastAPI 类型转换阶段）。
+
+**体积上限在这一层拦**（:func:`_read_capped`）：``ingest`` 拿到的已经是完整
+bytes，而 ``storage.epub.reader`` 的容器上限只对「按 EPUB 处理」的文件生效 ——
+一个超大 ``.txt`` 会先被整个读进内存再解码。上传是同步请求，它不该有能力把进程
+的内存打满。
 
 上传失败**只**出现在响应体里：绝不写 ``failed_novel``（§4-7），绝不走抓取侧的
 ``_upsert_rows``（§4 硬边界）——两条都由测试钉住。
@@ -67,10 +73,33 @@ from copixiv.features.library.schemas import UploadResponse, UploadResultItem
 # 正整数 pixiv author id 的校验与 400 文案**唯一所有者**是单本 PATCH 那个用例
 # （``0`` / 负数 / 非整数 / 布尔都拒）。这里直接调它，不抄第二份规则：两处文案
 # 一旦漂移，前端按 detail 提示的行为就会跟着分叉。
-from copixiv.features.novels.update_metadata import _author_id
+from copixiv.core.ids import author_id as _author_id
 from copixiv.pixiv.client import PixivClient
 
 router = APIRouter()
+
+
+# 单个文件的上限。**这一层必须自己拦**：``ingest`` 拿到的已经是完整 bytes，
+# 而 ``epub.reader`` 的容器上限只在「按 EPUB 处理」时才生效 —— 一个 2 GB 的
+# ``.txt`` 会先被整个读进内存、再整个解码、再被判失败。上传是同步请求，它不该
+# 有能力把进程的内存打满。
+MAX_UPLOAD_BYTES = 128 * 1024 * 1024
+UPLOAD_TOO_LARGE_ERROR = "文件过大（单个文件最多 128 MB）"
+
+
+async def _read_capped(upload: UploadFile) -> bytes:
+    """读一份上传并卡上限 → bytes；超限抛 :class:`ValidationError`（400）。
+
+    读 *MAX_UPLOAD_BYTES + 1* 字节再判长度，而不是先读全部再看大小：
+    ``UploadFile`` 已经在 Starlette 里落成临时文件（大文件不会全量进内存），
+    但我们自己那一次 ``read()`` 会 —— 多读一个字节就够判断，省下的是这之后的
+    全部内存。超限的请求整批 400（与「一个文件都没带」同一口径）：半批入库
+    半批拒收会让"我到底收进去了几本"变成猜谜。
+    """
+    data = await upload.read(MAX_UPLOAD_BYTES + 1)
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise ValidationError(UPLOAD_TOO_LARGE_ERROR)
+    return data
 
 
 @router.post(
@@ -114,10 +143,8 @@ async def upload_novels(
     if not files:
         raise ValidationError("请选择要上传的 TXT / EPUB 文件")
 
-    payloads = [
-        (upload.filename or "未命名.txt", await upload.read())
-        for upload in files
-    ]
+    payloads = [(upload.filename or "未命名.txt", await _read_capped(upload))
+                for upload in files]
 
     preset_author_id: int | None = None
     preset_author_name: str | None = None
@@ -139,13 +166,10 @@ async def upload_novels(
         preset_author_name = profile.author_name
 
     # ---- 落库：写事务（咨询锁在里面），无网络 ----
+    # 占位行的写事务兜底在 ``ingest_uploads`` 里（它在取锁那一步一起做，见
+    # 那边的 ``prepared``）：本函数是那条约定的**实现者之一**，不是它的
+    # 所有者——同一个补写留在两处只会让人以为它需要两遍。
     async with write_uow.begin():
-        if preset_author_id is not None:
-            # 幂等兜底：读事务那次已经提交（上面那个显式 begin 的出口），
-            # 这里再插一次是 ON CONFLICT DO NOTHING、不会等锁。
-            SQLAlchemyAuthorRepository(write_uow.session).ensure_exists(
-                {preset_author_id}
-            )
         results = ingest_uploads(
             write_uow.session,
             file_storage,

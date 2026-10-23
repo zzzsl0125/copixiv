@@ -251,6 +251,39 @@ def test_no_files_is_400(client):
     ).status_code == 400
 
 
+def test_oversize_file_is_400_and_writes_nothing(
+    client, session_factory, monkeypatch,
+):
+    """体积上限在**读字节那一层**拦（不只是 EPUB 才拦），且整批不入库。
+
+    ``ingest`` 拿到的已经是完整 bytes，所以上限必须在 API 层生效：一个超大
+    ``.txt`` 不该先被整个读进内存再解码。这里把上限调小来断言这条路径，并确认
+    它发生在写库之前（``novel`` / ``author`` 都空）。
+    """
+    monkeypatch.setattr(library, "MAX_UPLOAD_BYTES", 16)
+
+    response = _upload(client, [("大.txt", b"x" * 17)])
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == library.UPLOAD_TOO_LARGE_ERROR
+    with session_factory() as session:
+        assert session.execute(select(Novel)).first() is None
+        assert session.execute(select(Author)).first() is None
+
+
+def test_a_batch_with_one_oversize_file_is_rejected_whole(
+    client, session_factory, monkeypatch,
+):
+    """半批入库半批拒收会让"收进去几本"变成猜谜 → 整批 400。"""
+    monkeypatch.setattr(library, "MAX_UPLOAD_BYTES", 16)
+
+    response = _upload(client, [("好.txt", b"short"), ("大.txt", b"x" * 17)])
+
+    assert response.status_code == 400
+    with session_factory() as session:
+        assert session.execute(select(Novel)).first() is None
+
+
 # ---------------------------------------------------------------------------
 # 落库形态（§3/§7-3/§7-4/§7-5）
 # ---------------------------------------------------------------------------
