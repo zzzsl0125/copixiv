@@ -150,9 +150,8 @@ class TestReadEpub:
 def _pad_with_fake_image(data: bytes, *, size: int) -> bytes:
     """往一份 EPUB 里塞一个大 "image" 成员，返回新容器（体积约 ``size``）。
 
-    走 OPF 声明，所以它同时也验证了"非文本成员留空占位"这条路：ebooklib
-    要在 manifest 里找到它，但正文读取一个字节都不该碰它。图片按 STORED
-    写入 —— 压缩会把 ``b"\xff" * n`` 压成几百字节，测不出"容器很大"。
+    走 OPF 声明（真实语料里的插图就是这么进容器的），图片按 STORED 写入 ——
+    压缩会把 ``b"\xff" * n`` 压成几百字节，测不出"容器很大"。
     """
     import io
     import zipfile
@@ -174,8 +173,13 @@ def _pad_with_fake_image(data: bytes, *, size: int) -> bytes:
     return buffer.getvalue()
 
 
-class TestSlimContainer:
-    """瘦身读取：容器可以很大，只要正文小就该读得出来，且正文不变。"""
+class TestLargeContainers:
+    """容器可以很大，只要正文小就该读得出来 —— 而且插图一个字节都不该读。
+
+    这条路径不经过 ebooklib（它会把每个 manifest 成员的字节都留在内存里，所以
+    曾经必须先把容器"瘦身"）。现在按需 ``archive.open`` 正文成员，内存跟着正文
+    走，于是这里断言的是**读了哪些成员**，而不只是"结果对不对"。
+    """
 
     def test_container_over_the_old_cap_is_readable_when_text_is_small(self):
         """旧 50 MB 上限的失败根因是插图，不是正文 —— 现在不该再失败。"""
@@ -187,51 +191,79 @@ class TestSlimContainer:
         assert content.body == "第一段。\n第二段。"
         assert content.title == "测试书名"
 
-    def test_slimmed_read_matches_an_unlimited_whole_container_read(self):
-        """瘦身版喂给 ebooklib 的结果必须与整容器一致（正文 + 元数据）。"""
-        import io
+    def test_images_are_never_read(self, monkeypatch):
+        """插图成员一次都不该被打开：内存跟着正文走，不跟插图走。"""
         import zipfile
 
-        from ebooklib import epub
+        # 先造好容器，再开始记录 —— 造容器的那几次 read 不算。
+        big = _pad_with_fake_image(build_epub(), size=1024 * 1024)
+        opened: list[str] = []
+        real_open = zipfile.ZipFile.open
 
-        from copixiv.storage.epub.reader import _slim_container
+        def spy(self, name, *args, **kwargs):
+            opened.append(name if isinstance(name, str) else name.filename)
+            return real_open(self, name, *args, **kwargs)
 
-        big = _pad_with_fake_image(build_epub(title="t", author="a"),
-                                   size=1024 * 1024)
-        slim = _slim_container(big)
-        assert len(slim) < len(big) / 10
+        monkeypatch.setattr(zipfile.ZipFile, "open", spy)
+        read_epub(big)
 
-        # 图片在瘦身容器里仍在（空占位）—— 删掉会让 ebooklib 抛 KeyError。
-        with zipfile.ZipFile(io.BytesIO(slim)) as archive:
-            assert archive.read("EPUB/images/padding.jpg") == b""
+        assert opened, "至少该读正文成员"
+        assert not [n for n in opened if n.endswith((".jpg", ".png"))], (
+            f"插图不该被读：{opened}"
+        )
 
-        whole = epub.read_epub(io.BytesIO(big))
-        from_slim = epub.read_epub(io.BytesIO(slim))
-        assert reader.extract_body(from_slim) == reader.extract_body(whole)
-        assert reader._first_metadata(from_slim, "title") == "t"
-        assert reader._first_metadata(from_slim, "creator") == "a"
+    def test_an_oversized_member_is_truncated_not_fatal(self, monkeypatch):
+        """单个成员的解压上限把它截断，而不是让进程把内存吃满。"""
+        big = _pad_with_fake_image(build_epub(), size=1024)
+        assert read_epub(big).body == "第一段。\n第二段。"
 
-    def test_opf_referencing_a_missing_member_still_fails_as_invalid(self):
-        """OPF 指向不存在的成员：ebooklib 的 KeyError 仍要落成 EpubReadError。"""
-        import io
-        import zipfile
-
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(io.BytesIO(build_epub())) as source:
-            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as target:
-                for info in source.infolist():
-                    payload = source.read(info.filename)
-                    if info.filename == "EPUB/content.opf":
-                        payload = payload.replace(
-                            b"</manifest>",
-                            b'<item id="ghost" href="images/ghost.jpg" '
-                            b'media-type="image/jpeg"/></manifest>',
-                        )
-                    target.writestr(info, payload)
+        # 上限调到 8 字节：正文被截成很短的一截（只剩开头标签里的空白），
+        # 于是走到"没有正文"——关键是**不**抛内存 / 解码类异常。
+        monkeypatch.setattr(reader, "_MAX_MEMBER_BYTES", 8)
         with pytest.raises(EpubReadError) as excinfo:
-            read_epub(buffer.getvalue())
+            read_epub(big)
+        assert str(excinfo.value) == EPUB_EMPTY_ERROR
+
+
+def _rebuild(data: bytes, *, drop: tuple[str, ...] = ()) -> bytes:
+    """Copy an EPUB container, omitting the members named in *drop*."""
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(data)) as source:
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as target:
+            for info in source.infolist():
+                if info.filename in drop:
+                    continue
+                target.writestr(info, source.read(info.filename))
+    return buffer.getvalue()
+
+
+class TestBrokenStructure:
+    def test_a_spine_entry_missing_from_the_archive_is_invalid(self):
+        """spine 指向不存在的成员 → 无效容器，而不是悄悄少一章。"""
+        buffer = _rebuild(build_epub(), drop=("EPUB/text/ch1.xhtml",))
+
+        with pytest.raises(EpubReadError) as excinfo:
+            read_epub(buffer)
 
         assert str(excinfo.value) == EPUB_INVALID_ERROR
+
+    def test_an_unreferenced_ghost_manifest_item_is_harmless(self):
+        """manifest 声明了不存在的成员、但 spine 不用它 → 照常读得出来。
+
+        这与上一条的差别就是这条路径的产品口径：**只读 spine 里的正文**。
+        ebooklib 会为 manifest 里每个成员预读字节，于是一个指向缺失插图的条目
+        能把整本书判成坏容器；我们没有那个包袱。
+        """
+        data = build_epub().replace(
+            b"</manifest>",
+            b'<item id="ghost" href="images/ghost.jpg" '
+            b'media-type="image/jpeg"/></manifest>',
+        )
+
+        assert read_epub(data).body == "第一段。\n第二段。"
 
 
 class TestHtmlToText:
