@@ -20,6 +20,24 @@ from typing import Generator, Callable
 from loguru import logger
 
 
+#: How much task log one ``task_history`` row may store.
+#:
+#: A task's log is written into a JSONB column, and nothing bounded it: the
+#: capture buffer grew until the task returned, so one ``fix_series_index`` run
+#: stored 1,263,316 characters in a single row.  Across 1,566 rows that made
+#: ``result`` total 13 MB, and it is re-read by anyone opening the log or by a
+#: future un-stripped list query.
+#:
+#: 256 KiB keeps the useful part — a normal run's log (median 5.7 kB) is
+#: unaffected — while making the pathological case cost a predictable amount.
+#: The *tail* is kept: when a task fails, the error and the last actions before
+#: it are what the operator needs, and the beginning is usually setup noise.
+MAX_TASK_LOG_BYTES = 256 * 1024
+#: Marker prepended when a log was truncated, so nobody wonders where the head
+#: of the run went.
+_TRUNCATION_NOTICE = "[日志过长，仅保留最后 {} KiB；完整日志见 log/backend.log]\n"
+
+
 class InterceptHandler(logging.Handler):
     """Intercept standard library log records and route them to loguru."""
 
@@ -120,6 +138,8 @@ def capture_logs(
         print(get_logs())   # → "2026-06-30 12:00:00 - INFO - doing work"
     """
     buffer = io.StringIO()
+    # Filled once at block exit; lets ``get_logs`` stay answerable afterwards.
+    _done: list[str] = [""]
 
     def task_filter(record: dict) -> bool:
         if task_id is not None:
@@ -133,12 +153,52 @@ def capture_logs(
         level=level,
     )
 
+    def get_logs() -> str:
+        """The captured text, capped at :data:`MAX_TASK_LOG_BYTES`.
+
+        Returns the **tail** plus a notice, because the end of a run holds the
+        error and the last actions — the part an operator actually reads.  A
+        log at or under the cap is returned verbatim.
+
+        Readable after the ``with`` block exits as well: the kernel calls it
+        *inside* the block (before the final history write), but a caller that
+        keeps the closure and asks later must not get "I/O operation on closed
+        file" — the text has already been produced by then.
+        """
+        try:
+            text = buffer.getvalue()
+        except ValueError:
+            # Closed after the block: the snapshot taken at exit is the whole
+            # record — no further lines can have arrived once the handler was
+            # removed.
+            text = _done[0]
+        raw = text.encode("utf-8", errors="replace")
+        if len(raw) <= MAX_TASK_LOG_BYTES:
+            return text
+        tail = raw[-MAX_TASK_LOG_BYTES:]
+        # Cut on a line boundary where possible so the first retained line is
+        # not a half-line, and drop a partial UTF-8 sequence at the split.
+        newline = tail.find(b"\n")
+        if 0 <= newline < len(tail) - 1:
+            tail = tail[newline + 1:]
+        kibs = MAX_TASK_LOG_BYTES // 1024
+        return (
+            _TRUNCATION_NOTICE.format(kibs)
+            + tail.decode("utf-8", errors="replace")
+        )
+
     try:
         if task_id is not None:
             with logger.contextualize(task_id=task_id):
-                yield buffer.getvalue
+                yield get_logs
         else:
-            yield buffer.getvalue
+            yield get_logs
     finally:
         logger.remove(handler_id)
+        # Snapshot before closing so a caller holding the closure can still ask
+        # after the block (``_done`` is what ``get_logs`` falls back to).
+        try:
+            _done[0] = buffer.getvalue()
+        except ValueError:
+            pass
         buffer.close()

@@ -26,6 +26,8 @@ knowledge — into four task modules plus a shared cursor module:
   a row for this file?", the opposite direction from ``check_epub`` (which
   walks rows).  Kept separate so a bug there cannot touch the EPUB state
   machine.
+* :mod:`.history` — ``prune_task_history``: trims the audit/queue table by
+  "keep newest N rows **and** keep the last N days" (dry-run by default).
 
 Importing this package executes every ``@register(...)`` decorator, because
 the re-exports below import all four task modules — that is what keeps
@@ -52,6 +54,13 @@ from .epub import (
     check_epub,
 )
 from .files import PruneOrphanFilesArgs, prune_orphan_files
+from .history import (
+    DEFAULT_KEEP,
+    DEFAULT_MAX_AGE_DAYS,
+    RETENTION_SETTING_KEY,
+    PruneTaskHistoryArgs,
+    prune_task_history,
+)
 from .search import check_fts, rebuild_fts, sync_empty_name
 from .series import (
     _ORPHAN_CURSOR_KEY,
@@ -73,6 +82,9 @@ __all__ = [
     "FixSeriesIndexArgs",
     "prune_orphan_files",
     "PruneOrphanFilesArgs",
+    "prune_task_history",
+    "PruneTaskHistoryArgs",
+    "RETENTION_SETTING_KEY",
     "_scan_placeholder",
     "_sweep",
     "_read_cursor",
