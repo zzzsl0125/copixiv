@@ -74,3 +74,8 @@ docs
 
 # npm cache override for sandboxed runs
 .npm-cache/
+
+# Coverage
+.coverage
+.coverage.*
+htmlcov/

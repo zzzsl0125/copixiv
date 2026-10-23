@@ -5,6 +5,7 @@ from pathlib import Path
 from copixiv.core import formats
 from copixiv.core.services import build_path, safe_filename
 from copixiv.log import logger
+from copixiv.storage import assets
 from copixiv.storage.atomic import write_text_atomic
 
 
@@ -148,11 +149,18 @@ class FileStorage:
         return content or None
 
     def delete_novel_files(self, novel_path: str) -> None:
-        """Delete a novel's text and EPUB files, and clean up empty directories.
+        """Delete a novel's text, EPUB, and downloaded images.
 
         Refuses to touch paths outside the download root — ``novel_path``
         comes from the database and is trusted only after a containment
         check (a polluted row must not delete arbitrary files).
+
+        The **images** matter as much as the text: they are named after the
+        novel id (``{id}_u_*`` / ``{id}_p_*`` / ``{id}_c_cover.*``), so a novel
+        that is deleted while its pictures stay on disk leaves them behind for
+        the weekly orphan sweep to reclaim.  Deleting the book should reclaim
+        them now — that is the difference between "I deleted this" and "I
+        deleted this, and 12 images are still sitting in the tree".
         """
         root = Path(self.download_dir).resolve()
         path = Path(novel_path)
@@ -167,18 +175,31 @@ class FileStorage:
             return
 
         for suffix in formats.ALL_SUFFIXES:
-            file_path = resolved.with_suffix(suffix)
-            if file_path.is_file():
-                try:
-                    file_path.unlink()
-                except OSError:
-                    pass
+            _unlink(resolved.with_suffix(suffix))
 
-        # Remove parent directory if empty
+        novel_id = resolved.stem.rsplit("_", 1)[-1]
+        if novel_id.isdigit():
+            parent = resolved.parent
+            for pattern in (f"{novel_id}_u_*", f"{novel_id}_p_*"):
+                for asset in parent.glob(pattern):
+                    _unlink(asset)
+            cover = assets.find_cover(parent, novel_id)
+            if cover is not None:
+                _unlink(cover)
+
+        # Remove the parent directory when this was the last novel in it.
+        # Assets are gone by now, so an "empty directory" really means empty.
         parent = resolved.parent
         try:
-            remaining = list(parent.iterdir())
-            if not remaining:
+            if not any(parent.iterdir()):
                 parent.rmdir()
         except OSError:
             pass
+
+
+def _unlink(path: Path) -> None:
+    """Best-effort delete: a cleanup failure must not abort the others."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning(f"删除文件失败（继续清理其余文件）: {path}")

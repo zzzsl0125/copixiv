@@ -318,6 +318,32 @@ class TestResponseCompression:
         assert r.status_code == 200
         assert "content-encoding" not in r.headers
 
+def _ensure_wiring_novel(app, novel_id: int, title: str, path, *, text: int):
+    """Write the row for this run's temp file — **update the path if it exists**.
+
+    The wiring app runs against a *module-scoped database that outlives the
+    process*: the second `pytest` run finds the row from the first one, still
+    pointing at the previous run's ``tmp_path``.  Insert-only made these two
+    tests fail on every other run (404, because the stored path is gone and
+    only ``novel.path`` is ever filled — see ``FileStorage.save_novel_text``).
+    Upserting the path is what makes the test independent of leftover state,
+    which is what every other test in this suite already is.
+    """
+    from copixiv.db.models import Novel
+
+    with app.state.session_factory() as s:
+        existing = s.get(Novel, novel_id)
+        if existing is None:
+            s.add(Novel(
+                id=novel_id, title=title, author_id=None, path=str(path),
+                like=900, text=text, has_epub=3,
+            ))
+        else:
+            existing.path = str(path)
+            existing.text = text
+        s.commit()
+
+
     def test_epub_download_is_not_double_compressed(self, client, app):
         """An EPUB is already deflated inside — gzip would cost CPU for 0.6 %.
 
@@ -334,13 +360,7 @@ class TestResponseCompression:
         storage = app.state.file_storage
         body = "正文" * 2000
         path = storage.save_novel_text(20_000, "某书", body)
-        with app.state.session_factory() as s:
-            if s.get(Novel, 20_000) is None:
-                s.add(Novel(
-                    id=20_000, title="某书", author_id=None,
-                    path=str(path), like=900, text=5000, has_epub=3,
-                ))
-                s.commit()
+        _ensure_wiring_novel(app, 20_000, "某书", path, text=5000)
 
         # A minimal real EPUB container, written next to the text file the way
         # the builder does.
@@ -367,13 +387,7 @@ class TestResponseCompression:
 
         body = "正文" * 20000      # ~120 kB, past the 1 KiB floor
         path = app.state.file_storage.save_novel_text(20_001, "长书", body)
-        with app.state.session_factory() as s:
-            if s.get(Novel, 20_001) is None:
-                s.add(Novel(
-                    id=20_001, title="长书", author_id=None,
-                    path=str(path), like=900, text=len(body), has_epub=3,
-                ))
-                s.commit()
+        _ensure_wiring_novel(app, 20_001, "长书", path, text=len(body))
 
         r = client.get(
             "/api/novels/20001/download?format=txt",

@@ -69,3 +69,59 @@ class TestAdoptAnchor:
         assert len(ninety) < 255            # fine by character count
         assert len(Path(anchor).name.encode()) > 255
         assert storage.adopt_anchor(anchor) is None
+
+
+class TestDeleteNovelFiles:
+    """删除一本小说 = 正文 + EPUB + **它自己的图片**，别人的一律不动。
+
+    这条路径是销毁性的，而且 ``novel_path`` 来自数据库，所以两件事都要钉住：
+    越界路径一个字节都不碰；删除要连插图一起回收（否则删完书，图还躺在树里
+    等每周的孤儿扫描来收）。
+    """
+
+    def _tree(self, tmp_path):
+        parent = tmp_path / "0000"
+        parent.mkdir(parents=True)
+        text = parent / "我的书_12345.txt"
+        text.write_text("正文", encoding="utf-8")
+        text.with_suffix(".epub").write_bytes(b"epub")
+        for name in ("12345_u_1.jpg", "12345_p_2.png", "12345_c_cover.jpg",
+                     "12346_u_9.jpg"):
+            (parent / name).write_bytes(b"x")
+        return parent, text
+
+    def test_removes_text_epub_and_images_but_nothing_else(self, tmp_path):
+        parent, text = self._tree(tmp_path)
+
+        FileStorage(str(tmp_path)).delete_novel_files(str(text))
+
+        assert sorted(p.name for p in parent.iterdir()) == ["12346_u_9.jpg"]
+
+    def test_the_directory_is_removed_once_it_is_empty(self, tmp_path):
+        parent, text = self._tree(tmp_path)
+        (parent / "12346_u_9.jpg").unlink()
+
+        FileStorage(str(tmp_path)).delete_novel_files(str(text))
+
+        assert not parent.exists()
+
+    def test_a_path_outside_the_root_is_refused(self, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        victim = outside / "重要文件_1.txt"
+        victim.write_text("别删我", encoding="utf-8")
+
+        FileStorage(str(tmp_path / "download")).delete_novel_files(str(victim))
+
+        assert victim.exists()
+
+    def test_a_missing_file_is_not_an_error(self, tmp_path):
+        """文件早就没了 → 不抛异常；空目录顺带收掉（这是清理的既定行为）。"""
+        parent = tmp_path / "0000"
+        parent.mkdir()
+
+        FileStorage(str(tmp_path)).delete_novel_files(
+            str(parent / "不存在_1.txt")
+        )
+
+        assert not parent.exists()
