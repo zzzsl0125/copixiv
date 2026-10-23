@@ -14,7 +14,7 @@ from sqlalchemy import select
 
 from copixiv.db.models import Author
 from copixiv.db.uow import SqlUnitOfWork
-from copixiv.db.write_lock import DbWriteLock, db_write
+from copixiv.db.write_lock import db_write
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 
 
@@ -50,10 +50,6 @@ class TestDbWriteIsNoop:
             result = marker is None
 
         assert result is True
-
-    def test_db_write_lock_callable_returns_db_write(self):
-        # The injected adapter is just db_write() itself (compat shim).
-        assert DbWriteLock()() is not None
 
 
 @pytest.mark.slow

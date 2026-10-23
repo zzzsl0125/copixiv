@@ -99,7 +99,6 @@ from copixiv.app import _build
 from copixiv.db import models
 from copixiv.db.engine import create_database_engine, create_session_factory
 from copixiv.db.uow import SqlUnitOfWork
-from copixiv.db.write_lock import DbWriteLock
 from copixiv.tasks.kernel import TaskContext
 from copixiv.tasks.kernel import describe_tasks, discover_tasks, get_spec
 
@@ -178,13 +177,17 @@ def _coerce_guess(value: str) -> Any:
 
 
 def _injected_deps(app_singletons):
-    """Return the dependency dict that tasks expect."""
+    """Return the dependency dict that tasks expect.
+
+    Only these three: ``TaskExecutor`` carries exactly what task bodies read,
+    and ``TaskContext`` no longer has ``epub_builder`` / ``config`` /
+    ``write_lock`` fields (``db_write()`` is a no-op boundary under PostgreSQL
+    and no task ever read the other two).
+    """
     return {
         "client": app_singletons.client,
         "file_storage": app_singletons.file_storage,
         "image_downloader": app_singletons.image_downloader,
-        "epub_builder": app_singletons.epub_builder,
-        "config": app_singletons.config,
     }
 
 
@@ -341,9 +344,6 @@ def run_task(task_name: str, params: dict[str, Any], dry_run: bool = False) -> A
         client=deps.get("client"),
         file_storage=deps.get("file_storage"),
         image_downloader=deps.get("image_downloader"),
-        epub_builder=deps.get("epub_builder"),
-        config=deps.get("config"),
-        write_lock=DbWriteLock(),
     )
 
     args_obj = (

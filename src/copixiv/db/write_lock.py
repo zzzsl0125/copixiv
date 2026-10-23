@@ -11,9 +11,9 @@ concurrency.
 What remains here is a *documented* transaction-boundary marker: ``db_write``
 is still an ``asynccontextmanager`` so callers that historically wrapped
 their write batch in ``async with db_write():`` keep working, but the body
-now just yields — it no longer holds any lock.  ``DbWriteLock`` is kept so
-the task-runner injection point (which supplied the serialized-write adapter
-behind the removed ``WriteLockPort`` protocol) still type-checks.
+now just yields — it no longer holds any lock.  The ``DbWriteLock`` adapter
+that once wrapped it for the task-runner injection point is gone: the task
+context carries no ``write_lock`` field, and no caller read it.
 
 Usage (unchanged shape, no longer mutually exclusive)::
 
@@ -115,13 +115,4 @@ async def run_write_transaction(
     raise AssertionError("unreachable: retry loop must return or raise")
 
 
-class DbWriteLock:
-    """Callable wrapping ``db_write()`` as a write-boundary context manager.
 
-    Injected into application-layer use cases by the task runner so they
-    acquire the write boundary through ``db_write()`` (compat: this was the
-    one concrete adapter behind the now-removed ``WriteLockPort`` protocol).
-    """
-
-    def __call__(self) -> AsyncIterator[None]:
-        return db_write()

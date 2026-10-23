@@ -12,7 +12,7 @@
 | `src/copixiv/config.py` | 配置模型与加载 |
 | `src/copixiv/deps.py` | FastAPI 依赖（get_session_factory / get_app_config / get_file_storage / get_task_manager / get_uow / get_write_uow / parse_json_param） |
 | `core/` | 纯 Python：models.py / services.py / exceptions.py / draft.py（无框架、无 SQLAlchemy、无 web 依赖；仅标准库工具函数，含 zip/路径处理） |
-| `db/` | engine / uow（纯事务边界）/ write_lock（事务边界标记，PG 后不再持锁）/ backup / models / constants / base / data_version |
+| `db/` | engine / uow（纯事务边界）/ write_lock（事务边界标记，PG 后不再持锁）/ backup / models / constants / base |
 | `pixiv/` | pixivpy3 防腐层（唯一允许 import pixivpy3 的目录） |
 | `storage/` | file_storage / image_downloader / epub 子包 |
 | `notify/` | telegram / factory |

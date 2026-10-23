@@ -41,7 +41,7 @@ app.py → features(+tasks) → core；db / pixiv / storage / notify 是适配�
 | `features/` | 按功能切片：api + repo + schemas 同置 |
 | `tasks/` | 任务注册表 + 调度内核 + 业务任务 |
 | `core/` | 纯 Python：Pydantic 实体、纯服务、域异常；无框架/无 SQLAlchemy/无 web 依赖（仅标准库工具函数） |
-| `db/` | PostgreSQL 唯一适配：engine / uow / write_lock（事务边界标记）/ backup / data_version |
+| `db/` | PostgreSQL 唯一适配：engine / uow / write_lock（事务边界标记）/ backup / models / constants |
 | `pixiv/` | pixivpy3 防腐层（唯一厂商边界） |
 | `storage/` | 文件存储 / 图片下载 / EPUB |
 | `notify/` | 通知后端 |
