@@ -69,26 +69,29 @@ async def check_epub(ctx: TaskContext) -> TaskResult:
     ``has_embedded_images`` + ``not has_raw_markers``) only run for rows that
     need them.
 
-    **Why a nightly full-table scan is still not the right long-term shape**
-    (measured 2026-10-24; kept here because the "can this be cheaper?" question
-    comes up every time someone reads this docstring):
+    **The backlogs this fixes are real and were still present on 2026-10-24.**
+    Do not read "the nightly runs report 无变化" as "there is nothing to do".
+    Those rows were written by the **old cursor version** and say 「本轮 121
+    行」 — a bounded slice, not the table.  The first full pass on the fixed
+    code (read-only, run against production) reports:
 
-    Only **1 594 of 246 035 rows (0.65 %)** can still change state — those with
-    ``has_epub`` in (0, 1).  The other 244 441 are terminal: 233 337
-    ``NO_IMAGES`` and 11 104 ``DONE``.  A terminal row can only move if a file
-    appears or vanishes beside it, i.e. if *another* code path wrote or deleted
-    it — and every such path already updates the row in the same transaction
-    (the producer in ``image_downloader``, the re-download in ``ingest``,
-    ``delete_novel_files`` on delete).  The scan is therefore a **cross-check on
-    invariants that are already maintained transactionally**, and the last
-    eight production runs all report 「无变化」.
+    * ``DONE`` → **5 rows** that are finished but were never marked;
+    * ``PENDING`` → **3 rows** whose EPUB still carries raw image markers,
+      i.e. books whose readers see literal ``[pixivimage:…]`` text;
+    * ``NO_IMAGES`` → **985 rows** settled by the give-up rule;
+    * ``MISSING_SOURCE`` → **684 rows** whose text file is gone.
 
-    So the honest long-term shape is: keep the full pass as an explicit
-    *audit* (what this task is), not as a nightly repair everyone relies on for
-    convergence, and let the events that can actually change a row drive
-    re-examination.  That needs the producer to record "I touched this row"
-    (a data-model change), not a tuning knob — out of scope for this commit,
-    which only bounds the memory.
+    So this is a one-off reconciliation with outstanding work, not a no-op
+    audit.  What it is *not* — and why it should not stay a nightly repair
+    forever — is a monthly-sized backlog: after convergence, the only rows that
+    can still change are the ones another code path touched, and every such path
+    already writes the status in its own transaction.
+
+    The long-term shape is therefore: run the full pass to convergence (and keep
+    it as an *audit* afterwards), and let the events that can actually change a
+    row drive re-examination.  That needs the producer to record "I touched this
+    row" (a data-model change), not a tuning knob — out of scope here, which only
+    bounds the memory and the read shape.
 
     **Full table every run, chunked for the event loop.**  The first full pass
     over production measured ~10.5 ms/row — 42 minutes for 238 k rows — because
