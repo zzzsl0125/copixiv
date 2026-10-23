@@ -86,8 +86,20 @@ def _txt_has_placeholder(txt_path: Path) -> bool:
     return False
 
 
-def classify(path_str: str | None) -> str:
-    """Bucket a novel path: 'ok' | 'corrupt' | 'placeholder' | 'noepub' | 'gone'."""
+def classify(path_str: str | None, novel_id: int | None = None) -> str:
+    """Bucket a novel path: 'ok' | 'corrupt' | 'placeholder' | 'noepub' | 'gone'.
+
+    ``gone`` is the largest bucket by far and it is **not** a defect: 232 k
+    ``NO_IMAGES`` rows have a body with no image placeholder, so no EPUB will
+    ever be built for them.  Only a body that still asks for an image is a
+    candidate, and only while the image is still obtainable — once
+    ``_no_images_ever_and_stale`` says the source images are gone for good, a
+    missing EPUB is the *expected* end state, not something to repair.
+
+    *novel_id* is needed for that give-up check; without it a placeholder body
+    with no EPUB is reported as ``noepub`` (the per-id ``--ids`` path passes
+    it, and so does :func:`classify_files`).
+    """
     if not path_str:
         return "gone"
     txt = Path(path_str)
@@ -95,7 +107,11 @@ def classify(path_str: str | None) -> str:
         return "gone"
     epub = txt.with_suffix('.epub')
     if not epub.exists():
-        return "noepub" if _txt_has_placeholder(txt) else "gone"
+        if not _txt_has_placeholder(txt):
+            return "gone"
+        if novel_id is not None and _is_abandoned(txt, novel_id):
+            return "gone"          # images gone for good → NO_IMAGES is correct
+        return "noepub"
     if not zipfile.is_zipfile(epub):
         return "corrupt"
     with zipfile.ZipFile(epub) as zf:
@@ -108,63 +124,49 @@ def classify(path_str: str | None) -> str:
     return "ok"
 
 
-def classify_files(download_dir: Path, wanted: dict[str, list[int]]) -> int:
-    """Walk *download_dir* once and fill *wanted* with ids per defect class.
+def _is_abandoned(txt_path: Path, novel_id: int) -> bool:
+    """True when ``check_epub`` would settle this row at ``NO_IMAGES``.
 
-    Two passes over a cheap index instead of one pass over the expensive
-    thing: first the ``.epub`` files (a zip directory listing, no images
-    read — 9 k files in ~10 s), then only the ``.txt`` files that could
-    still matter.  Reading every text file (242 k) to bucket them took
-    10+ minutes and made the dry run useless; the ids are collected first,
-    so the text scan is scoped to novels whose EPUB is missing or empty.
+    The repair script and the reconciler must agree on that verdict, or a dry
+    run keeps counting rows as "needs repair" that the nightly task has
+    already — correctly — given up on (923 of them in production: the author
+    deleted the illustrations, so there is nothing left to embed).
     """
-    def _id_of(path: Path) -> int | None:
-        stem = path.stem
-        if "_" not in stem:
-            return None
-        try:
-            return int(stem.rsplit("_", 1)[1])
-        except ValueError:
-            return None
+    from copixiv.tasks.maintenance.epub import _no_images_ever_and_stale
 
-    epubs = list(download_dir.glob("*/*.epub"))
-    print(f"扫描 {len(epubs)} 个 epub ...", flush=True)
-    need_text_scan: dict[int, Path] = {}   # id -> txt, for the second pass
-    for epub in epubs:
-        novel_id = _id_of(epub)
-        if novel_id is None:
-            continue
-        txt = epub.with_suffix(".txt")
-        try:
-            with zipfile.ZipFile(epub) as zf:
-                names = zf.namelist()
-        except (OSError, zipfile.BadZipFile):
-            wanted["corrupt"].append(novel_id)
-            continue
-        if _xhtml_has_placeholder(epub):
-            wanted["placeholder"].append(novel_id)
-        elif not any("/images/" in n for n in names) and txt.exists():
-            # No embedded image: only a body that still has a placeholder
-            # makes this a defect (an image-less novel is fine).
-            need_text_scan[novel_id] = txt
+    return _no_images_ever_and_stale(txt_path, novel_id)
 
-    n_txt = 0
-    for novel_id, txt in need_text_scan.items():
-        n_txt += 1
-        if _txt_has_placeholder(txt):
-            wanted["placeholder"].append(novel_id)
 
-    if "noepub" in wanted:
-        for txt in download_dir.glob("*/*.txt"):
-            novel_id = _id_of(txt)
-            if novel_id is None or txt.with_suffix('.epub').exists():
-                continue
-            n_txt += 1
-            if _txt_has_placeholder(txt):
-                wanted["noepub"].append(novel_id)
+def classify_files(rows, wanted: dict[str, list[int]]) -> int:
+    """Fill *wanted* by classifying every row, using ``novel.path`` as truth.
 
-    print(f"（其中需要读正文的 {n_txt} 个）")
-    return len(epubs)
+    **The database is the authority, not the directory listing.**  This used
+    to glob ``download/*/*.epub`` and derive the novel id from the *filename*
+    (``..._<id>.epub``).  ``novel.path`` is written once and afterwards only
+    filled when NULL, while ``build_path`` recomputes from the current title,
+    so a work that the author renamed ends up with its EPUB beside a filename
+    the database does not point at.  The glob-based scan then saw "no EPUB" for
+    a row that has one, and reported it as ``noepub``/``placeholder`` — a
+    dry run counted **2,108** defects where the real number (classified by
+    ``path``) is a few dozen, almost all of them already-terminal rows whose
+    images the author deleted.
+
+    Classifying per row is also cheaper in practice: the expensive step
+    (reading the body to look for a marker) only runs for rows whose EPUB is
+    missing or image-less, and the 232 k ``NO_IMAGES`` rows whose body carries
+    no marker short-circuit on a single read they would need anyway.
+
+    Returns the number of rows examined.
+    """
+    def _ids_of(kind: str) -> list[int]:
+        return wanted[kind]
+
+    print(f"按 novel.path 分类 {len(rows)} 行 ...", flush=True)
+    for novel_id, path_str in rows:
+        kind = classify(path_str, novel_id)
+        if kind in wanted:
+            _ids_of(kind).append(novel_id)
+    return len(rows)
 
 
 def select_targets(rows, args) -> dict[str, list[int]]:
@@ -186,7 +188,7 @@ def select_targets(rows, args) -> dict[str, list[int]]:
     if args.ids:
         by_id = {nid: p for nid, p in rows}
         for novel_id in args.ids:
-            kind = classify(by_id.get(novel_id))
+            kind = classify(by_id.get(novel_id), novel_id)
             if kind in picked:
                 picked[kind].append(novel_id)
         missing = [i for i in args.ids if i not in by_id]
@@ -199,8 +201,8 @@ def select_targets(rows, args) -> dict[str, list[int]]:
         return picked
 
     download_dir = Path(args.download_dir)
-    seen = classify_files(download_dir, picked)
-    print(f"扫描 {seen} 个 epub（目录 {download_dir}）")
+    seen = classify_files(rows, picked)
+    print(f"分类 {seen} 行（download 根 {download_dir}；以 novel.path 为准）")
 
     if args.limit:
         for kind in picked:
