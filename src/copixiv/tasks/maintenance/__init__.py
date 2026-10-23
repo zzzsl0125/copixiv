@@ -22,6 +22,10 @@ knowledge — into four task modules plus a shared cursor module:
 * :mod:`._cursor` — ``_read_cursor`` / ``_write_cursor`` / ``_CURSOR_KEY``,
   shared by epub and series.  The *keys* stay per-task: sharing a key
   between tasks would let one task's progress overwrite another's.
+* :mod:`.files` — ``prune_orphan_files``: walks the *disk* and asks "is there
+  a row for this file?", the opposite direction from ``check_epub`` (which
+  walks rows).  Kept separate so a bug there cannot touch the EPUB state
+  machine.
 
 Importing this package executes every ``@register(...)`` decorator, because
 the re-exports below import all four task modules — that is what keeps
@@ -47,6 +51,7 @@ from .epub import (
     _txt_has_images,
     check_epub,
 )
+from .files import PruneOrphanFilesArgs, prune_orphan_files
 from .search import check_fts, rebuild_fts, sync_empty_name
 from .series import (
     _ORPHAN_CURSOR_KEY,
@@ -66,6 +71,8 @@ __all__ = [
     "sync_empty_name",
     "fix_series_index",
     "FixSeriesIndexArgs",
+    "prune_orphan_files",
+    "PruneOrphanFilesArgs",
     "_scan_placeholder",
     "_sweep",
     "_read_cursor",
