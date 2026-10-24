@@ -58,7 +58,7 @@ function mountMasonry<T>(
           list.map((item, index) => h('div', {
             key: index,
             'data-index': index,
-            style: state.cardStyle(index),
+            style: state.cardStyle(),
             ref: (el: unknown) => {
               if (!el) return
               const elm = el as HTMLElement
@@ -237,7 +237,7 @@ describe('useMasonryLayout', () => {
   /**
    * `cardStyle()` 的响应式样式**只能有 `position`**。
    *
-   * 模板 `:style="cardStyle(index)"` 是**响应式绑定**，每次组件重渲染都会重新
+   * 模板 `:style="cardStyle()"` 是**响应式绑定**，每次组件重渲染都会重新
    * 应用，把 `runLayout` / `setItemRef` 命令式写下的结果覆盖掉。数据、位置、
    * 容器高度全对，列表却一片空白 / 全叠在左上角，都是这一个原因。这个错误先后
    * 伪装成三种界面故障：
@@ -257,11 +257,10 @@ describe('useMasonryLayout', () => {
    */
   it('cardStyle() 只返回 position（几何属性会覆盖命令式写入）', () => {
     const { state } = mountMasonry([1, 2], { heights: [100, 100] })
-    for (const i of [0, 1]) {
-      const style = state.cardStyle(i)
-      expect(Object.keys(style)).toEqual(['position'])
-      expect(style.position).toBe('absolute')
-    }
+    // 无参：几何是命令式写的，样式函数没有任何理由知道「这是第几张卡」。
+    const style = state.cardStyle()
+    expect(Object.keys(style)).toEqual(['position'])
+    expect(style.position).toBe('absolute')
   })
 
   it('新挂载的卡片在拿到位置前被命令式隐藏（不会闪现在左上角）', async () => {

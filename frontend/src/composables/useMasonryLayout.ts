@@ -38,9 +38,10 @@ export interface UseMasonryLayoutOptions {
  * `columns` 的二维形状就变 → `:key` 全变 → Vue 把**每一张卡片卸载再重挂**。
  * 实测（真实 Firefox，600 张卡）跨 1000px 断点拖窗口，主线程单帧卡 **1289 ms**。
  *
- * 现在卡片始终是一个**平坦列表**（数据顺序，`:key` 稳定），位置通过
- * `cardStyle(index)` 写 `left`/`top`。列数变化只重算位置 → **零组件重挂**，
- * 同一动作实测 **31 ms**（41 倍）。
+ * 现在卡片始终是一个**平坦列表**（数据顺序，`:key` 稳定）。模板的 `:style`
+ * 只负责「绝对定位」这一件事，`left`/`top` 由 `runLayout` **命令式**写进 DOM
+ * （绝不经过响应式绑定，原因见 `cardStyle` 的注释）。列数变化只重算位置 →
+ * **零组件重挂**，同一动作实测 **31 ms**（41 倍）。
  *
  * 三条纪律：
  * 1. **先渲染、后测量**：卡片先以 `visibility:hidden` 进入 DOM，`nextTick` 之后
@@ -374,8 +375,12 @@ export function useMasonryLayout<T>(
    *
    * 这条纪律由返回类型 `CardStyle` 在**编译期**守着：往下面的字面量里加任何
    * 几何字段都会被 excess property 检查拒掉，不用再靠跑浏览器去发现。
+   *
+   * **不接受下标参数**：几何既然是命令式写的，`cardStyle` 就没有任何理由知道
+   * 「这是第几张卡」。留着 `(_index: number)` 只会在未来诱使人「按下标微调一下
+   * 样式」——那正是这条契约要禁止的事。模板现在写 `cardStyle()`。
    */
-  const cardStyle = (_index: number): CardStyle => ({
+  const cardStyle = (): CardStyle => ({
     position: 'absolute',
   })
 

@@ -324,7 +324,7 @@ const handleNovelUpdated = (updated: Novel) => {
         <NovelCard
           v-for="(novel, index) in displayNovels"
           :key="novel.id"
-          :style="cardStyle(index)"
+          :style="cardStyle()"
           :data-anchor-id="String(novel.id)"
           :novel="novel"
           :is-active="activeCardId === novel.id"
