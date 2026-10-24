@@ -22,7 +22,6 @@ vi.mock('../../src/composables', async (importOriginal) => {
       error: { value: null },
       noMoreData: { value: false },
       hasExcluded: { value: false },
-      capReached: { value: false },
       filters: {
         keyword: '',
         order_by: 'random',

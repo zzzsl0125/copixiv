@@ -91,7 +91,6 @@ function mountNovels() {
         loading: false,
         error: null,
         noMoreData: true,
-        capReached: false,
         hasExcluded: false,
       },
       batchState: {

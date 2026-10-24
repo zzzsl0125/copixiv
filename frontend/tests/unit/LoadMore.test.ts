@@ -59,7 +59,6 @@ function mountLoadMore(overrides: Partial<{
   loading: boolean
   noMoreData: boolean
   hasData: boolean
-  autoLoad: boolean
 }> = {}) {
   return mount(LoadMore, {
     props: { loading: false, noMoreData: false, hasData: true, ...overrides },
@@ -152,39 +151,40 @@ describe('LoadMore (IntersectionObserver)', () => {
   })
 
   /**
-   * 到上限时**必须停止自动加载**。
+   * 上限状态下**不需要**任何节流：自动加载是自限的。
    *
-   * 这是真实踩到的无限循环：列表有了内存上限后，"裁掉头部 30 条 + 追加 30 条"
-   * **总高度几乎不变**，用户滚到底时哨兵永远停在视口内 → 每 300ms 再触发一次
-   * → 无限翻页。实测（真实 Firefox，25 秒）发出 **77 个带 cursor 的请求**，
-   * 页面一直在转圈。
+   * 历史：这里曾经有一个 `autoLoad` prop（「到上限就停自动加载」），依据是一次
+   * 误诊 —— 用 `window.scrollTo()` 循环模拟连续滚动，测到 25 秒 77 个请求，
+   * 据此认定「哨兵会无限自触发」。真机复测推翻了它：
    *
-   * 修法是 `autoLoad=false`：自动触发和"排重观察定时器"都停，只留手动点击。
+   *   到 300 张上限后，把锚点补偿（`window.scrollBy`）临时改成 no-op，好让哨兵
+   *   **真的**停在视口里（`secTop=564`，`atBottom=0`），然后完全静止 25 秒：
+   *   只发了 **3 个**请求就自己停了（200ms 分辨率采样，之后 24 秒恒为 0）。
+   *
+   * 原因是每次加载都把哨兵推出视口（实测 `secTop` 564 → 714 → 949），而
+   * IntersectionObserver 只在「不可见 → 可见」的**变化**时回调，不会因为
+   * 「一直可见」而持续回调。所以这条用例钉住的是「加载完只重观察一次」。
    */
-  it('autoLoad=false 时自动哨兵不再 emit（上限状态），但按钮仍可手点', async () => {
-    const wrapper = mountLoadMore({ autoLoad: false })
-    await nextTick()
-
-    MockIntersectionObserver.instances[0].trigger()
-    expect(wrapper.emitted('load-more')).toBeUndefined()
-
-    // 加载结束也不排「重观察」定时器（那个定时器正是无限续期的来源）
-    await wrapper.setProps({ autoLoad: false, loading: true })
-    await wrapper.setProps({ loading: false })
-    vi.advanceTimersByTime(1000)
-    expect(wrapper.emitted('load-more')).toBeUndefined()
-
-    // 手动点击仍然有效：用户想继续往下翻，只是要自己点
-    await wrapper.get('button').trigger('click')
-    expect(wrapper.emitted('load-more')).toHaveLength(1)
-  })
-
-  it('autoLoad 未传时默认开启（Vue 会把缺失的 Boolean prop 转成 false，必须 withDefaults）', async () => {
-    // 这条钉住一个真实踩坑：`autoLoad?: boolean` 不给默认值时，Vue 的 boolean
-    // casting 会把它变成 **false** —— 整个无限滚动会静默失效（只加载第一页就停）。
+  it('加载结束后只重观察一次：哨兵回到可见才再发下一次（不会凭"一直在视口里"重复发）', async () => {
     const wrapper = mountLoadMore()
     await nextTick()
+
+    // 哨兵可见 → 发一次
     MockIntersectionObserver.instances[0].trigger()
     expect(wrapper.emitted('load-more')).toHaveLength(1)
+
+    // 加载结束 → pause + 300ms 后 resume（重建 observer）
+    await wrapper.setProps({ loading: true })
+    await wrapper.setProps({ loading: false })
+    vi.advanceTimersByTime(300)
+    await nextTick()
+    expect(MockIntersectionObserver.instances).toHaveLength(2)
+
+    // 关键：**新** observer 还没触发，就绝不能再发（这是"无限循环"的反面）
+    expect(wrapper.emitted('load-more')).toHaveLength(1)
+
+    // 只有哨兵重新进入可见区，才发下一次
+    MockIntersectionObserver.instances[1].trigger()
+    expect(wrapper.emitted('load-more')).toHaveLength(2)
   })
 })

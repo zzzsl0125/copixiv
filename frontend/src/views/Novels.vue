@@ -25,8 +25,6 @@ export type NovelsState = {
   loading: boolean
   error: string | null
   noMoreData: boolean
-  /** 列表已到内存上限：此时停止自动翻页（见 LoadMore 的 `autoLoad`）。 */
-  capReached: boolean
   hasExcluded: boolean
 }
 
@@ -93,7 +91,6 @@ const novels = computed(() => props.novelsState.novels)
 const loading = computed(() => props.novelsState.loading)
 const error = computed(() => props.novelsState.error)
 const noMoreData = computed(() => props.novelsState.noMoreData)
-const capReached = computed(() => props.novelsState.capReached)
 const hasExcluded = computed(() => props.novelsState.hasExcluded)
 
 const batchMode = computed(() => props.batchState?.mode ?? false)
@@ -383,7 +380,6 @@ const handleNovelUpdated = (updated: Novel) => {
         :loading="loading"
         :no-more-data="noMoreData"
         :has-data="novels.length > 0"
-        :auto-load="!capReached"
         @load-more="handleLoadMore"
       />
       <LoadMore

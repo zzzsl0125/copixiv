@@ -14,7 +14,6 @@ const {
   loading,
   error,
   noMoreData,
-  capReached,
   filters,
   hasExcluded,
   loadNovels,
@@ -73,7 +72,6 @@ const novelsState = computed<NovelsState>(() => ({
   loading: loading.value,
   error: error.value,
   noMoreData: noMoreData.value,
-  capReached: capReached.value,
   hasExcluded: hasExcluded.value,
 }))
 

@@ -12,21 +12,6 @@ export interface CursorPaginationResult<T> {
   handleLoadMore: () => Promise<void>
   /** 上一次 load-more 因为到达上限而丢掉的头部条数（0 = 什么都没丢）。 */
   lastTrimmed: Ref<number>
-  /**
-   * 是否已经到达（并仍在）列表上限。
-   *
-   * 一旦为 true，**自动加载必须停下**，只保留用户手动点「加载更多」。
-   *
-   * 为什么必须停：`LoadMore.vue` 的哨兵会在 loading 结束后 pause/resume 重观察
-   * （为了让仍停在视口里的哨兵再触发一次，把短页面填满）。列表无限增长时，
-   * 页面会越来越长、哨兵最终离开视口，所以它自然停下。
-   *
-   * 但有了上限之后，"裁掉头部 30 条 + 追加 30 条"**总高度几乎不变**，用户滚到
-   * 底时哨兵**永远在视口内** → 每 300ms 触发一次 → 无限"裁头 + 追加"循环。
-   * 实测（真实 Firefox）：25 秒内发出 **77 个带 cursor 的请求**，页面一直在
-   * 转圈。这是上限与自动哨兵的直接冲突。
-   */
-  capReached: Ref<boolean>
 }
 
 export interface CursorPaginationOptions {
@@ -55,7 +40,6 @@ export function useCursorPagination<T>(
   const cursor = ref<unknown>(null)
   const noMoreData = ref(false)
   const lastTrimmed = ref(0)
-  const capReached = ref(false)
 
   const maxItems = options.maxItems
 
@@ -69,7 +53,6 @@ export function useCursorPagination<T>(
     if (!maxItems || items.value.length <= maxItems) return 0
     const drop = items.value.length - maxItems
     items.value.splice(0, drop)
-    capReached.value = true
     return drop
   }
 
@@ -133,7 +116,6 @@ export function useCursorPagination<T>(
     cursor.value = null
     noMoreData.value = false
     lastTrimmed.value = 0
-    capReached.value = false
     items.value = []
   }
 
@@ -141,6 +123,6 @@ export function useCursorPagination<T>(
 
   return {
     items, loading, error, cursor, noMoreData,
-    loadData, reset, handleLoadMore, lastTrimmed, capReached,
+    loadData, reset, handleLoadMore, lastTrimmed,
   }
 }
