@@ -82,6 +82,7 @@ const NOVELS_STATE = {
   error: null,
   noMoreData: false,
   hasExcluded: false,
+  capReached: false,
 }
 
 const BATCH_OFF = {

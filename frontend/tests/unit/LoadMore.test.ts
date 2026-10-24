@@ -59,6 +59,7 @@ function mountLoadMore(overrides: Partial<{
   loading: boolean
   noMoreData: boolean
   hasData: boolean
+  autoLoad: boolean
 }> = {}) {
   return mount(LoadMore, {
     props: { loading: false, noMoreData: false, hasData: true, ...overrides },
@@ -148,5 +149,42 @@ describe('LoadMore (IntersectionObserver)', () => {
     expect(() => mountLoadMore()).not.toThrow()
     await nextTick()
     expect(MockIntersectionObserver.instances).toHaveLength(0)
+  })
+
+  /**
+   * 到上限时**必须停止自动加载**。
+   *
+   * 这是真实踩到的无限循环：列表有了内存上限后，"裁掉头部 30 条 + 追加 30 条"
+   * **总高度几乎不变**，用户滚到底时哨兵永远停在视口内 → 每 300ms 再触发一次
+   * → 无限翻页。实测（真实 Firefox，25 秒）发出 **77 个带 cursor 的请求**，
+   * 页面一直在转圈。
+   *
+   * 修法是 `autoLoad=false`：自动触发和"排重观察定时器"都停，只留手动点击。
+   */
+  it('autoLoad=false 时自动哨兵不再 emit（上限状态），但按钮仍可手点', async () => {
+    const wrapper = mountLoadMore({ autoLoad: false })
+    await nextTick()
+
+    MockIntersectionObserver.instances[0].trigger()
+    expect(wrapper.emitted('load-more')).toBeUndefined()
+
+    // 加载结束也不排「重观察」定时器（那个定时器正是无限续期的来源）
+    await wrapper.setProps({ autoLoad: false, loading: true })
+    await wrapper.setProps({ loading: false })
+    vi.advanceTimersByTime(1000)
+    expect(wrapper.emitted('load-more')).toBeUndefined()
+
+    // 手动点击仍然有效：用户想继续往下翻，只是要自己点
+    await wrapper.get('button').trigger('click')
+    expect(wrapper.emitted('load-more')).toHaveLength(1)
+  })
+
+  it('autoLoad 未传时默认开启（Vue 会把缺失的 Boolean prop 转成 false，必须 withDefaults）', async () => {
+    // 这条钉住一个真实踩坑：`autoLoad?: boolean` 不给默认值时，Vue 的 boolean
+    // casting 会把它变成 **false** —— 整个无限滚动会静默失效（只加载第一页就停）。
+    const wrapper = mountLoadMore()
+    await nextTick()
+    MockIntersectionObserver.instances[0].trigger()
+    expect(wrapper.emitted('load-more')).toHaveLength(1)
   })
 })

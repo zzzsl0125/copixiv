@@ -42,6 +42,7 @@ vi.mock('../../src/composables', () => ({
     error: { value: null },
     noMoreData: { value: false },
     hasExcluded: { value: false },
+    capReached: { value: false },
     filters: createFilters(),
     loadNovels: vi.fn(),
     handleSearch: mocks.handleSearch,

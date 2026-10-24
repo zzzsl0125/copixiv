@@ -143,6 +143,7 @@ function mountNovels(novel: Novel = LOCAL_NOVEL) {
         loading: false,
         error: null,
         noMoreData: true,
+        capReached: false,
         hasExcluded: false,
       },
       onNovelUpdated: appLikePatch,

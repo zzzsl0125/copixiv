@@ -44,6 +44,7 @@ vi.mock('../../src/composables', () => ({
     error: { value: null },
     noMoreData: { value: false },
     hasExcluded: { value: false },
+    capReached: { value: false },
     // 「这个 keyword 已经取过数了」的记号（双请求修复用）。真实实现里由
     // handleSearch 写入；这里是 mock，所以初始为 null —— 与「侧边栏点击只赋
     // keyword、不自己取数」那条路径的真实状态一致。
