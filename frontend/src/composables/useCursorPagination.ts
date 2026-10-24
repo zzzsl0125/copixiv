@@ -10,8 +10,6 @@ export interface CursorPaginationResult<T> {
   loadData: (isLoadMore?: boolean) => Promise<void>
   reset: () => void
   handleLoadMore: () => Promise<void>
-  /** 上一次 load-more 因为到达上限而丢掉的头部条数（0 = 什么都没丢）。 */
-  lastTrimmed: Ref<number>
 }
 
 export interface CursorPaginationOptions {
@@ -39,7 +37,6 @@ export function useCursorPagination<T>(
   const error = ref<string | null>(null)
   const cursor = ref<unknown>(null)
   const noMoreData = ref(false)
-  const lastTrimmed = ref(0)
 
   const maxItems = options.maxItems
 
@@ -50,10 +47,9 @@ export function useCursorPagination<T>(
    * 不影响它。所以 load-more 仍然从正确的下一页开始，不需要重取。
    */
   const trim = () => {
-    if (!maxItems || items.value.length <= maxItems) return 0
+    if (!maxItems || items.value.length <= maxItems) return
     const drop = items.value.length - maxItems
     items.value.splice(0, drop)
-    return drop
   }
 
   // A reload requested while a fetch is in flight invalidates that fetch and
@@ -75,7 +71,6 @@ export function useCursorPagination<T>(
     const seq = ++requestSeq
     loading.value = true
     error.value = null
-    lastTrimmed.value = 0
 
     try {
       const currentCursor = isLoadMore ? cursor.value : undefined
@@ -86,7 +81,7 @@ export function useCursorPagination<T>(
 
       if (isLoadMore) {
         items.value.push(...newItems)
-        lastTrimmed.value = trim()
+        trim()
       } else {
         items.value = newItems
       }
@@ -115,7 +110,6 @@ export function useCursorPagination<T>(
   const reset = () => {
     cursor.value = null
     noMoreData.value = false
-    lastTrimmed.value = 0
     items.value = []
   }
 
@@ -123,6 +117,6 @@ export function useCursorPagination<T>(
 
   return {
     items, loading, error, cursor, noMoreData,
-    loadData, reset, handleLoadMore, lastTrimmed,
+    loadData, reset, handleLoadMore,
   }
 }

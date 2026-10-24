@@ -119,7 +119,7 @@ describe('useCursorPagination', () => {
         .fn()
         .mockResolvedValueOnce({ items: [1, 2, 3], cursor: { id: 3 } })
         .mockResolvedValueOnce({ items: [4, 5, 6], cursor: { id: 6 } })
-      const { items, handleLoadMore, loadData, lastTrimmed } = useCursorPagination<number>(
+      const { items, handleLoadMore, loadData } = useCursorPagination<number>(
         fetcher, { maxItems: 4 },
       )
 
@@ -127,25 +127,31 @@ describe('useCursorPagination', () => {
       expect(items.value).toEqual([1, 2, 3])
 
       await handleLoadMore()
-      // 3 + 3 = 6，上限 4 → 丢掉最老的 2 条
+      // 3 + 3 = 6，上限 4 → 丢掉最老的 2 条：只剩 4 条，且丢的是**头部**
+      expect(items.value).toHaveLength(4)
       expect(items.value).toEqual([3, 4, 5, 6])
-      expect(lastTrimmed.value).toBe(2)
+      // 头部：最老的 1、2 被裁掉
+      expect(items.value[0]).toBe(3)
+      // 尾部：最新的 6 原样保留，裁剪绝不从尾部删
+      expect(items.value[items.value.length - 1]).toBe(6)
     })
 
-    it('没越界时一条都不裁，lastTrimmed 为 0', async () => {
+    it('没越界时一条都不裁，头部原样保留', async () => {
       const fetcher = vi
         .fn()
         .mockResolvedValueOnce({ items: [1, 2], cursor: { id: 2 } })
         .mockResolvedValueOnce({ items: [3], cursor: { id: 3 } })
-      const { items, lastTrimmed, loadData, handleLoadMore } = useCursorPagination<number>(
+      const { items, loadData, handleLoadMore } = useCursorPagination<number>(
         fetcher, { maxItems: 10 },
       )
 
       await loadData()
       await handleLoadMore()
 
+      // 总共 3 条 < 上限 10，一条都不该丢：头部仍是第 1 条
+      expect(items.value).toHaveLength(3)
       expect(items.value).toEqual([1, 2, 3])
-      expect(lastTrimmed.value).toBe(0)
+      expect(items.value[0]).toBe(1)
     })
 
     it('裁剪不动 cursor：下一页仍从正确的游标取', async () => {
@@ -183,21 +189,31 @@ describe('useCursorPagination', () => {
       expect(items.value).toEqual([1, 2, 3, 4])
     })
 
-    it('reset() 把 lastTrimmed 归零', async () => {
+    it('reset() 清掉裁剪后的状态，重新从第一页开始', async () => {
       const fetcher = vi
         .fn()
         .mockResolvedValueOnce({ items: [1, 2, 3], cursor: { id: 3 } })
         .mockResolvedValueOnce({ items: [4, 5, 6], cursor: { id: 6 } })
-      const { loadData, handleLoadMore, reset, lastTrimmed } = useCursorPagination<number>(
+        .mockResolvedValueOnce({ items: [7, 8], cursor: null })
+      const { items, cursor, loadData, handleLoadMore, reset } = useCursorPagination<number>(
         fetcher, { maxItems: 4 },
       )
 
       await loadData()
       await handleLoadMore()
-      expect(lastTrimmed.value).toBe(2)
+      // 裁剪后：头部被裁、列表有界、cursor 仍指向尾部之后
+      expect(items.value).toEqual([3, 4, 5, 6])
+      expect(cursor.value).toEqual({ id: 6 })
 
       reset()
-      expect(lastTrimmed.value).toBe(0)
+      // 裁剪留下的痕迹（有界列表与游标）一起清掉，回到未加载状态
+      expect(items.value).toEqual([])
+      expect(cursor.value).toBeNull()
+
+      // 重置后继续 load-more 从第一页重新取，不被上一次的裁剪状态影响
+      await handleLoadMore()
+      expect(fetcher).toHaveBeenLastCalledWith(null)
+      expect(items.value).toEqual([7, 8])
     })
   })
 })

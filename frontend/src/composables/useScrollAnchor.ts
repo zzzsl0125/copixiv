@@ -1,5 +1,3 @@
-import { nextTick } from 'vue'
-
 /**
  * 列表「裁掉头部」后的滚动位置补偿。
  *
@@ -63,23 +61,4 @@ export function restoreScrollAnchor(root: ParentNode | null, anchor: AnchorSnaps
   if (Math.abs(delta) < 1) return false
   window.scrollBy(0, delta)
   return true
-}
-
-/**
- * 包一次「会让列表变短的操作」：抓锚点 → 等 DOM 与重排稳定 → 还原。
- *
- * `afterLayout` 由调用方提供（通常是瀑布流的 `relayout()`），它在 DOM 更新后
- * 重算位置；还原必须排在它**之后**，否则量到的是旧坐标。
- */
-export async function withScrollAnchor(
-  root: () => ParentNode | null,
-  mutate: () => void,
-  afterLayout: () => void,
-): Promise<boolean> {
-  const anchor = captureScrollAnchor(root())
-  mutate()
-  await nextTick()
-  afterLayout()
-  await nextTick()
-  return restoreScrollAnchor(root(), anchor)
 }

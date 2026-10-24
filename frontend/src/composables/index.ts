@@ -6,7 +6,7 @@ export { useSystem } from './useSystem'
 export { useTokens } from './useTokens'
 export { useMasonryLayout } from './useMasonryLayout'
 export {
-  captureScrollAnchor, restoreScrollAnchor, withScrollAnchor,
+  captureScrollAnchor, restoreScrollAnchor,
   type AnchorSnapshot,
 } from './useScrollAnchor'
 export { useToast } from './useToast'
