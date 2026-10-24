@@ -235,28 +235,33 @@ describe('useMasonryLayout', () => {
   })
 
   /**
-   * `visibility` **绝不能**出现在响应式 `:style` 里。
+   * `cardStyle()` 的响应式样式**只能有 `position`**。
    *
-   * 这是真实故障的根因：模板 `:style="cardStyle(index)"` 会在每次组件重渲染时
-   * 重新应用，把命令式写下的 `visible` 覆盖回 `hidden` —— 数据、位置、容器高度
-   * 全都是对的，但列表一片空白；滚动触发一次重排又恢复正常。用户的描述
-   * 「侧边栏高亮正常但没内容，滚到翻页位置上方就显现」正是这个。
+   * 模板 `:style="cardStyle(index)"` 是**响应式绑定**，每次组件重渲染都会重新
+   * 应用，把 `runLayout` / `setItemRef` 命令式写下的结果覆盖掉。数据、位置、
+   * 容器高度全对，列表却一片空白 / 全叠在左上角，都是这一个原因。这个错误先后
+   * 伪装成三种界面故障：
+   *  - 留着 `visibility: 'hidden'` → 覆盖回隐藏 → **列表整片空白**；用户的描述
+   *    是「出现无内容的现象时，可以往下滚轮，滚到约翻页的位置时，上一页原本
+   *    空白的部分会显现」，以及「打开 F12 期间无此问题」（调试器拖慢了重渲染
+   *    时序）—— 滚动触发一次重排（load-more / relayout）就"恢复正常"。
+   *  - 移走 visibility 却留着 `left/top: '0px'` → 位置归零 → **卡片全叠在左上角**
+   *  - 移走 left/top 却留着 `width` → 宽度不再由响应式负责后，首帧测高时卡片
+   *    没有宽度（绝对定位 + 无宽度 = 收缩到内容宽），量到的高度偏小 30–50%
+   *    → **同列卡片互相压住**（时序契约见上面那条测高用例）
    *
-   * 所以契约是：`visibility` 只由 runLayout / setItemRef 命令式管理。
-   */
-  /**
-   * 模板的 `:style="cardStyle(index)"` 是**响应式绑定**，每次重渲染都会重新应用。
-   *
-   * 所以它里面**只能有 `position`**：任何 `visibility` / `left` / `top` / `width`
-   * 都会覆盖命令式写下的结果。这一个错误先后伪装成两种故障：
-   * - 留着 `visibility: 'hidden'` → 覆盖回隐藏 → **列表整片空白**
-   * - 移走 visibility 却留着 `left/top: '0px'` → 位置归零 → **卡片全叠在左上角**
+   * 所以契约是：`cardStyle()` 的输出**只有 `position` 一个键**，任何几何属性
+   * （`visibility` / `left` / `top` / `width`）都不许出现——它们全部由 `runLayout`
+   * 命令式管理。这条同时覆盖了旧用例「不许含 visibility」的断言，且更强：
+   * `Object.keys` 全量比对，不是单看一个键。
    */
   it('cardStyle() 只返回 position（几何属性会覆盖命令式写入）', () => {
     const { state } = mountMasonry([1, 2], { heights: [100, 100] })
-    const style = state.cardStyle(0)
-    expect(Object.keys(style)).toEqual(['position'])
-    expect(style.position).toBe('absolute')
+    for (const i of [0, 1]) {
+      const style = state.cardStyle(i)
+      expect(Object.keys(style)).toEqual(['position'])
+      expect(style.position).toBe('absolute')
+    }
   })
 
   it('新挂载的卡片在拿到位置前被命令式隐藏（不会闪现在左上角）', async () => {
@@ -409,28 +414,6 @@ describe('useMasonryLayout', () => {
 
     // 必须真的排出来了：不能永远停在 0 高度 / 全隐藏
     expect(state.totalHeight.value).toBeGreaterThan(0)
-  })
-
-  /**
-   * **重渲染不得把卡片重新隐藏**（真实故障的根因）。
-   *
-   * 之前 `cardStyle()` 返回 `visibility: 'hidden'`，而模板是
-   * `:style="cardStyle(index)"` —— 响应式绑定会在**每次组件重渲染**时重新应用，
-   * 把我命令式写下的 `visible` 覆盖回 `hidden`。症状：数据、位置、容器高度都
-   * 正确，侧边栏高亮也正常，但列表一片空白；往下滚触发一次重排（load-more /
-   * relayout）后又恢复正常。用户原话：
-   * 「出现无内容的现象时，可以往下滚轮，滚到约翻页的位置时，上一页原本空白的
-   *   部分会显现」，以及「打开 F12 期间无此问题」（调试器拖慢了重渲染时序）。
-   *
-   * 这条用例拿不到 Vue 的重渲染时机（jsdom 没有真实渲染流水线），所以它钉的是
-   * **契约本身**：`cardStyle()` 的输出里不许出现 `visibility`。只要这条成立，
-   * Vue 就没有机会覆盖命令式写下的值。
-   */
-  it('cardStyle() 的返回值不许含 visibility（否则重渲染会覆盖命令式写入）', () => {
-    const { state } = mountMasonry([1, 2, 3], { heights: [100, 100, 100] })
-    for (const i of [0, 1, 2]) {
-      expect(Object.keys(state.cardStyle(i))).not.toContain('visibility')
-    }
   })
 
   it('setItemRef 挂载时具名隐藏新卡片（命令式，不受重渲染影响）', async () => {

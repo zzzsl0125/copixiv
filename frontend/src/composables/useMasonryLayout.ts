@@ -14,6 +14,16 @@ export interface MasonryPosition {
   top: number
 }
 
+/**
+ * 卡片唯一的响应式样式：**只允许 `position`**。几何属性一律由 `runLayout` 命令式写入。
+ *
+ * 用类型（而不是注释）来守：`cardStyle` 的返回类型标成它之后，TypeScript 的
+ * excess property 检查会在**编译期**拒掉任何往字面量里塞 `width` / `left` /
+ * `top` / `visibility` 的改动 —— 而不是等它在真实浏览器里变成空白 / 叠卡片 /
+ * 互相压住之后才被发现。
+ */
+export type CardStyle = { position: 'absolute' }
+
 export interface UseMasonryLayoutOptions {
   /** 列间距（px），默认 24。 */
   gap?: number
@@ -345,9 +355,12 @@ export function useMasonryLayout<T>(
    *
    * 所以：几何（left/top/width/visibility）**全部**由 `runLayout` 的命令式
    * 写入循环负责，且时序固定为「先写宽 → 再测高 → 再落位」。模板只管定位方式。
+   *
+   * 这条纪律由返回类型 `CardStyle` 在**编译期**守着：往下面的字面量里加任何
+   * 几何字段都会被 excess property 检查拒掉，不用再靠跑浏览器去发现。
    */
-  const cardStyle = (_index: number) => ({
-    position: 'absolute' as const,
+  const cardStyle = (_index: number): CardStyle => ({
+    position: 'absolute',
   })
 
   return {

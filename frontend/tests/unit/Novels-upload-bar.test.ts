@@ -51,7 +51,9 @@ vi.mock('../../src/composables', async (importOriginal) => ({
     columnWidth: ref(400),
     totalHeight: ref(1000),
     positions: ref([]),
-    cardStyle: () => ({ position: 'absolute', width: '400px', left: '0px', top: '0px', visibility: 'visible' }),
+    // 契约：`cardStyle()` **只返回 `position`**。几何属性（width/left/top/visibility）
+    // 一律由 `runLayout` 命令式写入；写进响应式 `:style` 会被重渲染覆盖回旧值。
+    cardStyle: () => ({ position: 'absolute' } as const),
     setItemRef: vi.fn(),
     relayout: vi.fn(),
   }),

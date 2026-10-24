@@ -52,16 +52,18 @@ vi.mock('../../src/composables', async (importOriginal) => ({
     handleViewLoadMore: vi.fn(),
     patchNovel: h.patchNovel,
   }),
-  // 布局在测试里不参与断言：位置全给 (0,0)、卡片始终可见（真实实现按列高
-  // 分布并用 visibility:hidden 隐藏尚未定位的卡片）。这里要的是「卡片都渲染
-  // 出来、操作条看得见」，所以坐标无所谓。
+  // 布局在测试里不参与断言：位置全给 (0,0)、卡片始终可见。这里要的是「卡片都
+  // 渲染出来、操作条看得见」，所以坐标无所谓。
+  // 但 `cardStyle()` 的返回值仍要守契约：**只返回 `position`**。几何属性
+  // （width/left/top/visibility）一律由 `runLayout` 命令式写入，写进响应式
+  // `:style` 会被重渲染覆盖回旧值。
   useMasonryLayout: () => ({
     containerRef: ref(null),
     columnCount: ref(3),
     columnWidth: ref(400),
     totalHeight: ref(1000),
     positions: ref([]),
-    cardStyle: () => ({ position: 'absolute', width: '400px', left: '0px', top: '0px', visibility: 'visible' }),
+    cardStyle: () => ({ position: 'absolute' } as const),
     setItemRef: vi.fn(),
     relayout: vi.fn(),
   }),
