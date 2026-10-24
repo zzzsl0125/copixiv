@@ -407,6 +407,80 @@ class TestFanOutAuthorFetch:
         assert titles == ["ok"]
         assert failed == [7, 8]
 
+    async def test_a_novel_without_a_user_id_does_not_kill_the_batch(
+        self, session_factory, monkeypatch,
+    ):
+        """``user.id`` may be absent/null in the vendor payload.
+
+        Before 2026-10-24 the None went straight into ``AuthorFetchArgs``
+        (an int-typed model), so **one** malformed entry in a ranking page
+        raised ``ValidationError`` and killed the whole task — while the
+        sibling branches it had already started kept writing novels.  The
+        probe that found this also showed the day was left half-applied with
+        no result row.
+        """
+        seen: list[int] = []
+
+        async def _fake_author_fetch(args, ctx):     # noqa: ARG001
+            seen.append(args.author_id)
+            return TaskResult(summary="ok", new_novel_titles=["书"])
+
+        monkeypatch.setattr(novels_mod, "author_fetch", _fake_author_fetch)
+        good = novel_info(1, author_id=11)
+        broken = novel_info(2)
+        broken.user = SimpleNamespace(id=None, name=None)
+
+        titles, failed = await _fan_out_author_fetch(
+            [good, broken], force=False, ctx=make_ctx(session_factory, ScriptedClient()),
+        )
+
+        assert seen == [11], "无作者 id 的那条应被丢掉，其余照常抓"
+        assert titles == ["书"]
+        assert failed == []
+
+    async def test_a_page_of_only_unresolvable_authors_is_a_clean_no_op(
+        self, session_factory, monkeypatch,
+    ):
+        async def _never(args, ctx):                 # noqa: ARG001
+            raise AssertionError("没有可抓的作者时不该扇出")
+
+        monkeypatch.setattr(novels_mod, "author_fetch", _never)
+        broken = novel_info(2)
+        broken.user = SimpleNamespace(id=None, name=None)
+        client = ScriptedClient()
+
+        titles, failed = await _fan_out_author_fetch(
+            [broken], force=False, ctx=make_ctx(session_factory, client),
+        )
+
+        assert (titles, failed) == ([], [])
+        assert client.rules == []
+
+    async def test_one_failing_author_does_not_lose_the_rest_of_the_day(
+        self, session_factory, monkeypatch,
+    ):
+        """The fan-out must contain a per-author failure, like its siblings do.
+
+        ``gather`` without ``return_exceptions=True`` propagates the first
+        exception *and leaves the other branches running* (asyncio does not
+        cancel them) — so the task was recorded failed while its siblings
+        were still writing novels.
+        """
+        async def _fake_author_fetch(args, ctx):     # noqa: ARG001
+            if args.author_id == 22:
+                raise RuntimeError("作者 22 网络挂了")
+            return TaskResult(summary="ok", new_novel_titles=["好书"])
+
+        monkeypatch.setattr(novels_mod, "author_fetch", _fake_author_fetch)
+
+        titles, failed = await _fan_out_author_fetch(
+            [novel_info(1, author_id=11), novel_info(2, author_id=22)],
+            force=False, ctx=make_ctx(session_factory, ScriptedClient()),
+        )
+
+        assert titles == ["好书"], "失败的作者不该抹掉成功的作者"
+        assert failed == []
+
     async def test_a_non_taskresult_child_is_ignored_not_trusted(
         self, session_factory, monkeypatch,
     ):

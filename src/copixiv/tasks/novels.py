@@ -108,10 +108,19 @@ async def _fan_out_author_fetch(
     if not cn:
         return [], []
 
+    # ``user.id`` is optional in the vendor payload (and ``safe_get`` returns
+    # None when the field is absent or null).  That None must never reach
+    # ``AuthorFetchArgs``: it is an int-typed model, so a single malformed
+    # entry in a 20-author ranking page raised ``ValidationError`` and took
+    # the **whole** task down — after several sibling branches had already
+    # written novels, leaving the day half-applied with no result row.  A
+    # novel whose author id cannot be resolved simply cannot name an author
+    # to fetch; it is dropped here, next to the other "nothing to fan out"
+    # early exits.
     authors = {
         safe_get(n, "user.id")
         for n in cn if safe_get(n, "user")
-    }
+    } - {None}
     if not authors:
         return [], []
 
@@ -125,15 +134,31 @@ async def _fan_out_author_fetch(
                     ctx.with_uow(ctx.child_uow()),
                 )
 
-        results = await asyncio.gather(*[_one(a) for a in authors])
+        # ``return_exceptions=True`` for the same reason ``failed_retry`` and
+        # ``author_special_follow`` use it: one author's network failure must
+        # cost that author, not the whole ranking day.  Without it the gather
+        # propagates the first exception while the other branches keep
+        # running (asyncio does not cancel them), so the task is recorded
+        # failed *while* its siblings are still writing novels.
+        results = await asyncio.gather(
+            *[_one(a) for a in authors], return_exceptions=True,
+        )
 
     # Each author_fetch returns a TaskResult; flatten titles and failures.
     titles: list[str] = []
     failed_ids: list[int] = []
-    for r in results:
+    for author_id, r in zip(authors, results):
         if isinstance(r, TaskResult):
             titles.extend(r.new_novel_titles)
             failed_ids.extend(r.failed_ids)
+        else:
+            # An exception (or a contract break).  There is no novel id to
+            # blame — the unit of work was the *author* — so the trace goes
+            # to the log and the day still reports what did succeed.  This is
+            # what ``author_special_follow`` already does.
+            logger.error(
+                f"扇出 author_fetch 失败: 作者 #{author_id}: {r!r}"
+            )
     return titles, failed_ids
 
 
