@@ -107,6 +107,10 @@ async def fetch_novel_and_assets(
         # 没重写正文文件（内容相同，或 webview 根本没给正文）→ 不重新判定
         # EPUB 状态：None = 库侧"别覆盖"。
         data = replace(data, has_epub=None)
+    else:
+        # 这一轮**确实**替换了正文文件。适配层要靠它区分"已更新"与"已存在，跳过"，
+        # 而 ``new_count`` 答不了这个问题：一次改写正文的重抓并不插入新行。
+        data = replace(data, rewrote_body=True)
 
     # Download assets in background.  Still called when the body is unchanged
     # — that path also heals a missing/corrupt EPUB — but without force, so an

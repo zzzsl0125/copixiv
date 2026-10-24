@@ -147,12 +147,25 @@ def _batch_summary(prefix: str, out) -> str:
 
     ``f"{prefix}: 新增 {n} 本小说"`` is the wording the UI and the Telegram
     notifier have always shown, and it reads as "all good" even when half the
-    batch failed.  The counts are now appended whenever something failed;
+    batch failed.  The failure count is appended whenever something failed;
     ``failed_ids`` carries the machine-readable list for anyone who needs the
     ids rather than a count.
+
+    「新增」 must mean **new rows**, not "novels fetched".  ``out.titles`` lists
+    every novel whose body this run fetched, and with ``force=True`` that
+    includes novels already in the library — measured: re-downloading one
+    existing novel with ``force=True`` gives ``new_count == 0`` while
+    ``titles == ["书"]``, so counting titles claimed 「新增 1 本」 for zero new
+    rows.  A batch therefore reports inserted rows, and the re-download count
+    separately when there were no new rows at all (otherwise "新增 0 本" reads
+    like a broken run rather than "nothing new, 40 refreshed").
     """
+    new = out.new_count
+    refreshed = max(len(out.titles) - new, 0)
+    summary = f"{prefix}: 新增 {new} 本小说"
+    if refreshed:
+        summary += f"，更新 {refreshed} 本"
     failed = len(out.failed_ids)
-    summary = f"{prefix}: 新增 {len(out.titles)} 本小说"
     if failed:
         summary += f"，失败 {failed} 本"
     return summary
@@ -160,7 +173,17 @@ def _batch_summary(prefix: str, out) -> str:
 
 @register("novel_fetch", description="抓取指定 ID 的小说", args=NovelFetchArgs)
 async def novel_fetch(args: NovelFetchArgs, ctx: TaskContext) -> TaskResult:
-    """Download and persist a single novel by ID."""
+    """Download and persist a single novel by ID.
+
+    The summary states what this run actually did, which is a three-way
+    question, not a two-way one.  ``new_count`` answers "was a row inserted";
+    it is **not** the same as "did anything happen": a re-download of a
+    known novel inserts nothing, yet it does replace the body whenever the
+    author edited the text.  Folding the two together (``titles and
+    new_count``) reported 「已存在，跳过」 for a re-download that had just
+    rewritten the text and rebuilt the EPUB — the operator reads that line to
+    decide whether the re-download worked.
+    """
     out = await ingest(
         ids=[args.id],
         force=args.redownload,
@@ -169,18 +192,37 @@ async def novel_fetch(args: NovelFetchArgs, ctx: TaskContext) -> TaskResult:
         file_storage=ctx.file_storage,
         image_downloader=ctx.image_downloader,
     )
+    title = out.titles[0] if out.titles else None
     if out.failed:
         summary = f"小说 #{args.id} 获取失败"
-    elif out.titles and out.new_count:
-        summary = f"下载完成: {out.titles[0]}"
+    elif out.new_count and title:
+        summary = f"下载完成: {title}"
+    elif out.rewritten_ids and title:
+        summary = f"已更新: {title}"
+    elif title is None:
+        # Nothing was fetched at all, and the pipeline did not report it as a
+        # failure either (a degraded assembly, an unforeseen early exit).
+        # Saying 「已存在，跳过」 here would turn "I never asked pixiv" into
+        # "already have it" — the operator's one signal that the download
+        # never happened would be a lie.  Report it as the failure it is.
+        summary = f"小说 #{args.id} 获取失败（未取到内容）"
     else:
+        # Nothing written: the body on disk was already identical to the
+        # source.  Note ``out.titles`` is non-empty here — it lists what was
+        # **fetched**, and this run fetched the novel.  That is precisely the
+        # confusion this branch structure removes.
         summary = "已存在，跳过"
     return TaskResult(
         summary=summary,
-        new_novel_titles=out.titles,
+        # ``new_novel_titles`` is documented as "newly discovered and
+        # persisted".  A re-download persists nothing new, so only the
+        # insert path may claim a title — otherwise the notifier's
+        # 「新增 N 本」 and this summary disagree with the ledger.
+        new_novel_titles=(out.titles if out.new_count else []),
         # Machine-readable outcome: callers must not infer success/failure from
-        # the summary text (see TaskResult.failed_ids).
-        failed_ids=([args.id] if out.failed else []),
+        # the summary text (see TaskResult.failed_ids).  A run that fetched
+        # nothing is a failure even when the pipeline stayed silent.
+        failed_ids=([args.id] if out.failed or title is None else []),
     )
 
 

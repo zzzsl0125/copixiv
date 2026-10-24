@@ -54,6 +54,14 @@ class NovelDraft:
     has_epub: EpubStatus | None = None
     tags: list[str] = field(default_factory=list)
     content: str | None = None
+    #: Did *this* fetch replace the body file?  ``False`` for a metadata-only
+    #: draft, and for a re-download whose text was byte-identical to the local
+    #: copy (the content-change check in ``download_novel``).  Once the
+    #: transient ``content`` is dropped this is the only record that a write
+    #: happened, and task adapters report it to the operator ("已更新" vs
+    #: "已存在，跳过") instead of guessing from ``new_count`` — that guess
+    #: called a genuine re-download a skip (see ``IngestOutcome``).
+    rewrote_body: bool = False
     images: dict | None = None
     illusts: dict | None = None
     cover_url: str | None = None

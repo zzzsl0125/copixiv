@@ -280,19 +280,35 @@ async def _upsert_batch(
 class IngestOutcome:
     """Result of one :func:`ingest` call.
 
-    ``titles`` lists the titles of novels downloaded this call;
+    ``titles`` lists the titles of novels **fetched and persisted** this call;
     ``new_author_ids`` is the set of authors seen among downloaded novels;
     ``failed`` carries every recorded failure ``(novel_id, reason)``
     (webview-empty / network / asset processing);
     ``new_count`` is the number of newly-inserted novel rows (0 when the
-    novel already existed — lets the single-novel adapter distinguish
-    "downloaded" from "already known / skipped").
+    novel already existed);
+    ``rewritten_ids`` are the novels whose **body file this call replaced**.
+
+    ``new_count`` and ``rewritten_ids`` answer two different questions and
+    neither implies the other, which is why both exist:
+
+    * a *new* novel is always written (``new_count`` 1 → also rewritten);
+    * a *re-download* of a known novel writes nothing when the body is
+      byte-identical (that is the content-change check in
+      ``download_novel``), but **does** write when the author edited the
+      text — ``new_count`` stays 0 in both cases.
+
+    The single-novel adapter used to fold them together (``titles and
+    new_count``), so a re-download that genuinely replaced the text still
+    reported 「已存在，跳过」.  Reporting the rewrite separately is what lets
+    the summary state what actually happened without re-deriving it from
+    ``titles``.
     """
 
     titles: list[str] = field(default_factory=list)
     new_author_ids: set[int] = field(default_factory=set)
     failed: list[tuple[int, str]] = field(default_factory=list)
     new_count: int = 0
+    rewritten_ids: set[int] = field(default_factory=set)
 
     @property
     def failed_ids(self) -> list[int]:
@@ -385,17 +401,24 @@ async def _download_round(
 ) -> tuple[list[NovelDraft], list[tuple[int, str]]]:
     """Download phase —— 并发网络 / 文件 I/O，**不碰数据库**。
 
-    没有 client 时只记一条 warning：装配阶段被裁掉的客户端不该让整轮变成异常，
-    而"这些 id 需要下载"这件事本身仍然是真的。
+    没有 client 时，要下载的那些 id 记成**失败**而不是静默跳过。装配阶段被裁掉
+    的客户端不该让整轮抛异常（"这些 id 需要下载"仍然是真的），但也绝不能读成
+    成功：那条路径会让 ``novel_fetch`` 落到「已存在，跳过」的汇总，于是任务行
+    写着 success，而书一本都没下、行也不存在（2026-10-24 探针复现）。失败进
+    ``failed_novel`` 台账，与真正的下载失败同一条流水线——operator 能在
+    「下载失败」页看见它们，重试也有入口。
     """
     if not download_ids:
         return [], []
     if client is None:
         logger.warning(
             f"ingest: {len(download_ids)} novels need download "
-            f"but no client provided — skipping download",
+            f"but no client provided — recording them as failed",
         )
-        return [], []
+        return [], [
+            (nid, "缺少 pixiv 客户端（装配阶段未提供 client）")
+            for nid in download_ids
+        ]
     return await _download_novels(
         download_ids, client, file_storage, image_downloader,
         redownload=force, stored_paths=stored_paths,
@@ -529,6 +552,9 @@ async def ingest(
         new_author_ids=names.author_ids,
         failed=failed_records + assets.failures,
         new_count=new_count,
+        # 正文文件这一轮被替换过的 id。只有下载阶段知道这件事（内容比较发生在
+        # 那里），而 ``new_count`` 答不出它：改写正文的重抓不插入新行。
+        rewritten_ids={d.id for d in downloaded if d.rewrote_body},
     )
 
 
