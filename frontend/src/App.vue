@@ -20,6 +20,7 @@ const {
   handleSearch,
   handleLoadMore,
   handleCardSearch,
+  lastFetchedKeyword,
 } = useNovels()
 
 const { systemConfig, fetchConfig } = useSystem()
@@ -260,9 +261,35 @@ watch(
 watch(() => filters.keyword, (keyword) => {
   if (!configLoadedAndApplied.value) return
   const section = resolveSection(keyword)
+
+  // 这个 keyword 是**刚才某次 `handleSearch` 自己设的**吗？是的话那次调用已经
+  // 取过数了，这里只补上「section 的阈值 / 排序 / 高亮」，绝不能再取一次。
+  //
+  // 为什么必须区分：`handleSearch` 是「赋值 keyword → 取数」的同步动作，而
+  // watcher 在 flush 时才跑。若 watcher 再走一遍 `applySection`（内部又是一次
+  // `handleSearch`），同一个 keyword 就会发两次请求、第一次的结果被丢弃。
+  // 实测真实浏览器：搜索框里敲 `is_special_follow:true;` 发 **2** 次完全相同的
+  // 请求（23ms + 21ms 串行）。
+  //
+  // 侧边栏点击走 `handleSectionSearch`（只赋 keyword、不自己取数）→ 这里
+  // pending 为 null → 照旧 `applySection` 取数，仍然恰好 1 次。
+  // popstate 也是「先改 keyword 再 `handleSearch`」，同样被 pending 覆盖。
+  if (lastFetchedKeyword.value === keyword) {
+    lastFetchedKeyword.value = null
+    if (section && section !== 'novels') {
+      const def = SECTIONS[section]
+      activeSection.value = section
+      filters.min_like = def.min_like
+      filters.min_text = def.min_text
+      applySectionOrdering(section)
+    } else {
+      activeSection.value = section
+    }
+    return
+  }
+
   if (section && section !== 'novels') {
-    // 直接给 filters 赋值（而非 handleSectionSearch）：keyword 已是当前值，
-    // 不会与 watch 递归；命中 section 才重取，自由搜索交给调用方已有的 handleSearch。
+    // 外部改写（URL 直达 / 后退前进 / 搜索历史回填）——没有现成的取数，走完整入口。
     applySection(section)
   } else {
     activeSection.value = section

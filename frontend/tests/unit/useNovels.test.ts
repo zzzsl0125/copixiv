@@ -266,4 +266,115 @@ describe('useNovels', () => {
     // load-more 响应即使返回 false 也不覆盖首屏 true
     expect(state.hasExcluded.value).toBe(true)
   })
+
+  /**
+   * 双请求回归。
+   *
+   * 实测（真实 Firefox + BiDi 数 `/api/novels/` 请求）：在搜索框里键入
+   * `is_special_follow:true;` 会发 **2 次 URL 完全相同**的请求，两次串行
+   * （23ms + 21ms），第二次的结果覆盖第一次——白屏时间翻倍。
+   *
+   * 根因在 App 层：`handleSearch` 同步赋值 keyword 并取数，而 keyword watcher
+   * 在 flush 时才跑，看到同一个 keyword 又走了一遍 `applySection` → `handleSearch`。
+   *
+   * `lastFetchedKeyword` 就是「这个 keyword 已经取过数了」的记号，watcher 据此
+   * 只补 section 的阈值/排序，不再取数。这条用例钉住那个记号本身。
+   */
+  describe('lastFetchedKeyword：区分「取过数的 keyword」与「外部改写」', () => {
+    it('handleSearch 之后被记为该 keyword 已取数', async () => {
+      const state = mountUseNovels('/')
+      await flushPromises()
+
+      expect(state.lastFetchedKeyword.value).toBeNull()
+      await state.handleSearch('is_special_follow:true;', { setOrdering: true })
+      await flushPromises()
+
+      expect(state.lastFetchedKeyword.value).toBe('is_special_follow:true;')
+    })
+
+    it('只赋 filters.keyword、不调 handleSearch 时记号不变（侧边栏那条路径）', async () => {
+      const state = mountUseNovels('/')
+      await flushPromises()
+
+      // 侧边栏点击 = 只赋 keyword，靠 watcher 取数。此时记号不该被设置，
+      // 否则 watcher 会误以为「已经取过」而跳过取数 → 点了书架什么都不加载。
+      state.filters.keyword = 'is_special_follow:true;'
+      await flushPromises()
+
+      expect(state.lastFetchedKeyword.value).toBeNull()
+    })
+
+    it('每次 handleSearch 都刷新记号（连续搜两个词）', async () => {
+      const state = mountUseNovels('/')
+      await flushPromises()
+
+      await state.handleSearch('R-18')
+      await flushPromises()
+      expect(state.lastFetchedKeyword.value).toBe('R-18')
+
+      await state.handleSearch('猫')
+      await flushPromises()
+      expect(state.lastFetchedKeyword.value).toBe('猫')
+    })
+  })
+
+  /**
+   * 同一串 keyword 走哪条入口，都必须得到**同一个列表**。
+   *
+   * 实测发现的真实缺陷（真实 Firefox + BiDi）：点侧边栏「我的上传」发的是
+   * `order_by=id, order_direction=DESC`；但把 `source:local;` 敲进搜索框，
+   * 发的是 `order_by=like, order_direction=DESC` —— 因为
+   * `applySearchOrdering` 是一串手写的 `type === '...'` 分支，`source` 漏了。
+   *
+   * 后果不是"慢"，是**同一个书架两条入口给出不同顺序的列表**，而且阈值也不同。
+   * 修法是让排序/阈值直接读 `SECTIONS` 表（与侧边栏同源），而不是在
+   * `useNovels` 里再猜一遍。
+   */
+  describe('书架 keyword 的排序与阈值：搜索框入口必须与侧边栏同源', () => {
+    const cases: Array<[string, string, string]> = [
+      ['source:local;', 'id', 'DESC'],
+      ['is_special_follow:true;', 'id', 'DESC'],
+      ['is_favourite:true;', 'id', 'DESC'],
+    ]
+
+    for (const [keyword, orderBy, direction] of cases) {
+      it(`「${keyword}」→ order_by=${orderBy} ${direction}、阈值归零`, async () => {
+        const state = mountUseNovels('/')
+        await flushPromises()
+
+        await state.handleSearch(keyword, { setOrdering: true })
+        await flushPromises()
+
+        expect(state.filters.order_by).toBe(orderBy)
+        expect(state.filters.order_direction).toBe(direction)
+        // 书架是「我的完整清单」，门槛必须 0/0（LIBRARY_DESIGN §5，
+        // 历史回归 32a13bb：照抄 500/3000 藏掉 1395 篇）
+        expect(state.filters.min_like).toBe(0)
+        expect(state.filters.min_text).toBe(0)
+      })
+    }
+
+    it('自由搜索（非书架 keyword）仍然落到 like DESC + 阈值归零', async () => {
+      const state = mountUseNovels('/')
+      await flushPromises()
+
+      await state.handleSearch('猫', { setOrdering: true })
+      await flushPromises()
+
+      expect(state.filters.order_by).toBe('like')
+      expect(state.filters.order_direction).toBe('DESC')
+      expect(state.filters.min_like).toBe(0)
+    })
+
+    it('作者下钻仍按 id DESC（这条本来就有，不许被表改动碰坏）', async () => {
+      const state = mountUseNovels('/')
+      await flushPromises()
+
+      await state.handleSearch('author_id:12345;', { setOrdering: true })
+      await flushPromises()
+
+      expect(state.filters.order_by).toBe('id')
+      expect(state.filters.order_direction).toBe('DESC')
+    })
+  })
 })

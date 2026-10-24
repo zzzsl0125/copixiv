@@ -1,7 +1,7 @@
 import { reactive, ref, onMounted, onUnmounted } from 'vue'
 import { novelApi } from '../api'
 import type { Novel, NovelFilters } from '../types'
-import { DEFAULT_PAGE_SIZE, DEFAULT_MAX_ITEMS } from '../config'
+import { DEFAULT_PAGE_SIZE, DEFAULT_MAX_ITEMS, SECTIONS, resolveSection } from '../config'
 import { useCursorPagination } from './useCursorPagination'
 import { useSystem } from './useSystem'
 
@@ -26,6 +26,17 @@ export function useNovels() {
   /** 当前搜索范围内是否存在被厌恶标签排除的小说（首屏响应附带）——
    * 控制 ExclusionBar（查看被隐藏的小说）的显示；load-more 不覆盖。 */
   const hasExcluded = ref(false)
+
+  /**
+   * 最近一次**真正发起**取数时用的 keyword。
+   *
+   * 用来回答「这个 keyword 是不是已经取过数了」。`handleSearch` 是
+   * 「同步赋 keyword → 立即取数」，而 App 的 keyword watcher 要到 flush 才跑；
+   * 没有这个记号，watcher 会把同一份 keyword 再取一遍（实测发两次完全相同的
+   * 请求）。侧边栏点击只赋 keyword、不自己取数，所以那个记号对不上，
+   * watcher 该取还是会取——这正好是两条路径要的区分。
+   */
+  const lastFetchedKeyword = ref<string | null>(null)
 
   const fetchNovels = async (cursor?: unknown) => {
     const res = await novelApi.getNovels({
@@ -66,6 +77,23 @@ export function useNovels() {
   const applySearchOrdering = (keyword: string) => {
     if (!keyword.trim()) return
 
+    // 命中某个书架 section 的 keyword（`is_favourite:true;` / `is_special_follow:true;`
+    // / `source:local;`）→ 排序**必须**取该 section 的默认排序，和点侧边栏完全等价。
+    //
+    // 早先这里是一串手写的 `type === '...'` 分支，`source:local;` 漏掉了，于是
+    // 在搜索框里敲它得到 `order_by=like`（书架是 `id DESC`）——实测真实浏览器：
+    // 侧边栏 → 我的上传发 `order_by=id`，搜索框敲同一串发 `order_by=like`。
+    // 两条入口对同一个书架给出不同列表，这是"表在别处被绕过"的老问题。
+    const section = resolveSection(keyword)
+    if (section) {
+      const def = SECTIONS[section]
+      filters.order_by = def.order_by
+      filters.order_direction = def.order_direction
+      filters.min_like = def.min_like
+      filters.min_text = def.min_text
+      return
+    }
+
     const conditions = keyword.split(/[;；]/).filter(cond => cond.trim())
     let isSpecialCase = false
     if (conditions.length === 1 && conditions[0]) {
@@ -84,14 +112,6 @@ export function useNovels() {
         } else if (type === 'series_id' || type === 'series') {
           filters.order_by = 'id'
           filters.order_direction = 'ASC'
-          isSpecialCase = true
-        } else if (type === 'is_special_follow') {
-          filters.order_by = 'id'
-          filters.order_direction = 'DESC'
-          isSpecialCase = true
-        } else if (type === 'is_favourite') {
-          filters.order_by = 'id'
-          filters.order_direction = 'DESC'
           isSpecialCase = true
         }
       } else if (/^\d{7,}$/.test(condition.trim())) {
@@ -165,6 +185,8 @@ export function useNovels() {
       }
     }
 
+    // 记账：这次 keyword 已经取过数了（watcher 看到同一个值就不许再取）。
+    lastFetchedKeyword.value = filters.keyword
     loadNovels()
   }
 
@@ -210,6 +232,7 @@ export function useNovels() {
     noMoreData,
     filters,
     hasExcluded,
+    lastFetchedKeyword,
     loadNovels,
     handleSearch,
     handleLoadMore,
