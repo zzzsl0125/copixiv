@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, ref, toRef, nextTick, onMounted } from 'vue'
+import { computed, ref, toRef, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
 import NovelCard, { type NovelStateChange } from '../components/features/NovelCard.vue'
 import NovelHeader from '../components/features/NovelHeader.vue'
 import LoadMore from '../components/features/LoadMore.vue'
 import EmptyState from '../components/ui/EmptyState.vue'
+import CardSkeleton from '../components/ui/CardSkeleton.vue'
 import BatchBar from '../components/features/BatchBar.vue'
 import UploadBar from '../components/features/UploadBar.vue'
 import BatchDeleteModal from '../components/features/BatchDeleteModal.vue'
@@ -11,7 +12,7 @@ import BatchTagModal from '../components/features/BatchTagModal.vue'
 import BatchEditModal from '../components/features/BatchEditModal.vue'
 import BatchDownloadModal from '../components/features/BatchDownloadModal.vue'
 import EditNovelModal from '../components/features/EditNovelModal.vue'
-import { useMasonryLayout, useCollectionViews, useToast } from '../composables'
+import { useMasonryLayout, useCollectionViews, useToast, captureScrollAnchor, restoreScrollAnchor } from '../composables'
 import { tagPreferenceApi, getApiErrorMessage } from '../api'
 import ExclusionBar from '../components/features/ExclusionBar.vue'
 import type { Novel, NovelFilters, TagPreference, BatchScope, BatchOperationResult } from '../types'
@@ -82,7 +83,6 @@ const emit = defineEmits<{
 }>()
 
 const toast = useToast()
-const columnRefs = ref<HTMLElement[]>([])
 const activeCardId = ref<number | string | null>(null)
 const tagPreferences = ref<TagPreference[]>([])
 
@@ -141,10 +141,56 @@ const {
   afterLayout: () => relayout(),
 })
 
-const { columns, relayout } = useMasonryLayout<Novel>(
-  toRef(displayNovels),
-  columnRefs,
-)
+const {
+  containerRef: masonryContainerRef,
+  columnCount,
+  totalHeight,
+  cardStyle,
+  setItemRef,
+  relayout,
+} = useMasonryLayout<Novel>(toRef(displayNovels))
+
+/**
+ * load-more 越过上限时，`useCursorPagination` 会从**头部**裁掉最老的卡片，
+ * 把用户正在看的那张顶走（30 张约 2500px）。卡片是绝对定位的，原生 scroll
+ * anchoring 对它不生效，所以自己锚定「视口顶部第一张卡」。
+ *
+ * 为什么监听「首条 id 变化」而不是「长度变化」：裁剪与追加在同一个同步函数里
+ * 完成（push 30 → splice 30），**长度前后都是 300，watcher 根本不会触发**。
+ * 首条 id 变了才是「头部真的被裁了」的唯一可靠信号。
+ */
+const stopAnchorWatch = ref<null | (() => void)>(null)
+const handleLoadMore = () => {
+  const root = masonryContainerRef.value
+  if (!root) {
+    emit('novels-command', { type: 'load-more' })
+    return
+  }
+  const anchor = captureScrollAnchor(root)
+  // 已经有什么在等：上一次的锚点作废（用户可能又滚了，新锚点更准）。
+  stopAnchorWatch.value?.()
+  stopAnchorWatch.value = null
+
+  emit('novels-command', { type: 'load-more' })
+
+  const stop = watch(
+    () => displayNovels.value[0]?.id,
+    async () => {
+      stop()
+      stopAnchorWatch.value = null
+      // 两跳 nextTick：一跳等 items → DOM 打补丁，一跳等瀑布流把位置算完写下去。
+      await nextTick()
+      await nextTick()
+      restoreScrollAnchor(root, anchor)
+    },
+  )
+  stopAnchorWatch.value = stop
+}
+
+onBeforeUnmount(() => {
+  stopAnchorWatch.value?.()
+  stopAnchorWatch.value = null
+})
 
 const scopeLabel = computed(() => `已勾选的 ${selectedCount.value} 篇`)
 
@@ -285,23 +331,46 @@ const handleNovelUpdated = (updated: Novel) => {
         </template>
       </div>
 
-      <div v-if="displayNovels.length > 0" class="flex gap-6 items-start">
-        <div v-for="(col, colIndex) in columns" :key="colIndex" :ref="el => { if (el) columnRefs[colIndex] = el as HTMLElement }" class="flex-1 flex flex-col gap-6 w-full min-w-0">
-          <NovelCard
-            v-for="novel in col"
-            :key="novel.id"
-            :novel="novel"
-            :is-active="activeCardId === novel.id"
-            :tag-preferences="tagPreferences"
-            :batch-mode="batchMode"
-            :batch-selected="isBatchSelected(novel.id)"
-            @toggle-active="handleToggleActive"
-            @toggle-batch-select="handleBatchToggleCard"
-            @search="(type, value) => emit('novels-command', { type: 'card-search', payload: { type, value } })"
-            @state-changed="emit('novel-state-changed', $event)"
-            @edit="editingNovel = $event"
-          />
-        </div>
+      <!-- 瀑布流：**一个平坦列表**（key 稳定 = 卡片永不因为换列而重挂）+ 绝对定位。
+           旧实现是「每列一个 v-for」套「每卡一个 v-for」，列数一变二维数组被换掉，
+           Vue 会把每张卡卸载再重挂（实测 600 张拖窗口主线程单帧卡 1289ms）。
+           现在换列只改 style 里的 left/top，DOM 与组件实例都不动（31ms）。 -->
+      <div
+        v-if="displayNovels.length > 0"
+        ref="masonryContainerRef"
+        class="relative w-full"
+        :style="{ height: totalHeight + 'px', visibility: totalHeight ? 'visible' : 'hidden' }"
+        data-testid="masonry-grid"
+      >
+        <NovelCard
+          v-for="(novel, index) in displayNovels"
+          :key="novel.id"
+          :style="cardStyle(index)"
+          :data-anchor-id="String(novel.id)"
+          :novel="novel"
+          :is-active="activeCardId === novel.id"
+          :tag-preferences="tagPreferences"
+          :batch-mode="batchMode"
+          :batch-selected="isBatchSelected(novel.id)"
+          :ref="el => setItemRef(index, el as unknown as HTMLElement | null)"
+          @toggle-active="handleToggleActive"
+          @toggle-batch-select="handleBatchToggleCard"
+          @search="(type, value) => emit('novels-command', { type: 'card-search', payload: { type, value } })"
+          @state-changed="emit('novel-state-changed', $event)"
+          @edit="editingNovel = $event"
+        />
+      </div>
+
+      <!-- 加载中且一份内容都还没有 → 骨架屏（旧实现这里直接白屏一个来回：
+           实测点书架到首卡出现前有 63–70ms 的空白）。
+           张数按当前列数取，保证骨架与真实栅格的列宽/间距一致，出图不跳版。 -->
+      <div
+        v-else-if="loading || viewLoading"
+        class="grid gap-6"
+        :style="{ gridTemplateColumns: `repeat(${columnCount}, minmax(0, 1fr))` }"
+        data-testid="masonry-skeleton"
+      >
+        <CardSkeleton v-for="n in columnCount * 2" :key="n" />
       </div>
 
       <EmptyState v-else-if="!loading && !viewLoading" :loading="loading" />
@@ -311,7 +380,7 @@ const handleNovelUpdated = (updated: Novel) => {
         :loading="loading"
         :no-more-data="noMoreData"
         :has-data="novels.length > 0"
-        @load-more="emit('novels-command', { type: 'load-more' })"
+        @load-more="handleLoadMore"
       />
       <LoadMore
         v-else

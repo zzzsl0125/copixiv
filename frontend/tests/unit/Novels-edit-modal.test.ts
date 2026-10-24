@@ -52,8 +52,21 @@ vi.mock('../../src/composables', async (importOriginal) => ({
     handleViewLoadMore: vi.fn(),
     patchNovel: h.patchNovel,
   }),
-  // 一列装下全部卡片，测试里才看得见操作条（真实实现按列高分布）
-  useMasonryLayout: () => ({ columns: computed(() => [h.novels]), relayout: vi.fn() }),
+  // 布局在测试里不参与断言：位置全给 (0,0)、卡片始终可见（真实实现按列高
+  // 分布并用 visibility:hidden 隐藏尚未定位的卡片）。这里要的是「卡片都渲染
+  // 出来、操作条看得见」，所以坐标无所谓。
+  useMasonryLayout: () => ({
+    containerRef: ref(null),
+    columnCount: ref(3),
+    columnWidth: ref(400),
+    totalHeight: ref(1000),
+    positions: ref([]),
+    cardStyle: () => ({ position: 'absolute', width: '400px', left: '0px', top: '0px', visibility: 'visible' }),
+    setItemRef: vi.fn(),
+    relayout: vi.fn(),
+  }),
+  captureScrollAnchor: () => null,
+  restoreScrollAnchor: () => false,
 }))
 
 vi.mock('../../src/api', () => ({

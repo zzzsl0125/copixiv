@@ -5,6 +5,10 @@ export { usePagedNovelIdView } from './usePagedNovelIdView'
 export { useSystem } from './useSystem'
 export { useTokens } from './useTokens'
 export { useMasonryLayout } from './useMasonryLayout'
+export {
+  captureScrollAnchor, restoreScrollAnchor, withScrollAnchor,
+  type AnchorSnapshot,
+} from './useScrollAnchor'
 export { useToast } from './useToast'
 export { useCollectionViews, type UseCollectionViewsOptions } from './useCollectionViews'
 export { useBatchMode, type BatchMode } from './useBatchMode'

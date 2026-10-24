@@ -45,7 +45,18 @@ vi.mock('../../src/composables', async (importOriginal) => ({
     toggleViewExcluded: vi.fn(),
     handleViewLoadMore: vi.fn(),
   }),
-  useMasonryLayout: () => ({ columns: ref([[]]), relayout: vi.fn() }),
+  useMasonryLayout: () => ({
+    containerRef: ref(null),
+    columnCount: ref(3),
+    columnWidth: ref(400),
+    totalHeight: ref(1000),
+    positions: ref([]),
+    cardStyle: () => ({ position: 'absolute', width: '400px', left: '0px', top: '0px', visibility: 'visible' }),
+    setItemRef: vi.fn(),
+    relayout: vi.fn(),
+  }),
+  captureScrollAnchor: () => null,
+  restoreScrollAnchor: () => false,
 }))
 
 vi.mock('../../src/api', () => ({
