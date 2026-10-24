@@ -95,6 +95,20 @@ export function useMasonryLayout<T>(
   /** 瀑布流总高度（px）：给外层容器一个确定高度，绝对定位的子元素才不会塌。 */
   const totalHeight = ref(0)
 
+  /**
+   * 布局完成次数。**外部唯一可信的「位置已经写到 DOM 上了」信号。**
+   *
+   * 为什么需要它：`layoutItems` 是 fire-and-forget（`void runLayout(...)`），
+   * 而且内部还有串行闸门（一次只跑一个循环，中途触发被合并）。所以调用方
+   * **没有任何办法**知道「我这次改数据，位置什么时候落位」——只能数微任务跳数
+   * 去赌。`useLoadMoreAnchor` 以前就是靠 `await nextTick()` 两次来赌，赌输的
+   * 后果不是报错，而是 `restoreScrollAnchor` 量到 delta≈0 直接返回 false，
+   * 于是裁掉头部后视口**静默地**被顶走约 2900px。
+   *
+   * 现在改成盯这个计数器：> 变更前的值 即为「已经落位」。
+   */
+  const layoutRevision = ref(0)
+
   // 上一次布局的几何指纹：与自己不一致 → 不能「只追加」，必须全量重建。
   let laidOutColumnCount = 0
   let laidOutColumnWidth = 0
@@ -285,6 +299,8 @@ export function useMasonryLayout<T>(
     totalHeight.value = colHeights.length
       ? Math.max(...colHeights.map(h => Math.max(0, h - gap)))
       : 0
+    // 位置已经写进 DOM 了：这是外部唯一该依赖的完成信号（见 layoutRevision 声明）。
+    layoutRevision.value++
   }
 
   // 串行闸门（旧实现同款，保留是对的）：同一时刻只允许一个布局循环，
@@ -369,6 +385,8 @@ export function useMasonryLayout<T>(
     columnCount,
     columnWidth,
     totalHeight,
+    /** 布局完成次数：等它变大，就说明位置已落位。见声明的注释。 */
+    layoutRevision,
     positions,
     cardStyle,
     setItemRef,

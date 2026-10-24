@@ -9,6 +9,10 @@ export {
   captureScrollAnchor, restoreScrollAnchor,
   type AnchorSnapshot,
 } from './useScrollAnchor'
+export {
+  useLoadMoreAnchor,
+  type LoadMoreAnchor, type UseLoadMoreAnchorOptions,
+} from './useLoadMoreAnchor'
 export { useToast } from './useToast'
 export { useCollectionViews, type UseCollectionViewsOptions } from './useCollectionViews'
 export { useBatchMode, type BatchMode } from './useBatchMode'
