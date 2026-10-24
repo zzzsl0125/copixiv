@@ -1,7 +1,7 @@
 import { reactive, ref, onMounted, onUnmounted } from 'vue'
 import { novelApi } from '../api'
 import type { Novel, NovelFilters } from '../types'
-import { DEFAULT_PAGE_SIZE } from '../config'
+import { DEFAULT_PAGE_SIZE, DEFAULT_MAX_ITEMS } from '../config'
 import { useCursorPagination } from './useCursorPagination'
 import { useSystem } from './useSystem'
 
@@ -59,7 +59,7 @@ export function useNovels() {
     loadData: loadNovelsBase,
     reset,
     handleLoadMore,
-  } = useCursorPagination<Novel>(fetchNovels)
+  } = useCursorPagination<Novel>(fetchNovels, { maxItems: DEFAULT_MAX_ITEMS })
 
   const loadNovels = (isLoadMore = false) => loadNovelsBase(isLoadMore)
 

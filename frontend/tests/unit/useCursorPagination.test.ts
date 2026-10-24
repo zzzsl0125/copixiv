@@ -104,4 +104,100 @@ describe('useCursorPagination', () => {
       expect(items.value.map((i) => i.id)).toEqual([2])
     })
   })
+
+  /**
+   * 列表上限（`DEFAULT_MAX_ITEMS`）。
+   *
+   * 为什么要有这组断言：`LoadMore.vue` 是哨兵式自动加载（`rootMargin: 100px`，
+   * 滚到底就自动再取），没有上限时"一直往下滚"能把列表堆到上千条。实测（真实
+   * Firefox）600 张卡 = 21,497 个 DOM 节点、跨列断点重排时主线程单帧卡 1,289ms。
+   * 上限就是给这个数字一个硬边界。
+   */
+  describe('列表上限（maxItems）', () => {
+    it('越过上限时从头部裁掉，长度恒定等于上限', async () => {
+      const fetcher = vi
+        .fn()
+        .mockResolvedValueOnce({ items: [1, 2, 3], cursor: { id: 3 } })
+        .mockResolvedValueOnce({ items: [4, 5, 6], cursor: { id: 6 } })
+      const { items, handleLoadMore, loadData, lastTrimmed } = useCursorPagination<number>(
+        fetcher, { maxItems: 4 },
+      )
+
+      await loadData()
+      expect(items.value).toEqual([1, 2, 3])
+
+      await handleLoadMore()
+      // 3 + 3 = 6，上限 4 → 丢掉最老的 2 条
+      expect(items.value).toEqual([3, 4, 5, 6])
+      expect(lastTrimmed.value).toBe(2)
+    })
+
+    it('没越界时一条都不裁，lastTrimmed 为 0', async () => {
+      const fetcher = vi
+        .fn()
+        .mockResolvedValueOnce({ items: [1, 2], cursor: { id: 2 } })
+        .mockResolvedValueOnce({ items: [3], cursor: { id: 3 } })
+      const { items, lastTrimmed, loadData, handleLoadMore } = useCursorPagination<number>(
+        fetcher, { maxItems: 10 },
+      )
+
+      await loadData()
+      await handleLoadMore()
+
+      expect(items.value).toEqual([1, 2, 3])
+      expect(lastTrimmed.value).toBe(0)
+    })
+
+    it('裁剪不动 cursor：下一页仍从正确的游标取', async () => {
+      const fetcher = vi
+        .fn()
+        .mockResolvedValueOnce({ items: [1, 2], cursor: { id: 2 } })
+        .mockResolvedValueOnce({ items: [3, 4], cursor: { id: 4 } })
+        .mockResolvedValueOnce({ items: [5], cursor: null })
+      const { handleLoadMore, loadData, items } = useCursorPagination<number>(
+        fetcher, { maxItems: 3 },
+      )
+
+      await loadData()
+      await handleLoadMore()
+      // 现在 items = [2, 3, 4]（裁掉 1）
+      expect(items.value).toEqual([2, 3, 4])
+
+      await handleLoadMore()
+      // cursor 必须还是 4（不是被裁后的任何东西）
+      expect(fetcher).toHaveBeenLastCalledWith({ id: 4 })
+      // [2,3,4] + [5] = 4 条，上限 3 → 裁掉最老的 1 条（那只剩 2）
+      expect(items.value).toEqual([3, 4, 5])
+    })
+
+    it('没配 maxItems 时行为与旧实现完全一致（无限累积）', async () => {
+      const fetcher = vi
+        .fn()
+        .mockResolvedValueOnce({ items: [1, 2], cursor: { id: 2 } })
+        .mockResolvedValueOnce({ items: [3, 4], cursor: { id: 4 } })
+      const { items, loadData, handleLoadMore } = useCursorPagination<number>(fetcher)
+
+      await loadData()
+      await handleLoadMore()
+
+      expect(items.value).toEqual([1, 2, 3, 4])
+    })
+
+    it('reset() 把 lastTrimmed 归零', async () => {
+      const fetcher = vi
+        .fn()
+        .mockResolvedValueOnce({ items: [1, 2, 3], cursor: { id: 3 } })
+        .mockResolvedValueOnce({ items: [4, 5, 6], cursor: { id: 6 } })
+      const { loadData, handleLoadMore, reset, lastTrimmed } = useCursorPagination<number>(
+        fetcher, { maxItems: 4 },
+      )
+
+      await loadData()
+      await handleLoadMore()
+      expect(lastTrimmed.value).toBe(2)
+
+      reset()
+      expect(lastTrimmed.value).toBe(0)
+    })
+  })
 })
