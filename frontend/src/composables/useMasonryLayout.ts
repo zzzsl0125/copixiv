@@ -195,7 +195,26 @@ export function useMasonryLayout<T>(
 
     await nextTick()
 
+    // ---- 先把列宽写到卡片上，再测高 ----
+    //
+    // 顺序是**硬性**的：`cardStyle()` 现在只返回 `{ position: 'absolute' }`
+    // （宽度绝不能进响应式绑定，见那里的注释），所以卡片宽度**只由这里**负责。
+    // 若跳过这一步直接 `offsetHeight`，绝对定位且没有宽度的元素会收缩到内容
+    // 宽度（shrink-to-fit）：文字被折成很多行、卡片反而变**窄**，量到的
+    // `offsetHeight` 比满列宽下的真实高度小 30–50%。
+    //
+    // 后果不是「略挤」而是结构性错位：同列下一张按偏小的高度落位，直接压在
+    // 上一张身上。真机实测（30 张 / 3 列 / 静止态）同列相邻间隙是
+    // -28 / -20 / -4 / 0 px（应为恒定 +24），重叠 13–17 对，容器比内容矮 52–79px。
+    const widthPx = cw + 'px'
+    for (let i = start; i < total; i++) {
+      const el = itemEls[i]
+      if (el && el.style.width !== widthPx) el.style.width = widthPx
+    }
+
     // ---- 批量测高：1 次强制布局（第一读），其余命中布局缓存 ----
+    // 上一段刚改过宽度 → 这里的第一读同时把那些改动 flush 下去，仍然只有
+    // **一次**强制布局（下面的 counter.reads 用例守着这个上界）。
     const heights: number[] = []
     for (let i = start; i < total; i++) {
       const el = itemEls[i]
@@ -232,9 +251,9 @@ export function useMasonryLayout<T>(
     //
     // 代价：这一层绕过了 Vue 的声明式绑定，所以必须自己保证
     //   1) 每张卡都被写到（含 start 之前的历史卡片——列宽变了它们也要挪）；
-    //   2) 卡片换列时宽度也跟着写；
+    //   2) 卡片换列时宽度也跟着写（宽度已在测高前写过一遍；这里补写是为了
+    //      覆盖 `start` 之前的历史卡片，它们不参与上面的测高循环）；
     //   3) 没位置的卡片隐藏，避免在 (0,0) 叠成一堆。
-    const widthPx = cw + 'px'
     for (let i = 0; i < total; i++) {
       const el = itemEls[i]
       if (!el) continue
@@ -313,28 +332,22 @@ export function useMasonryLayout<T>(
   const relayout = () => layoutItems(true)
 
   /**
-   * 卡片的**静态**内联样式：只负责「一开始就绝对定位 + 宽度 + 隐藏」。
+   * 卡片的响应式内联样式。**只允许 `position`。**
    *
-   * `left`/`top` 故意**不**走响应式绑定——它们由 `runLayout` 命令式直接写到
-   * 元素上（见那里的注释：走响应式会让 300 个组件全部重渲染，单帧 338ms）。
-   * 这里给出一份初始值，让首帧就是 hidden + 正确宽度，不会出现「以流式布局
-   * 堆叠一瞬再跳到绝对定位」的闪烁。
+   * `:style` 是响应式绑定，每次组件重渲染都会重新应用。所以 `visibility` /
+   * `left` / `top` / `width` **一个都不能写进来** —— 它们会覆盖 `runLayout`
+   * 命令式写下的结果。这个错误先后伪装成三种故障，全部在真实浏览器里重现过：
+   *  - 留着 `visibility: 'hidden'` → 重渲染把它覆盖回 hidden → **列表整片空白**
+   *  - 移走 visibility 却留着 `left/top: '0px'` → 位置归零 → **卡片全叠在左上角**
+   *  - 移走 left/top 却留着 `width` → 宽度被重渲染改回去，但**更要命的是**：
+   *    宽度不再由响应式负责后，首帧测高时卡片没有宽度（绝对定位 + 无宽度 =
+   *    收缩到内容宽），量到的高度偏小 30–50% → **同列卡片互相压住**
+   *
+   * 所以：几何（left/top/width/visibility）**全部**由 `runLayout` 的命令式
+   * 写入循环负责，且时序固定为「先写宽 → 再测高 → 再落位」。模板只管定位方式。
    */
   const cardStyle = (_index: number) => ({
     position: 'absolute' as const,
-    width: columnWidth.value + 'px',
-    left: '0px',
-    top: '0px',
-    // `visibility` **绝不**出现在这里。
-    //
-    // 这是踩过的坑：模板里的 `:style` 是响应式的，每次组件重渲染都会重新应用。
-    // 之前这里写了 `visibility: 'hidden'`，于是 Vue 在**任何**重渲染时都会把我
-    // 命令式写下的 `visible` 覆盖回 `hidden` —— 卡片全部消失，而数据、位置、
-    // 容器高度全是对的。表现就是「侧边栏高亮正常、列表一片空白」，滚一下触发
-    // 一次重排又好了。
-    //
-    // 现在 `visibility` 只由 `runLayout` 的写入循环管理（一张卡要么有位置且
-    // visible，要么还没位置且 hidden），模板不参与。
   })
 
   return {

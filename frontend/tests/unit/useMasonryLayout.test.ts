@@ -32,7 +32,12 @@ function mountMasonry<T>(
 ) {
   // 默认 1200（3 列）；用例要别的宽度就显式传，别靠「上一条用例留下的全局状态」。
   setInnerWidth(opts.innerWidth ?? 1200)
-  const counter = { reads: 0 }
+  // `readWidths`：每次读 `offsetHeight` 时，**那一刻**元素内联的 width。
+  // jsdom 里高度是注入的常量、与宽度无关，所以真实浏览器里那个 bug
+  // （先测高、后写宽 → 量到"未设宽度"时的高度 → 同列卡片互相压住）
+  // 在 jsdom 中不会自己暴露。记下"读高那一刻的宽度"，才能把这条时序
+  // 契约钉住：**测高必须发生在列宽已经写到卡片之后**。
+  const counter = { reads: 0, readWidths: [] as string[] }
   const itemsRef = ref(items) as unknown as import('vue').Ref<T[]>
   const heights = opts.heights ?? []
 
@@ -62,7 +67,11 @@ function mountMasonry<T>(
               const hh = heights[index] ?? 0
               Object.defineProperty(elm, 'offsetHeight', {
                 configurable: true,
-                get() { counter.reads++; return hh },
+                get() {
+                  counter.reads++
+                  counter.readWidths.push(elm.style.width)
+                  return hh
+                },
               })
               state.setItemRef(index, elm)
             },
@@ -122,6 +131,39 @@ describe('useMasonryLayout', () => {
 
     // 只量新追加的 2 张；历史 2 张不许再读（那是 O(n²) 的来源）
     expect(counter.reads).toBe(2)
+  })
+
+  /**
+   * **测高必须发生在列宽写到卡片之后**（顺序契约）。
+   *
+   * 真实故障（真机测到，jsdom 测不出数值）：`cardStyle()` 改成只返回
+   * `{ position: 'absolute' }` 之后，卡片的宽度就**只由 `runLayout` 的写入循环
+   * 负责**。但那个循环排在「批量测高」**之后**，于是第一次布局时卡片还没有
+   * 宽度 —— 绝对定位 + 无宽度 = 收缩到内容宽度（shrink-to-fit），卡片被撑得
+   * 很窄、文字折成很多行，`offsetHeight` 量到的高度比真实（满列宽）高度
+   * **小 30–50%**。
+   *
+   * 后果不是"排版略挤"，是**结构性错位**：同列的下一张按偏小的高度落位，
+   * 直接压在上一张身上。真机实测（30 张卡、3 列、静止态）：
+   * 同列相邻间隙 `-28 / -20 / -4 / 0 px`（应为恒定的 +24），重叠对数 13–17，
+   * 容器高度比内容矮 52–79px。
+   *
+   * jsdom 里 `offsetHeight` 是注入常量，量不出这个差异，所以这里钉的是
+   * **可观测的时序**：读高度那一刻，元素内联 width 必须已经是列宽。
+   */
+  it('测高时卡片已经有列宽（先写宽、后测高——否则量到收缩宽度的高度）', async () => {
+    const { counter, state } = mountMasonry([1, 2, 3, 4, 5, 6], {
+      heights: [100, 100, 100, 100, 100, 100],
+    })
+    await flushPromises()
+
+    expect(state.positions.value).toHaveLength(6)
+    const cw = state.columnWidth.value
+    expect(cw).toBeGreaterThan(0)
+    const expected = `${cw}px`
+    // 首次布局的每一次读高，都必须发生在宽度已写入之后。
+    expect(counter.readWidths.length).toBeGreaterThan(0)
+    expect(counter.readWidths).toEqual(counter.readWidths.map(() => expected))
   })
 
   it('放 N 张卡的强制布局次数有界：一次批量读 N 次，不是逐条写→读的 2N', async () => {
@@ -202,13 +244,19 @@ describe('useMasonryLayout', () => {
    *
    * 所以契约是：`visibility` 只由 runLayout / setItemRef 命令式管理。
    */
-  it('cardStyle() 不返回 visibility（该属性只能由命令式管理，否则会被重渲染覆盖）', () => {
+  /**
+   * 模板的 `:style="cardStyle(index)"` 是**响应式绑定**，每次重渲染都会重新应用。
+   *
+   * 所以它里面**只能有 `position`**：任何 `visibility` / `left` / `top` / `width`
+   * 都会覆盖命令式写下的结果。这一个错误先后伪装成两种故障：
+   * - 留着 `visibility: 'hidden'` → 覆盖回隐藏 → **列表整片空白**
+   * - 移走 visibility 却留着 `left/top: '0px'` → 位置归零 → **卡片全叠在左上角**
+   */
+  it('cardStyle() 只返回 position（几何属性会覆盖命令式写入）', () => {
     const { state } = mountMasonry([1, 2], { heights: [100, 100] })
     const style = state.cardStyle(0)
-    expect(style).not.toHaveProperty('visibility')
-    // 仍然必须一开始就绝对定位 + 有宽度，避免流式堆叠一瞬
+    expect(Object.keys(style)).toEqual(['position'])
     expect(style.position).toBe('absolute')
-    expect(style.width).toBeTruthy()
   })
 
   it('新挂载的卡片在拿到位置前被命令式隐藏（不会闪现在左上角）', async () => {
