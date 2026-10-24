@@ -192,11 +192,34 @@ describe('useMasonryLayout', () => {
     }
   })
 
-  it('cardStyle() 对尚未定位的卡片给出 visibility:hidden（避免在 (0,0) 叠成一堆）', () => {
+  /**
+   * `visibility` **绝不能**出现在响应式 `:style` 里。
+   *
+   * 这是真实故障的根因：模板 `:style="cardStyle(index)"` 会在每次组件重渲染时
+   * 重新应用，把命令式写下的 `visible` 覆盖回 `hidden` —— 数据、位置、容器高度
+   * 全都是对的，但列表一片空白；滚动触发一次重排又恢复正常。用户的描述
+   * 「侧边栏高亮正常但没内容，滚到翻页位置上方就显现」正是这个。
+   *
+   * 所以契约是：`visibility` 只由 runLayout / setItemRef 命令式管理。
+   */
+  it('cardStyle() 不返回 visibility（该属性只能由命令式管理，否则会被重渲染覆盖）', () => {
     const { state } = mountMasonry([1, 2], { heights: [100, 100] })
-    // 还没 flush：位置表为空 → 卡片隐藏
-    expect(state.cardStyle(0).visibility).toBe('hidden')
-    expect(state.cardStyle(0).position).toBe('absolute')
+    const style = state.cardStyle(0)
+    expect(style).not.toHaveProperty('visibility')
+    // 仍然必须一开始就绝对定位 + 有宽度，避免流式堆叠一瞬
+    expect(style.position).toBe('absolute')
+    expect(style.width).toBeTruthy()
+  })
+
+  it('新挂载的卡片在拿到位置前被命令式隐藏（不会闪现在左上角）', async () => {
+    const { itemsRef, state } = mountMasonry([1], { heights: [100] })
+    await flushPromises()
+
+    itemsRef.value.push(2)
+    await flushPromises()
+
+    // 新卡片的元素应当已经存在；布局跑完后必须有位置且可见
+    expect(state.positions.value.length).toBe(2)
   })
 
   it('裁掉头部后位置表随之收缩（缓存上限的布局侧契约）', async () => {
@@ -309,5 +332,72 @@ describe('useMasonryLayout', () => {
     // 必须写到了真正的 DOM 元素上（而不是在组件实例上抛异常）
     expect(dom.style.position).toBe('absolute')
     expect(dom.style.visibility).toBe('visible')
+  })
+
+  /**
+   * **容器宽度晚于数据到达**：这是「刷新偶发空白」的根因。
+   *
+   * 真实时序：`/api/novels/` 很快返回 → `items.length` watcher 立刻触发布局
+   * → 但如果容器还没被量到宽度（`columnWidth === 0`），旧实现在这里**静默
+   * return**。而 `columnWidth` 的 watcher 只在值**变化**时回调，若它已经变过，
+   * 就再没有任何东西会触发重排 → `totalHeight` 恒为 0 → 容器 `visibility:
+   * hidden` → 卡片一张都不显示。
+   *
+   * 因为取决于两个异步任务谁先完成，用户看到的是「时不时，像每第三次刷新」。
+   */
+  it('容器宽度为 0 时不放弃：宽度就绪后必须自动补一次布局', async () => {
+    // 先用 0 宽度（jsdom 里容器没有布局，正是"还没量到"的真实状态）
+    const { state } = mountMasonry([1, 2, 3], { heights: [100, 100, 100], innerWidth: 0 })
+    await flushPromises()
+    expect(state.totalHeight.value).toBe(0)
+
+    // 宽度就绪（真实浏览器里是 useElementSize 的 ResizeObserver 回调）
+    setInnerWidth(1200)
+    window.dispatchEvent(new Event('resize'))
+    await nextTick()
+    await flushPromises()
+    await nextTick()
+    await flushPromises()
+
+    // 必须真的排出来了：不能永远停在 0 高度 / 全隐藏
+    expect(state.totalHeight.value).toBeGreaterThan(0)
+  })
+
+  /**
+   * **重渲染不得把卡片重新隐藏**（真实故障的根因）。
+   *
+   * 之前 `cardStyle()` 返回 `visibility: 'hidden'`，而模板是
+   * `:style="cardStyle(index)"` —— 响应式绑定会在**每次组件重渲染**时重新应用，
+   * 把我命令式写下的 `visible` 覆盖回 `hidden`。症状：数据、位置、容器高度都
+   * 正确，侧边栏高亮也正常，但列表一片空白；往下滚触发一次重排（load-more /
+   * relayout）后又恢复正常。用户原话：
+   * 「出现无内容的现象时，可以往下滚轮，滚到约翻页的位置时，上一页原本空白的
+   *   部分会显现」，以及「打开 F12 期间无此问题」（调试器拖慢了重渲染时序）。
+   *
+   * 这条用例拿不到 Vue 的重渲染时机（jsdom 没有真实渲染流水线），所以它钉的是
+   * **契约本身**：`cardStyle()` 的输出里不许出现 `visibility`。只要这条成立，
+   * Vue 就没有机会覆盖命令式写下的值。
+   */
+  it('cardStyle() 的返回值不许含 visibility（否则重渲染会覆盖命令式写入）', () => {
+    const { state } = mountMasonry([1, 2, 3], { heights: [100, 100, 100] })
+    for (const i of [0, 1, 2]) {
+      expect(Object.keys(state.cardStyle(i))).not.toContain('visibility')
+    }
+  })
+
+  it('setItemRef 挂载时具名隐藏新卡片（命令式，不受重渲染影响）', async () => {
+    const { state, itemsRef, wrapper } = mountMasonry([1], { heights: [100] })
+    await flushPromises()
+
+    const dom = document.createElement('div')
+    Object.defineProperty(dom, 'offsetHeight', { configurable: true, get: () => 100 })
+    // 一个尚未有位置的下标（第 5 个，items 只有 1 个）
+    state.setItemRef(5, dom as unknown as HTMLElement)
+    expect(dom.style.visibility).toBe('hidden')
+    expect(dom.style.position).toBe('absolute')
+
+    itemsRef.value.push(2, 3, 4, 5)
+    await flushPromises()
+    expect(wrapper.exists()).toBe(true)
   })
 })

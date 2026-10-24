@@ -121,14 +121,49 @@ export function useMasonryLayout<T>(
 
   const setItemRef = (index: number, ref: unknown) => {
     if (index < 0) return
-    itemEls[index] = toElement(ref)
+    const el = toElement(ref)
+    itemEls[index] = el
+    // 新挂载的卡片在拿到位置之前必须隐藏，否则它会以 `absolute; left:0; top:0`
+    // 短暂出现在左上角。
+    //
+    // 在这里做（而不是在模板的 `:style` 里）是必须的：`:style` 是响应式绑定，
+    // 每次重渲染都会重新应用，会把我命令式写下的 `visible` 覆盖回 `hidden`——
+    // 那正是「列表一片空白、滚一下又好了」的原因。
+    if (el && !positions.value[index]) {
+      el.style.position = 'absolute'
+      el.style.visibility = 'hidden'
+    }
   }
 
   const runLayout = async (force: boolean) => {
     const count = columnCount.value
     const cw = columnWidth.value
-    // 宽度还没量到：等下一次（容器尺寸变化会再触发一次）。
-    if (!cw || !count) return
+    // 宽度还没量到（容器尚未完成首次布局）。
+    //
+    // **不能在这里静默 return**：那样一旦「长度 watcher 先跑、容器宽度后到」
+    // 这个顺序发生，就再也没有任何东西会触发重排 —— `columnWidth` 的 watcher
+    // 只在值**变化**时回调，而它可能已经变过了。页面表现就是容器高度停在 0、
+    // 立刻 `visibility:hidden`，卡片一张都不显示，且刷新偶发（取决于
+    // `/api/novels/` 与首次布局谁先完成）。
+    //
+    // 所以这里排一次微任务重试：容器量到宽度后（同一帧或下一帧）必然能跑通。
+    // 用 `pendingRetry` 去重，避免每帧都排。
+    if (!cw || !count) {
+      // 有界重试：最多试几次就停。宽度为 0 是「容器还没完成首次布局」的暂时
+      // 状态，正常情况下一次 nextTick 之后就有了；但若容器永远拿不到尺寸
+      // （被隐藏 / jsdom），无限重试会把主线程锁死。停掉之后仍然可以由
+      // `columnWidth` 的 watcher 在真正的尺寸变化时重新触发。
+      if (widthRetryCount < MAX_WIDTH_RETRIES && !pendingWidthRetry) {
+        widthRetryCount++
+        pendingWidthRetry = true
+        void nextTick(() => {
+          pendingWidthRetry = false
+          layoutItems(force)
+        })
+      }
+      return
+    }
+    widthRetryCount = 0 // 拿到宽度了：重置，下次「暂时没宽度」还能再试
 
     const list = items.value
     const total = list.length
@@ -211,6 +246,8 @@ export function useMasonryLayout<T>(
         el.style.top = pos.top + 'px'
         el.style.visibility = 'visible'
       } else {
+        // 没位置的卡片必须隐藏，否则会全部叠在 (0,0)。
+        // `visibility` 是唯一由命令式管理的属性（见 cardStyle 的说明）。
         el.style.visibility = 'hidden'
       }
     }
@@ -226,6 +263,10 @@ export function useMasonryLayout<T>(
   // 没有这道闸门时，两个触发交错会把同一批 item 分配两遍。
   let layoutRunning = false
   let layoutPending: boolean | null = null
+  // 「列宽还没量到」时的重试闸门（见 runLayout 里那段说明）。
+  let pendingWidthRetry = false
+  let widthRetryCount = 0
+  const MAX_WIDTH_RETRIES = 5
 
   const layoutItems = (force = false) => {
     if (layoutRunning) {
@@ -284,7 +325,16 @@ export function useMasonryLayout<T>(
     width: columnWidth.value + 'px',
     left: '0px',
     top: '0px',
-    visibility: 'hidden' as const,
+    // `visibility` **绝不**出现在这里。
+    //
+    // 这是踩过的坑：模板里的 `:style` 是响应式的，每次组件重渲染都会重新应用。
+    // 之前这里写了 `visibility: 'hidden'`，于是 Vue 在**任何**重渲染时都会把我
+    // 命令式写下的 `visible` 覆盖回 `hidden` —— 卡片全部消失，而数据、位置、
+    // 容器高度全是对的。表现就是「侧边栏高亮正常、列表一片空白」，滚一下触发
+    // 一次重排又好了。
+    //
+    // 现在 `visibility` 只由 `runLayout` 的写入循环管理（一张卡要么有位置且
+    // visible，要么还没位置且 hidden），模板不参与。
   })
 
   return {
