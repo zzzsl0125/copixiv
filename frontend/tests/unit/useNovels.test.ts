@@ -377,4 +377,57 @@ describe('useNovels', () => {
       expect(state.filters.order_direction).toBe('DESC')
     })
   })
+
+  /**
+   * `exclude_blocked` 随书架语义走，不随全局开关一刀切。
+   *
+   * 书架（我的收藏 / 特别关注 / 我的上传）是「我的**完整**清单」：被厌恶标签命中
+   * 的一本仍然是我收藏的，不该从我的书架里消失。这跟 `min_like` 门槛把本地书
+   * 筛没是同一类错误——用浏览态的规则处理清单。
+   *
+   * 附带收益：`exclude_blocked=true` 时后端要多跑一趟 `has_excluded` 存在性
+   * 查询，实测书架 scope 下多 9.2ms（15.0 vs 5.8ms 中位），而书架的答案几乎恒 false。
+   */
+  describe('exclude_blocked：书架不排除，浏览/自由搜索跟随全局开关', () => {
+    it('书架 keyword → exclude_blocked=false（不排除、也不问 has_excluded）', async () => {
+      const state = mountUseNovels('/')
+      await flushPromises()
+
+      for (const keyword of ['source:local;', 'is_special_follow:true;', 'is_favourite:true;']) {
+        novelApiMock.getNovels.mockClear()
+        await state.handleSearch(keyword, { setOrdering: true })
+        await flushPromises()
+
+        expect(novelApiMock.getNovels).toHaveBeenCalledWith(
+          expect.objectContaining({ exclude_blocked: false }),
+        )
+      }
+    })
+
+    it('空 keyword（小说列表）→ 跟随全局开关（缺省 true）', async () => {
+      const state = mountUseNovels('/')
+      await flushPromises()
+
+      novelApiMock.getNovels.mockClear()
+      await state.handleSearch('')
+      await flushPromises()
+
+      expect(novelApiMock.getNovels).toHaveBeenCalledWith(
+        expect.objectContaining({ exclude_blocked: true }),
+      )
+    })
+
+    it('自由搜索（非书架）→ 跟随全局开关', async () => {
+      const state = mountUseNovels('/')
+      await flushPromises()
+
+      novelApiMock.getNovels.mockClear()
+      await state.handleSearch('猫')
+      await flushPromises()
+
+      expect(novelApiMock.getNovels).toHaveBeenCalledWith(
+        expect.objectContaining({ exclude_blocked: true }),
+      )
+    })
+  })
 })

@@ -19,9 +19,21 @@ export function useNovels() {
   // ---- 厌恶标签排除（跟随全局设置；被排除集合在 Novels.vue 中按需加载）----
   const { systemConfig } = useSystem()
 
-  /** 本次请求是否排除厌恶标签小说（跟随全局设置，缺省视为开启）。 */
-  const excludeBlocked = () =>
-    systemConfig.value ? systemConfig.value.exclude_blocked_tag_novels : true
+  /**
+   * 本次请求是否排除厌恶标签小说。
+   *
+   * 两层条件，**先看书架语义**：
+   * - 当前 keyword 命中某个书架 section 且该表项 `exclude_blocked: false`
+   *   （我的收藏 / 特别关注 / 我的上传）→ **不排除**。书架是「我的完整清单」，
+   *   被厌恶标签命中的一本仍然是我收藏的，不该从书架里消失；顺带省掉后端那趟
+   *   `has_excluded` 存在性查询（书架 scope 下实测多 9.2ms，而答案几乎恒定 false）。
+   * - 否则跟随全局开关（缺省视为开启）。
+   */
+  const excludeBlocked = () => {
+    const section = resolveSection(filters.keyword.trim())
+    if (section) return SECTIONS[section].exclude_blocked
+    return systemConfig.value ? systemConfig.value.exclude_blocked_tag_novels : true
+  }
 
   /** 当前搜索范围内是否存在被厌恶标签排除的小说（首屏响应附带）——
    * 控制 ExclusionBar（查看被隐藏的小说）的显示；load-more 不覆盖。 */
