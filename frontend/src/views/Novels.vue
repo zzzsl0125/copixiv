@@ -355,7 +355,7 @@ const handleNovelUpdated = (updated: Novel) => {
           :tag-preferences="tagPreferences"
           :batch-mode="batchMode"
           :batch-selected="isBatchSelected(novel.id)"
-          :ref="el => setItemRef(index, el as unknown as HTMLElement | null)"
+          :ref="el => setItemRef(index, el)"
           @toggle-active="handleToggleActive"
           @toggle-batch-select="handleBatchToggleCard"
           @search="(type, value) => emit('novels-command', { type: 'card-search', payload: { type, value } })"

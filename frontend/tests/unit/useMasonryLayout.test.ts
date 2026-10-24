@@ -280,4 +280,34 @@ describe('useMasonryLayout', () => {
 
     expect(state.positions.value).toHaveLength(2)
   })
+
+  /**
+   * 真实页面里 `:ref` 挂在 **组件** 上（`<NovelCard :ref="...">`），拿到的是
+   * **组件实例**，不是 DOM 元素。`el.style` 在组件实例上是 `undefined`，
+   * 于是布局每次写位置都抛 TypeError，`totalHeight` 永远是 0，外层容器
+   * `visibility:hidden` 永不解除 —— 页面表现为「无限转圈、什么都没加载出来」。
+   *
+   * 这个用例用「组件实例形状」的对象喂 `setItemRef`，钉住「必须解包出 $el」。
+   */
+  it('setItemRef 收到组件实例时（真实 :ref 行为）也要解包出 DOM 元素', async () => {
+    const { itemsRef, state } = mountMasonry([1, 2, 3], { heights: [100, 100, 100] })
+    await flushPromises()
+
+    // 模拟 Vue 传进来的组件实例：{ $el: HTMLElement }
+    const dom = document.createElement('div')
+    Object.defineProperty(dom, 'offsetHeight', { configurable: true, get: () => 120 })
+    const compLike = { $el: dom, $: {} }
+
+    itemsRef.value.push(4)
+    await flushPromises()
+    // 用一个组件实例形状替换最后一项的 ref
+    expect(() => state.setItemRef(3, compLike as unknown as HTMLElement)).not.toThrow()
+
+    state.relayout()
+    await flushPromises()
+
+    // 必须写到了真正的 DOM 元素上（而不是在组件实例上抛异常）
+    expect(dom.style.position).toBe('absolute')
+    expect(dom.style.visibility).toBe('visible')
+  })
 })

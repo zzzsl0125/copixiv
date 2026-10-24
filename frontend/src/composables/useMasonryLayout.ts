@@ -98,9 +98,30 @@ export function useMasonryLayout<T>(
   // 卡片元素：模板用 `setItemRef(index, el)` 挂进来，顺序与 items 一致。
   const itemEls: (HTMLElement | null)[] = []
 
-  const setItemRef = (index: number, el: HTMLElement | null) => {
+  /**
+   * 把一个 ref 回调给的「东西」解包成真正的 DOM 元素。
+   *
+   * `:ref` 挂在**组件**上时（`<NovelCard :ref="...">`），Vue 传进来的是
+   * **组件实例**（`{ $el, $, ... }`），不是元素。直接 `el.style.position = ...`
+   * 会抛 `TypeError: t.style is undefined`——布局每次都在这里炸掉，
+   * `totalHeight` 永远停在 0，网格容器 `visibility:hidden` 永不解除，
+   * 页面表现为「无限转圈、卡片一张都没出来」。
+   *
+   * 单元测试里喂的是裸 DOM 元素，所以测不出这个差异；必须在这里兼容两种形状。
+   */
+  const toElement = (ref: unknown): HTMLElement | null => {
+    if (!ref) return null
+    // 组件实例：取 $el（Vue 3 里是根的 DOM 元素）
+    if (typeof ref === 'object' && '$el' in (ref as Record<string, unknown>)) {
+      const el = (ref as { $el?: unknown }).$el
+      return el instanceof HTMLElement ? el : null
+    }
+    return ref instanceof HTMLElement ? ref : null
+  }
+
+  const setItemRef = (index: number, ref: unknown) => {
     if (index < 0) return
-    itemEls[index] = el
+    itemEls[index] = toElement(ref)
   }
 
   const runLayout = async (force: boolean) => {
