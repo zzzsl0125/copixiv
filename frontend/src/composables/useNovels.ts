@@ -1,6 +1,6 @@
 import { reactive, ref, onMounted, onUnmounted } from 'vue'
 import { novelApi } from '../api'
-import type { Novel, NovelFilters } from '../types'
+import { parseOrderBy, parseOrderDirection, type Novel, type NovelFilters } from '../types'
 import { DEFAULT_PAGE_SIZE, DEFAULT_MAX_ITEMS, SECTIONS, resolveSection } from '../config'
 import { useCursorPagination } from './useCursorPagination'
 import { useSystem } from './useSystem'
@@ -10,8 +10,8 @@ export function useNovels() {
 
   const filters = reactive<NovelFilters>({
     keyword: urlParams.get('keyword') || '',
-    order_by: urlParams.get('order_by') || 'random',
-    order_direction: urlParams.get('order_direction') || 'DESC',
+    order_by: parseOrderBy(urlParams.get('order_by')),
+    order_direction: parseOrderDirection(urlParams.get('order_direction')),
     min_like: urlParams.get('min_like') ? Number(urlParams.get('min_like')) : undefined,
     min_text: urlParams.get('min_text') ? Number(urlParams.get('min_text')) : undefined,
   })
@@ -205,8 +205,8 @@ export function useNovels() {
   const onPopState = () => {
     const params = new URLSearchParams(window.location.search)
     filters.keyword = params.get('keyword') || ''
-    filters.order_by = params.get('order_by') || 'random'
-    filters.order_direction = params.get('order_direction') || 'DESC'
+    filters.order_by = parseOrderBy(params.get('order_by'))
+    filters.order_direction = parseOrderDirection(params.get('order_direction'))
     filters.min_like = params.get('min_like') ? Number(params.get('min_like')) : undefined
     filters.min_text = params.get('min_text') ? Number(params.get('min_text')) : undefined
 

@@ -1,6 +1,6 @@
 import { ref, computed, watch, nextTick, type Ref } from 'vue'
 import { novelApi, getApiErrorMessage } from '../api'
-import type { Novel, NovelFilters, BatchScope } from '../types'
+import type { Novel, NovelFilters, BatchScope, OrderBy } from '../types'
 import { usePagedNovelIdView } from './usePagedNovelIdView'
 import { useToast } from './useToast'
 
@@ -96,11 +96,18 @@ export function useCollectionViews(options: UseCollectionViewsOptions) {
   }
 
   // ---- 视图的集合顺序：随机在集合视图内禁用，其余按当前排序条件取序 ----
-  function scopeOrderBy(): string | undefined {
+  /**
+   * 集合视图可用的排序子集：`random` 在集合内禁用（保持范围/勾选顺序），
+   * 其余原样透传。
+   *
+   * 返回类型是 `OrderBy | undefined`，不是 `string | undefined`：后者曾让这个
+   * 函数变成一个**手写白名单**，而且白名单本身是漏的（旧实现只放行
+   * id/like/text，`view` / `create_time` 被静默丢弃）。现在只有「random → undefined」
+   * 一条规则，未来新增排序字段不必回来改这里。
+   */
+  function scopeOrderBy(): OrderBy | undefined {
     const o = filters.value.order_by
-    if (o === 'random') return undefined  // 集合视图不支持随机 → 保持范围/勾选顺序
-    if (o === 'id' || o === 'like' || o === 'text') return o
-    return undefined
+    return o === 'random' ? undefined : o
   }
 
   async function reloadSelectedIds() {

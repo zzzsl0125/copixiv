@@ -4,7 +4,7 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { createRouter, createMemoryHistory } from 'vue-router'
 import App from '../../src/App.vue'
 import { SECTIONS } from '../../src/config'
-import type { NovelFilters } from '../../src/types'
+import { parseOrderBy, parseOrderDirection, type NovelFilters } from '../../src/types'
 
 /**
  * 「我的上传」section 状态机（docs/LIBRARY_DESIGN.md §5）。
@@ -29,8 +29,8 @@ function createFilters(): NovelFilters {
   const params = new URLSearchParams(window.location.search)
   return reactive<NovelFilters>({
     keyword: params.get('keyword') || '',
-    order_by: params.get('order_by') || 'random',
-    order_direction: params.get('order_direction') || 'DESC',
+    order_by: parseOrderBy(params.get('order_by')),
+    order_direction: parseOrderDirection(params.get('order_direction')),
     min_like: params.get('min_like') ? Number(params.get('min_like')) : undefined,
     min_text: params.get('min_text') ? Number(params.get('min_text')) : undefined,
   })

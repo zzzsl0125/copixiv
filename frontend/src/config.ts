@@ -1,3 +1,5 @@
+import type { OrderBy, OrderDirection } from './types/novels'
+
 /**
  * Frontend-bundled config defaults.
  *
@@ -33,9 +35,16 @@ export interface SectionDef {
   keyword: string
   min_like: number
   min_text: number
-  /** 该 section 的默认排序（点击侧边栏进入时套用）。 */
-  order_by: string
-  order_direction: string
+  /**
+   * 该 section 的默认排序（点击侧边栏进入时套用）。
+   *
+   * 类型是字面量联合而**不是** `string`：`SECTIONS` 用 `satisfies
+   * Record<string, SectionDef>` 校验，只有字段类型收窄到这个联合，
+   * `satisfies` 才真的能拦住 `order_by: 'lkke'` 这种拼写错误。
+   * 宽 `string` 时它只验「是个字符串」，等于没验。
+   */
+  order_by: OrderBy
+  order_direction: OrderDirection
   /**
    * 这个 section 是否跟随全局「排除厌恶标签」开关。
    *
