@@ -162,8 +162,22 @@ const likeBorderClass = computed(() => {
   return 'border-gray-100'
 })
 
+/** 标签偏好预索引：tag → preference。
+ *
+ * 原先每个标签各做一次 `props.tagPreferences.find(...)`（13 标签 × 19 条偏好 ≈ 247 次比较/卡），
+ * 现在是每张卡只遍历偏好数组一次。`computed` 依赖 props.tagPreferences，父组件换数组即重建。
+ * 重复 tag 取第一条，与原来 `find()` 的「先到先得」语义一致。
+ */
+const tagPreferenceMap = computed(() => {
+  const map = new Map<string, TagPreference['preference']>()
+  for (const p of props.tagPreferences) {
+    if (!map.has(p.tag)) map.set(p.tag, p.preference)
+  }
+  return map
+})
+
 const getTagClass = (tag: string) => {
-  const preference = props.tagPreferences.find(p => p.tag === tag)?.preference
+  const preference = tagPreferenceMap.value.get(tag)
   if (preference === 'favourite') return 'bg-blue-100 text-blue-800 font-bold'
   if (preference === 'blocked') return 'line-through text-red-400 bg-gray-50'
   return 'bg-gray-100 text-gray-800'
@@ -172,7 +186,7 @@ const getTagClass = (tag: string) => {
 
 <template>
   <div
-    class="relative group bg-white rounded-xl shadow-sm hover:shadow-xl transition-all duration-300 overflow-hidden flex flex-col border cursor-pointer"
+    class="relative group bg-white rounded-xl shadow-sm hover:shadow-xl duration-300 transition-[box-shadow,border-color] overflow-hidden flex flex-col border cursor-pointer"
     :class="likeBorderClass"
     @click="handleCardClick"
   >
@@ -253,8 +267,15 @@ const getTagClass = (tag: string) => {
 
       <div
         v-if="!batchMode"
-        class="absolute inset-0 bg-white/95 backdrop-blur-sm border-t border-gray-100 flex items-center px-3 py-2 gap-2 transition-transform duration-300"
-        :class="['translate-y-full', 'group-hover:translate-y-0', showMobileActions ? 'translate-y-0!' : '']"
+        class="absolute inset-0 bg-white/95 border-t border-gray-100 flex items-center px-3 py-2 gap-2 transition-transform duration-300"
+        :class="[
+          'translate-y-full',
+          'group-hover:translate-y-0',
+          showMobileActions ? 'translate-y-0!' : '',
+          // 磨砂只在展开时生效：常驻 backdrop-blur 会给每张卡建一个合成层
+          // （300 张卡 = 300 个 backdrop-filter 图层，即使抽屉已移出可视区）。
+          showMobileActions ? 'backdrop-blur-sm' : 'group-hover:backdrop-blur-sm',
+        ]"
         @click="stopPropagation"
       >
         <div class="flex-1 flex gap-2 h-full">

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import NovelCard from '../../src/components/features/NovelCard.vue'
-import type { Novel } from '../../src/types'
+import type { Novel, TagPreference } from '../../src/types'
 
 vi.mock('../../src/api', () => ({
   novelApi: {
@@ -153,5 +153,181 @@ describe('NovelCard 小标签区（本地 / EPUB 同一区域）', () => {
 
     expect(wrapper.findAll('[data-testid="badge-epub"]')).toHaveLength(1)
     expect(wrapper.get('[data-testid="novel-badges"]').text().trim()).toBe('EPUB')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 渲染成本：每卡固定开销（标签偏好 Map 预索引 / 具体过渡属性 / 按需 backdrop-filter）
+// ---------------------------------------------------------------------------
+
+/** 13 标签的卡（实测平均每卡 15.6 个标签，取接近上限的样本）。 */
+const manyTags = Array.from({ length: 13 }, (_, i) => `tag-${i}`)
+const manyTagNovel: Novel = { ...novel, id: 43, tags: manyTags }
+
+/** 19 条偏好（与线上规模一致），标签名故意都不在卡的标签集里，
+ *  这样「一次都没命中」的线性查找才需要扫完整个数组（旧实现的最坏路径）。 */
+const nineteenPrefs: TagPreference[] = Array.from({ length: 19 }, (_, i) => ({
+  id: i + 1,
+  tag: `pref-${i}`,
+  preference: i % 2 === 0 ? 'favourite' : 'blocked',
+  sort_index: i,
+}))
+
+/** 统计「按数字下标读取元素」的次数。
+ *
+ * 旧实现 `tagPreferences.find(...)` 每个标签都会从头扫一遍数组 →
+ * 13 标签 × 19 条 = 最多 247 次下标读取；预索引后每张卡只遍历一次数组（19 次）。
+ * 用读取次数而不是耗时断言，CI 上不会 flaky。
+ */
+function countingPreferences(prefs: TagPreference[]) {
+  const reads = { index: 0 }
+  const proxy = new Proxy(prefs, {
+    get(target, prop, receiver) {
+      if (typeof prop === 'string' && /^\d+$/.test(prop)) reads.index += 1
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  return { proxy, reads }
+}
+
+function tagSpan(wrapper: ReturnType<typeof mountCard>, tag: string) {
+  const span = wrapper.findAll('span').find(el => el.text() === tag)
+  if (!span) throw new Error(`标签 ${tag} 未渲染`)
+  return span
+}
+
+describe('NovelCard 标签偏好：Map 预索引（不再逐标签线性 find）', () => {
+  it('偏好数组的读取次数与标签数无关（旧实现随标签数线性放大）', () => {
+    const oneTag = countingPreferences(nineteenPrefs)
+    mountCard({ novel: { ...manyTagNovel, tags: ['tag-0'] }, tagPreferences: oneTag.proxy })
+
+    const thirteenTags = countingPreferences(nineteenPrefs)
+    mountCard({ novel: manyTagNovel, tagPreferences: thirteenTags.proxy })
+
+    // 旧实现 13 标签要扫 13 遍（≈247 次），1 标签只扫 1 遍；预索引两者相同。
+    expect(thirteenTags.reads.index).toBeGreaterThan(0) // 确实读了（建了索引）
+    expect(thirteenTags.reads.index).toBe(oneTag.reads.index)
+    // 每张卡最多把数组过两遍：一次建 Map，一次 Vue 对 props 数组的响应式遍历。
+    expect(thirteenTags.reads.index).toBeLessThanOrEqual(2 * nineteenPrefs.length)
+  })
+
+  it('30 张卡共用同一份偏好：总读取量不随标签数放大', () => {
+    const { proxy, reads } = countingPreferences(nineteenPrefs)
+    for (let i = 0; i < 30; i++) {
+      mountCard({ novel: { ...manyTagNovel, id: 1000 + i }, tagPreferences: proxy })
+    }
+
+    // 旧实现：30 × 13 × 19 ≈ 7410；预索引：30 × 2 × 19 = 1140（与标签数无关）。
+    expect(reads.index).toBeLessThanOrEqual(30 * 2 * nineteenPrefs.length)
+  })
+
+  it('配色语义逐字不变：favourite / blocked / 无偏好', () => {
+    const prefs: TagPreference[] = [
+      { id: 1, tag: 'tag-0', preference: 'favourite', sort_index: 0 },
+      { id: 2, tag: 'tag-1', preference: 'blocked', sort_index: 1 },
+    ]
+    const wrapper = mountCard({ novel: manyTagNovel, tagPreferences: prefs })
+
+    expect(tagSpan(wrapper, 'tag-0').classes()).toContain('bg-blue-100')
+    expect(tagSpan(wrapper, 'tag-0').classes()).toContain('text-blue-800')
+    expect(tagSpan(wrapper, 'tag-0').classes()).toContain('font-bold')
+
+    expect(tagSpan(wrapper, 'tag-1').classes()).toContain('line-through')
+    expect(tagSpan(wrapper, 'tag-1').classes()).toContain('text-red-400')
+    expect(tagSpan(wrapper, 'tag-1').classes()).toContain('bg-gray-50')
+
+    expect(tagSpan(wrapper, 'tag-2').classes()).toContain('bg-gray-100')
+    expect(tagSpan(wrapper, 'tag-2').classes()).toContain('text-gray-800')
+  })
+
+  it('偏好变化后颜色跟着变（索引必须响应 tagPreferences）', async () => {
+    const wrapper = mountCard({ novel: manyTagNovel, tagPreferences: [] })
+    expect(tagSpan(wrapper, 'tag-0').classes()).toContain('bg-gray-100')
+
+    await wrapper.setProps({
+      tagPreferences: [{ id: 1, tag: 'tag-0', preference: 'favourite', sort_index: 0 }],
+    })
+    expect(tagSpan(wrapper, 'tag-0').classes()).toContain('bg-blue-100')
+
+    await wrapper.setProps({
+      tagPreferences: [{ id: 2, tag: 'tag-0', preference: 'blocked', sort_index: 0 }],
+    })
+    expect(tagSpan(wrapper, 'tag-0').classes()).toContain('line-through')
+    expect(tagSpan(wrapper, 'tag-0').classes()).not.toContain('bg-blue-100')
+
+    await wrapper.setProps({ tagPreferences: [] })
+    expect(tagSpan(wrapper, 'tag-0').classes()).toContain('bg-gray-100')
+  })
+
+  it('同一标签重复出现时保持「先到先得」（与原来的 find 语义一致）', () => {
+    const wrapper = mountCard({
+      novel: manyTagNovel,
+      tagPreferences: [
+        { id: 1, tag: 'tag-0', preference: 'favourite', sort_index: 0 },
+        { id: 2, tag: 'tag-0', preference: 'blocked', sort_index: 1 },
+      ],
+    })
+
+    expect(tagSpan(wrapper, 'tag-0').classes()).toContain('bg-blue-100')
+  })
+})
+
+describe('NovelCard 卡片根：transition-all 收敛到具体属性', () => {
+  /** 取根元素上的过渡属性清单（`transition-shadow` / `transition-[a,b]`）。 */
+  function transitionProps(classes: string[]): string[] | null {
+    const util = classes.find(c => c.startsWith('transition-') && c !== 'transition-colors')
+    if (!util) return null
+    if (util === 'transition-shadow') return ['box-shadow']
+    if (util === 'transition-transform') return ['transform']
+    const arbitrary = /^transition-\[(.+)\]$/.exec(util)
+    return arbitrary ? arbitrary[1]!.split(',').map(s => s.trim()) : []
+  }
+
+  it('不再使用 transition-all，但仍然有 300ms 过渡', () => {
+    const classes = mountCard().get('.group').classes()
+
+    expect(classes).not.toContain('transition-all')
+    expect(classes).toContain('duration-300')
+    expect(transitionProps(classes)).not.toBeNull()
+  })
+
+  it('过渡属性覆盖 hover 阴影与 likeBorderClass 会动的边框/阴影', () => {
+    // likeBorderClass 会在 likes 档位/批量选中时切换 ring-* / border-* / shadow-[...]，
+    // 这些全部走 box-shadow 与 border-color，必须在过渡清单里，否则视觉会和原来不一致。
+    const props = transitionProps(mountCard({
+      novel: { ...novel, like: 5000 },
+      batchMode: true,
+      batchSelected: true,
+    }).get('.group').classes())!
+
+    expect(props).toContain('box-shadow')
+    expect(props).toContain('border-color')
+  })
+})
+
+describe('NovelCard 操作条：backdrop-filter 只在需要时存在', () => {
+  const isBackdropUtility = (c: string) => /^backdrop-blur/.test(c)
+
+  it('默认态（未 hover / 非 active / 非 batchMode）没有任何常驻 backdrop-filter', () => {
+    const overlay = mountCard({ isActive: false }).get('.translate-y-full')
+
+    // 默认态不能出现会立即生效的 backdrop-blur 工具类（否则每卡一个合成层）。
+    expect(overlay.classes().filter(isBackdropUtility)).toEqual([])
+    // 磨砂只在 hover 时挂上（group-hover 变体）。
+    expect(overlay.classes()).toContain('group-hover:backdrop-blur-sm')
+  })
+
+  it('激活（移动端抽屉展开）时保留磨砂底', () => {
+    const overlay = mountCard({ isActive: true }).get('.translate-y-full')
+
+    expect(overlay.classes()).toContain('backdrop-blur-sm')
+    expect(overlay.classes().filter(isBackdropUtility)).toHaveLength(1)
+  })
+
+  it('批量模式不渲染操作条，自然也没有 backdrop-filter', () => {
+    const wrapper = mountCard({ batchMode: true, isActive: true })
+
+    expect(wrapper.find('.translate-y-full').exists()).toBe(false)
+    expect(wrapper.find('[class*="backdrop-blur"]').exists()).toBe(false)
   })
 })
