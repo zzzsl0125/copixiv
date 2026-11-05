@@ -16,8 +16,10 @@ deterministic synthetic sample — so the suite stays self-contained on CI where
 the gitignored corpus is absent.
 """
 
+import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -29,6 +31,17 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 PGDEV_SCRIPT = PROJECT_ROOT / "scripts" / "pg_dev.py"
+
+# Send every sink to a throwaway directory for the whole session.
+#
+# ``create_app()`` calls ``setup_logging()`` unconditionally, so before this
+# fixture a pytest run appended to the *production* ``log/backend.log`` and
+# rotated the real archives away: the big-log tests emit 24 000 filler lines
+# per run (~4 MB), and 91% of the 344 MB log directory turned out to be test
+# filler.  Setting the env var here (rather than in each test) also covers
+# ``create_app`` calls made from fixtures, and keeps the console sink alone as
+# the thing a developer watches.  os.environ is read by ``copixiv.log``.
+os.environ.setdefault("COPIXIV_LOG_DIR", str(Path(tempfile.gettempdir()) / "copixiv-test-logs"))
 
 TEST_DB = "copixiv_test"
 TEST_DATABASE_URL = f"postgresql+psycopg2://postgres@127.0.0.1:5433/{TEST_DB}"

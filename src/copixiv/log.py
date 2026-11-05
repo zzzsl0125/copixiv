@@ -10,9 +10,11 @@ Moved out of the former ``app.logger`` module so that ``infrastructure`` /
 shim was removed — internal code imports from here directly.)
 """
 
+import os
 import sys
 import logging
 import io
+from datetime import date
 from pathlib import Path
 from contextlib import contextmanager
 from typing import Generator, Callable
@@ -33,8 +35,31 @@ from loguru import logger
 #: The *tail* is kept: when a task fails, the error and the last actions before
 #: it are what the operator needs, and the beginning is usually setup noise.
 MAX_TASK_LOG_BYTES = 256 * 1024
-#: Marker prepended when a log was truncated, so nobody wonders where the head
-#: of the run went.
+#: How long rotated log archives are kept.  A *daily* rotation plus this
+#: window bounds the directory to ~:data:`LOG_RETENTION_DAYS` files no matter
+#: how fast the app logs.  The previous ``rotation="10 MB"`` bound nothing on
+#: the time axis: a burst could rotate dozens of 10 MB files within minutes,
+#: and because every one of them was younger than the 3-day window, retention
+#: deleted none of them (344 MB / 41 files observed on 2026-10-24).
+LOG_RETENTION_DAYS = 7
+#: Rotate at local midnight.  A time-based rotation also means the *active*
+#: file is rolled over — loguru only ever passes already-rotated archives to
+#: the retention callback, so a size-only schedule can leave one file growing
+#: forever (``access.log`` still held 2026-10-08 lines on 2026-10-24).
+LOG_ROTATION = "00:00"
+#: Compress archives.  Text logs compress to roughly a tenth, which matters
+#: far more than the age window when the app is verbose.
+LOG_COMPRESSION = "gz"
+
+#: Environment override for the log directory.  Tests set this to a temp dir
+#: so a pytest run never appends to the *production* ``log/backend.log``:
+#: ``create_app()`` calls :func:`setup_logging`, and the big-log tests emit
+#: tens of thousands of filler lines that previously landed in ``log/`` and
+#: rotated the real archives away (91% of the directory was test filler).
+LOG_DIR_ENV = "COPIXIV_LOG_DIR"
+
+#: Marker prepended when a stored task log was truncated, so nobody wonders
+#: where the head of the run went.
 _TRUNCATION_NOTICE = "[日志过长，仅保留最后 {} KiB；完整日志见 log/backend.log]\n"
 
 
@@ -64,14 +89,61 @@ class InterceptHandler(logging.Handler):
         )
 
 
-def setup_logging(log_dir: str = "log") -> None:
+def _log_dir(log_dir: str | None) -> Path:
+    """Resolve the sink directory: explicit arg → ``COPIXIV_LOG_DIR`` → ``log``.
+
+    The env override is what keeps tests out of the production directory; see
+    :data:`LOG_DIR_ENV`.
+    """
+    return Path(log_dir or os.environ.get(LOG_DIR_ENV) or "log")
+
+
+def _prune_old_logs(directory: Path, pattern: str, days: int) -> None:
+    """Delete archives in *directory* whose mtime is older than *days*.
+
+    Runs once at startup.  loguru's own ``retention`` is only consulted after
+    a rotation, so a process that boots, writes a little, and is restarted
+    repeatedly (``Restart=always`` on a crash-looping unit) never trims
+    anything.  Startup is the one moment that is guaranteed to happen.
+
+    *pattern* must match archives only.  ``backend.log`` is not an archive,
+    and after a long outage its mtime looks just as old as one — sweeping it
+    would discard the file the new process is about to append to.
+    """
+    cutoff = date.today().toordinal() - days
+    for path in directory.glob(pattern):
+        try:
+            if not path.is_file():
+                continue
+            if date.fromtimestamp(path.stat().st_mtime).toordinal() < cutoff:
+                path.unlink()
+        except OSError:
+            # A log we cannot stat or remove must never keep the app from
+            # starting — logging is a side channel, not a dependency.
+            continue
+
+
+def setup_logging(log_dir: str | None = None) -> None:
     """Configure loguru sinks (console + rotating files) and intercept stdlib.
 
     Must be called once, early in the process lifetime — ideally before any
     ``logger`` calls are made.
+
+    *log_dir* defaults to ``$COPIXIV_LOG_DIR``, else the repo-local ``log/``.
+    Callers that are not the production service (tests, dev harnesses) should
+    pass their own directory so they do not append to — or rotate away — the
+    real archives.
     """
-    log_dir = Path(log_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
+    directory = _log_dir(log_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+
+    # Trim stragglers first: loguru's retention only fires *after* a rotation,
+    # so nothing would ever clean up a directory already full of stale files.
+    # The patterns skip the active ``backend.log`` / ``access.log`` (see
+    # ``_prune_old_logs``); rotated archives are named ``<stem>.<timestamp>.log``
+    # optionally followed by ``.gz``.
+    for stem in ("backend", "access"):
+        _prune_old_logs(directory, f"{stem}.*.log*", LOG_RETENTION_DAYS)
 
     # Remove default handler
     logger.remove()
@@ -84,32 +156,42 @@ def setup_logging(log_dir: str = "log") -> None:
         "<level>{message}</level>"
     )
 
-    # Console (stdout, colourised)
+    # Console (stdout, colourised).  Keeps loguru's default
+    # ``backtrace=True, diagnose=True``: a human is reading it live and the
+    # annotated locals are genuinely useful there.
     logger.add(sys.stdout, format=log_format, level="INFO", colorize=True)
+
+    # File sinks.  ``diagnose=False`` drops the per-frame variable dump
+    # (``│ └ <function foo at 0x7f…>``, 2.1x the bytes) while keeping
+    # ``backtrace=True`` so the *caller* chain above the raise point survives —
+    # that chain is what tells you who triggered the failure.  The dump also
+    # inlined live values (DB URLs, tokens) into the log.
+    file_kwargs = dict(
+        format=log_format,
+        level="INFO",
+        rotation=LOG_ROTATION,
+        retention=f"{LOG_RETENTION_DAYS} days",
+        compression=LOG_COMPRESSION,
+        encoding="utf-8",
+        backtrace=True,
+        diagnose=False,
+    )
 
     # Backend log file — all application / library messages.
     # Exclude only HTTP access-log entries produced by the access-log
     # middleware (tagged with ``extra.name == "http_access"``).
     logger.add(
-        log_dir / "backend.log",
-        format=log_format,
-        level="INFO",
-        rotation="10 MB",
-        retention="3 days",
-        encoding="utf-8",
+        directory / "backend.log",
         filter=lambda record: record["extra"].get("name") != "http_access",
+        **file_kwargs,
     )
 
     # Access log file — HTTP request/response entries from the access-log
     # middleware (tagged with ``extra.name == "http_access"``).
     logger.add(
-        log_dir / "access.log",
-        format=log_format,
-        level="INFO",
-        rotation="10 MB",
-        retention="3 days",
-        encoding="utf-8",
+        directory / "access.log",
         filter=lambda record: record["extra"].get("name") == "http_access",
+        **file_kwargs,
     )
 
     # --- Bridge standard library logging into loguru ---
