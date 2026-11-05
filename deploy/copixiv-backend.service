@@ -32,9 +32,14 @@
 # Debugging:
 #   journalctl -xeu copixiv-backend.service -n 80 --no-pager
 #   python scripts/pg_dev.py status   # database health/port
+#
+# 2026-11-02: 前端不再需要独立 unit —— 后端自己伺服 ``frontend/dist``
+# （``copixiv.app.mount_frontend``），浏览器直接访问 :9000。
+# 原 ``deploy/copixiv-frontend.service``（vite preview，:5173）已删除；
+# 若 /etc 里还装着它：``sudo systemctl disable --now copixiv-frontend``。
 
 [Unit]
-Description=Backend of Copixiv
+Description=Copixiv (API + frontend, :9000)
 # Rate limits for the Restart= loop below.  Both keys belong to [Unit]: in
 # [Service] systemd ignores them with "Unknown key name ... ignoring" (which
 # is exactly where they used to live, so the limits never applied).

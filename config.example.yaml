@@ -25,6 +25,15 @@ proxy:
 # 前端默认筛选值（min_like / min_text）已内置前端源码，不再有 frontend 段。
 batch_download:
   naming: "{author_name}/{series_name}/#{series_index}_{title}_{id}"
+# 数据库备份：由「任务管理 → 定时任务」里的 backup_database 任务执行
+# （建议每周一次，例如 cron `0 6 * * 6`）。没有启用该定时任务时，
+# 进程会在每周首次启动时兜底跑一次 pg_dump —— 那个兜底会在检测到
+# 已启用的 backup_database 计划后自动关闭。
+# `dir` 相对仓库根；`keep_count` 保留最近 N 份周备份。
+# 测试可用 env COPIXIV_BACKUP__DIR 覆盖目录。
+backup:
+  dir: backups
+  keep_count: 4
 security:
   api_key: ""
   allowed_hosts: []         # 额外放行域名；allowed_origins 未配置时由此推导（:5173/:4173）

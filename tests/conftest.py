@@ -43,6 +43,16 @@ PGDEV_SCRIPT = PROJECT_ROOT / "scripts" / "pg_dev.py"
 # the thing a developer watches.  os.environ is read by ``copixiv.log``.
 os.environ.setdefault("COPIXIV_LOG_DIR", str(Path(tempfile.gettempdir()) / "copixiv-test-logs"))
 
+# Same reason for backups: ``create_app()`` runs the startup ``pg_dump``
+# fallback when this ISO week's dump is missing (and the test databases have
+# no ``backup_database`` schedule).  Without this override a test run would
+# write ``backups/<week>.dump`` containing a *test* database — and because
+# the fallback only checks the filename, that poisoned file would suppress the
+# real backup for the rest of the week.
+os.environ.setdefault(
+    "COPIXIV_BACKUP__DIR", str(Path(tempfile.gettempdir()) / "copixiv-test-backups")
+)
+
 TEST_DB = "copixiv_test"
 TEST_DATABASE_URL = f"postgresql+psycopg2://postgres@127.0.0.1:5433/{TEST_DB}"
 

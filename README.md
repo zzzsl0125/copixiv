@@ -52,16 +52,21 @@ python main.py
 > 自带实例（数据目录 `.spike/`，端口 5433，与 `config.example.yaml` 一致；
 > 部署环境请自行提供 PostgreSQL 并配置 `database_url`）。
 
-### 3. 启动前端
+### 3. 构建前端（可选）
+
+后端会直接伺服 `frontend/dist`（`copixiv.app.mount_frontend`），所以只需构建一次，
+不需要再跑 `vite preview` / 单独的静态服务器：
 
 ```bash
 cd frontend
 npm install
 npm run build
-npm run preview
 ```
 
-打开 `http://localhost:5173` 即可开始使用
+打开 `http://localhost:9000` 即可开始使用（API 与页面同一个进程、同一个端口）。
+
+> 前端源码改动后重新执行 `npm run build` 即可，不用重启后端。
+> `frontend/dist` 不存在时后端只提供 API，并在日志里给出构建提示。
 
 
 ## 小说入库

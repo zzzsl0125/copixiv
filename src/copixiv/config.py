@@ -71,13 +71,19 @@ class BatchDownloadConfig(BaseModel):
 
 
 class BackupConfig(BaseModel):
-    """Weekly database backup retention.
+    """Weekly database backup location and retention.
 
     ``keep_count`` weekly backups are retained (default 4).  Keeping a
     single copy gives no protection against accidental corruption being
     vacuumed into the only backup; N copies preserve a recovery window.
+
+    ``dir`` is project-relative (the systemd unit's WorkingDirectory is the
+    repo root).  It is configurable mainly so tests can point it at a temp
+    directory — a test app must never write a dump into the production
+    ``backups/`` (a same-week file there would suppress the real backup).
     """
 
+    dir: str = "backups"
     keep_count: int = 4
 
 

@@ -15,18 +15,22 @@ npm run build      # vue-tsc 类型检查 + vite build
 
 ## 生产部署
 
-生产由 systemd 单元 `copixiv-frontend.service` 管理：
+前端不再由独立进程伺服：后端（`copixiv.service`，:9000）直接提供 `frontend/dist`，
+见 `copixiv.app.mount_frontend`。Node 只在**构建**时用到：
 
-- 每次启动前执行 `npm run build`（`ExecStartPre`），确保 `dist/` 与源码一致
-- 使用 `npm run preview` 在 `0.0.0.0:5173` 提供构建产物
-- `vite preview` 的 `preview.proxy` 同样把 `/api` 转发到 `127.0.0.1:9000`
+```bash
+cd frontend && npm run build   # 产出 dist/，之后不需要重启后端
+```
+
+- 构建是部署步骤，不在 systemd 的 `ExecStartPre` 里（避免每次启动都跑 vue-tsc + vite）
+- 页面与 API 同源同端口（`:9000`），没有 `vite preview`、没有 `:5173`
+- `npm run dev`（:5173）仍可用于开发，`/api` 由 Vite 代理到 `127.0.0.1:9000`
 
 常用操作：
 
 ```bash
-sudo systemctl restart copixiv-frontend   # 重启并重新构建
-journalctl -u copixiv-frontend -n 100     # 查看日志
-ss -tlnp | grep 5173                      # 检查端口占用
+journalctl -u copixiv -n 100      # 后端（含静态托管）日志
+bash ../scripts/diag_frontend.sh  # 构建 + 伺服诊断
 ```
 
 ## 后端契约
@@ -52,6 +56,7 @@ VITE_API_KEY=你的key npm run build
 
 ## 排障
 
-- **5173 端口被旧进程占用**：`pkill -f vite` 后重启服务（vite preview 无 `strictPort`，占用会导致启动失败）
-- **页面能开但数据空白**：确认后端 `copixiv-backend.service` 在 9000 端口运行，`curl http://127.0.0.1:5173/api/system/config` 应有 JSON
-- **CORS**：生产访问走同源 `/api` 代理，不依赖浏览器跨域；后端白名单默认允许 `localhost/127.0.0.1:5173/4173`
+- **页面 404 / 还是旧版**：确认 `frontend/dist/index.html` 存在且已重新 `npm run build`；`curl -I http://127.0.0.1:9000/` 应为 200 `text/html`
+- **页面能开但数据空白**：确认后端在 9000 端口运行，`curl http://127.0.0.1:9000/api/system/config` 应有 JSON
+- **CORS**：生产同源同端口，不依赖浏览器跨域；开发服务器（:5173）的白名单默认允许 `localhost/127.0.0.1:5173/4173`
+- **旧 unit 残留**：若 `/etc/systemd/system/copixiv-frontend.service` 还在，`sudo systemctl disable --now copixiv-frontend` 后删除

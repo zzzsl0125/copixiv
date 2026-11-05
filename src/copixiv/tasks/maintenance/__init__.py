@@ -31,6 +31,9 @@ knowledge — into four task modules plus a shared cursor module:
 * :mod:`.refetch` — ``refetch_missing_source``: re-downloads novels whose text
   file vanished (``has_epub=4``).  The reconciler only *labels* them; nothing
   was fetching them back.
+* :mod:`.backup` — ``backup_database``: the weekly ``pg_dump``, moved out of
+  ``create_app()``'s startup path.  An enabled schedule for it also disables
+  the startup fallback (see ``copixiv.app._has_enabled_backup_schedule``).
 
 Importing this package executes every ``@register(...)`` decorator, because
 the re-exports below import all four task modules — that is what keeps
@@ -56,6 +59,7 @@ from .epub import (
     _txt_has_images,
     check_epub,
 )
+from .backup import BackupDatabaseArgs, backup_database
 from .files import PruneOrphanFilesArgs, prune_orphan_files
 from .refetch import RefetchMissingSourceArgs, refetch_missing_source
 from .history import (
@@ -78,6 +82,8 @@ from .series import (
 )
 
 __all__ = [
+    "backup_database",
+    "BackupDatabaseArgs",
     "check_epub",
     "check_fts",
     "rebuild_fts",

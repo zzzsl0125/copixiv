@@ -162,9 +162,8 @@ pytest -m "not slow"           # 快速门禁
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install .
-python main.py                 # 后端 :9000
-
-cd frontend && npm install && npm run build && npm run preview   # 前端 :4173
+cd frontend && npm install && npm run build   # 构建一次，后端直接伺服 dist
+cd .. && python main.py                        # API + 前端 :9000
 ```
 
 ## 10. 关键文件索引

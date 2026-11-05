@@ -536,6 +536,10 @@ class TestTaskManagerHelpers:
         be carried too, but no task ever read them (``db_write()`` is a no-op
         boundary under PostgreSQL, and the executor uses the notifier itself),
         so they were removed rather than advertised.
+
+        ``backup_dir`` is the one config value a task *does* read (the
+        ``backup_database`` task needs to know where ``pg_dump`` writes).  It
+        travels as a plain string instead of re-introducing ``config``.
         """
         from copixiv.tasks.kernel import TaskManagerSystem
 
@@ -546,7 +550,10 @@ class TestTaskManagerHelpers:
         deps = tms._executor._deps
         assert deps["client"] == "cli"
         assert deps["file_storage"] is None
-        assert set(deps) == {"client", "file_storage", "image_downloader"}
+        assert deps["backup_dir"] == "backups"
+        assert set(deps) == {
+            "client", "file_storage", "image_downloader", "backup_dir",
+        }
 
 
 class TestFailedNovelRepository:

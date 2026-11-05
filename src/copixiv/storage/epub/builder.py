@@ -1,11 +1,22 @@
-"""EPUB builder — converts downloaded novel text + images into an EPUB file."""
+"""EPUB builder — converts downloaded novel text + images into an EPUB file.
+
+**Why the heavy imports are local.**  ``PIL`` (isolated import: +7 MiB RSS)
+and ``ebooklib``/``lxml`` (+11 MiB) were module-level imports, so they were
+loaded into every process that built an ``EpubBuilder`` — which ``app.py``
+does at startup, even though nothing is built until a novel with images is
+downloaded.  They now load on first use.  Once used they stay for the life
+of the process (CPython never unloads a module), so this buys the window
+between a restart and the first EPUB/image — measured as ~7 MiB off
+``create_app()``'s startup footprint, not a permanent saving.  Annotations
+are strings (``from __future__ import annotations``) so the type hints need
+no import.
+"""
+
+from __future__ import annotations
 
 import html
 import io
 from pathlib import Path
-
-from PIL import Image
-from ebooklib import epub
 
 from copixiv.core import formats
 from copixiv.storage import assets
@@ -86,6 +97,8 @@ class EpubBuilder:
             return False
 
         # Build EPUB
+        from ebooklib import epub
+
         book = epub.EpubBook()
         book.set_identifier(novel_id)
         book.set_title(title)
@@ -160,6 +173,8 @@ class EpubBuilder:
     def _compress_image(
         image_path: Path, quality: int = 75
     ) -> tuple[bytes, str, str]:
+        from PIL import Image
+
         with Image.open(image_path) as img:
             fmt = img.format.lower() if img.format else "jpeg"
 
@@ -199,6 +214,8 @@ class EpubBuilder:
     ) -> bool:
         if not image_path.exists():
             return False
+        from ebooklib import epub
+
         try:
             data, media_type, ext = EpubBuilder._compress_image(image_path, quality)
             epub_image = epub.EpubImage()
@@ -308,6 +325,8 @@ class EpubBuilder:
 
     @staticmethod
     def _build_cover_page() -> epub.EpubHtml:
+        from ebooklib import epub
+
         cover_page = epub.EpubHtml(
             title="封面", file_name="cover_page.xhtml", lang="zh"
         )
@@ -327,6 +346,8 @@ class EpubBuilder:
     def _build_main_page(
         title: str, author_name: str, content: str
     ) -> epub.EpubHtml:
+        from ebooklib import epub
+
         html_body = content.replace("\n", "<br/>")
         html_page = epub.EpubHtml(
             title="正文", file_name="content.xhtml", lang="zh"

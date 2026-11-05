@@ -277,6 +277,12 @@ class TaskContext:
     # tree): the executor uses the notifier itself, ``db_write()`` is a no-op
     # boundary under PG, and nothing needed the builder or the config.  Keeping
     # them advertised a dependency surface that did not exist.
+    #
+    # ``backup_dir`` is the one config value a task genuinely needs (which
+    # directory ``pg_dump`` writes into).  It travels as a plain string rather
+    # than dragging the whole ``AppConfig`` back in, and it defaults to the
+    # same directory the startup fallback uses.
+    backup_dir: str = "backups"
     task_id: int | None = None
 
     def child_uow(self) -> SqlUnitOfWork:
@@ -620,6 +626,7 @@ class TaskExecutor:
             client=self._deps.get("client"),
             file_storage=self._deps.get("file_storage"),
             image_downloader=self._deps.get("image_downloader"),
+            backup_dir=self._deps.get("backup_dir", "backups"),
             task_id=task_id,
         )
 
@@ -975,6 +982,10 @@ class TaskManagerSystem:
                 "client": client,
                 "file_storage": file_storage,
                 "image_downloader": image_downloader,
+                # Only the one config value a task reads (backup_database).
+                "backup_dir": (
+                    config.backup.dir if config is not None else "backups"
+                ),
             },
         )
         self._ticker = CronTicker(session_factory)

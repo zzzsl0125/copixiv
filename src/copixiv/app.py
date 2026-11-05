@@ -12,9 +12,9 @@ is called.  Entry paths:
 - tests / embedding → ``from copixiv.app import create_app``
 
 Public surface: :func:`create_app`, :func:`main`, :func:`ensure_port_free`,
-:data:`UVICORN_LOG_CONFIG`.  The three security/access middlewares and the
-``DomainError`` HTTP handler also live here (moved from the former
-``web_api`` package).
+:func:`mount_frontend`, :data:`UVICORN_LOG_CONFIG`.  The three security/access
+middlewares and the ``DomainError`` HTTP handler also live here (moved from the
+former ``web_api`` package).
 """
 
 from __future__ import annotations
@@ -310,24 +310,58 @@ class _AppSingletons:
 # Build — wire everything together
 # ---------------------------------------------------------------------------
 
-# Weekly ``pg_dump`` backups land in this directory (project-relative).
-_BACKUP_DIR = "backups"
+# Registered name of the backup task (tasks/maintenance/backup.py).  An
+# enabled ``scheduled_task`` row with this task name disables the startup
+# fallback below.
+_BACKUP_TASK_NAME = "backup_database"
 
 
-def _should_auto_backup() -> bool:
-    """Return True if this week's backup doesn't already exist."""
+def _should_auto_backup(backup_dir: str) -> bool:
+    """Return True if this week's backup doesn't already exist in *backup_dir*."""
     this_week = date.today().strftime("%G-W%V")
-    week_backup = Path(_BACKUP_DIR) / f"{this_week}.dump"
+    week_backup = Path(backup_dir) / f"{this_week}.dump"
     return not week_backup.exists()
+
+
+def _has_enabled_backup_schedule(session_factory) -> bool:
+    """True when a ``backup_database`` cron row is enabled.
+
+    Backups are the :mod:`copixiv.tasks.maintenance.backup` task's job; a
+    scheduled install must not *also* dump the whole database on the first
+    startup of every ISO week (that dump is a full table read competing with
+    whatever else the machine is doing).  The startup path below is only a
+    fallback for installs that have not scheduled one yet.
+
+    A failure to read the table (e.g. a schema too old for the query) is
+    treated as "no schedule" — the fallback is the safe side.
+    """
+    from sqlalchemy import select
+
+    from copixiv.db import models
+
+    try:
+        with session_factory() as session:
+            return session.execute(
+                select(models.ScheduledTask.id).where(
+                    models.ScheduledTask.task == _BACKUP_TASK_NAME,
+                    models.ScheduledTask.is_enabled.is_(True),
+                )
+            ).first() is not None
+    except Exception:
+        logger.exception(
+            "Could not check for a backup schedule — keeping the startup "
+            "backup fallback."
+        )
+        return False
 
 
 def _maybe_backup(cfg) -> None:
     """Create a weekly pg_dump backup and remove older ones (keep N most recent)."""
     try:
-        backup_database(cfg.database_url, backup_dir=_BACKUP_DIR)
+        backup_database(cfg.database_url, backup_dir=cfg.backup.dir)
         cleanup_old_backups(
             cfg.database_url, keep_count=cfg.backup.keep_count,
-            backup_dir=_BACKUP_DIR,
+            backup_dir=cfg.backup.dir,
         )
     except Exception:
         logger.exception("Backup failed — continuing without backup.")
@@ -422,16 +456,22 @@ def _build(config_path: str | None = None) -> _AppSingletons:
 
     cfg = config if config_path is None else load_config(config_path)
 
-    # Auto-backup: first startup of each ISO week (pg_dump — driven by
-    # ``cfg.database_url``, not a file path).
-    if _should_auto_backup():
-        logger.info("First startup this week — creating automatic backup.")
-        _maybe_backup(cfg)
-
     engine = create_database_engine(cfg.database_url)
     session_factory = create_session_factory(engine)
     init_database(engine, cfg.database_url)
     logger.info("Database initialized (Alembic migrations applied).")
+
+    # Weekly backup.  The authoritative path is the ``backup_database`` task
+    # on a cron schedule (tasks/maintenance/backup.py); this startup dump is
+    # only a fallback for installs that have not scheduled one yet.  It is a
+    # full ``pg_dump`` — 590 MB read / ~71 MB write on this host — so it must
+    # stop as soon as a schedule exists.
+    if (
+        _should_auto_backup(cfg.backup.dir)
+        and not _has_enabled_backup_schedule(session_factory)
+    ):
+        logger.info("First startup this week — creating automatic backup.")
+        _maybe_backup(cfg)
 
     # File storage + EPUB builder + image downloader
     file_storage = FileStorage(cfg.path.download or "download")
@@ -536,19 +576,95 @@ def mount_routers(app: FastAPI) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Frontend static serving
+# ---------------------------------------------------------------------------
+
+# The built Vue bundle.  The backend serves it directly: the app used to run a
+# second process (``node vite preview``) whose only job was to hand out 716 KB
+# of static files — 141 MiB RSS / 118 MiB PSS on this host, plus a full
+# ``npm run build`` on every service start.  One process, one port.
+_FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+
+# Vite emits content-hashed filenames under ``/assets``; they can be cached
+# forever.  ``index.html`` must not be, or a rebuild would keep serving the
+# old bundle to a warm browser.
+_ASSET_CACHE = {"Cache-Control": "public, max-age=31536000, immutable"}
+_INDEX_CACHE = {"Cache-Control": "no-cache"}
+
+
+def mount_frontend(app: FastAPI, dist: Path | None = None) -> bool:
+    """Serve the built SPA (``frontend/dist``) from the backend.
+
+    Routes, in registration order:
+
+    * ``GET /assets/{path}`` — hashed bundle files, immutable-cached.  The
+      path is resolved and containment-checked so ``..`` cannot escape the
+      assets directory.
+    * ``GET /{path}`` — SPA fallback: an existing root file (``favicon.svg``,
+      ``icons.svg``) is served as-is, every other path gets ``index.html``
+      so Vue Router's ``createWebHistory`` routes survive a refresh.
+      ``/api/...`` is **not** caught here — an unknown API path still gets
+      the JSON 404 it got before static serving existed.
+
+    Returns ``False`` (and logs a warning) when the bundle is missing — e.g.
+    a checkout that never ran ``npm run build``; the API keeps working.
+    """
+    from fastapi import HTTPException
+    from fastapi.responses import FileResponse
+
+    root = (dist or _FRONTEND_DIST).resolve()
+    index = root / "index.html"
+    if not index.is_file():
+        logger.warning(
+            f"Frontend bundle not found at {root} — API only. "
+            "Build it with: cd frontend && npm run build"
+        )
+        return False
+
+    assets_root = root / "assets"
+
+    @app.get("/assets/{asset_path:path}", include_in_schema=False)
+    async def _frontend_asset(asset_path: str):
+        target = (assets_root / asset_path).resolve()
+        if not target.is_relative_to(assets_root) or not target.is_file():
+            raise HTTPException(status_code=404, detail="Not Found")
+        return FileResponse(target, headers=_ASSET_CACHE)
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def _frontend_index(full_path: str):
+        if full_path == "api" or full_path.startswith("api/"):
+            # Keep FastAPI's JSON 404 contract for unknown API routes; the
+            # catch-all must not turn them into an HTML page.
+            raise HTTPException(status_code=404, detail="Not Found")
+        if full_path:
+            candidate = (root / full_path).resolve()
+            if candidate.is_relative_to(root) and candidate.is_file():
+                return FileResponse(candidate)
+        return FileResponse(index, headers=_INDEX_CACHE)
+
+    logger.info(f"Serving frontend bundle from {root}")
+    return True
+
+
+# ---------------------------------------------------------------------------
 # FastAPI factory
 # ---------------------------------------------------------------------------
 
 
-def create_app(config_path: str | None = None):
+def create_app(config_path: str | None = None, log_dir: str | None = None):
     """Build the container and return a fully configured FastAPI app.
 
     ``config_path`` selects an alternate config.yaml (defaults to the
     shared application config).  Construction — logging setup, DB
     migrations, account loading — happens here, never at import time.
+
+    ``log_dir`` selects where the rotating sinks are written; it defaults to
+    ``$COPIXIV_LOG_DIR`` and then the repo-local ``log/``.  Tests pass a temp
+    directory so a suite run does not append to — and rotate away — the
+    production archives.
     """
     # Configure logging before anything else so all log output is captured.
-    setup_logging()
+    setup_logging(log_dir)
 
     s = _build(config_path)
 
@@ -731,6 +847,10 @@ def create_app(config_path: str | None = None):
     )
 
     mount_routers(app)
+
+    # Same process serves the built SPA (see deploy/copixiv.service — the
+    # unit no longer supervises Node).  A missing bundle only logs.
+    mount_frontend(app)
 
     return app
 
