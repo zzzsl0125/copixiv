@@ -2,6 +2,10 @@ name: CI
 
 # 触发时机：push 到任意分支 + 任何 Pull Request。
 # 同一分支上多次快速 push 时取消仍在运行的旧任务（节省额度）。
+#
+# 2026-11-09：旧的 Python 测试套件（1100 用例 / 23k 行）已整体移除，
+# 由用户决定重写。新增门禁：ruff + mypy + import-linter。旧套件里的
+# pg_bigm 编译步骤只服务于那批用例，一并移除。
 on:
   push:
   pull_request:
@@ -12,9 +16,9 @@ concurrency:
 
 jobs:
   backend:
-    name: Backend (pytest)
+    name: Backend (ruff + mypy + import-linter)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -23,29 +27,17 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      # dev extras 含 pytest / pytest-asyncio / httpx / pgserver；pixivpy3
-      # 是 git 依赖（pyproject 里的 direct reference），runner 自带 git。
-      # 测试已迁移到 PostgreSQL：pip install ".[dev]" 会装入 pgserver（自带
-      # PG16 二进制）和 psycopg2-binary；tests/conftest.py 通过
-      # scripts/pg_dev.py 在 .spike/ 启动本地实例（端口 5433），全程离线、
-      # 不需要真实 token。种子数据在缺少 database/database.db 时自动改用
-      # 确定性合成样本，CI 无需任何外部数据文件。
       - name: Install dependencies
-        run: pip install ".[dev]"
+        run: pip install ".[dev]" ruff mypy import-linter
 
-      # pgserver 的 wheel 只带 plpgsql 与 vector，**不含 pg_bigm**（0.1.4 实测），
-      # 而迁移 0007 起关键词搜索底座就是 pg_bigm 的 bigram GIN 索引。不先编进去，
-      # `CREATE EXTENSION pg_bigm` 会在建库迁移时就失败 —— tests/adapters/
-      # test_migrations.py 的 fresh-DB 用例与 conftest 的建库一起挂。
-      # 脚本幂等（已装则跳过），需要 gcc / make / git：runner 自带，
-      # 且从源码构建（固定到提交 SHA），不需要网络上的预编译产物。
-      - name: Build pg_bigm extension into pgserver's PostgreSQL
-        run: bash scripts/build_pg_bigm.sh
+      - name: Lint (ruff)
+        run: ruff check src
 
-      # 快速门禁：CI 只跑非 slow 用例（含迁移链/并发在内的 slow 测试按需
-      # 全量执行：python -m pytest，见 pyproject.toml 的 markers 注释）。
-      - name: Run tests
-        run: python -m pytest -q -m "not slow"
+      - name: Type-check (mypy)
+        run: mypy src/copixiv
+
+      - name: Layer contracts (import-linter)
+        run: lint-imports
 
       # 前端类型的唯一真相是后端导出的 OpenAPI：提交的 frontend/openapi.json
       # 必须与当前路由/模型一致，否则 openapi-typescript 生成的就是过期类型。
@@ -80,9 +72,6 @@ jobs:
           npm run codegen
           git diff --exit-code -- src/types/api.generated.ts
 
-      - name: Run tests
-        run: npm run test
-
-      # vue-tsc 会连带对 tests/**/*.ts 做严格类型检查，再产出生产构建。
+      # 前端测试套件也已整体移除（2026-11-09）；构建含 vue-tsc 严格类型检查。
       - name: Type-check and build
         run: npm run build
