@@ -7,6 +7,11 @@ placeholder rows (FK constraints) and refreshed aggregate summaries.
 Callers must wrap this in a short write transaction (e.g.
 ``run_write_transaction(uow, ...)``) — this helper never starts or commits
 a transaction itself.
+
+Synchronous on purpose: it is pure database work and runs as the *callback*
+inside :func:`copixiv.db.write_lock.run_write_transaction`, which owns the
+single ``asyncio.to_thread`` hop.  A caller who is already in a transaction
+(``with uow.begin()``) calls it directly.
 """
 
 from __future__ import annotations
@@ -20,7 +25,7 @@ from copixiv.features.novels.repo import (
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 
 
-async def persist_novels(
+def persist_novels(
     uow: SqlUnitOfWork,
     novels: list[NovelDraft],
     force_update: list[str] | None = None,
@@ -42,8 +47,8 @@ async def persist_novels(
     SQLAlchemyAuthorRepository(uow.session).ensure_exists(author_ids)
     SQLAlchemySeriesRepository(uow.session).ensure_exists(series_ids)
 
-    count = await SQLAlchemyNovelRepository(uow.session).upsert_novels(novels, force_update or [])
-    await SQLAlchemyAuthorRepository(uow.session).update_summary(author_ids)
-    await SQLAlchemySeriesRepository(uow.session).update_summary(series_ids)
+    count = SQLAlchemyNovelRepository(uow.session).upsert_novels(novels, force_update or [])
+    SQLAlchemyAuthorRepository(uow.session).update_summary(author_ids)
+    SQLAlchemySeriesRepository(uow.session).update_summary(series_ids)
 
     return count

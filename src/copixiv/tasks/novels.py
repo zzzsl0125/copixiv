@@ -23,7 +23,7 @@ from copixiv.core.calendar import month_ranges
 from copixiv.features.novels.ingest import ingest
 from copixiv.core.models import TaskResult
 from copixiv.core.services import safe_get
-from copixiv.db.write_lock import run_write_transaction
+from copixiv.db.write_lock import read_transaction, run_write_transaction
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 from copixiv.log import logger
 
@@ -301,17 +301,18 @@ async def author_fetch(args: AuthorFetchArgs, ctx: TaskContext) -> TaskResult:
     session_factory = ctx.session_factory
     uow = ctx.uow
 
-    # Plan — read-only, short transaction, no lock.
-    async with uow.begin():
-        if not args.force and not await SQLAlchemyAuthorRepository(uow.session).need_update(args.author_id):
-            logger.info(
-                f"Skip Author {args.author_id}, already updated today."
-            )
-            return TaskResult(
-                summary=f"作者 #{args.author_id} 今日已更新，跳过"
-            )
+    # Plan — read-only, one short read transaction, no lock.
+    def _plan(uw) -> tuple[bool, dict | None]:
+        repo = SQLAlchemyAuthorRepository(uw.session)
+        skip = (not args.force) and repo.need_update(args.author_id)
+        return skip, (None if skip else repo.get_by_id(args.author_id))
 
-        author = await SQLAlchemyAuthorRepository(uow.session).get_by_id(args.author_id)
+    skip, author = await read_transaction(uow, _plan)
+    if skip:
+        logger.info(f"Skip Author {args.author_id}, already updated today.")
+        return TaskResult(
+            summary=f"作者 #{args.author_id} 今日已更新，跳过"
+        )
 
     if not author:
         async with ctx.client.account_rule(
@@ -382,8 +383,12 @@ async def author_delete(args: AuthorDeleteArgs, ctx: TaskContext) -> TaskResult:
 @register("author_special_follow", description="抓取特别关注的作者的新作")
 async def author_special_follow(ctx: TaskContext) -> TaskResult:
     """Check for new novels from specially-followed authors."""
-    async with ctx.uow.begin():
-        author_ids = await SQLAlchemyAuthorRepository(ctx.uow.session).get_special_follow_author_ids()
+    author_ids = await read_transaction(
+        ctx.uow,
+        lambda uw: SQLAlchemyAuthorRepository(
+            uw.session
+        ).get_special_follow_author_ids(),
+    )
 
     if not author_ids:
         logger.info("No special followed authors.")

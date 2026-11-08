@@ -170,7 +170,7 @@ class SQLAlchemyTagRepository(BaseRepository):
 
     # -- tags ---------------------------------------------------------------
 
-    async def get_all(self) -> Sequence[Any]:
+    def get_all(self) -> Sequence[Any]:
         return list(self.session.execute(
             select(models.Tag).order_by(models.Tag.name)
         ).scalars().all())
@@ -194,30 +194,30 @@ class SQLAlchemyTagRepository(BaseRepository):
 
     # -- preferences --------------------------------------------------------
 
-    async def get_preferences(self) -> Sequence[Any]:
+    def get_preferences(self) -> Sequence[Any]:
         stmt = select(models.TagPreference).order_by(models.TagPreference.sort_index)
         return list(self.session.execute(stmt).scalars().all())
 
-    async def create_preference(self, pref_data: dict) -> Any:
+    def create_preference(self, pref_data: dict) -> Any:
         pref = models.TagPreference(**pref_data)
         self.session.add(pref)
         self.session.flush()
         return pref
 
-    async def update_preference(self, pref_id: int, pref_data: dict) -> Any | None:
+    def update_preference(self, pref_id: int, pref_data: dict) -> Any | None:
         return self._update_attrs(models.TagPreference, pref_id, pref_data)
 
-    async def delete_preference(self, pref_id: int) -> bool:
+    def delete_preference(self, pref_id: int) -> bool:
         return self._delete_by_id(models.TagPreference, pref_id)
 
-    async def reorder_preferences(self, ids: list[int]) -> bool:
+    def reorder_preferences(self, ids: list[int]) -> bool:
         return self._reorder(models.TagPreference, "sort_index", ids)
 
     # -- aliases ------------------------------------------------------------
     # source/target are stored as integer FKs → tag.id but exposed as tag
     # names for API compatibility.
 
-    async def get_aliases(self) -> Sequence[dict]:
+    def get_aliases(self) -> Sequence[dict]:
         """Return all tag aliases with source/target as tag names."""
         rows = self.session.execute(
             select(
@@ -267,10 +267,10 @@ class SQLAlchemyTagRepository(BaseRepository):
             for src, tgt in rows
         }
 
-    async def get_alias_map(self) -> dict[str, str]:
+    def get_alias_map(self) -> dict[str, str]:
         return self.get_alias_map_sync()
 
-    async def create_alias(self, alias_data: dict) -> dict:
+    def create_alias(self, alias_data: dict) -> dict:
         """Create a tag alias.  *alias_data* should have 'source' and 'target'
         as tag *names* — they are resolved to tag IDs internally.
 
@@ -307,7 +307,7 @@ class SQLAlchemyTagRepository(BaseRepository):
             "target": target_name,
         }
 
-    async def delete_alias(self, alias_id: int) -> bool:
+    def delete_alias(self, alias_id: int) -> bool:
         alias = self.session.get(models.TagAlias, alias_id)
         if alias is None:
             return False
@@ -335,7 +335,7 @@ class SQLAlchemyTagRepository(BaseRepository):
     # * 候选按 target 用一条 ``CROSS JOIN LATERAL`` 集合语句算完（不再 N+1），
     #   且单条语句的输入 target 数有硬上限（见 :func:`_scan_limit`）。
 
-    async def suggest_aliases(
+    def suggest_aliases(
         self, limit: int = 5, offset: int = 0, target_tag: str | None = None
     ) -> dict:
         """Suggest alias mappings by finding tags with similar names.
@@ -443,7 +443,7 @@ class SQLAlchemyTagRepository(BaseRepository):
             "candidates": candidates,
         }
 
-    async def apply_alias_retroactively(self, source: str, target: str) -> int:
+    def apply_alias_retroactively(self, source: str, target: str) -> int:
         """Replace all occurrences of *source* tag with *target* tag on novels.
 
         Uses a single array operation: ``UPDATE novel SET tags =

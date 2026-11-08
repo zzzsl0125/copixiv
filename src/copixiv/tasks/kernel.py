@@ -361,19 +361,41 @@ class TaskHistoryRecorder:
 
         ``status=None`` is a progress-only write: the row's state is left
         alone, so a late progress update can never resurrect a finished task.
+
+        The public method stays a coroutine — its callers are task coroutines
+        — but the blocking session work runs in one worker thread
+        (:meth:`_update_sync`): a lifecycle update is a handful of events per
+        task, so one hop per event is cheap and the event loop stays free.
         """
-        async with db_write():
-            with self._session_factory() as session:
-                repo = SQLAlchemyTaskRepository(session)
-                repo.update_task_sync(
-                    task_id, status, result=result, duration=duration,
-                    progress=progress,
-                )
-                session.commit()
+        await asyncio.to_thread(
+            self._update_sync,
+            task_id,
+            status,
+            result=result,
+            duration=duration,
+            progress=progress,
+        )
         if status is not None and status != "pending":
             # Once started (running) or terminal this row is no longer a
             # live queue entry.
             self._live_pending.discard(task_id)
+
+    def _update_sync(
+        self,
+        task_id: int,
+        status: str | None,
+        result: str | None = None,
+        duration: float | None = None,
+        progress: str | None = None,
+    ) -> None:
+        """Synchronous body of :meth:`update` (runs in a worker thread)."""
+        with db_write(), self._session_factory() as session:
+            repo = SQLAlchemyTaskRepository(session)
+            repo.update_task_sync(
+                task_id, status, result=result, duration=duration,
+                progress=progress,
+            )
+            session.commit()
 
     # -- stale recovery ----------------------------------------------------
 
@@ -1089,7 +1111,11 @@ class TaskManagerSystem:
             self._wake.clear()
             try:
                 while not self._stopping:
-                    pending = self._next_pending(fetch_lane)
+                    # The queue select is a blocking DB read; hop to a worker
+                    # thread so the 1s poll never stalls the event loop.
+                    pending = await asyncio.to_thread(
+                        self._next_pending, fetch_lane,
+                    )
                     if pending is None:
                         break
                     await self._run_pending(pending)

@@ -47,6 +47,7 @@ from sqlalchemy import select as _select
 
 from copixiv.core.models import EpubStatus, TaskResult
 from copixiv.db import models
+from copixiv.db.write_lock import read_transaction
 from copixiv.features.failures.repo import FailedNovelRepository
 from copixiv.log import logger
 
@@ -130,7 +131,9 @@ async def refetch_missing_source(
             summary="重抓丢失正文: 缺少 pixiv 客户端或文件存储，跳过"
         )
 
-    with ctx.session_factory() as session:
+    def _plan(uw) -> tuple[int, list[int]]:
+        """Count + candidate set in one read transaction (one thread hop)."""
+        session = uw.session
         total = _count_missing(session)
 
         # Two independent reasons to leave a row out, unioned because either
@@ -162,6 +165,9 @@ async def refetch_missing_source(
                 set(candidates)
             )
             candidates = [nid for nid in candidates if nid not in skip_ids]
+        return total, candidates
+
+    total, candidates = await read_transaction(ctx.uow, _plan)
 
     if not candidates:
         return TaskResult(
@@ -206,8 +212,9 @@ async def refetch_missing_source(
 
     # The ordinary ingest path already records failures in the ledger; the
     # count here is what the operator reads.
-    with ctx.session_factory() as session:
-        remaining = _count_missing(session)
+    remaining = await read_transaction(
+        ctx.uow, lambda uw: _count_missing(uw.session),
+    )
 
     logger.info(
         "refetch_missing_source: 成功 {} / {} 本，仍为 has_epub=4 的 {} 本",

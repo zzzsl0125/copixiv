@@ -76,7 +76,7 @@ MAX_RETRY_IDS = 500
 
 
 @router.get("", response_model=FailedNovelListResponse)
-async def list_failed_novels(
+def list_failed_novels(
     offset: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
     uow: SqlUnitOfWork = Depends(get_uow),
@@ -92,14 +92,14 @@ async def list_failed_novels(
 
 
 @router.get("/count", response_model=FailedNovelCountResponse)
-async def count_failed_novels(
+def count_failed_novels(
     uow: SqlUnitOfWork = Depends(get_uow),
 ):
     return FailedNovelCountResponse(count=FailedNovelRepository(uow.session).count())
 
 
 @router.delete("/{novel_id}", status_code=204)
-async def delete_failed_novel(
+def delete_failed_novel(
     novel_id: int,
     uow: SqlUnitOfWork = Depends(get_write_uow),
 ):
@@ -108,7 +108,7 @@ async def delete_failed_novel(
 
 
 @router.post("/{novel_id}/reset-count", status_code=204)
-async def reset_failed_novel_count(
+def reset_failed_novel_count(
     novel_id: int,
     uow: SqlUnitOfWork = Depends(get_write_uow),
 ):
@@ -122,7 +122,7 @@ async def reset_failed_novel_count(
 
 
 @router.post("/reset-count", status_code=204)
-async def reset_all_failed_novel_counts(
+def reset_all_failed_novel_counts(
     uow: SqlUnitOfWork = Depends(get_write_uow),
 ):
     """Reset every failure count to 0 — records stay, all unblocked."""
@@ -130,7 +130,7 @@ async def reset_all_failed_novel_counts(
 
 
 @router.delete("", status_code=204)
-async def clear_all_failed_novels(
+def clear_all_failed_novels(
     uow: SqlUnitOfWork = Depends(get_write_uow),
 ):
     """Clear the whole ledger."""
@@ -138,7 +138,7 @@ async def clear_all_failed_novels(
 
 
 @router.post("/retry", response_model=BatchTaskResponse)
-async def retry_failed_novels(
+def retry_failed_novels(
     body: FailedNovelRetryRequest = Body(...),
     task_manager=Depends(get_task_manager),
 ):
@@ -155,7 +155,7 @@ async def retry_failed_novels(
 
 
 @router.post("/retry-all", response_model=BatchTaskResponse)
-async def retry_all_failed_novels(
+def retry_all_failed_novels(
     uow: SqlUnitOfWork = Depends(get_uow),
     task_manager=Depends(get_task_manager),
 ):

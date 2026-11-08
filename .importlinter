@@ -1,0 +1,61 @@
+[importlinter]
+# 契约里禁用了 fastapi / sqlalchemy / pixivpy3 等第三方模块，因此必须为 true。
+# import-linter 只认字符串形式的 "true"（见 forbidden.py 的
+# _graph_was_built_with_externals），不是 TOML 布尔值。
+root_packages =
+    copixiv
+include_external_packages = true
+
+[importlinter:contract:core-is-pure]
+name = core 是纯 Python，不依赖任何其他层
+type = forbidden
+source_modules =
+    copixiv.core
+forbidden_modules =
+    copixiv.db
+    copixiv.features
+    copixiv.tasks
+    copixiv.pixiv
+    copixiv.storage
+    copixiv.notify
+    copixiv.app
+    fastapi
+    sqlalchemy
+
+[importlinter:contract:adapters-are-leaves]
+name = 适配层（db/pixiv/storage/notify）不被 features/tasks/app 反向依赖
+type = forbidden
+source_modules =
+    copixiv.db
+    copixiv.pixiv
+    copixiv.storage
+    copixiv.notify
+forbidden_modules =
+    copixiv.features
+    copixiv.tasks
+    copixiv.app
+
+[importlinter:contract:pixivpy3-whitelist]
+name = pixivpy3 只允许被 pixiv/ 直接 import
+type = forbidden
+source_modules =
+    copixiv.core
+    copixiv.db
+    copixiv.features
+    copixiv.tasks
+    copixiv.storage
+    copixiv.notify
+forbidden_modules =
+    pixivpy3
+allow_indirect_imports = true
+
+[importlinter:contract:db-is-the-only-sql-layer]
+name = db/ 是唯一持有 SQLAlchemy 引擎与模型的层
+type = forbidden
+source_modules =
+    copixiv.core
+    copixiv.pixiv
+    copixiv.storage
+    copixiv.notify
+forbidden_modules =
+    sqlalchemy

@@ -52,7 +52,7 @@ from copixiv.core.exceptions import (
 )
 from copixiv.core.models import Novel
 from copixiv.db.uow import SqlUnitOfWork
-from copixiv.db.write_lock import run_write_transaction
+from copixiv.db.write_lock import read_transaction, run_write_transaction
 from copixiv.features.authors.resolve_names import (
     collect_author_names,
     writeback_author_names,
@@ -103,7 +103,9 @@ class SyncNovelUseCase:
                 （webview 返回空）→ 404。
             ValidationError: 本地书 → 400（没有来源可同步）。
         """
-        novel = await self._read(novel_id)
+        novel = await read_transaction(
+            self._uow, lambda read_uow: self._read(read_uow, novel_id),
+        )
         if novel is None:
             raise NotFoundError(f"Novel {novel_id} not found")
         if novel.source != SOURCE_PIXIV:
@@ -125,7 +127,9 @@ class SyncNovelUseCase:
 
         # 读回与 PATCH 同一条路（``get_by_id`` 的域模型已处理 is_special_follow
         # 的 NULL 归一），前端拿到的形状与 PATCH 响应一致。
-        updated = await self._read(novel_id)
+        updated = await read_transaction(
+            self._uow, lambda read_uow: self._read(read_uow, novel_id),
+        )
         if updated is None:  # 并发删除的兜底——上面刚写过，实际不会发生
             raise NotFoundError(f"Novel {novel_id} not found")
         return updated
@@ -134,16 +138,14 @@ class SyncNovelUseCase:
     # 三个阶段：读（短事务）→ 抓（网络）→ 写（短事务）
     # ------------------------------------------------------------------
 
-    async def _read(self, novel_id: int) -> Novel | None:
+    def _read(self, uow: SqlUnitOfWork, novel_id: int) -> Novel | None:
         """短读事务读一行；读不到就是不存在。
 
-        显式开一个 ``begin()``（而不是裸用 ``uow.session``）：读完即提交/释放，
-        抓取阶段不会挂着一个打开的读事务。
+        同步：事务边界由调用方的 ``read_transaction`` 提供（那个
+        ``asyncio.to_thread`` 既把阻塞读搬出事件循环，也负责 BEGIN/COMMIT）。
+        读完即提交/释放，抓取阶段不会挂着一个打开的读事务。
         """
-        async with self._uow.begin():
-            return await SQLAlchemyNovelRepository(
-                self._uow.session
-            ).get_by_id(novel_id)
+        return SQLAlchemyNovelRepository(uow.session).get_by_id(novel_id)
 
     async def _fetch(self, novel_id: int) -> NovelDraft | None:
         """``webview_novel`` → ``build_from_webview``；取不到返回 ``None``。
@@ -185,14 +187,17 @@ class SyncNovelUseCase:
         )
         return replace(draft, author_name=names.get(draft.author_id))
 
-    async def _persist(self, uow: SqlUnitOfWork, draft: NovelDraft) -> None:
+    def _persist(self, uow: SqlUnitOfWork, draft: NovelDraft) -> None:
         """落库（调用方已开写事务）：upsert 一行 + 把作者名写回 ``author`` 行。
 
         ``writeback_author_names`` 与 ``ingest`` 的持久化阶段同一个收尾：名字是
         作者的**属性**，只写 novel 行会让作者页与卡片显示两个名字。
+
+        同步：它是 ``run_write_transaction`` 的 ``fn`` 回调，整个事务跑在同一个
+        worker 线程里——写成 ``async def`` 会被当成普通返回值，写入静默丢失。
         """
-        await batch_upsert([draft], uow, force_update=SYNC_FORCE_UPDATE)
+        batch_upsert([draft], uow, force_update=SYNC_FORCE_UPDATE)
         if draft.author_name:
-            await writeback_author_names(
+            writeback_author_names(
                 {draft.author_id: draft.author_name}, uow,
             )

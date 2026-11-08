@@ -19,7 +19,7 @@ from copixiv.core.services import (
     MARKER_OVERLAP,
     has_image_placeholders_bytes,
 )
-from copixiv.db.write_lock import run_write_transaction
+from copixiv.db.write_lock import read_transaction, run_write_transaction
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.storage import assets
 from copixiv.storage.epub import state
@@ -146,16 +146,19 @@ async def check_epub(ctx: TaskContext) -> TaskResult:
     # holding one transaction open for the whole file-I/O pass is exactly what
     # this task should not do.  Coverage is unchanged — *every* row is still
     # examined every run, which is the property the cursor removal bought.
+    def _read_page(uw, after_id: int) -> list:
+        return uw.session.execute(
+            _select(
+                models.Novel.id, models.Novel.path, models.Novel.has_epub
+            )
+            .where(models.Novel.id > after_id)
+            .order_by(models.Novel.id)
+            .limit(_SWEEP_READ_PAGE)
+        ).fetchall()
+
     async def _page(after_id: int) -> list:
-        async with uow.begin():
-            return uow.session.execute(
-                _select(
-                    models.Novel.id, models.Novel.path, models.Novel.has_epub
-                )
-                .where(models.Novel.id > after_id)
-                .order_by(models.Novel.id)
-                .limit(_SWEEP_READ_PAGE)
-            ).fetchall()
+        # One read transaction (one thread hop) per keyset page.
+        return await read_transaction(uow, lambda uw: _read_page(uw, after_id))
 
     # A leftover cursor from the old design would make the next reader think
     # part of the table was already done; clear it once, then forget it.
@@ -185,9 +188,9 @@ async def check_epub(ctx: TaskContext) -> TaskResult:
     async def _apply(ids: list[int], status: EpubStatus) -> None:
         await run_write_transaction(
             uow,
-            lambda uw: SQLAlchemyNovelRepository(uw.session).update_has_epub_status(
-                ids, status
-            ),
+            lambda uw: SQLAlchemyNovelRepository(
+                uw.session
+            ).update_has_epub_status(ids, status),
         )
 
     async def _flush() -> None:

@@ -59,6 +59,7 @@ from sqlalchemy import select as _select
 
 from copixiv.core.models import TaskResult
 from copixiv.db import models
+from copixiv.db.write_lock import read_transaction
 from copixiv.log import logger
 from copixiv.storage import assets
 
@@ -216,10 +217,12 @@ async def prune_orphan_files(
     if not root.is_dir():
         return TaskResult(summary=f"孤儿文件清理: 下载目录不存在 {root}")
 
-    with ctx.session_factory() as session:
-        known_ids = set(
-            session.execute(_select(models.Novel.id)).scalars().all()
+    def _read_known_ids(uw) -> set[int]:
+        return set(
+            uw.session.execute(_select(models.Novel.id)).scalars().all()
         )
+
+    known_ids = await read_transaction(ctx.uow, _read_known_ids)
 
     now = time.time()
     orphans = await asyncio.to_thread(

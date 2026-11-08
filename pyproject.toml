@@ -33,17 +33,41 @@ dependencies = [
 [project.optional-dependencies]
 # 本地开发环境：pgserver 提供自带的 PG16 二进制（scripts/pg_dev.py 用它起
 # 本地实例，端口 5433）。测试套件已于 2026-11-09 全部移除（用户决定重写），
-# 新的门禁是 ruff / mypy / import-linter，见 [dependency-groups]。
+# 新的门禁是 ruff / mypy / import-linter。
 dev = [
     "pgserver>=0.1.4",
+    "ruff>=0.17",
+    "mypy>=1.14",
+    "import-linter>=2.1",
 ]
 
-[project.scripts]
-copixiv = "copixiv.app:main"
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+src = ["src"]
 
-[tool.hatch.metadata]
-allow-direct-references = true
+[tool.ruff.lint]
+# 起步只用真正能抓 bug 的规则集，不引入风格争议（E501 行宽交给 formatter 之外的
+# 人眼判断，先不卡）。逐项放开的顺序建议：先 F/E/I，稳定后再 B/SIM/UP。
+select = ["F", "E", "I"]
+ignore = [
+    "E501",   # 行宽：110 是软约束，长 SQL 常量与注释允许超
+    "E712",   # `col == True` 是 SQLAlchemy 的必需写法，改成裸列会被 PG 拒绝
+    "E402",   # 本仓库刻意做函数级延迟 import（PIL/ebooklib 会各加 7/11 MiB RSS）
+    "F821",   # 文件普遍有 `from __future__ import annotations`，注解里的前向引用不是运行时错误
+]
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/copixiv"]
+[tool.ruff.lint.isort]
+known-first-party = ["copixiv"]
 
+[tool.mypy]
+python_version = "3.12"
+# 渐进式严格：先只报"能确定是 bug"的错误，避免一次性几百条噪声淹没改动。
+# 逐步升级顺序：check_untyped_defs → disallow_untyped_defs → strict。
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_return_any = false
+check_untyped_defs = false
+ignore_missing_imports = true
+mypy_path = "src"
+files = ["src/copixiv"]

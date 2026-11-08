@@ -79,3 +79,5 @@ docs
 .coverage
 .coverage.*
 htmlcov/
+# 验证/冒烟脚本的临时目录（不入库）
+.smoke/

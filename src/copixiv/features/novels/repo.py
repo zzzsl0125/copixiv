@@ -33,7 +33,6 @@ from sqlalchemy.orm import Session
 from copixiv.db import models
 from copixiv.db import constants as C
 from copixiv.core.models import Novel, EpubStatus
-from copixiv.core.offload import offload
 from copixiv.core.draft import NovelDraft
 from copixiv.core.services import (
     EXCLUDE_BLOCKED_SETTING_KEY,
@@ -609,7 +608,7 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
             C.FIELD_IS_SPECIAL_FOLLOW, C.ORDER_BY_NONE, C.ORDER_BY_RANDOM,
         }
 
-    async def get_by_id(self, novel_id: int) -> Novel | None:
+    def get_by_id(self, novel_id: int) -> Novel | None:
         novel = self.session.get(models.Novel, novel_id)
         if novel is None:
             return None
@@ -623,13 +622,13 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         )
         return domain
 
-    async def get_existing_ids(self, novel_ids: set[int]) -> set[int]:
+    def get_existing_ids(self, novel_ids: set[int]) -> set[int]:
         if not novel_ids:
             return set()
         stmt = select(models.Novel.id).where(models.Novel.id.in_(novel_ids))
         return set(self.session.execute(stmt).scalars().all())
 
-    async def get_stored_paths(self, novel_ids: set[int]) -> dict[int, str]:
+    def get_stored_paths(self, novel_ids: set[int]) -> dict[int, str]:
         """``{id: path}`` for the given ids — the on-disk anchor of each row.
 
         ``novel.path`` is written once and then only ever filled when NULL
@@ -683,12 +682,11 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
             )
         ).scalars().all())
 
-    async def list_blocked_ids(self) -> list[int]:
+    def list_blocked_ids(self) -> list[int]:
         if not self._exclusion_active(None):
             return []
         return self._blocked_novel_ids(self._blocked_tag_names())
 
-    @offload
     def sort_novel_ids(
         self,
         novel_ids: list[int],
@@ -698,8 +696,7 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         """Return *novel_ids* ordered by a novel column (id / like / text).
 
         Pushes the sort to PostgreSQL: ``WHERE id = ANY($1) ORDER BY <col>``.
-        Missing IDs are dropped.  The public coroutine runs it in a worker
-        thread (``@offload``).
+        Missing IDs are dropped.
         """
         if not novel_ids or order_by not in (C.COL_ID, C.COL_LIKES, C.COL_TEXTS):
             return list(novel_ids)
@@ -720,7 +717,6 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         )
         return list(self.session.execute(stmt).scalars())
 
-    @offload
     def get_novels(self, spec: QuerySpec) -> dict:
         """Retrieve a paginated, filtered list of novels per *spec*."""
         if spec.order_by:
@@ -777,9 +773,8 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
 
         return {"novels": novels, "cursor": cursor_out}
 
-    @offload
     def count_novels(self, spec: QuerySpec) -> NovelCount:
-        """Count VISIBLE novels matching *spec* (bounded, worker thread).
+        """Count VISIBLE novels matching *spec* (bounded).
 
         返回 :class:`NovelCount` 而不是裸 int：调用方要能区分「精确值」与
         「≥ COUNT_CAP 的下界」（前者可直接展示，后者只能显示 ``N+``）。
@@ -820,7 +815,6 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
             return NovelCount(COUNT_CAP, truncated=True)
         return NovelCount(matched)
 
-    @offload
     def count_excluded_novels(self, spec: QuerySpec) -> NovelCount:
         """Count novels matching *spec* that carry blocked tags (同样有界)."""
         if not self._exclusion_active(spec.exclude_blocked_tags):
@@ -835,7 +829,6 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
             spec, blocked_tag_names=blocked_names, count_blocked=True,
         )
 
-    @offload
     def has_excluded_novels(self, spec: QuerySpec) -> bool:
         """Whether any novel matching *spec* carries blocked tags.
 
@@ -859,7 +852,6 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
             return False
         return self.session.execute(stmt).first() is not None
 
-    @offload
     def list_matching_ids(self, spec: QuerySpec) -> list[int]:
         """Return every VISIBLE novel ID matching *spec*, unpaginated."""
         for q_type, _qvalue in spec.conditions:
@@ -876,7 +868,6 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         stmt = builder.build_ids()
         return list(self.session.execute(stmt).scalars())
 
-    @offload
     def filter_ids_in_scope(
         self,
         novel_ids: list[int],
@@ -899,7 +890,6 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         )
         return list(self.session.execute(stmt).scalars())
 
-    @offload
     def get_novels_by_ids(self, novel_ids: list[int]) -> list[Novel]:
         """Return full novel models for the given IDs, in the given order.
 
@@ -1041,7 +1031,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             C.FIELD_IS_SPECIAL_FOLLOW, C.ORDER_BY_NONE, C.ORDER_BY_RANDOM,
         }
 
-    @offload
     def upsert_novels(
         self, novels: list[NovelDraft], force_update: list[str] | None = None
     ) -> int:
@@ -1230,10 +1219,9 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         paths already did that through ``persist_novels``; deletion did not, so
         author ``novel_count`` / ``like`` / ``text`` only ever drifted upward.
 
-        Both repository methods are ``@offload``-decorated (they hop to a worker
-        thread); this is the **synchronous** counterpart, and it exists because a
-        delete path runs inside a transaction that must not be handed to another
-        thread's connection.
+        This is the **synchronous** counterpart of the author / series
+        ``update_summary`` methods, and it exists because a delete path runs
+        inside a transaction that must stay on its own connection.
         """
         author_ids, series_ids = parent_ids
         if author_ids:
@@ -1241,7 +1229,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         if series_ids:
             SQLAlchemySeriesRepository(self.session).update_summary_sync(series_ids)
 
-    async def delete(self, novel_id: int) -> None:
+    def delete(self, novel_id: int) -> None:
         """Delete a novel row.
 
         The ``sync_tag_refs`` trigger decrements ``tag.reference_count`` from
@@ -1266,7 +1254,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         self.session.flush()
         self._refresh_summaries(parent_ids)
 
-    async def toggle_favourite(self, novel_id: int) -> None:
+    def toggle_favourite(self, novel_id: int) -> None:
         from copixiv.core.exceptions import NotFoundError
 
         result = self.session.execute(
@@ -1278,7 +1266,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         if result is None:
             raise NotFoundError(f"Novel {novel_id} not found")
 
-    async def toggle_special_follow(self, author_id: int) -> None:
+    def toggle_special_follow(self, author_id: int) -> None:
         from copixiv.core.exceptions import NotFoundError
 
         result = self.session.execute(
@@ -1290,7 +1278,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         if result is None:
             raise NotFoundError(f"Author {author_id} not found")
 
-    async def update_has_epub_status(
+    def update_has_epub_status(
         self, novel_ids: list[int], status: EpubStatus
     ) -> None:
         if not novel_ids:
@@ -1301,7 +1289,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             .values(has_epub=status)
         )
 
-    async def update_metadata(self, novel_id: int, values: dict[str, Any]) -> None:
+    def update_metadata(self, novel_id: int, values: dict[str, Any]) -> None:
         """单行元数据更新 —— 卡片「编辑」的写路径（docs/NOVEL_EDIT_DESIGN.md §5）。
 
         刻意与 ``_upsert_rows`` 分开：那条路径带"来源权威"覆盖白名单与"非空者胜"
@@ -1323,7 +1311,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
 
     # ---- batch operations ----------------------------------------------------
 
-    @offload
     def delete_many(self, novel_ids: list[int]) -> list[str]:
         """Delete many novels.
 
@@ -1353,7 +1340,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         )
         return [row.path for row in rows if row.path]
 
-    @offload
     def add_tags_to_novels(
         self, novel_ids: list[int], tags: set[str]
     ) -> int:
@@ -1390,7 +1376,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         ).scalars().all())
         return len(changed)
 
-    @offload
     def filter_ids_by_source(
         self, novel_ids: list[int], sources: set[str]
     ) -> list[int]:
@@ -1424,7 +1409,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         )
         return list(self.session.execute(stmt).scalars().all())
 
-    @offload
     def update_metadata_many(
         self,
         novel_ids: list[int],
@@ -1502,7 +1486,6 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         ).scalars().all())
         return len(changed)
 
-    @offload
     def remove_tags_from_novels(
         self, novel_ids: list[int], tags: set[str]
     ) -> int:
@@ -1566,20 +1549,19 @@ class SQLAlchemySeriesRepository(BaseRepository):
             )
         self.session.flush()
 
-    async def get_by_id(self, series_id: int) -> dict | None:
+    def get_by_id(self, series_id: int) -> dict | None:
         series = self.session.get(models.Series, series_id)
         if series is None:
             return None
         return model_to_dict(series)
 
-    @offload
     def update_summary(self, series_ids: set[int] | None = None) -> None:
-        """Recalculate series aggregates (runs in a worker thread)."""
+        """Recalculate series aggregates."""
         self.update_summary_sync(series_ids)
 
     def update_summary_sync(self, series_ids: set[int] | None = None) -> None:
-        """Same as :meth:`update_summary`, without the thread hop — see the
-        author repository's counterpart for why a delete path needs it."""
+        """Same as :meth:`update_summary`, under the explicit sync name — see
+        the author repository's counterpart for why a delete path needs it."""
         update_summary(
             self.session, models.Series, C.COL_SERIES_ID, series_ids,
             extra_columns=[
@@ -1587,7 +1569,7 @@ class SQLAlchemySeriesRepository(BaseRepository):
             ],
         )
 
-    async def update_series_name(self, series_id: int, name: str) -> None:
+    def update_series_name(self, series_id: int, name: str) -> None:
         """写入 ``series`` 行的名字（编辑器的解析结果）。
 
         刻意**不**像 ``update_author_name`` 那样顺带改写同系列的全部 novel 行：
@@ -1605,7 +1587,7 @@ class SQLAlchemySeriesRepository(BaseRepository):
             .values(series_name=name)
         )
 
-    async def count_novels_by_series(self, series_id: int) -> int:
+    def count_novels_by_series(self, series_id: int) -> int:
         """库内已有多少本挂在这个 series_id 下（预览里的"库内已有 N 本"）。
 
         走 ``ix_novel_series_id``；``series`` 行自己的 ``novel_count`` 是抓取
@@ -1617,7 +1599,7 @@ class SQLAlchemySeriesRepository(BaseRepository):
             .where(models.Novel.series_id == series_id)
         ).scalar_one())
 
-    async def single_book_series_missing_index(self) -> list[int]:
+    def single_book_series_missing_index(self) -> list[int]:
         """Rows that are the only volume of their series and have no index.
 
         Such a row's chapter number can only be 1: the database holds exactly
@@ -1651,7 +1633,7 @@ class SQLAlchemySeriesRepository(BaseRepository):
             )
         ).scalars().all())
 
-    async def series_with_empty_index(self) -> list[int]:
+    def series_with_empty_index(self) -> list[int]:
         """Series with at least one chapter number missing.
 
         Dead series are excluded: a series that pixiv keeps answering 404 for
@@ -1682,7 +1664,7 @@ class SQLAlchemySeriesRepository(BaseRepository):
     def _draft_columns(cls) -> list:
         return [getattr(models.Novel, name) for name in cls.DRAFT_COLUMNS]
 
-    async def novels_of_series(self, series_id: int) -> list[dict]:
+    def novels_of_series(self, series_id: int) -> list[dict]:
         """库内挂在该系列下的小说（全套现值列，按 ``id`` 升序）。
 
         名册能算出权威章节号，但 ``_upsert_rows`` 只在"列是 NULL"或"列进了
@@ -1700,14 +1682,14 @@ class SQLAlchemySeriesRepository(BaseRepository):
             ).all()
         ]
 
-    async def novel_columns(self, novel_id: int) -> dict | None:
+    def novel_columns(self, novel_id: int) -> dict | None:
         """单行的"造 draft"现值列（孤儿分支逐本用），没有这一行则 None。"""
         row = self.session.execute(
             _select(*self._draft_columns()).where(models.Novel.id == novel_id)
         ).one_or_none()
         return dict(row._mapping) if row is not None else None
 
-    async def novels_with_orphan_index(
+    def novels_with_orphan_index(
         self, limit: int | None = None, after_id: int = 0,
     ) -> list[tuple[int, str | None, int | None]]:
         """``series_id`` 为空、``series_index`` 却还留着的"孤儿号"行。
@@ -1738,7 +1720,7 @@ class SQLAlchemySeriesRepository(BaseRepository):
             for row in self.session.execute(stmt).all()
         ]
 
-    async def series_with_stored_index(
+    def series_with_stored_index(
         self, after_id: int = 0, limit: int | None = None,
     ) -> list[int]:
         """至少有一本带号的系列（``fix_series_index`` 全量复查模式的候选）。

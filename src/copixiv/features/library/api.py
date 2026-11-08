@@ -18,7 +18,7 @@ multipart，字段名 ``files``（可重复，承载多文件）；可选表单�
 1. ``Depends(get_uow)``（读事务）：解析一次名字（整批共用，``lookup_author_profile``
    **只调一次**）——本地表命中时零网络，没有再问 pixiv；解析结果与占位行
    在这一步提交（见下）；
-2. ``Depends(get_write_uow)``：``async with write_uow.begin():`` 里落库
+2. ``Depends(get_write_uow)``：``with write_uow.begin():`` 里落库
    （``ensure_exists`` 兜底 + ``ingest_uploads``）。写事务里没有网络。
 
 两个 UoW 的 ``session`` 都是**懒创建**的：依赖注入阶段的 ``begin()`` 只占位，
@@ -156,7 +156,7 @@ async def upload_novels(
         # 本地表命中时这一步零网络（``lookup_author_profile`` 先查本地表）。
         # 占位行（``author`` 有外键）放**解析之后**建：先建就是一个未提交的
         # INSERT 陪着 HTTP 一起等，正是这条纪律要防的形状。
-        async with uow.begin():
+        with uow.begin():
             profile = await lookup_author_profile(
                 preset_author_id, session=uow.session, client=client,
             )
@@ -169,7 +169,7 @@ async def upload_novels(
     # 占位行的写事务兜底在 ``ingest_uploads`` 里（它在取锁那一步一起做，见
     # 那边的 ``prepared``）：本函数是那条约定的**实现者之一**，不是它的
     # 所有者——同一个补写留在两处只会让人以为它需要两遍。
-    async with write_uow.begin():
+    with write_uow.begin():
         results = ingest_uploads(
             write_uow.session,
             file_storage,

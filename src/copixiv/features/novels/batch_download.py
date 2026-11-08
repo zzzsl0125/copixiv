@@ -61,17 +61,22 @@ class BatchDownloadUseCase:
         novel_ids: list[int] | None = None,
         excluded_ids: list[int] | None = None,
     ) -> BatchDownloadResult:
+        """Build the ZIP.  Async **only** because of the ``asyncio.to_thread``
+        around :func:`build_batch_zip` below: deflate compression is real CPU
+        work on a whole selection.  All repository calls are synchronous
+        blocking calls on the calling thread's session.
+        """
         if novel_ids:
             # Explicit selection — filters/order are irrelevant; a stable
             # id-descending order keeps the result deterministic.
-            all_novels = await self._repo.get_novels_by_ids(novel_ids)
+            all_novels = self._repo.get_novels_by_ids(novel_ids)
             novels = sorted(
                 all_novels, key=lambda n: n.id or 0, reverse=True,
             )[:limit]
             if not novels:
                 raise NotFoundError("未找到匹配条件的小说")
         else:
-            results = await self._repo.get_novels(
+            results = self._repo.get_novels(
                 QuerySpec(
                     conditions=conditions or [],
                     order_by=order_by,
@@ -108,7 +113,7 @@ class BatchDownloadUseCase:
             search_desc=search_desc,
         )
 
-    async def preview(
+    def preview(
         self,
         conditions: SearchConditions | None = None,
         *,
@@ -127,16 +132,20 @@ class BatchDownloadUseCase:
         inside the ZIP — a live preview of the naming rule — or ``None``
         when no novels match.
 
+        Pure DB read plus template resolution: synchronous, so the endpoint
+        can be a plain ``def`` and FastAPI keeps the blocking session work on
+        the worker thread.
+
         Raises:
             ValidationError: If the template does not contain ``{id}``.
         """
         if novel_ids:
-            all_novels = await self._repo.get_novels_by_ids(novel_ids)
+            all_novels = self._repo.get_novels_by_ids(novel_ids)
             novels = sorted(
                 all_novels, key=lambda n: n.id or 0, reverse=True,
             )[:1]
         else:
-            results = await self._repo.get_novels(
+            results = self._repo.get_novels(
                 QuerySpec(
                     conditions=conditions or [],
                     order_by=order_by,

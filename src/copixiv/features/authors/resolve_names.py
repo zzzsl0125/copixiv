@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
 from copixiv.db.uow import SqlUnitOfWork
+from copixiv.db.write_lock import read_transaction
 from copixiv.pixiv.client import PixivClient
 from copixiv.core.services import safe_get
 from copixiv.log import logger
@@ -63,8 +64,15 @@ async def collect_author_names(
         return {}
 
     # -- local ----------------------------------------------------------
-    async with uow.begin():
-        resolved = await SQLAlchemyAuthorRepository(uow.session).get_names_by_ids(author_ids)
+    # Sync DB read: ``read_transaction`` opens the short transaction and runs
+    # the blocking query in a worker thread (this outer function is async
+    # because of the network gather below, not because of the database).
+    resolved = await read_transaction(
+        uow,
+        lambda read_uow: SQLAlchemyAuthorRepository(
+            read_uow.session
+        ).get_names_by_ids(author_ids),
+    )
 
     # -- remote ---------------------------------------------------------
     # 丢掉空的 author_id：``sync_empty_name`` 的输入集来自 ``novel.author_id``，
@@ -140,7 +148,7 @@ async def lookup_author_profile(
     key is ``ensure_exists``'s job, and that belongs to the write path).  Never
     raises: an unreachable Pixiv degrades to ``source='unknown'``.
     """
-    known = await SQLAlchemyAuthorRepository(session).get_names_by_ids({author_id})
+    known = SQLAlchemyAuthorRepository(session).get_names_by_ids({author_id})
     if author_id in known:
         return AuthorProfile(author_id, known[author_id], "local")
 
@@ -150,17 +158,26 @@ async def lookup_author_profile(
     return AuthorProfile(author_id, None, "unknown")
 
 
-async def writeback_author_names(
+def writeback_author_names(
     mapping: dict[int, str],
     uow: SqlUnitOfWork,
 ) -> None:
     """Persist resolved author names to ``novel`` and ``author`` tables.
 
-    The caller must already hold ``db_write()`` and be inside a
-    ``uow.begin()`` transaction; this function performs no locking of its
-    own.  ``update_author_name`` copies the name into both the author row
-    and every novel row for that author (backfilling new ``author_name=NULL``
+    The caller must already be inside an open transaction (a
+    ``run_write_transaction`` callback, or ``with uow.begin()``); this
+    function performs no transaction management of its own.
+    ``update_author_name`` copies the name into both the author row and
+    every novel row for that author (backfilling new ``author_name=NULL``
     novel rows from webview downloads).
+
+    **Plain ``def`` on purpose**: both of today's call sites use it as the
+    ``fn`` passed to :func:`copixiv.db.write_lock.run_write_transaction`
+    (``tasks/novels.py::author_fetch``, ``tasks/maintenance/search.py::
+    sync_empty_name``), and ``run_write_transaction`` does not await its
+    callback — an ``async def`` here would be returned as a coroutine and
+    the write would silently never happen.
     """
+    author_repo = SQLAlchemyAuthorRepository(uow.session)
     for aid, name in mapping.items():
-        await SQLAlchemyAuthorRepository(uow.session).update_author_name(aid, name)
+        author_repo.update_author_name(aid, name)

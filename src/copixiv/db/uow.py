@@ -1,7 +1,31 @@
-"""Unit of Work — transaction boundary for background tasks."""
+"""Unit of Work — a synchronous transaction boundary around a Session.
 
-from contextlib import asynccontextmanager
-from collections.abc import AsyncIterator
+Why synchronous
+---------------
+SQLAlchemy's ``Session`` is blocking: every ``execute`` / ``flush`` /
+``commit`` is a synchronous call into psycopg2.  Wrapping those calls in
+``async def`` does not make them async — it only moves the blocking work
+onto the **event loop thread**, where it stalls every other request.
+
+The rule this module encodes:
+
+* the data layer is **plain synchronous Python**;
+* the async world (FastAPI endpoints, task coroutines) uses it through
+  exactly two seams — :func:`copixiv.deps.get_uow` /
+  :func:`copixiv.deps.get_write_uow` for requests (FastAPI runs sync
+  ``yield`` dependencies in the very thread that runs the endpoint) and
+  :func:`copixiv.db.write_lock.run_write_transaction` for tasks
+  (``asyncio.to_thread`` once around the whole transaction).
+
+Nothing in ``features/**`` / ``tasks/**`` should call ``asyncio.to_thread``
+for a database operation again: one hop per request is enough, and 62
+per-method hops were what made the old code both slower and unreadable.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 from sqlalchemy.orm import Session
 
@@ -9,28 +33,22 @@ from sqlalchemy.orm import Session
 class SqlUnitOfWork:
     """A pure transaction boundary around a SQLAlchemy session.
 
-    The UoW owns its session lifecycle: a session is created lazily from
-    ``session_factory`` on first access and closed at the end of every
-    ``begin()`` cycle, so each transaction gets a fresh session.
+    The session is created lazily on first access and closed at the end of
+    every :meth:`begin` cycle, so each transaction gets a fresh one.
 
     It carries no repositories — callers construct whatever repository
-    they need directly against ``uow.session``, keeping this class free
-    of any feature/tasks import.
+    they need directly against ``uow.session``, keeping this class free of
+    any feature/tasks import.
 
     Usage::
 
         uow = SqlUnitOfWork(session_factory)
-        async with uow.begin():
-            await SQLAlchemyNovelRepository(uow.session).upsert_novels([...])
+        with uow.begin():
+            SQLAlchemyNovelRepository(uow.session).upsert_novels([...])
         # begin() commits on clean exit / rolls back on exception
     """
 
     def __init__(self, session_factory):
-        """*session_factory* is a ``sessionmaker``.
-
-        Sessions are created lazily on first access and closed inside
-        ``begin()``, so the UoW manages the full lifecycle.
-        """
         self._session_factory = session_factory
         self._session: Session | None = None
 
@@ -45,41 +63,40 @@ class SqlUnitOfWork:
             self._session = self._session_factory()
         return self._session
 
-    # -- async context manager -----------------------------------------------
-
-    @asynccontextmanager
-    async def begin(self) -> AsyncIterator[None]:
+    @contextmanager
+    def begin(self) -> Iterator[None]:
         """Enter a transactional scope.  Commits on clean exit, rolls back on exception.
 
-        Note: the exit path already commits — callers should NOT call
-        ``commit()`` explicitly inside the ``async with`` block.
+        The exit path already commits — callers must NOT call ``commit()``
+        explicitly inside the block.
 
-        ``BaseException`` (not just ``Exception``) is caught so that
-        cancellation (``CancelledError``) and generator shutdown
-        (``GeneratorExit``, e.g. when a FastAPI dependency is closed
-        after a handler error) still roll back explicitly.
+        ``BaseException`` (not just ``Exception``) is caught so that a
+        KeyboardInterrupt or a generator shutdown on the way out still
+        rolls back explicitly instead of leaving the transaction open.
         """
         try:
             yield
-            await self.commit()
         except BaseException:
             try:
-                await self.rollback()
+                self.rollback()
             except BaseException:
                 # Never let a rollback failure mask the original error.
                 from copixiv.log import logger
+
                 logger.exception("Rollback failed")
             raise
+        else:
+            self.commit()
         finally:
             if self._session is not None:
                 self._session.close()
                 self._session = None
 
-    async def commit(self) -> None:
+    def commit(self) -> None:
         if self._session is not None:
             self._session.commit()
 
-    async def flush(self) -> None:
+    def flush(self) -> None:
         """Force pending changes into the database, inside the current transaction.
 
         Needed when the same transaction reads a table it just wrote to:
@@ -91,6 +108,6 @@ class SqlUnitOfWork:
         if self._session is not None:
             self._session.flush()
 
-    async def rollback(self) -> None:
+    def rollback(self) -> None:
         if self._session is not None:
             self._session.rollback()

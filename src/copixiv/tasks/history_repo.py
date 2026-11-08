@@ -19,7 +19,7 @@ class SQLAlchemyTaskRepository(BaseRepository):
 
     # -- task history ------------------------------------------------------
 
-    async def add_task(self, name: str, arguments: dict, task_func: str) -> int:
+    def add_task(self, name: str, arguments: dict, task_func: str) -> int:
         return self.add_task_sync(name, arguments, task_func)
 
     def add_task_sync(self, name: str, arguments: dict, task_func: str) -> int:
@@ -41,7 +41,7 @@ class SQLAlchemyTaskRepository(BaseRepository):
         self.session.flush()
         return task.id
 
-    async def update_task(
+    def update_task(
         self, task_id: int, status: str | None, result: str | None = None,
         duration: float | None = None, progress: str | None = None,
     ) -> None:
@@ -120,7 +120,7 @@ class SQLAlchemyTaskRepository(BaseRepository):
             )
         return self.session.execute(stmt).scalar_one_or_none()
 
-    async def get_busy_funcs(self) -> list[str]:
+    def get_busy_funcs(self) -> list[str]:
         """Distinct ``task_func`` values with a pending/running row.
 
         One tiny query backing the front-end busy flags.  It exists so the
@@ -138,7 +138,7 @@ class SQLAlchemyTaskRepository(BaseRepository):
         ).scalars().all()
         return sorted(rows)
 
-    async def get_history(
+    def get_history(
         self, limit: int = 50, offset: int = 0
     ) -> Sequence[models.TaskHistory]:
         stmt = (
@@ -149,7 +149,7 @@ class SQLAlchemyTaskRepository(BaseRepository):
         )
         return list(self.session.execute(stmt).scalars().all())
 
-    async def get_history_rows(
+    def get_history_rows(
         self, limit: int = 50, offset: int = 0,
     ) -> list[dict]:
         """History rows **without** the log payload, plus a ``has_log`` flag.
@@ -199,7 +199,7 @@ class SQLAlchemyTaskRepository(BaseRepository):
         rows = self.session.execute(stmt).all()
         return [dict(row._mapping) for row in rows]
 
-    async def get_task_log(self, task_id: int) -> str | None:
+    def get_task_log(self, task_id: int) -> str | None:
         """Return just the stored log text for one row (``None`` if none)."""
         log = self.session.execute(
             select(models.TaskHistory.result["log"]).where(
@@ -208,10 +208,10 @@ class SQLAlchemyTaskRepository(BaseRepository):
         ).scalar()
         return log if isinstance(log, str) else None
 
-    async def count_history(self) -> int:
+    def count_history(self) -> int:
         return self.count(models.TaskHistory)
 
-    async def get_task_arguments(self, task_id: int) -> str | None:
+    def get_task_arguments(self, task_id: int) -> str | None:
         """Return the raw JSON ``arguments`` of a history row (or None).
 
         Lets endpoints read task arguments without touching the ORM
@@ -222,14 +222,14 @@ class SQLAlchemyTaskRepository(BaseRepository):
 
     # -- scheduled tasks ----------------------------------------------------
 
-    async def get_scheduled_tasks(self) -> Sequence[models.ScheduledTask]:
+    def get_scheduled_tasks(self) -> Sequence[models.ScheduledTask]:
         return self.get_scheduled_tasks_sync()
 
     def get_scheduled_tasks_sync(self) -> Sequence[models.ScheduledTask]:
         stmt = select(models.ScheduledTask).order_by(models.ScheduledTask.sort_index)
         return list(self.session.execute(stmt).scalars().all())
 
-    async def create_scheduled(
+    def create_scheduled(
         self, task_data: dict
     ) -> models.ScheduledTask:
         task = models.ScheduledTask(**task_data)
@@ -237,13 +237,13 @@ class SQLAlchemyTaskRepository(BaseRepository):
         self.session.flush()
         return task
 
-    async def update_scheduled(
+    def update_scheduled(
         self, task_id: int, task_data: dict
     ) -> models.ScheduledTask | None:
         return self._update_attrs(models.ScheduledTask, task_id, task_data)
 
-    async def delete_scheduled(self, task_id: int) -> bool:
+    def delete_scheduled(self, task_id: int) -> bool:
         return self._delete_by_id(models.ScheduledTask, task_id)
 
-    async def reorder_scheduled(self, ids: list[int]) -> bool:
+    def reorder_scheduled(self, ids: list[int]) -> bool:
         return self._reorder(models.ScheduledTask, "sort_index", ids)

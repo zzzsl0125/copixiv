@@ -63,12 +63,12 @@ def get_task_methods():
 
 
 @router.get("/scheduled", response_model=list[ScheduledTaskResponse])
-async def get_scheduled_tasks(uow: SqlUnitOfWork = Depends(get_uow)):
-    return await SQLAlchemyTaskRepository(uow.session).get_scheduled_tasks()
+def get_scheduled_tasks(uow: SqlUnitOfWork = Depends(get_uow)):
+    return SQLAlchemyTaskRepository(uow.session).get_scheduled_tasks()
 
 
 @router.post("/scheduled", response_model=ScheduledTaskResponse)
-async def create_scheduled_task(
+def create_scheduled_task(
     background_tasks: BackgroundTasks,
     task_in: ScheduledTaskCreate,
     task_manager=Depends(get_task_manager),
@@ -76,18 +76,18 @@ async def create_scheduled_task(
 ):
     _validate_task_function(task_in.task)
     _validate_task_params(task_in.task, task_in.params)
-    task = await SQLAlchemyTaskRepository(uow.session).create_scheduled(task_in.model_dump())
+    task = SQLAlchemyTaskRepository(uow.session).create_scheduled(task_in.model_dump())
     # Commit FIRST, then reload: a fresh connection cannot see the
     # uncommitted INSERT.  (BackgroundTasks alone is not enough — this
     # FastAPI/Starlette version runs them BEFORE the yield-dependency
     # teardown commit, so the reload would still read old data.)
-    await uow.commit()
+    uow.commit()
     background_tasks.add_task(task_manager.reload_cron_jobs)
     return task
 
 
 @router.put("/scheduled/{task_id}", response_model=ScheduledTaskResponse)
-async def update_scheduled_task(
+def update_scheduled_task(
     background_tasks: BackgroundTasks,
     task_id: int, task_in: ScheduledTaskUpdate,
     task_manager=Depends(get_task_manager),
@@ -99,48 +99,48 @@ async def update_scheduled_task(
     elif task_in.params is not None:
         # Params can change without the function changing: validate against
         # the *existing* row's function.
-        existing = await SQLAlchemyTaskRepository(uow.session).get_scheduled_tasks()
+        existing = SQLAlchemyTaskRepository(uow.session).get_scheduled_tasks()
         current = next((t for t in existing if t.id == task_id), None)
         if current is not None:
             _validate_task_params(current.task, task_in.params)
-    task = await SQLAlchemyTaskRepository(uow.session).update_scheduled(task_id, task_in.model_dump(exclude_none=True))
+    task = SQLAlchemyTaskRepository(uow.session).update_scheduled(task_id, task_in.model_dump(exclude_none=True))
     if task is None:
         raise NotFoundError(f"Task {task_id} not found")
-    await uow.commit()
+    uow.commit()
     background_tasks.add_task(task_manager.reload_cron_jobs)
     return task
 
 
 @router.delete("/scheduled/{task_id}")
-async def delete_scheduled_task(
+def delete_scheduled_task(
     background_tasks: BackgroundTasks,
     task_id: int,
     task_manager=Depends(get_task_manager),
     uow: SqlUnitOfWork = Depends(get_write_uow),
 ):
-    if not await SQLAlchemyTaskRepository(uow.session).delete_scheduled(task_id):
+    if not SQLAlchemyTaskRepository(uow.session).delete_scheduled(task_id):
         raise NotFoundError(f"Task {task_id} not found")
-    await uow.commit()
+    uow.commit()
     background_tasks.add_task(task_manager.reload_cron_jobs)
     return {"ok": True}
 
 
 @router.post("/scheduled/reorder")
-async def reorder_scheduled_tasks(
+def reorder_scheduled_tasks(
     background_tasks: BackgroundTasks,
     task_ids: list[int],
     task_manager=Depends(get_task_manager),
     uow: SqlUnitOfWork = Depends(get_write_uow),
 ):
-    if not await SQLAlchemyTaskRepository(uow.session).reorder_scheduled(task_ids):
+    if not SQLAlchemyTaskRepository(uow.session).reorder_scheduled(task_ids):
         raise NotFoundError("Failed to reorder tasks")
-    await uow.commit()
+    uow.commit()
     background_tasks.add_task(task_manager.reload_cron_jobs)
     return {"ok": True}
 
 
 @router.post("/scheduled/{task_id}/run")
-async def run_scheduled_task(
+def run_scheduled_task(
     task_id: int,
     task_manager=Depends(get_task_manager),
 ):
@@ -151,17 +151,17 @@ async def run_scheduled_task(
 
 
 @router.get("/busy", response_model=TaskBusyResponse)
-async def get_busy_tasks(uow: SqlUnitOfWork = Depends(get_uow)):
+def get_busy_tasks(uow: SqlUnitOfWork = Depends(get_uow)):
     """Task functions with a pending/running row — the front-end busy set.
 
     Tiny on purpose: the task-status poller hits this every 5 s while a task
     runs, and it used to read a full history page instead.
     """
-    return {"funcs": await SQLAlchemyTaskRepository(uow.session).get_busy_funcs()}
+    return {"funcs": SQLAlchemyTaskRepository(uow.session).get_busy_funcs()}
 
 
 @router.get("/history", response_model=TaskHistoryListResponse)
-async def get_task_history(
+def get_task_history(
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
     uow: SqlUnitOfWork = Depends(get_uow),
@@ -173,8 +173,8 @@ async def get_task_history(
     re-read it every 5 s whenever a task was running.
     """
     repo = SQLAlchemyTaskRepository(uow.session)
-    rows = await repo.get_history_rows(limit=limit, offset=offset)
-    total = await repo.count_history()
+    rows = repo.get_history_rows(limit=limit, offset=offset)
+    total = repo.count_history()
     return {
         "items": [TaskHistoryResponse.model_validate(r) for r in rows],
         "total": total,
@@ -182,12 +182,12 @@ async def get_task_history(
 
 
 @router.get("/history/{task_id}/log", response_model=TaskHistoryLogResponse)
-async def get_task_log(
+def get_task_log(
     task_id: int,
     uow: SqlUnitOfWork = Depends(get_uow),
 ):
     """Return the stored execution log for one task-history row."""
-    log = await SQLAlchemyTaskRepository(uow.session).get_task_log(task_id)
+    log = SQLAlchemyTaskRepository(uow.session).get_task_log(task_id)
     if log is None:
         raise NotFoundError(f"Task {task_id} 没有日志")
     return {"id": task_id, "log": log}

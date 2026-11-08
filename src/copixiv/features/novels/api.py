@@ -78,7 +78,7 @@ def _iter_zip(buffer) -> Iterator[bytes]:
 
 
 @router.get("/", response_model=NovelListResponse)
-async def get_novels(
+def get_novels(
     background_tasks: BackgroundTasks,
     session_factory=Depends(get_session_factory),
     uow: SqlUnitOfWork = Depends(get_uow),
@@ -104,13 +104,13 @@ async def get_novels(
         min_text=min_text,
         exclude_blocked_tags=exclude_blocked,
     )
-    results = await SQLAlchemyNovelRepository(uow.session).get_novels(spec)
+    results = SQLAlchemyNovelRepository(uow.session).get_novels(spec)
 
     # 首屏搜索响应附带「范围内是否存在被厌恶标签排除的小说」——镜像谓词
     # 存在性查询（~ms 级），让 ExclusionBar 只在确有被隐藏小说时显示。
     # load-more（带 cursor）与无关键词浏览不计算，保持默认 False。
     if conditions and cursor_dict is None:
-        results["has_excluded"] = await SQLAlchemyNovelRepository(
+        results["has_excluded"] = SQLAlchemyNovelRepository(
             uow.session
         ).has_excluded_novels(spec)
 
@@ -124,7 +124,7 @@ async def get_novels(
 
 
 @router.get("/count", response_model=NovelCountResponse)
-async def count_novels(
+def count_novels(
     uow: SqlUnitOfWork = Depends(get_uow),
     keyword: str | None = Query(None),
     min_like: int | None = Query(None),
@@ -149,7 +149,7 @@ async def count_novels(
         exclude_ids=excluded_ids or [],
         exclude_blocked_tags=exclude_blocked,
     )
-    total = await SQLAlchemyNovelRepository(uow.session).count_novels(spec)
+    total = SQLAlchemyNovelRepository(uow.session).count_novels(spec)
     # How many matching novels were hidden by blocked tags (0 when the
     # exclusion is off / nothing blocked) — powers the ExclusionBar.
     # Off by default: it is the *slow* tail of this endpoint (the same
@@ -158,7 +158,7 @@ async def count_novels(
     # caller needs it eagerly.  Pass ``with_excluded=true`` to opt in.
     excluded = NovelCount(0)
     if with_excluded and exclude_blocked is not False:
-        excluded = await SQLAlchemyNovelRepository(uow.session).count_excluded_novels(spec)
+        excluded = SQLAlchemyNovelRepository(uow.session).count_excluded_novels(spec)
     return NovelCountResponse(
         total=total.value,
         excluded=excluded.value,
@@ -168,7 +168,7 @@ async def count_novels(
 
 
 @router.get("/ids", response_model=NovelIdsResponse)
-async def get_matching_novel_ids(
+def get_matching_novel_ids(
     uow: SqlUnitOfWork = Depends(get_uow),
     keyword: str | None = Query(None),
     min_like: int | None = Query(None),
@@ -191,12 +191,12 @@ async def get_matching_novel_ids(
         min_text=min_text,
         exclude_blocked_tags=exclude_blocked,
     )
-    ids = await SQLAlchemyNovelRepository(uow.session).list_matching_ids(spec)
+    ids = SQLAlchemyNovelRepository(uow.session).list_matching_ids(spec)
     return NovelIdsResponse(ids=ids, total=len(ids), truncated=False)
 
 
 @router.get("/blocked-ids", response_model=NovelIdsResponse)
-async def get_blocked_novel_ids(
+def get_blocked_novel_ids(
     uow: SqlUnitOfWork = Depends(get_uow),
     keyword: str | None = Query(None),
     min_like: int | None = Query(None),
@@ -216,7 +216,7 @@ async def get_blocked_novel_ids(
     unsupported values return the scope order.
     """
     conditions = parse_search_keyword(keyword) if keyword else None
-    blocked_ids = await SQLAlchemyNovelRepository(uow.session).list_blocked_ids()
+    blocked_ids = SQLAlchemyNovelRepository(uow.session).list_blocked_ids()
     if not blocked_ids:
         return NovelIdsResponse(ids=[], total=0, truncated=False)
 
@@ -230,11 +230,11 @@ async def get_blocked_novel_ids(
             exclude_blocked_tags=False,
         )
         matching.extend(
-            await SQLAlchemyNovelRepository(uow.session).filter_ids_in_scope(chunk, scope_spec)
+            SQLAlchemyNovelRepository(uow.session).filter_ids_in_scope(chunk, scope_spec)
         )
 
     if order_by and order_by != "random":
-        matching = await SQLAlchemyNovelRepository(uow.session).sort_novel_ids(
+        matching = SQLAlchemyNovelRepository(uow.session).sort_novel_ids(
             matching, order_by, order_direction,
         )
     return NovelIdsResponse(
@@ -243,7 +243,7 @@ async def get_blocked_novel_ids(
 
 
 @router.post("/sort-ids", response_model=NovelIdsResponse)
-async def sort_novel_ids(
+def sort_novel_ids(
     body: SortIdsRequest = Body(...),
     uow: SqlUnitOfWork = Depends(get_uow),
 ):
@@ -254,14 +254,14 @@ async def sort_novel_ids(
     ids = sorted({int(i) for i in body.novel_ids})
     if not ids:
         return NovelIdsResponse(ids=[], total=0, truncated=False)
-    ordered = await SQLAlchemyNovelRepository(uow.session).sort_novel_ids(
+    ordered = SQLAlchemyNovelRepository(uow.session).sort_novel_ids(
         ids, body.order_by, body.order_direction,
     )
     return NovelIdsResponse(ids=ordered, total=len(ordered), truncated=False)
 
 
 @router.post("/by-ids", response_model=NovelsByIdsResponse)
-async def get_novels_by_ids(
+def get_novels_by_ids(
     body: NovelsByIdsRequest = Body(...),
     uow: SqlUnitOfWork = Depends(get_uow),
 ):
@@ -273,12 +273,12 @@ async def get_novels_by_ids(
     """
     ids = body.novel_ids[:BATCH_MAX_NOVELS]
     truncated = len(body.novel_ids) > BATCH_MAX_NOVELS
-    novels = await SQLAlchemyNovelRepository(uow.session).get_novels_by_ids(ids)
+    novels = SQLAlchemyNovelRepository(uow.session).get_novels_by_ids(ids)
     return NovelsByIdsResponse(novels=novels, truncated=truncated)
 
 
 @router.post("/match-ids", response_model=MatchIdsResponse)
-async def match_novel_ids(
+def match_novel_ids(
     body: MatchIdsRequest = Body(...),
     uow: SqlUnitOfWork = Depends(get_uow),
     exclude_blocked: bool | None = Query(None),
@@ -302,13 +302,13 @@ async def match_novel_ids(
             exclude_blocked_tags=exclude_blocked,
         )
         matching.extend(
-            await SQLAlchemyNovelRepository(uow.session).filter_ids_in_scope(chunk, scope_spec)
+            SQLAlchemyNovelRepository(uow.session).filter_ids_in_scope(chunk, scope_spec)
         )
     return MatchIdsResponse(matching_ids=matching, truncated=False)
 
 
 @router.post("/batch-task", response_model=BatchTaskResponse)
-async def batch_task_operation(
+def batch_task_operation(
     body: BatchOperationRequest = Body(...),
     task_manager=Depends(get_task_manager),
     uow: SqlUnitOfWork = Depends(get_uow),
@@ -325,7 +325,7 @@ async def batch_task_operation(
     # Scope resolution lives in the application layer (single rule for the
     # sync and background paths — docs/MODULARITY.md §M7): cap=None because
     # the background task chunks selections of any size.
-    ids = await resolve_batch_scope(
+    ids = resolve_batch_scope(
         SQLAlchemyNovelRepository(uow.session),
         mode=scope.mode,
         novel_ids=scope.novel_ids,
@@ -357,13 +357,13 @@ async def batch_task_operation(
 
 
 @router.post("/{novel_id}/favourite", status_code=204)
-async def toggle_favourite(novel_id: int, uow: SqlUnitOfWork = Depends(get_write_uow)):
-    await SQLAlchemyNovelRepository(uow.session).toggle_favourite(novel_id)
+def toggle_favourite(novel_id: int, uow: SqlUnitOfWork = Depends(get_write_uow)):
+    SQLAlchemyNovelRepository(uow.session).toggle_favourite(novel_id)
 
 
 @router.post("/author/{author_id}/follow", status_code=204)
-async def toggle_special_follow(author_id: int, uow: SqlUnitOfWork = Depends(get_write_uow)):
-    await SQLAlchemyNovelRepository(uow.session).toggle_special_follow(author_id)
+def toggle_special_follow(author_id: int, uow: SqlUnitOfWork = Depends(get_write_uow)):
+    SQLAlchemyNovelRepository(uow.session).toggle_special_follow(author_id)
 
 
 @router.get("/author/{author_id}", response_model=AuthorLookupResponse)
@@ -393,7 +393,7 @@ async def lookup_author(
         author_id=profile.author_id,
         author_name=profile.author_name,
         source=profile.source,
-        novel_count=await SQLAlchemyAuthorRepository(session).count_novels_by_author(
+        novel_count=SQLAlchemyAuthorRepository(session).count_novels_by_author(
             author_id,
         ),
     )
@@ -419,7 +419,7 @@ async def lookup_series(
         series_id=profile.series_id,
         series_name=profile.series_name,
         source=profile.source,
-        novel_count=await SQLAlchemySeriesRepository(session).count_novels_by_series(
+        novel_count=SQLAlchemySeriesRepository(session).count_novels_by_series(
             series_id,
         ),
     )
@@ -490,7 +490,7 @@ async def sync_novel(
 
 
 @router.get("/{novel_id}/download")
-async def download_novel(
+def download_novel(
     novel_id: int,
     file_storage=Depends(get_file_storage),
     uow: SqlUnitOfWork = Depends(get_uow),
@@ -499,7 +499,7 @@ async def download_novel(
     use_case = GetNovelFileUseCase(
         SQLAlchemyNovelRepository(uow.session), file_storage.download_dir,
     )
-    file_path, media_type = await use_case.execute(novel_id, format)
+    file_path, media_type = use_case.execute(novel_id, format)
     headers = {
         "Content-Disposition": f"attachment; filename*=UTF-8''{quote(file_path.name)}"
     }
@@ -547,7 +547,7 @@ async def batch_download_novels(
 
 
 @router.post("/batch-download/preview")
-async def batch_download_preview(
+def batch_download_preview(
     body: BatchDownloadRequest = Body(...),
     app_config=Depends(get_app_config),
     uow: SqlUnitOfWork = Depends(get_uow),
@@ -555,7 +555,7 @@ async def batch_download_preview(
     conditions = parse_search_keyword(body.keyword) if body.keyword else None
     naming = app_config.batch_download.naming
     use_case = BatchDownloadUseCase(SQLAlchemyNovelRepository(uow.session), naming)
-    path = await use_case.preview(
+    path = use_case.preview(
         conditions,
         order_by=body.order_by,
         order_direction=body.order_direction,
@@ -570,12 +570,12 @@ async def batch_download_preview(
 
 
 @router.post("/batch", response_model=BatchOperationResponse)
-async def batch_operation(
+def batch_operation(
     body: BatchOperationRequest = Body(...),
     file_storage=Depends(get_file_storage),
     uow: SqlUnitOfWork = Depends(get_write_uow),
 ):
-    ids = await resolve_batch_scope(
+    ids = resolve_batch_scope(
         SQLAlchemyNovelRepository(uow.session),
         mode=body.scope.mode,
         novel_ids=body.scope.novel_ids,
@@ -586,13 +586,13 @@ async def batch_operation(
     )
     if body.operation == "delete":
         use_case = BatchDeleteUseCase(SQLAlchemyNovelRepository(uow.session), file_storage)
-        affected = await use_case.execute(ids)
+        affected = use_case.execute(ids)
     else:
         use_case = BatchTagUseCase(
             SQLAlchemyNovelRepository(uow.session),
             SQLAlchemyTagRepository(uow.session),
         )
-        affected = await use_case.execute(body.operation, ids, body.tags)
+        affected = use_case.execute(body.operation, ids, body.tags)
     return BatchOperationResponse(matched=len(ids), affected=affected)
 
 
@@ -623,7 +623,7 @@ async def batch_metadata_operation(
     同形：``POST /{novel_id}/...`` 那几条都要第二段路径，所以不会把
     ``batch-metadata`` 当成 ``novel_id``（``batch-export`` 早已是同样的形状）。
     """
-    ids = await resolve_batch_scope(
+    ids = resolve_batch_scope(
         SQLAlchemyNovelRepository(uow.session),
         mode=body.scope.mode,
         novel_ids=body.scope.novel_ids,
@@ -657,17 +657,17 @@ async def batch_metadata_operation(
 
 
 @router.delete("/{novel_id}", status_code=204)
-async def delete_novel(
+def delete_novel(
     novel_id: int,
     file_storage=Depends(get_file_storage),
     uow: SqlUnitOfWork = Depends(get_write_uow),
 ):
     use_case = DeleteNovelUseCase(SQLAlchemyNovelRepository(uow.session), file_storage)
-    await use_case.execute(novel_id)
+    use_case.execute(novel_id)
 
 
 @router.post("/batch-export", response_model=BatchExportResponse)
-async def batch_export_task(
+def batch_export_task(
     body: BatchExportRequest = Body(...),
     task_manager=Depends(get_task_manager),
 ):
@@ -694,7 +694,7 @@ async def batch_export_task(
 
 
 @router.get("/export/{task_id}/download")
-async def download_export_file(
+def download_export_file(
     task_id: int,
     file_storage=Depends(get_file_storage),
     uow: SqlUnitOfWork = Depends(get_uow),
@@ -714,7 +714,7 @@ async def download_export_file(
 
     # Prefer the user's zip_name (stored in the task arguments).
     filename = f"batch_export_{task_id}.zip"
-    arguments = await SQLAlchemyTaskRepository(uow.session).get_task_arguments(task_id)
+    arguments = SQLAlchemyTaskRepository(uow.session).get_task_arguments(task_id)
     if arguments:
         try:
             args = json.loads(arguments)

@@ -140,6 +140,12 @@ class BatchEditMetadataUseCase:
     ) -> BatchMetadataCounts:
         """计数（``apply=False``）或"计数 + 写库"（``apply=True``）。
 
+        ``async`` only for the name lookups (:func:`lookup_author_profile` /
+        :func:`lookup_series_profile`, which may ask Pixiv once each).  Every
+        repository call here is a plain synchronous call: the narrowing
+        UPDATE and the name writebacks block the calling thread, which is the
+        worker thread of the endpoint that awaits this use case.
+
         Args:
             eligible_ids: 调用方解析出的整个选择集（含 pixiv 书）。
             author_id: ``_UNSET`` = 不动作者；``None`` = 解除关联；正整数 = 挂上去。
@@ -166,7 +172,7 @@ class BatchEditMetadataUseCase:
 
         # 只有本地书接受这批字段（field_policy：两个 id 都是"仅本地书"）。
         # 收窄走索引、不读行——pixiv 书的数量进 ``skipped``，不是错误。
-        applicable = await self._repo.filter_ids_by_source(
+        applicable = self._repo.filter_ids_by_source(
             eligible_ids, {SOURCE_LOCAL},
         )
         counts = BatchMetadataCounts(
@@ -232,7 +238,7 @@ class BatchEditMetadataUseCase:
         # 一条——它们描述的是同一批行的同一件事）。``affected`` 只数这一条：
         # 它是"这次批量编辑改了几本"，名字回写与补空名是收尾，混进来会让
         # ``affected`` 与 ``applicable`` 失去可比性。
-        counts["affected"] = await self._write.update_metadata_many(
+        counts["affected"] = self._write.update_metadata_many(
             applicable, values,
         )
 
@@ -240,7 +246,7 @@ class BatchEditMetadataUseCase:
             # 第二条带条件的 set-based UPDATE：``author_name IS NULL`` 的行补
             # 「未知作者」，有名字的行一个字节不动。常量复用
             # ``update_metadata.UNKNOWN_AUTHOR``（产品承诺的唯一所有者）。
-            await self._write.update_metadata_many(
+            self._write.update_metadata_many(
                 applicable,
                 {"author_name": UNKNOWN_AUTHOR},
                 only_where_null="author_name",
@@ -252,12 +258,12 @@ class BatchEditMetadataUseCase:
         # ——后者就是这个调用的一层循环包装，而本用例按单本用例的装配形状只拿
         # 仓库、不拿 uow（这里也只有一个 id，没有可循环的东西）。
         if resolved_author is not None:
-            await self._authors.update_author_name(*resolved_author)
+            self._authors.update_author_name(*resolved_author)
 
         # 系列只命名"这一个系列行"：系列名的规范方向是 novel → series
         # （``update_summary`` 取 ``max(novel.series_name)``），改写同系列其它
         # 小说行既没必要也会覆盖来源值。见 ``repo.update_series_name`` 的注释。
         if resolved_series is not None:
-            await self._series.update_series_name(*resolved_series)
+            self._series.update_series_name(*resolved_series)
 
         return counts

@@ -8,7 +8,7 @@ series-only; the cursor *helpers* come from :mod:`._cursor`.
 from pydantic import BaseModel, field_validator
 
 from copixiv.core.models import TaskResult
-from copixiv.db.write_lock import run_write_transaction
+from copixiv.db.write_lock import read_transaction, run_write_transaction
 from copixiv.features.novels import series_ledger
 from copixiv.features.novels.repo import (
     SQLAlchemyNovelRepository,
@@ -89,9 +89,12 @@ async def _stored_columns(uow, novel_id: int) -> dict | None:
     只改一两列的 draft 必须带上这些列的现值：``repo._upsert_rows`` 的覆盖白名单
     （like / view / title / text / caption / series_name）是**无条件写入**的，
     draft 里少了哪一列就等于把它清成 NULL / 0。
+
+    读走 ``read_transaction``：一个只读事务 = 一次线程跳转，仓储调用本身是同步的。
     """
-    async with uow.begin():
-        return await SQLAlchemySeriesRepository(uow.session).novel_columns(novel_id)
+    return await read_transaction(
+        uow, lambda uw: SQLAlchemySeriesRepository(uw.session).novel_columns(novel_id),
+    )
 
 
 def _draft_from_row(columns: dict, **overrides):
@@ -199,15 +202,16 @@ async def fix_series_index(args: FixSeriesIndexArgs, ctx: TaskContext) -> TaskRe
     # This runs *before* the candidate queries and outside the cap: it needs no
     # network, so it cannot starve the series that do.  ``series_index`` is
     # fill-once, so this only ever writes to a NULL.
-    single_book_ids = []
-    async with uow.begin():
-        single_book_ids = await SQLAlchemySeriesRepository(
-            uow.session
-        ).single_book_series_missing_index()
+    single_book_ids = await read_transaction(
+        uow,
+        lambda uw: SQLAlchemySeriesRepository(
+            uw.session
+        ).single_book_series_missing_index(),
+    )
 
     if single_book_ids:
-        async def _fill_single(uw) -> None:
-            await SQLAlchemyNovelRepository(uw.session).update_metadata_many(
+        def _fill_single(uw) -> None:
+            SQLAlchemyNovelRepository(uw.session).update_metadata_many(
                 single_book_ids, {"series_index": 1},
             )
 
@@ -218,17 +222,18 @@ async def fix_series_index(args: FixSeriesIndexArgs, ctx: TaskContext) -> TaskRe
         )
 
     # ---- 候选集：缺号系列（②）+ 孤儿号行（③）+ 号齐全系列（④，sweep_all）----
-    async with uow.begin():
-        repo = SQLAlchemySeriesRepository(uow.session)
-        candidates = sorted(await repo.series_with_empty_index())
-        orphan_candidates = await repo.novels_with_orphan_index(
+    def _read_candidates(uw) -> tuple[list[int], list, list[int]]:
+        """三路候选集在同一个只读事务里读完（一次线程跳转）。"""
+        repo = SQLAlchemySeriesRepository(uw.session)
+        candidates = sorted(repo.series_with_empty_index())
+        orphans = repo.novels_with_orphan_index(
             limit=(
                 args.max_orphans + 1 if args.max_orphans is not None else None
             ),
             after_id=orphan_cursor,
         )
-        sweep_candidates = (
-            await repo.series_with_stored_index(
+        sweeps = (
+            repo.series_with_stored_index(
                 after_id=sweep_cursor,
                 limit=(
                     args.max_sweep + 1 if args.max_sweep is not None else None
@@ -237,6 +242,11 @@ async def fix_series_index(args: FixSeriesIndexArgs, ctx: TaskContext) -> TaskRe
             if args.sweep_all
             else []
         )
+        return candidates, orphans, sweeps
+
+    candidates, orphan_candidates, sweep_candidates = await read_transaction(
+        uow, _read_candidates,
+    )
 
     series_page, series_truncated = _page(
         [sid for sid in candidates if sid > series_cursor], args.max_series,
@@ -314,7 +324,7 @@ async def fix_series_index(args: FixSeriesIndexArgs, ctx: TaskContext) -> TaskRe
         candidate for the next round, which is exactly the pre-ledger
         behaviour.
         """
-        async def _record(uw) -> None:
+        def _record(uw) -> None:
             series_ledger.note_failure(uw.session, series_id, exc)
 
         try:
@@ -326,7 +336,7 @@ async def fix_series_index(args: FixSeriesIndexArgs, ctx: TaskContext) -> TaskRe
 
     async def _note_roster_success(series_id: int) -> None:
         """Clear a series' ledger entry after a successful fetch (best-effort)."""
-        async def _clear(uw) -> None:
+        def _clear(uw) -> None:
             series_ledger.note_success(uw.session, series_id)
 
         try:
@@ -361,10 +371,12 @@ async def fix_series_index(args: FixSeriesIndexArgs, ctx: TaskContext) -> TaskRe
                 continue
             authority[int(item_id)] = pos0 + 1          # 名册位置（1 基）= 章节号
 
-        async with uow.begin():
-            stored = await SQLAlchemySeriesRepository(uow.session).novels_of_series(
+        stored = await read_transaction(
+            uow,
+            lambda uw: SQLAlchemySeriesRepository(uw.session).novels_of_series(
                 series_id
-            )
+            ),
+        )
 
         fills: list = []      # 号为空 → 直接补（不需要 force_update）
         fixes: list = []      # 号是错值 → 必须 force_update 才写得进去
@@ -400,13 +412,13 @@ async def fix_series_index(args: FixSeriesIndexArgs, ctx: TaskContext) -> TaskRe
             glued.add(novel_id)
 
         if fills or fixes or glue:
-            async def _write(uw) -> None:
+            def _write(uw) -> None:
                 if fills:
-                    await batch_upsert(fills, uw)
+                    batch_upsert(fills, uw)
                 if fixes:
-                    await batch_upsert(fixes, uw, force_update=["series_index"])
+                    batch_upsert(fixes, uw, force_update=["series_index"])
                 if glue:
-                    await batch_upsert(
+                    batch_upsert(
                         glue, uw,
                         force_update=["series_id", "series_name", "series_index"],
                     )
@@ -454,10 +466,12 @@ async def fix_series_index(args: FixSeriesIndexArgs, ctx: TaskContext) -> TaskRe
         身份三列（series_id / series_name / 作者）一律取自 **webview 响应**
         （``safe_get``：dict / JsonDict / pydantic 三种形状都成立），不从名册条目取。
         """
-        async with uow.begin():
-            siblings = await SQLAlchemySeriesRepository(
-                uow.session
-            ).count_novels_by_series(series_id)
+        siblings = await read_transaction(
+            uow,
+            lambda uw: SQLAlchemySeriesRepository(
+                uw.session
+            ).count_novels_by_series(series_id),
+        )
         nav_index = guess_series_order(safe_get(data, "series_navigation"))
         title = safe_get(data, "series_title")
         if not siblings and nav_index:

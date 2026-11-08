@@ -58,49 +58,49 @@ def _token_to_masked_dict(t) -> dict:
 
 
 @router.get("/", response_model=list[TokenResponse])
-async def get_tokens(uow: SqlUnitOfWork = Depends(get_uow)):
+def get_tokens(uow: SqlUnitOfWork = Depends(get_uow)):
     # Build each row manually so the masked token (not the raw refresh_token)
     # is what the response model validates and serializes.
-    return [_token_to_masked_dict(t) for t in await SQLAlchemyTokenRepository(uow.session).get_all()]
+    return [_token_to_masked_dict(t) for t in SQLAlchemyTokenRepository(uow.session).get_all()]
 
 
 @router.post("/", response_model=TokenResponse)
-async def create_token(data: TokenBase, uow: SqlUnitOfWork = Depends(get_write_uow)):
+def create_token(data: TokenBase, uow: SqlUnitOfWork = Depends(get_write_uow)):
     # The request schema still accepts the full token; only the response
     # is masked so the client can't read back the secret it just submitted.
     payload = data.model_dump()
     want_follow = bool(payload.pop("is_follow", False))
-    created = await SQLAlchemyTokenRepository(uow.session).create(payload)
+    created = SQLAlchemyTokenRepository(uow.session).create(payload)
     if want_follow:
-        await SQLAlchemyTokenRepository(uow.session).set_follow(created.id, True)
+        SQLAlchemyTokenRepository(uow.session).set_follow(created.id, True)
         created.is_follow = True
     return _token_to_masked_dict(created)
 
 
 @router.put("/{token_id}", response_model=TokenResponse)
-async def update_token(token_id: int, data: TokenUpdate, uow: SqlUnitOfWork = Depends(get_write_uow)):
+def update_token(token_id: int, data: TokenUpdate, uow: SqlUnitOfWork = Depends(get_write_uow)):
     payload = data.model_dump(exclude_none=True)
     # is_follow is a singleton designation — clear it on every other
     # account before setting it on this one (see the token repository).
     follow_val = payload.pop("is_follow", None)
-    result = await SQLAlchemyTokenRepository(uow.session).update(token_id, payload)
+    result = SQLAlchemyTokenRepository(uow.session).update(token_id, payload)
     if result is None:
         raise NotFoundError(f"Token {token_id} not found")
     if follow_val is not None:
-        if not await SQLAlchemyTokenRepository(uow.session).set_follow(token_id, bool(follow_val)):
+        if not SQLAlchemyTokenRepository(uow.session).set_follow(token_id, bool(follow_val)):
             raise NotFoundError(f"Token {token_id} not found")
         result.is_follow = bool(follow_val)
     return _token_to_masked_dict(result)
 
 
 @router.delete("/{token_id}")
-async def delete_token(token_id: int, uow: SqlUnitOfWork = Depends(get_write_uow)):
-    if not await SQLAlchemyTokenRepository(uow.session).delete(token_id):
+def delete_token(token_id: int, uow: SqlUnitOfWork = Depends(get_write_uow)):
+    if not SQLAlchemyTokenRepository(uow.session).delete(token_id):
         raise NotFoundError(f"Token {token_id} not found")
     return {"ok": True}
 
 
 @router.post("/reorder/")
-async def reorder_tokens(ids: list[int], uow: SqlUnitOfWork = Depends(get_write_uow)):
-    await SQLAlchemyTokenRepository(uow.session).reorder(ids)
+def reorder_tokens(ids: list[int], uow: SqlUnitOfWork = Depends(get_write_uow)):
+    SQLAlchemyTokenRepository(uow.session).reorder(ids)
     return {"ok": True}

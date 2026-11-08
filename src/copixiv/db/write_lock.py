@@ -1,42 +1,32 @@
-"""Write-scope marker (postgres-migration).
+"""Write transactions — the one place a task crosses into the sync data layer.
 
-``db_write()`` was a *global* write lock that serialized all writes because
-SQLite allows only one writer at a time (even in WAL mode).  PostgreSQL is a
-MVCC multi-writer engine: a global mutex would only become a write
-bottleneck.  Under PG the responsibility for correctness moves to the
-**transaction** (a multi-statement ``begin()`` block that commits as one unit)
-plus **``ON CONFLICT`` upserts** for idempotency and row-level locking for
-concurrency.
+Background tasks are coroutines (they must be: the kernel cancels them on
+timeout, and they fan out network work with ``asyncio.gather``).  The
+database layer is blocking Python.  Rather than sprinkling
+``asyncio.to_thread`` through 62 repository methods, the hop happens **once
+per transaction**, here.
 
-What remains here is a *documented* transaction-boundary marker: ``db_write``
-is still an ``asynccontextmanager`` so callers that historically wrapped
-their write batch in ``async with db_write():`` keep working, but the body
-now just yields — it no longer holds any lock.  The ``DbWriteLock`` adapter
-that once wrapped it for the task-runner injection point is gone: the task
-context carries no ``write_lock`` field, and no caller read it.
+Two entry points:
 
-Usage (unchanged shape, no longer mutually exclusive)::
+* :func:`run_write_transaction` — a write transaction, retried on hot-row
+  lock conflicts.  Everything inside *fn* is synchronous: it receives the
+  ``uow`` and calls repositories directly.
+* :func:`read_transaction` — the read-only counterpart, so a task can read
+  the database without blocking the loop and without opening a write
+  transaction it does not need.
 
-    async with db_write():
-        async with uow.begin():
-            await SQLAlchemyNovelRepository(uow.session).upsert_novels([...])
-            await SQLAlchemyAuthorRepository(uow.session).update_last_update(author_id)
-
-Read-only queries never needed the lock (WAL supported concurrent reads),
-and under PG they still don't.
-
-For writes that must not fail on the rare hot-row lock conflict (fan-out
-cron tasks), :func:`run_write_transaction` wraps ``db_write()`` +
-``uow.begin()`` and retries ``LockNotAvailable`` on a fresh transaction
-with exponential backoff + jitter.
+``db_write()`` is kept as a documented no-op boundary marker for code that
+still wants to say "this block writes" without any locking.  Under
+PostgreSQL MVCC there is no single-writer rule to enforce; correctness
+comes from the transaction plus ``ON CONFLICT`` upserts.
 """
 
 from __future__ import annotations
 
 import asyncio
 import random
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from collections.abc import Callable
+from contextlib import contextmanager
 from typing import Any
 
 from sqlalchemy.exc import OperationalError
@@ -44,19 +34,12 @@ from sqlalchemy.exc import OperationalError
 from copixiv.log import logger
 
 
-@asynccontextmanager
-async def db_write() -> AsyncIterator[None]:
-    """Mark a write transaction boundary (no global mutual exclusion).
+@contextmanager
+def db_write() -> Any:
+    """Mark a write block.  Acquires no lock (PostgreSQL is MVCC multi-writer).
 
-    Under PostgreSQL MVCC there is no single-writer rule to enforce, so this
-    context manager intentionally acquires **no lock**.  It exists as:
-
-    * a place to document that a block performs writes,
-    * a compatibility shim for callers that wrapped writes in ``db_write()``.
-
-    Correctness for concurrent writers is provided by the enclosing
-    transaction (commit/rollback atomicity) and by ``ON CONFLICT``
-    upserts, not by a process-wide mutex.
+    Kept as a named boundary rather than a bare ``with``-less block so the
+    intent stays visible at call sites; it has no runtime effect.
     """
     yield
 
@@ -67,11 +50,42 @@ def _is_lock_not_available(exc: BaseException) -> bool:
     A blocked write surfaces as ``OperationalError`` with the psycopg2
     SQLSTATE ``55P03`` (``could not obtain lock ...``).  The failed
     transaction is already aborted, so the caller must retry with a
-    **fresh** transaction/session — exactly what
-    :func:`run_write_transaction` does.
+    **fresh** transaction/session.
+
+    Note: ``lock_timeout`` must be enabled (``SET lock_timeout``) or PG
+    waits indefinitely instead of raising 55P03; do not use NOWAIT.
     """
     orig = getattr(exc, "orig", None)
     return getattr(orig, "pgcode", None) == "55P03"
+
+
+def _run_write_sync(
+    uow,
+    fn: Callable[[Any], Any],
+    *,
+    max_attempts: int,
+    base_delay: float,
+    max_delay: float,
+) -> Any:
+    """Synchronous body of :func:`run_write_transaction` (runs in a worker thread)."""
+    for attempt in range(max_attempts):
+        try:
+            with db_write(), uow.begin():
+                return fn(uow)
+        except OperationalError as exc:
+            if not _is_lock_not_available(exc) or attempt == max_attempts - 1:
+                raise
+            delay = min(base_delay * (2 ** attempt), max_delay)
+            delay *= random.uniform(0.5, 1.5)
+            logger.warning(
+                "写事务撞锁（第 {} / {} 次尝试），{:.3f}s 后重试：{}",
+                attempt + 1, max_attempts, delay, exc,
+            )
+            # This runs in a worker thread, so a blocking sleep is correct —
+            # the event loop keeps serving requests while we back off.
+            import time
+            time.sleep(delay)
+    raise AssertionError("unreachable: retry loop must return or raise")
 
 
 async def run_write_transaction(
@@ -82,37 +96,35 @@ async def run_write_transaction(
     base_delay: float = 0.05,
     max_delay: float = 0.5,
 ) -> Any:
-    """Run ``fn(uow)`` inside ``db_write()`` + ``uow.begin()`` with retry.
+    """Run the **synchronous** ``fn(uow)`` in one write transaction.
 
-    PostgreSQL is an MVCC multi-writer engine: a write transaction is
-    short, and two concurrent fan-out writes may still briefly contend on
-    the same hot ``tag`` row.  Rather than serializing every write (the
-    old SQLite global lock) or failing the cron loudly, this helper
-    retries a lock conflict with exponential backoff + random jitter.
+    ``fn`` must be a plain ``def``: everything it does, from the ``BEGIN``
+    to the ``COMMIT``, executes in a single worker thread so the session
+    never crosses threads (SQLAlchemy ``Session`` is not thread-safe).
 
-    Retries use the *same* ``uow`` object but a **fresh** session/transaction
-    on every attempt: ``uow.begin()`` rolls back and closes the failed
-    session before re-raising, so the next attempt starts clean.
-
-    Only ``LockNotAvailable`` (SQLSTATE 55P03) is retried; real SQL/编程
-    错误 bubble up immediately.
+    Retries a ``LockNotAvailable`` conflict with exponential backoff +
+    jitter on a fresh session; real SQL/programming errors bubble up
+    immediately.
     """
-    for attempt in range(max_attempts):
-        try:
-            async with db_write():
-                async with uow.begin():
-                    return await fn(uow)
-        except OperationalError as exc:
-            if not _is_lock_not_available(exc) or attempt == max_attempts - 1:
-                raise
-            delay = min(base_delay * (2**attempt), max_delay)
-            delay *= random.uniform(0.5, 1.5)
-            logger.warning(
-                "写事务撞锁（第 {} / {} 次尝试），{:.3f}s 后重试：{}",
-                attempt + 1, max_attempts, delay, exc,
-            )
-            await asyncio.sleep(delay)
-    raise AssertionError("unreachable: retry loop must return or raise")
+    return await asyncio.to_thread(
+        _run_write_sync,
+        uow,
+        fn,
+        max_attempts=max_attempts,
+        base_delay=base_delay,
+        max_delay=max_delay,
+    )
 
 
+def _run_read_sync(uow, fn: Callable[[Any], Any]) -> Any:
+    with uow.begin():
+        return fn(uow)
 
+
+async def read_transaction(uow, fn: Callable[[Any], Any]) -> Any:
+    """Run the **synchronous** ``fn(uow)`` in one read transaction, off the loop.
+
+    A read still needs a transaction so the session is opened and closed
+    around it; it just never retries.
+    """
+    return await asyncio.to_thread(_run_read_sync, uow, fn)

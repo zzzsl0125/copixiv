@@ -33,7 +33,6 @@ are live queue entries, not history.
 
 from __future__ import annotations
 
-import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -43,7 +42,7 @@ from sqlalchemy import func, select as _select
 
 from copixiv.core.models import TaskResult
 from copixiv.db import models
-from copixiv.db.write_lock import run_write_transaction
+from copixiv.db.write_lock import read_transaction, run_write_transaction
 from copixiv.log import logger
 
 from ..kernel import TaskContext
@@ -93,14 +92,17 @@ def _policy(args: PruneTaskHistoryArgs, stored: dict | None) -> tuple[int, int]:
     return keep, age
 
 
-def _read_policy(ctx: TaskContext) -> dict | None:
-    """The stored policy JSON, or ``None`` when the row is absent/unparseable."""
-    with ctx.session_factory() as session:
-        raw = session.execute(
-            _select(models.Setting.value).where(
-                models.Setting.key == RETENTION_SETTING_KEY
-            )
-        ).scalar()
+def _read_policy(session) -> dict | None:
+    """The stored policy JSON, or ``None`` when the row is absent/unparseable.
+
+    Takes an open session so it can run inside the caller's single read
+    transaction (see ``prune_task_history``) rather than opening its own.
+    """
+    raw = session.execute(
+        _select(models.Setting.value).where(
+            models.Setting.key == RETENTION_SETTING_KEY
+        )
+    ).scalar()
     if not raw:
         return None
     try:
@@ -175,14 +177,25 @@ async def prune_task_history(
 
     Pending/running rows are never candidates — they are the live queue.
     """
-    keep, max_age_days = _policy(args, _read_policy(ctx))
-    cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+    def _read_counts(uw) -> tuple[int, int, int, int]:
+        """Policy + totals in one read transaction (one hop for the loop).
 
-    with ctx.session_factory() as session:
+        The threshold derives from the ``setting`` row, so the counts cannot
+        be computed before that row is read — both happen inside the same
+        transaction instead of two separate hops.
+        """
+        session = uw.session
+        keep, max_age_days = _policy(args, _read_policy(session))
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
         total = int(session.execute(
             _select(func.count()).select_from(models.TaskHistory)
         ).scalar() or 0)
-        victims = _count_victims(session, keep, cutoff)
+        return keep, max_age_days, total, _count_victims(session, keep, cutoff)
+
+    keep, max_age_days, total, victims = await read_transaction(
+        ctx.uow, _read_counts,
+    )
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
 
     threshold = (
         f"保留最近 {keep} 行 + 最近 {max_age_days} 天内的记录"
@@ -207,7 +220,7 @@ async def prune_task_history(
             )
         )
 
-    async def _delete(uw) -> int:
+    def _delete(uw) -> int:
         session = uw.session
         conditions = _victim_condition(session, keep, cutoff)
         result = session.execute(

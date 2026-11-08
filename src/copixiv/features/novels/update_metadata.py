@@ -115,6 +115,11 @@ class UpdateNovelMetadataUseCase:
     async def execute(self, novel_id: int, changes: dict[str, Any]) -> Novel:
         """应用 *changes*（只含客户端提交的键），返回更新后的域模型。
 
+        ``async`` only because the author/series columns can trigger a live
+        Pixiv name lookup (:func:`lookup_author_profile` /
+        :func:`lookup_series_profile`).  All repository calls are plain
+        synchronous calls; the local-table hit path never touches the network.
+
         Raises:
             NotFoundError: 小说不存在 → 404。
             ValidationError: 空 patch / 校验失败 / pixiv 书提交只读字段 → 400。
@@ -122,7 +127,7 @@ class UpdateNovelMetadataUseCase:
         if not changes:
             raise ValidationError("没有要更新的字段")
 
-        novel = await self._repo.get_by_id(novel_id)
+        novel = self._repo.get_by_id(novel_id)
         if novel is None:
             raise NotFoundError(f"Novel {novel_id} not found")
 
@@ -144,23 +149,23 @@ class UpdateNovelMetadataUseCase:
             )
             values.update(series_values)
 
-        await self._repo.update_metadata(novel_id, values)
+        self._repo.update_metadata(novel_id, values)
 
         # 作者行本身也要有名字（`ensure_exists` 刚建的占位行是 NULL），并把
         # 该名字规范到同作者的全部 novel 行——`update_author_name` 两个都做，
         # 且用 `IS DISTINCT FROM` 过滤掉无变化的行（刚写的这一行就在其中）。
         if resolved_author is not None:
-            await self._authors.update_author_name(*resolved_author)
+            self._authors.update_author_name(*resolved_author)
 
         # 系列只写"这一个系列行"的名字：系列名的规范方向是 novel → series
         # （`update_summary` 取 max(novel.series_name)），改写同系列其它
         # 小说行既没必要也会覆盖来源值。见 `update_series_name` 的注释。
         if resolved_series is not None:
-            await self._series.update_series_name(*resolved_series)
+            self._series.update_series_name(*resolved_series)
 
         # 返回读路径的域模型：它已处理 ``is_special_follow`` 的 NULL 归一
         # （无作者行的本地书会走这条），HTTP 层直接拿它做 response_model 序列化。
-        updated = await self._repo.get_by_id(novel_id)
+        updated = self._repo.get_by_id(novel_id)
         if updated is None:  # 并发删除的兜底——上面刚写过，实际不会发生
             raise NotFoundError(f"Novel {novel_id} not found")
         return updated
@@ -210,6 +215,9 @@ class UpdateNovelMetadataUseCase:
     ) -> tuple[dict[str, Any], tuple[int, str] | None]:
         """``author_id`` 提交值 → 列值 + 需要写回作者行的 ``(id, 名字)``。
 
+        ``async`` because :func:`lookup_author_profile` may ask Pixiv for the
+        name; every repository call in here is a plain synchronous call.
+
         三态与三种结果：
 
         * 显式 ``null``（解除关联）→ 写 ``author_id=NULL``；**显示名保持不动**
@@ -256,6 +264,9 @@ class UpdateNovelMetadataUseCase:
         self, raw: Any,
     ) -> tuple[dict[str, Any], tuple[int, str] | None]:
         """``series_id`` 提交值 → 列值 + 需要写回系列行的 ``(id, 名字)``。
+
+        ``async`` for the same reason as :meth:`_author_columns`: the name
+        resolution may hit Pixiv; the repository calls are synchronous.
 
         与作者同构，只有两处刻意的不同：
 

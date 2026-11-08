@@ -33,7 +33,7 @@ BATCH_ID_CHUNK_SIZE = 30_000
 _DEFAULT_CAP = object()
 
 
-async def resolve_batch_scope(
+def resolve_batch_scope(
     novel_repo: SQLAlchemyNovelRepository,
     *,
     mode: str,
@@ -62,6 +62,10 @@ async def resolve_batch_scope(
     The ``all_matched`` size check reads a **bounded** count
     (``repo.COUNT_CAP``): it answers "is the scope over the cap?", not
     "how many novels are there?".
+
+    Synchronous: it only queries the repository (blocking SQLAlchemy calls),
+    so the endpoint declaring it as a plain ``def`` keeps the session work on
+    the worker thread FastAPI runs it in.
     """
     if cap is _DEFAULT_CAP:
         cap = BATCH_MAX_NOVELS
@@ -81,7 +85,7 @@ async def resolve_batch_scope(
     # background-task path (cap=None) skips it and goes straight to the
     # ID list.
     if cap is not None:
-        matched = await novel_repo.count_novels(
+        matched = novel_repo.count_novels(
             QuerySpec(
                 conditions=conditions or [],
                 min_like=min_like,
@@ -102,7 +106,7 @@ async def resolve_batch_scope(
                 f"{cap} 篇，请先缩小筛选范围"
             )
 
-    ids = await novel_repo.list_matching_ids(
+    ids = novel_repo.list_matching_ids(
         QuerySpec(
             conditions=conditions or [],
             min_like=min_like,
@@ -128,8 +132,8 @@ class BatchDeleteUseCase:
         self._repo = novel_repo
         self._file_storage = file_storage
 
-    async def execute(self, novel_ids: list[int]) -> int:
-        paths = await self._repo.delete_many(novel_ids)
+    def execute(self, novel_ids: list[int]) -> int:
+        paths = self._repo.delete_many(novel_ids)
         for path in paths:
             if path:
                 self._file_storage.delete_novel_files(path)
@@ -147,7 +151,7 @@ class BatchTagUseCase:
         self._repo = novel_repo
         self._tag_repo = tag_repo
 
-    async def execute(
+    def execute(
         self, operation: str, novel_ids: list[int], tags: list[str],
     ) -> int:
         tag_set = {t.strip() for t in tags if t and t.strip()}
@@ -158,11 +162,11 @@ class BatchTagUseCase:
                 f"一次最多操作 {BATCH_MAX_TAGS} 个标签（当前 {len(tag_set)} 个）"
             )
 
-        alias_map = await self._tag_repo.get_alias_map()
+        alias_map = self._tag_repo.get_alias_map()
         resolved = {alias_map.get(t, t) for t in tag_set}
 
         if operation == "add_tags":
-            return await self._repo.add_tags_to_novels(novel_ids, resolved)
+            return self._repo.add_tags_to_novels(novel_ids, resolved)
         if operation == "remove_tags":
-            return await self._repo.remove_tags_from_novels(novel_ids, resolved)
+            return self._repo.remove_tags_from_novels(novel_ids, resolved)
         raise ValidationError(f"未知的批量操作: {operation}")

@@ -15,30 +15,30 @@ class SQLAlchemyTokenRepository(BaseRepository):
     def __init__(self, session: Session):
         super().__init__(session)
 
-    async def get_all(self) -> Sequence[models.Token]:
+    def get_all(self) -> Sequence[models.Token]:
         stmt = select(models.Token).order_by(models.Token.sort_index)
         return list(self.session.execute(stmt).scalars().all())
 
-    async def get_by_name(self, name: str) -> models.Token | None:
+    def get_by_name(self, name: str) -> models.Token | None:
         stmt = select(models.Token).where(models.Token.name == name)
         return self.session.execute(stmt).scalar_one_or_none()
 
-    async def create(self, token_data: dict) -> models.Token:
+    def create(self, token_data: dict) -> models.Token:
         token = models.Token(**token_data)
         self.session.add(token)
         self.session.flush()
         return token
 
-    async def update(self, token_id: int, token_data: dict) -> models.Token | None:
+    def update(self, token_id: int, token_data: dict) -> models.Token | None:
         return self._update_attrs(models.Token, token_id, token_data)
 
-    async def delete(self, token_id: int) -> bool:
+    def delete(self, token_id: int) -> bool:
         return self._delete_by_id(models.Token, token_id)
 
-    async def reorder(self, ids: list[int]) -> bool:
+    def reorder(self, ids: list[int]) -> bool:
         return self._reorder(models.Token, "sort_index", ids)
 
-    async def set_follow(self, token_id: int, is_follow: bool) -> bool:
+    def set_follow(self, token_id: int, is_follow: bool) -> bool:
         """Designate one token as the「追更账号」, clearing the flag on all others.
 
         Returns ``False`` when *token_id* doesn't exist.  Runs as a single

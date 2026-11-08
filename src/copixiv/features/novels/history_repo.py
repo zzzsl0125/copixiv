@@ -17,7 +17,7 @@ class SQLAlchemySearchHistoryRepository(BaseRepository):
     def __init__(self, session: Session):
         super().__init__(session)
 
-    async def get_all(
+    def get_all(
         self, limit: int = 50, offset: int = 0
     ) -> Sequence[models.SearchHistory]:
         stmt = (
@@ -28,7 +28,7 @@ class SQLAlchemySearchHistoryRepository(BaseRepository):
         )
         return list(self.session.execute(stmt).scalars().all())
 
-    async def add_or_update(
+    def add_or_update(
         self,
         type_: str,
         value: str,
@@ -50,10 +50,10 @@ class SQLAlchemySearchHistoryRepository(BaseRepository):
         )
         self.session.execute(stmt)
 
-    async def delete(self, history_id: int) -> bool:
+    def delete(self, history_id: int) -> bool:
         return self._delete_by_id(models.SearchHistory, history_id)
 
-    async def clear_all(self) -> int:
+    def clear_all(self) -> int:
         """Delete every search-history row. Returns the number deleted."""
         result = self.session.execute(_delete(models.SearchHistory))
         return result.rowcount or 0

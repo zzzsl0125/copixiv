@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from copixiv.db.uow import SqlUnitOfWork
-from copixiv.db.write_lock import run_write_transaction
+from copixiv.db.write_lock import read_transaction, run_write_transaction
 
 from copixiv.core.draft import NovelDraft, NovelInfoLike, build_from_novel_info
 from copixiv.core.models import EpubStatus
@@ -42,7 +42,7 @@ from copixiv.log import logger
 # ---------------------------------------------------------------------------
 
 
-async def batch_upsert(
+def batch_upsert(
     novels: list[NovelDraft], uow, force_update: list[str] | None = None,
 ) -> int:
     """Upsert novels and update author/series summaries.
@@ -53,8 +53,12 @@ async def batch_upsert(
     Pure write helper: the caller is responsible for wrapping it in a short
     write transaction (``run_write_transaction``) so the whole batch
     (including the commit) is atomic; there is no global write lock.
+
+    Synchronous, because it is the body of such a transaction: it runs either
+    as the plain ``fn`` callback of ``run_write_transaction`` or inside an
+    already-open ``with uow.begin()`` — never with an ``await``.
     """
-    count = await persist_novels(uow, novels, force_update)
+    count = persist_novels(uow, novels, force_update)
     novels = [n for n in novels if n]
     if novels:
         logger.info(
@@ -147,7 +151,7 @@ async def _download_novels(
 # ---------------------------------------------------------------------------
 
 
-async def _plan_batch(
+def _plan_batch(
     novels: list[NovelInfoLike],
     uow,
     redownload: bool = False,
@@ -176,7 +180,7 @@ async def _plan_batch(
 
     ids = {n.id for n in novels}
     repo = SQLAlchemyNovelRepository(uow.session)
-    existing = await repo.get_existing_ids(ids)
+    existing = repo.get_existing_ids(ids)
 
     # Exclude novels that have already failed too many times
     skip_ids: set[int] = set()
@@ -207,12 +211,12 @@ async def _plan_batch(
         n.id for n in novels if n.id in need_download
     ))
     stored_paths = (
-        await repo.get_stored_paths(set(download_ids)) if download_ids else {}
+        repo.get_stored_paths(set(download_ids)) if download_ids else {}
     )
     return existing_meta, download_ids, stored_paths
 
 
-async def _upsert_batch(
+def _upsert_batch(
     existing_meta: list[NovelDraft],
     downloaded: list[NovelDraft],
     uow,
@@ -236,7 +240,7 @@ async def _upsert_batch(
     titles_out: list[str] = []
 
     if existing_meta:
-        new_count += await batch_upsert(existing_meta, uow)
+        new_count += batch_upsert(existing_meta, uow)
         logger.info(f"_upsert_batch: metadata upsert done for {new_count} existing novels")
 
     if downloaded:
@@ -255,7 +259,7 @@ async def _upsert_batch(
         # its contract is explicitly "a source-side rename must NOT move the
         # path" (``tests/api/test_novel_sync.py``).  Downloading is the only
         # path that may have just written a different file.
-        new_count += await batch_upsert(downloaded, uow, force_update=["path"])
+        new_count += batch_upsert(downloaded, uow, force_update=["path"])
         # A novel that both downloaded successfully AND has a recorded failure
         # (e.g. an asset-processing failure) keeps its ledger entry — forgetting
         # it would erase the "downloaded but asset failed" trace.  Only clean
@@ -357,7 +361,7 @@ class _AuthorNames:
     author_ids: set[int]
 
 
-async def _plan_round(
+def _plan_round(
     novels: list[NovelInfoLike] | None,
     ids: list[int] | None,
     uow: SqlUnitOfWork,
@@ -369,9 +373,15 @@ async def _plan_round(
     *novels* 与 *ids* 是两条入口：前者带来源元数据，后者只是"我要这些编号"
     （单本 ``novel_fetch``）。两条都归结成一个 :class:`_RoundPlan`，之后的
     阶段因此不必再问"是哪条入口进来的"。
+
+    同步：只做数据库读取，由 async 的 :func:`ingest` 用
+    ``read_transaction(uow, lambda u: _plan_round(...))`` 包住——那一次
+    ``asyncio.to_thread`` 既把这堆阻塞读放到事件循环之外，也提供事务边界，
+    所以本函数**自己不开** ``uow.begin()``（开了会与 read_transaction 的事务
+    嵌套）。
     """
     if novels:
-        existing_meta, download_ids, stored_paths = await _plan_batch(
+        existing_meta, download_ids, stored_paths = _plan_batch(
             novels, uow, redownload=force,
             failed_repo=FailedNovelRepository(uow.session),
         )
@@ -383,10 +393,10 @@ async def _plan_round(
     # case its body must go to the stored anchor, not to a path recomputed
     # from a title that may have changed at the source.
     if download_ids:
-        async with uow.begin():
-            stored_paths = await SQLAlchemyNovelRepository(
-                uow.session
-            ).get_stored_paths(set(download_ids))
+        # 调用方（``ingest``）用 ``read_transaction`` 包住本函数，事务边界在那里。
+        stored_paths = SQLAlchemyNovelRepository(
+            uow.session
+        ).get_stored_paths(set(download_ids))
     return _RoundPlan([], download_ids, stored_paths)
 
 
@@ -523,7 +533,10 @@ async def ingest(
 
     uow = SqlUnitOfWork(session_factory)
 
-    plan = await _plan_round(novels, ids, uow, force=force)
+    # 计划阶段是同步 DB 读：``read_transaction`` 提供事务边界并把整段搬出循环。
+    plan = await read_transaction(
+        uow, lambda read_uow: _plan_round(novels, ids, read_uow, force=force),
+    )
 
     downloaded, failed_records = await _download_round(
         plan.download_ids, client, file_storage, image_downloader,
@@ -578,7 +591,7 @@ def _titles_by_id(
     return titles
 
 
-async def _persist_round(
+def _persist_round(
     uow: SqlUnitOfWork,
     existing_meta: list[NovelDraft],
     downloaded: list[NovelDraft],
@@ -596,20 +609,24 @@ async def _persist_round(
 
     顺序是有意义的：先 upsert（draft 的 has_epub=PENDING 落库），再按生产方
     自报的结果把它翻成 DONE。同一个事务里没有中间态对外可见。
+
+    同步：它是 ``run_write_transaction`` 的 ``fn`` 回调，整个回调（含 BEGIN /
+    COMMIT）跑在同一个 worker 线程里，绝不能是 ``async def``——anyio 不会 await
+    协程，只会把它当普通返回值，写入就静默丢了。
     """
-    titles_out, new_count = await _upsert_batch(
+    titles_out, new_count = _upsert_batch(
         existing_meta, downloaded, uow,
         failed_records=failed_records,
         failed_repo=FailedNovelRepository(uow.session),
         titles=titles,
     )
     if done_ids:
-        # 仓库方法是协程（``repo.py::update_has_epub_status``）：漏掉 ``await``
-        # 是一次**静默丢写**，不会报错。
-        await SQLAlchemyNovelRepository(uow.session).update_has_epub_status(
+        # 仓库方法是普通 ``def``（``repo.py::update_has_epub_status``）：本回调
+        # 同步执行，不需要 ``await``。
+        SQLAlchemyNovelRepository(uow.session).update_has_epub_status(
             done_ids, EpubStatus.DONE,
         )
         logger.info(f"_persist: {len(done_ids)} novels marked EPUB DONE")
     if mapping:
-        await writeback_author_names(mapping, uow)
+        writeback_author_names(mapping, uow)
     return titles_out, new_count

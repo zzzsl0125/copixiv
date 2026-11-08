@@ -55,8 +55,13 @@ async def lookup_series_profile(
     session: Session,
     client: PixivClient | None,
 ) -> SeriesProfile:
-    """Resolve one series id → name.  Read-only, never raises."""
-    row = await SQLAlchemySeriesRepository(session).get_by_id(series_id)
+    """Resolve one series id → name.  Read-only, never raises.
+
+    ``async`` only for the optional Pixiv fallback below
+    (:func:`fetch_series_name`); the two local reads are plain synchronous
+    queries on the request's session.
+    """
+    row = SQLAlchemySeriesRepository(session).get_by_id(series_id)
     name = (row or {}).get("series_name")
     if name:
         return SeriesProfile(series_id, name, "local")

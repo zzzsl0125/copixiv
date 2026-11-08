@@ -185,10 +185,29 @@ _DEFAULT_CONFIG_PATH = Path("config.yaml")
 def _env_overrides() -> dict:
     """Read COPIXIV_-prefixed env vars and nest them into the config shape.
 
-    Example: ``COPIXIV_PROXY__URL=http://…`` → ``{"proxy": {"url": "…"}}``
+    Nested keys use a double underscore::
+
+        COPIXIV_PROXY__URL=http://…   →  {"proxy": {"url": "…"}}
+        COPIXIV_BACKUP__DIR=/tmp/bk   →  {"backup": {"dir": "/tmp/bk"}}
+
+    Top-level keys have no separator::
+
+        COPIXIV_DATABASE_URL=…        →  {"database_url": "…"}
+
+    Top-level support matters in practice: it is the only way to point a
+    second process at a different database without editing ``config.yaml``
+    (verification instances, one-off migrations).  Without it the override
+    was silently dropped, so a process that *looked* isolated wrote to the
+    production database.
     """
     prefix = "COPIXIV_"
     overrides: dict = {}
+    # Only fields AppConfig actually declares may be overridden at the top
+    # level.  Otherwise an unrelated COPIXIV_* var (e.g. ``COPIXIV_LOG_DIR``,
+    # which ``log.py`` reads directly) would be injected into the config dict
+    # and rejected by ``extra="forbid"`` — turning a working startup into a
+    # hard failure.
+    top_level_fields = set(AppConfig.model_fields)
     for key, value in os.environ.items():
         if not key.startswith(prefix):
             continue
@@ -196,6 +215,10 @@ def _env_overrides() -> dict:
         if len(parts) == 2:
             section, field = parts
             overrides.setdefault(section, {})[field] = value
+        elif len(parts) == 1 and parts[0] in top_level_fields:
+            # A bare top-level config field (database_url, …).  Values stay
+            # strings; Pydantic coerces them against the declared types.
+            overrides[parts[0]] = value
     return overrides
 
 

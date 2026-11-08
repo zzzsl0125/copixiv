@@ -9,7 +9,6 @@ from sqlalchemy.orm import Session
 from copixiv.db import models
 from copixiv.db import constants as C
 from copixiv.db.base import BaseRepository, model_to_dict, update_summary
-from copixiv.core.offload import offload
 
 
 class SQLAlchemyAuthorRepository(BaseRepository):
@@ -30,13 +29,13 @@ class SQLAlchemyAuthorRepository(BaseRepository):
             )
         self.session.flush()
 
-    async def get_by_id(self, author_id: int) -> dict | None:
+    def get_by_id(self, author_id: int) -> dict | None:
         author = self.session.get(models.Author, author_id)
         if author is None:
             return None
         return model_to_dict(author)
 
-    async def get_names_by_ids(self, author_ids: set[int]) -> dict[int, str]:
+    def get_names_by_ids(self, author_ids: set[int]) -> dict[int, str]:
         """Batch lookup: return ``{author_id: author_name}`` for ids whose
         name is already known (non-NULL).  Authors with ``author_name IS NULL``
         are silently omitted."""
@@ -51,7 +50,7 @@ class SQLAlchemyAuthorRepository(BaseRepository):
         ).fetchall()
         return {row.author_id: row.author_name for row in rows}
 
-    async def count_novels_by_author(self, author_id: int) -> int:
+    def count_novels_by_author(self, author_id: int) -> int:
         """How many novels in the library currently point at *author_id*.
 
         Used by the editor's author-id preview: "库内已有 12 本" is how the
@@ -65,7 +64,7 @@ class SQLAlchemyAuthorRepository(BaseRepository):
             .where(models.Novel.author_id == author_id)
         ).scalar_one())
 
-    async def need_update(self, author_id: int) -> bool:
+    def need_update(self, author_id: int) -> bool:
         author = self.session.get(models.Author, author_id)
         if author and author.last_update:
             last = author.last_update
@@ -74,17 +73,16 @@ class SQLAlchemyAuthorRepository(BaseRepository):
             return (datetime.now(timezone.utc) - last).days > 0
         return True
 
-    @offload
     def update_summary(self, author_ids: set[int] | None = None) -> None:
-        """Recalculate author aggregates (runs in a worker thread)."""
+        """Recalculate author aggregates."""
         self.update_summary_sync(author_ids)
 
     def update_summary_sync(self, author_ids: set[int] | None = None) -> None:
-        """Same as :meth:`update_summary`, without the thread hop.
+        """Same as :meth:`update_summary`, under the explicit sync name.
 
         For call sites that are already inside a transaction on this session —
-        a delete path must not hand its connection to a worker thread.  The
-        statements live here once; the decorated half only adds the hop.
+        a delete path must keep its work on its own connection.  The
+        statements live here once; :meth:`update_summary` delegates here.
         """
         update_summary(
             self.session, models.Author, C.COL_AUTHOR_ID, author_ids,
@@ -93,15 +91,15 @@ class SQLAlchemyAuthorRepository(BaseRepository):
             ],
         )
 
-    async def update_author_name(self, author_id: int, name: str) -> None:
-        """Async entry point — see :meth:`update_author_name_sync`."""
+    def update_author_name(self, author_id: int, name: str) -> None:
+        """Entry point — see :meth:`update_author_name_sync`."""
         self.update_author_name_sync(author_id, name)
 
     def update_author_name_sync(self, author_id: int, name: str) -> None:
         """Write *name* to the author row **and** normalise its novel rows.
 
-        同步双胞胎：语句与谓词只有这一份（``async def`` 那一半只是既有调用点的
-        形状——它体内没有任何 await），给**同步的写路径**用：
+        同步孪生体：语句与谓词只有这一份（``update_author_name`` 只是既有调用点
+        沿用的名字，它委托到这里；本方法体内没有任何 await），给**同步的写路径**用：
         ``features/library/ingest.py`` 的上传管线是同步的（SQLAlchemy 的
         ``Session`` 本来就是同步 API），它要在写事务里做同一个收尾。
 
@@ -125,14 +123,14 @@ class SQLAlchemyAuthorRepository(BaseRepository):
             .values(author_name=name)
         )
 
-    async def update_last_update(self, author_id: int) -> None:
+    def update_last_update(self, author_id: int) -> None:
         self.session.execute(
             _update(models.Author)
             .where(models.Author.author_id == author_id)
             .values(last_update=datetime.now(timezone.utc))
         )
 
-    async def delete_author_and_data(self, author_id: int) -> None:
+    def delete_author_and_data(self, author_id: int) -> None:
         novel_ids = self.session.execute(
             _select(models.Novel.id).where(models.Novel.author_id == author_id)
         ).scalars().all()
@@ -152,14 +150,14 @@ class SQLAlchemyAuthorRepository(BaseRepository):
             _delete(models.Author).where(models.Author.author_id == author_id)
         )
 
-    async def get_empty_author_ids(self) -> list[int]:
+    def get_empty_author_ids(self) -> list[int]:
         return list(self.session.execute(
             _select(models.Author.author_id)
             .where(models.Author.author_name.is_(None))
             .distinct()
         ).scalars().all())
 
-    async def get_special_follow_author_ids(self) -> list[int]:
+    def get_special_follow_author_ids(self) -> list[int]:
         return list(self.session.execute(
             _select(models.Author.author_id).where(
                 models.Author.is_special_follow == True

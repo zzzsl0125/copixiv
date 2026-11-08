@@ -24,7 +24,7 @@ class SystemConfigUpdate(BaseModel):
 router = APIRouter()
 
 
-async def _config_response(uow: SqlUnitOfWork, app_config) -> dict:
+def _config_response(uow: SqlUnitOfWork, app_config) -> dict:
     """Merged config: static values from config.yaml + runtime settings.
 
     *app_config* is the application config object (injected via ``get_app_config``, docs/MODULARITY.md §M9)
@@ -36,7 +36,7 @@ async def _config_response(uow: SqlUnitOfWork, app_config) -> dict:
     """
     return {
         "batch_download_naming": app_config.batch_download.naming,
-        "exclude_blocked_tag_novels": await SQLAlchemySettingRepository(
+        "exclude_blocked_tag_novels": SQLAlchemySettingRepository(
             uow.session
         ).get_bool(
             EXCLUDE_BLOCKED_SETTING_KEY, default=True
@@ -45,22 +45,22 @@ async def _config_response(uow: SqlUnitOfWork, app_config) -> dict:
 
 
 @router.get("/config", response_model=SystemConfigResponse)
-async def get_system_config(
+def get_system_config(
     app_config=Depends(get_app_config),
     uow: SqlUnitOfWork = Depends(get_uow),
 ):
-    return await _config_response(uow, app_config)
+    return _config_response(uow, app_config)
 
 
 @router.put("/config", response_model=SystemConfigResponse)
-async def update_system_config(
+def update_system_config(
     data: SystemConfigUpdate,
     app_config=Depends(get_app_config),
     uow: SqlUnitOfWork = Depends(get_write_uow),
 ):
     if data.exclude_blocked_tag_novels is not None:
-        await SQLAlchemySettingRepository(uow.session).set_value(
+        SQLAlchemySettingRepository(uow.session).set_value(
             EXCLUDE_BLOCKED_SETTING_KEY,
             "true" if data.exclude_blocked_tag_novels else "false",
         )
-    return await _config_response(uow, app_config)
+    return _config_response(uow, app_config)

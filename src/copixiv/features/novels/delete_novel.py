@@ -15,7 +15,7 @@ class DeleteNovelUseCase:
         self._repo = novel_repo
         self._file_storage = file_storage
 
-    async def execute(self, novel_id: int) -> None:
+    def execute(self, novel_id: int) -> None:
         """Delete a novel by ID, then clean up its files best-effort.
 
         DB first, files second: a failed DB delete must not leave the
@@ -23,15 +23,19 @@ class DeleteNovelUseCase:
         is worse than orphaned files — orphans are easy to spot and the
         weekly ``check_epub``-style sweeps can reclaim them).
 
+        Pure DB + a best-effort local file delete: synchronous, so the
+        endpoint declaring it is a plain ``def`` and FastAPI runs the whole
+        thing (including the blocking ``Session`` work) in its worker thread.
+
         Raises:
             NotFoundError: If the novel doesn't exist.
         """
-        novel = await self._repo.get_by_id(novel_id)
+        novel = self._repo.get_by_id(novel_id)
         if not novel:
             raise NotFoundError(f"Novel {novel_id} not found")
 
         novel_path = novel.path
-        await self._repo.delete(novel_id)
+        self._repo.delete(novel_id)
 
         if novel_path:
             # Best-effort cleanup — a failure here must not fail the API

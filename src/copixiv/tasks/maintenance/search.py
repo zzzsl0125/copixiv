@@ -7,8 +7,10 @@ None of these touch EPUB state or series metadata: they repair the novel
 table's author names and the ``pg_bigm`` index respectively.
 """
 
+from typing import Any, cast
+
 from copixiv.core.models import TaskResult
-from copixiv.db.write_lock import run_write_transaction
+from copixiv.db.write_lock import read_transaction, run_write_transaction
 from copixiv.features.authors.resolve_names import (
     collect_author_names,
     writeback_author_names,
@@ -35,20 +37,25 @@ async def sync_empty_name(ctx: TaskContext) -> TaskResult:
     from sqlalchemy import select as _select
     from copixiv.db import models
 
-    uow = ctx.uow
+    # ``TaskContext.uow`` / ``client`` are Optional only for hand-built
+    # contexts — the executor always sets them for a real run.  The cast keeps
+    # that Optional noise out of the call sites; it has no runtime effect.
+    uow = cast(Any, ctx.uow)
 
-    async with uow.begin():
+    def _read_ids(uw) -> list:
         stmt = _select(
             models.Novel.id, models.Novel.author_id
         ).where(models.Novel.author_name.is_(None))
-        rows = uow.session.execute(stmt).fetchall()
+        return uw.session.execute(stmt).fetchall()
+
+    rows = await read_transaction(uow, _read_ids)
 
     if not rows:
         return TaskResult(summary="作者名同步: 无需修复")
 
     author_ids = {row.author_id for row in rows}
     mapping = await collect_author_names(
-        author_ids, client=ctx.client, uow=uow,
+        author_ids, client=cast(Any, ctx.client), uow=uow,
     )
     await run_write_transaction(
         uow, lambda uw: writeback_author_names(mapping, uw),
@@ -76,7 +83,7 @@ async def rebuild_fts(ctx: TaskContext) -> TaskResult:
 
     uow = ctx.uow
 
-    async def _reindex(uw) -> None:
+    def _reindex(uw) -> None:
         reindex(uw.session)
 
     await run_write_transaction(uow, _reindex)
@@ -97,8 +104,9 @@ async def check_fts(ctx: TaskContext) -> TaskResult:
 
     uow = ctx.uow
 
-    async with uow.begin():
-        result = index_health(uow.session)
+    result = await read_transaction(
+        uow, lambda uw: index_health(uw.session),
+    )
 
     if not result["index_exists"]:
         return TaskResult(summary="搜索索引检查: 索引不存在，需运行 rebuild_fts")

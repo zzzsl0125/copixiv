@@ -43,7 +43,7 @@ from copixiv.tasks.history_repo import SQLAlchemyTaskRepository
 from copixiv.core.exceptions import ValidationError
 from copixiv.core.models import TaskResult
 from copixiv.core.services import build_batch_zip
-from copixiv.db.write_lock import run_write_transaction
+from copixiv.db.write_lock import read_transaction, run_write_transaction
 from copixiv.log import logger
 
 from .kernel import TaskContext
@@ -106,15 +106,19 @@ async def batch_operation(
     total = len(ids)
 
     # ---- tags: normalize + resolve aliases (same rules as the sync path)
-    tag_set: set[str] | None = None
+    # Empty for ``delete``; only the tag branches read it, and they always
+    # populate it (the repo treats an empty set as "nothing to do").
+    tag_set: set[str] = set()
     if args.operation in ("add_tags", "remove_tags"):
         raw = {t.strip() for t in (args.tags or []) if t and t.strip()}
         if not raw:
             raise ValidationError("请至少输入一个标签")
         if len(raw) > BATCH_MAX_TAGS:
             raise ValidationError(f"一次最多操作 {BATCH_MAX_TAGS} 个标签")
-        async with ctx.uow.begin():
-            alias_map = await SQLAlchemyTagRepository(ctx.uow.session).get_alias_map()
+        alias_map = await read_transaction(
+            ctx.uow,
+            lambda uw: SQLAlchemyTagRepository(uw.session).get_alias_map(),
+        )
         tag_set = {alias_map.get(t, t) for t in raw}
 
     chunks = [
@@ -251,9 +255,13 @@ async def batch_export(args: BatchExportArgs, ctx: TaskContext) -> TaskResult:
 
     novels: list[dict] = []
     for i in range(0, total, BATCH_ID_CHUNK_SIZE):
-        async with ctx.uow.begin():
-            chunk = ids[i:i + BATCH_ID_CHUNK_SIZE]
-            novels.extend(await SQLAlchemyNovelRepository(ctx.uow.session).get_novels_by_ids(chunk))
+        chunk = ids[i:i + BATCH_ID_CHUNK_SIZE]
+
+        def _read_chunk(uw, chunk: list[int] = chunk) -> list:
+            return SQLAlchemyNovelRepository(uw.session).get_novels_by_ids(chunk)
+
+        # One read transaction per id chunk (one thread hop each).
+        novels.extend(await read_transaction(ctx.uow, _read_chunk))
     if not novels:
         raise ValidationError("所选小说均不存在")
 

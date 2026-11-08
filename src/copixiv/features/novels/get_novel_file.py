@@ -18,18 +18,22 @@ class GetNovelFileUseCase:
         self._repo = novel_repo
         self._root = Path(download_root).resolve()
 
-    async def execute(self, novel_id: int, fmt: str = "txt") -> tuple[Path, str]:
+    def execute(self, novel_id: int, fmt: str = "txt") -> tuple[Path, str]:
         """Return ``(file_path, media_type)`` for the given novel.
 
         The stored ``path`` is trusted only after confirming it resolves
         inside the download root — a polluted DB row must not turn this
         endpoint into an arbitrary-file read.
 
+        Synchronous: one indexed row lookup plus a few ``Path`` checks.  The
+        endpoint is a plain ``def`` so FastAPI keeps all of it (session
+        included) in the worker thread.
+
         Raises:
             NotFoundError: If the novel doesn't exist, has no path, or the
                 requested file doesn't exist on disk (or escapes the root).
         """
-        novel = await self._repo.get_by_id(novel_id)
+        novel = self._repo.get_by_id(novel_id)
         if not novel:
             raise NotFoundError(f"Novel {novel_id} not found")
         path = novel.path
