@@ -54,7 +54,6 @@ ignore = [
     "E501",   # 行宽：110 是软约束，长 SQL 常量与注释允许超
     "E712",   # `col == True` 是 SQLAlchemy 的必需写法，改成裸列会被 PG 拒绝
     "E402",   # 本仓库刻意做函数级延迟 import（PIL/ebooklib 会各加 7/11 MiB RSS）
-    "F821",   # 文件普遍有 `from __future__ import annotations`，注解里的前向引用不是运行时错误
 ]
 
 [tool.ruff.lint.isort]
