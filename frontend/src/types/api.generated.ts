@@ -533,8 +533,7 @@ export interface paths {
          *     Intersects the accumulated selection with the CURRENT search scope so
          *     the clear action only removes what belongs to the visible scope (the
          *     rest of the selection survives across searches).  Any-size input: the
-         *     ID list is processed in internal chunks to stay under SQLite's
-         *     variable limit.
+         *     ID list is processed in internal chunks to keep each PostgreSQL query bounded.
          */
         post: operations["match_novel_ids_api_novels_match_ids_post"];
         delete?: never;

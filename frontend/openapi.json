@@ -3241,7 +3241,7 @@
     },
     "/api/novels/match-ids": {
       "post": {
-        "description": "Subset of *novel_ids* that match the filters — scoped 「清除选择」.\n\nIntersects the accumulated selection with the CURRENT search scope so\nthe clear action only removes what belongs to the visible scope (the\nrest of the selection survives across searches).  Any-size input: the\nID list is processed in internal chunks to stay under SQLite's\nvariable limit.",
+        "description": "Subset of *novel_ids* that match the filters — scoped 「清除选择」.\n\nIntersects the accumulated selection with the CURRENT search scope so\nthe clear action only removes what belongs to the visible scope (the\nrest of the selection survives across searches).  Any-size input: the\nID list is processed in internal chunks to keep each PostgreSQL query bounded.",
         "operationId": "match_novel_ids_api_novels_match_ids_post",
         "parameters": [
           {
