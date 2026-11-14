@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 from datetime import datetime, timezone
 
 from sqlalchemy import case, delete, func, or_, select, update
@@ -177,7 +178,7 @@ class FailedNovelRepository:
         stmt = select(func.count()).select_from(models.FailedNovel)
         return self._session.execute(stmt).scalar_one()
 
-    def all_ids(self) -> list[int]:
+    def all_ids(self) -> builtins.list[int]:
         """Every novel id in the ledger, in ledger order.
 
         Used by ``POST /failed-novels/retry-all`` — the whole ledger is

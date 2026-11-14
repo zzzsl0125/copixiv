@@ -35,7 +35,7 @@ class SQLAlchemyTokenRepository(BaseRepository):
     def delete(self, token_id: int) -> bool:
         return self._delete_by_id(models.Token, token_id)
 
-    def reorder(self, ids: list[int]) -> bool:
+    def reorder(self, ids: list[int]) -> int:
         return self._reorder(models.Token, "sort_index", ids)
 
     def set_follow(self, token_id: int, is_follow: bool) -> bool:

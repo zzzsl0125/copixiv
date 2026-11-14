@@ -127,6 +127,8 @@ async def batch_operation(
     done = 0
     failed_chunks = 0
 
+    file_storage = ctx.require_file_storage()
+
     async def report_progress(stage: str) -> None:
         """Write live progress into the task-history row (best-effort).
 
@@ -135,17 +137,18 @@ async def batch_operation(
         carried ``"running"`` would resurrect a finished row (the call below
         is fire-and-forget, so it can land after the final update).
         """
-        if ctx.task_id is None:
+        task_id = ctx.task_id
+        if task_id is None:
             return
         try:
-            await run_write_transaction(
-                ctx.uow,
-                lambda uw: SQLAlchemyTaskRepository(uw.session).update_task(
-                    ctx.task_id,
+            def _write(uw) -> None:
+                SQLAlchemyTaskRepository(uw.session).update_task(
+                    task_id,
                     None,
                     progress=f"{_OP_LABELS[args.operation]}进行中：{stage}",
-                ),
-            )
+                )
+
+            await run_write_transaction(ctx.uow, _write)
         except Exception:  # noqa: BLE001 — progress must never kill the task
             logger.exception("批量任务进度更新失败（不影响执行）")
 
@@ -163,7 +166,7 @@ async def batch_operation(
                 for path in paths:
                     if path:
                         try:
-                            ctx.file_storage.delete_novel_files(path)
+                            file_storage.delete_novel_files(path)
                         except Exception:  # noqa: BLE001
                             logger.exception("删除小说文件失败: %s", path)
             elif args.operation == "add_tags":
@@ -230,23 +233,24 @@ async def batch_export(args: BatchExportArgs, ctx: TaskContext) -> TaskResult:
     if ctx.task_id is None:
         raise ValidationError("导出任务缺少 task_id，无法生成可下载的文件")
 
-    export_dir = Path(ctx.file_storage.download_dir)
+    export_dir = Path(ctx.require_file_storage().download_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
     _sweep_old_exports(export_dir)
 
     async def report_progress(stage: str) -> None:
         """See the batch_operation counterpart: progress-only, no status."""
-        if ctx.task_id is None:
+        task_id = ctx.task_id
+        if task_id is None:
             return
         try:
-            await run_write_transaction(
-                ctx.uow,
-                lambda uw: SQLAlchemyTaskRepository(uw.session).update_task(
-                    ctx.task_id,
+            def _write(uw) -> None:
+                SQLAlchemyTaskRepository(uw.session).update_task(
+                    task_id,
                     None,
                     progress=f"批量导出进行中：{stage}",
-                ),
-            )
+                )
+
+            await run_write_transaction(ctx.uow, _write)
         except Exception:  # noqa: BLE001
             logger.exception("导出任务进度更新失败（不影响执行）")
 
@@ -292,8 +296,8 @@ async def batch_export(args: BatchExportArgs, ctx: TaskContext) -> TaskResult:
     out_path = export_dir / f"{EXPORT_FILE_PREFIX}{ctx.task_id}.zip"
     zip_buf.seek(0)
     with open(out_path, "wb") as f:
-        while chunk := zip_buf.read(1 << 20):
-            f.write(chunk)
+        while data := zip_buf.read(1 << 20):
+            f.write(data)
     zip_buf.close()
 
     size_mb = out_path.stat().st_size / 1024 / 1024

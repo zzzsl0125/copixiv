@@ -12,7 +12,7 @@ from __future__ import annotations
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Any, BinaryIO, Callable
+from typing import Any, BinaryIO, Callable, Sequence, cast
 
 from copixiv.core import formats
 from copixiv.core.models import EpubStatus
@@ -32,7 +32,7 @@ _PROGRESS_EVERY = 500
 
 
 def build_batch_zip(
-    novels: list[dict[str, Any]],
+    novels: Sequence[Any],
     format_mode: str = "txt",
     naming_template: str | None = None,
     progress: Callable[[int, int], None] | None = None,
@@ -54,7 +54,10 @@ def build_batch_zip(
         binary file object (spooled: memory up to 8 MB, then disk), the
         titles successfully added, and the IDs whose files were missing.
     """
-    zip_buffer: BinaryIO = tempfile.SpooledTemporaryFile(max_size=_SPOOL_MAX)
+    zip_buffer = cast(
+        BinaryIO,
+        tempfile.SpooledTemporaryFile(max_size=_SPOOL_MAX),
+    )
     added_titles: list[str] = []
     missing_ids: list[str] = []
 

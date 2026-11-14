@@ -50,6 +50,24 @@ class TaskContext:
         """Return a copy of this context with *uow* replaced."""
         return replace(self, uow=uow)
 
+    def require_uow(self) -> SqlUnitOfWork:
+        """Return the active UnitOfWork, raising loudly if absent."""
+        if self.uow is None:
+            raise RuntimeError("TaskContext.uow is not set")
+        return self.uow
+
+    def require_client(self) -> PixivClient:
+        """Return the PixivClient, raising loudly if absent."""
+        if self.client is None:
+            raise RuntimeError("TaskContext.client is not set")
+        return self.client
+
+    def require_file_storage(self) -> FileStorage:
+        """Return the FileStorage, raising loudly if absent."""
+        if self.file_storage is None:
+            raise RuntimeError("TaskContext.file_storage is not set")
+        return self.file_storage
+
 
 class TaskHistoryRecorder:
     """Records task lifecycle rows (enqueue + status/result updates)."""

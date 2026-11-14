@@ -227,7 +227,7 @@ class NovelNamingTemplate:
 
     # -- resolve ---------------------------------------------------------
 
-    def resolve(self, novel: dict[str, Any]) -> str:
+    def resolve(self, novel: Any) -> str:
         """Produce a sanitized relative path (caller appends the extension)."""
         result = self._template
 

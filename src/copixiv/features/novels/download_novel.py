@@ -83,23 +83,24 @@ async def fetch_novel_and_assets(
     # Note the write below passes ``force=True``: ``save_novel_text``'s own
     # "file exists → skip" heuristic is exactly what the comparison just
     # overruled, so it must not be allowed to veto the write a second time.
+    content = data.content
     unchanged = False
-    if data.content:
+    if content:
         local = file_storage.read_novel_text(
             data.id, data.title, anchor=data.path,
         )
-        unchanged = (not redownload) and body_unchanged(local, data.content)
+        unchanged = (not redownload) and body_unchanged(local, content)
 
-    rewrote = bool(data.content) and not unchanged
-    if rewrote:
+    rewrote = bool(content) and not unchanged
+    if rewrote and content is not None:
         file_storage.save_novel_text(
-            data.id, data.title, data.content, force=True,
+            data.id, data.title, content, force=True,
             # ``data.path`` is the anchor: the stored path for a known row,
             # the freshly computed ``build_path`` for a first-time one.  Read
             # and write therefore always agree on the same file.
             anchor=data.path,
         )
-    elif data.content:
+    elif content:
         logger.info(f"下载: #{data.id} 正文未变，保留本地副本")
 
     if not rewrote:

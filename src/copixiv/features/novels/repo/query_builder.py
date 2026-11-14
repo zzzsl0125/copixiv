@@ -281,7 +281,7 @@ class NovelQueryBuilder:
         self, cap: int, *, count_blocked: bool = False,
     ) -> Select:
         """Build a bounded COUNT: ``SELECT count(*) FROM (SELECT 1 … LIMIT cap+1) x``."""
-        inner = select(literal_column("1")).select_from(self.main_model)
+        inner: Select = select(literal_column("1")).select_from(self.main_model)
         inner = self._apply_filters(inner, count_blocked=count_blocked)
         return select(func.count()).select_from(inner.limit(cap + 1).subquery())
 
@@ -292,7 +292,7 @@ class NovelQueryBuilder:
         if not self._has_scope_filters():
             return None
 
-        stmt = select(literal_column("1")).select_from(self.main_model)
+        stmt: Select = select(literal_column("1")).select_from(self.main_model)
         stmt = self._apply_filters(stmt, count_blocked=count_blocked)
         return stmt.limit(1)
 

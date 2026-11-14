@@ -177,7 +177,8 @@ class EpubBuilder:
     ) -> tuple[bytes, str, str]:
         from PIL import Image
 
-        with Image.open(image_path) as img:
+        with Image.open(image_path) as opened:
+            img: Image.Image = opened
             if (
                 img.mode in ("RGBA", "LA")
                 or (img.mode == "P" and "transparency" in img.info)

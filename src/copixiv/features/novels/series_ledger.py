@@ -56,7 +56,7 @@ RETIRE_AFTER_FAILURES = 3
 DEFINITIVE_STATUSES = frozenset({404, 410})
 
 
-def is_definitive_error(exc: BaseException) -> bool:
+def is_definitive_error(exc: BaseException | None) -> bool:
     """True when *exc* is pixiv definitively saying the series is gone.
 
     Imported lazily to keep this module free of the pixiv adapter at import
@@ -65,7 +65,7 @@ def is_definitive_error(exc: BaseException) -> bool:
     """
     from copixiv.pixiv.errors import PixivApiError
 
-    if not isinstance(exc, PixivApiError):
+    if exc is None or not isinstance(exc, PixivApiError):
         return False
     return getattr(exc, "status_code", None) in DEFINITIVE_STATUSES
 

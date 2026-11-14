@@ -76,7 +76,7 @@ def _patch_requests_call() -> None:
             )
         return response
 
-    BasePixivAPI.requests_call = _status_checked
+    setattr(BasePixivAPI, "requests_call", _status_checked)
 
 
 # -----------------------------------------------------------------------
@@ -101,7 +101,7 @@ def _patch_parse_result() -> None:
                     json.loads(req.content.decode("utf-8", "ignore"))
                 )
 
-    AppPixivAPI.parse_result = _permissive
+    setattr(AppPixivAPI, "parse_result", _permissive)
 
 
 # -----------------------------------------------------------------------
@@ -135,7 +135,7 @@ def _patch_webview_novel() -> None:
                 ) from e
             raise
 
-    AppPixivAPI.webview_novel = _patched
+    setattr(AppPixivAPI, "webview_novel", _patched)
 
 
 # -----------------------------------------------------------------------
@@ -188,7 +188,7 @@ def _sanitize_none_for_validation(data: Any, exc: Exception) -> Any | None:
     return patched
 
 
-def _permissive_model_construct(json_data: Any, model: type) -> Any:
+def _permissive_model_construct(json_data: Any, model: Any) -> Any:
     """Try model_validate, retry targeted None→'' sanitise, then fall back."""
     if isinstance(json_data, dict) and "error" in json_data:
         error_data = json_data["error"]
@@ -256,4 +256,4 @@ def _patch_novel_ranking() -> None:
         )
         return self.parse_result(r)
 
-    AppPixivAPI.novel_ranking = novel_ranking
+    setattr(AppPixivAPI, "novel_ranking", novel_ranking)

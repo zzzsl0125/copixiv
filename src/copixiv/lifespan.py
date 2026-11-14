@@ -108,8 +108,8 @@ def _add_account(
                 valid=valid,
                 follow=follow,
             ),
-            proxy_http=cfg.proxy.url or None,
-            proxy_https=cfg.proxy.url or None,
+            proxy_http=cfg.proxy.url or "",
+            proxy_https=cfg.proxy.url or "",
             min_interval=cfg.pixiv_client.min_interval,
             cooling_duration=cfg.pixiv_client.cooling_duration,
         )
@@ -179,8 +179,8 @@ def _build(
     image_downloader = ImageDownloader(
         max_workers=4,
         epub_builder=epub_builder,
-        proxy_http=cfg.proxy.url or None,
-        proxy_https=cfg.proxy.url or None,
+        proxy_http=cfg.proxy.url or "",
+        proxy_https=cfg.proxy.url or "",
     )
 
     account_pool = AccountPool(

@@ -20,12 +20,13 @@ module import.
 from __future__ import annotations
 
 import enum
+from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
-    Column,
     Computed,
     DateTime,
     Float,
@@ -40,12 +41,14 @@ from sqlalchemy import (
     text as sa_text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
-from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.sql.elements import quoted_name
 
 from . import constants as C
 
-Base = declarative_base()
+
+class Base(DeclarativeBase):
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -74,17 +77,17 @@ TEXT_COL = quoted_name(C.COL_TEXTS, True)
 class Author(Base):
     __tablename__ = C.TABLE_AUTHOR
 
-    author_id = Column(BigInteger, primary_key=True)
-    author_name = Column(Text)
-    novel_count = Column(Integer, default=0, nullable=False)
-    like = Column(LIKE_COL, Integer, default=0, nullable=False)
-    view = Column(VIEW_COL, Integer, default=0, nullable=False)
-    text = Column(TEXT_COL, Integer, default=0, nullable=False)
-    last_update = Column(DateTime(timezone=True), nullable=True)
-    is_special_follow = Column(Boolean, default=False, nullable=False)
+    author_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    author_name: Mapped[str | None] = mapped_column(Text)
+    novel_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    like: Mapped[int] = mapped_column(LIKE_COL, Integer, default=0, nullable=False)
+    view: Mapped[int] = mapped_column(VIEW_COL, Integer, default=0, nullable=False)
+    text: Mapped[int] = mapped_column(TEXT_COL, Integer, default=0, nullable=False)
+    last_update: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_special_follow: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
-    novels = relationship("Novel", back_populates="author_rel")
-    series = relationship("Series", back_populates="author_rel")
+    novels: Mapped[list[Novel]] = relationship("Novel", back_populates="author_rel")
+    series: Mapped[list[Series]] = relationship("Series", back_populates="author_rel")
 
     __table_args__ = (
         Index(
@@ -102,18 +105,18 @@ class Author(Base):
 class Series(Base):
     __tablename__ = C.TABLE_SERIES
 
-    series_id = Column(BigInteger, primary_key=True)
-    series_name = Column(Text)
-    novel_count = Column(Integer, default=0, nullable=False)
-    author_id = Column(
+    series_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    series_name: Mapped[str | None] = mapped_column(Text)
+    novel_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    author_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey(f"{C.TABLE_AUTHOR}.author_id", ondelete="SET NULL")
     )
-    like = Column(LIKE_COL, Integer, default=0, nullable=False)
-    view = Column(VIEW_COL, Integer, default=0, nullable=False)
-    text = Column(TEXT_COL, Integer, default=0, nullable=False)
+    like: Mapped[int] = mapped_column(LIKE_COL, Integer, default=0, nullable=False)
+    view: Mapped[int] = mapped_column(VIEW_COL, Integer, default=0, nullable=False)
+    text: Mapped[int] = mapped_column(TEXT_COL, Integer, default=0, nullable=False)
 
-    author_rel = relationship("Author", back_populates="series")
-    novels = relationship("Novel", back_populates="series_rel")
+    author_rel: Mapped[Author | None] = relationship("Author", back_populates="series")
+    novels: Mapped[list[Novel]] = relationship("Novel", back_populates="series_rel")
 
     __table_args__ = (
         Index("ix_series_author_id", "author_id"),
@@ -126,38 +129,38 @@ class Series(Base):
 class Novel(Base):
     __tablename__ = C.TABLE_NOVEL
 
-    id = Column(BigInteger, primary_key=True)
-    title = Column(Text, nullable=False)
-    author_id = Column(BigInteger, ForeignKey(f"{C.TABLE_AUTHOR}.author_id"))
-    author_name = Column(Text)
-    path = Column(Text, unique=True)
-    like = Column(LIKE_COL, Integer, default=0, nullable=False)
-    view = Column(VIEW_COL, Integer, default=0, nullable=False)
-    text = Column(TEXT_COL, Integer, default=0, nullable=False)
-    caption = Column(Text)
-    series_id = Column(
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    author_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey(f"{C.TABLE_AUTHOR}.author_id"))
+    author_name: Mapped[str | None] = mapped_column(Text)
+    path: Mapped[str | None] = mapped_column(Text, unique=True)
+    like: Mapped[int] = mapped_column(LIKE_COL, Integer, default=0, nullable=False)
+    view: Mapped[int] = mapped_column(VIEW_COL, Integer, default=0, nullable=False)
+    text: Mapped[int] = mapped_column(TEXT_COL, Integer, default=0, nullable=False)
+    caption: Mapped[str | None] = mapped_column(Text)
+    series_id: Mapped[int | None] = mapped_column(
         BigInteger,
         ForeignKey(f"{C.TABLE_SERIES}.series_id", ondelete="SET NULL"),
         nullable=True,
     )
-    series_name = Column(Text, nullable=True)
-    series_index = Column(Integer, nullable=True)
-    create_time = Column(DateTime(timezone=True), nullable=True)
+    series_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    series_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    create_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # 0 = 未分类（列默认值，迁移遗留，对账时会归类）
     # 1 = 待处理（正文有图片占位符，EPUB 还没成）  2 = 已完成
     # 3 = 确认无图（终态，无需 EPUB）
     # 归属：**产出该 EPUB 的路径**置位（抓取流水线、上传路径写出成品后），
     # 对账任务（check_epub）负责降级；元数据刷新**永不**写它。
     # （2026-09 追溯：元数据刷新曾无条件写 0，把 22 万行"已完成"冲掉。）
-    has_epub = Column(Integer, default=0, nullable=False)
-    shuffle = Column(Integer, default=0, nullable=False)
-    tags = Column(ARRAY(Text), nullable=False, server_default=sa_text("'{}'"))
-    is_favourite = Column(Boolean, default=False, nullable=False)
+    has_epub: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    shuffle: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    tags: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default=sa_text("'{}'"))
+    is_favourite: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # Where the row came from — migration 0005, docs/LIBRARY_DESIGN.md §2:
     # ``'pixiv'`` for everything the scraper wrote, ``'local'`` for a TXT the
     # user uploaded.  A column and not a tag: tags are user assets, and a
     # retroactive alias rewrite could merge 「本地」 away and empty the shelf.
-    source = Column(
+    source: Mapped[str] = mapped_column(
         Text,
         nullable=False,
         default="pixiv",
@@ -165,7 +168,7 @@ class Novel(Base):
     )
     # Local books: sha256 of the normalised body (the dedup key).  NULL for
     # Pixiv rows — hence the *partial* unique index below.
-    source_key = Column(Text, nullable=True)
+    source_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Keyword search text — the four searchable fields assembled exactly like
     # the old ``copixiv_novel_text(title, author_name, series_name, tags)``
     # (space-joined, empty fields skipped via ``nullif``), then lowercased.
@@ -181,7 +184,7 @@ class Novel(Base):
     # requires an immutable expression, and ``concat_ws`` /
     # ``array_to_string`` are catalogued ``STABLE``.  Keep this metadata
     # expression in step with that function.
-    search_lower = Column(
+    search_lower: Mapped[str | None] = mapped_column(
         Text,
         Computed(
             "copixiv_search_text(title, author_name, series_name, tags)",
@@ -189,8 +192,8 @@ class Novel(Base):
         ),
     )
 
-    author_rel = relationship("Author", back_populates="novels")
-    series_rel = relationship("Series", back_populates="novels")
+    author_rel: Mapped[Author | None] = relationship("Author", back_populates="novels")
+    series_rel: Mapped[Series | None] = relationship("Series", back_populates="novels")
 
     __table_args__ = (
         Index("ix_novel_like_text_id", "like", "text", "id"),
@@ -242,15 +245,15 @@ class Novel(Base):
 class Tag(Base):
     __tablename__ = C.TABLE_TAG
 
-    id = Column(BigInteger, Identity(), primary_key=True)
-    name = Column(Text, nullable=False, unique=True)
-    reference_count = Column(Integer, nullable=False, default=0)
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    reference_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     # ``lower(name)`` is catalogued IMMUTABLE, so — unlike ``novel.search_lower``
     # (which needs the ``copixiv_search_text`` wrapper for the STABLE
     # ``concat_ws`` / ``array_to_string``) — the generated column is inlined.
     # Keep this expression in step with migration 0008.
-    search_lower = Column(
+    search_lower: Mapped[str | None] = mapped_column(
         Text,
         Computed("lower(name)", persisted=True),
     )
@@ -280,10 +283,10 @@ class Tag(Base):
 class TagPreference(Base):
     __tablename__ = C.TABLE_TAG_PREFERENCE
 
-    id = Column(BigInteger, Identity(), primary_key=True)
-    tag = Column(Text, unique=True, nullable=False)
-    preference = Column(Text, nullable=False)
-    sort_index = Column(Integer, default=0, nullable=False)
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    tag: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    preference: Mapped[str] = mapped_column(Text, nullable=False)
+    sort_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     __table_args__ = (
         CheckConstraint(
@@ -297,8 +300,8 @@ class Setting(Base):
     """Runtime settings key-value store (UI-changeable, survives restarts)."""
 
     __tablename__ = C.TABLE_SETTINGS
-    key = Column(Text, primary_key=True)
-    value = Column(Text, nullable=False)
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
 
     def __repr__(self) -> str:
         return f"<Setting(key={self.key!r}, value={self.value!r})>"
@@ -306,22 +309,22 @@ class Setting(Base):
 
 class TagAlias(Base):
     __tablename__ = C.TABLE_TAG_ALIAS
-    id = Column(BigInteger, Identity(), primary_key=True)
-    source = Column(
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    source: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey(f"{C.TABLE_TAG}.id"),
         unique=True,
         nullable=False,
     )
-    target = Column(
+    target: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey(f"{C.TABLE_TAG}.id"),
         index=True,
         nullable=False,
     )
 
-    source_tag = relationship("Tag", foreign_keys=[source])
-    target_tag = relationship("Tag", foreign_keys=[target])
+    source_tag: Mapped[Tag] = relationship("Tag", foreign_keys=[source])
+    target_tag: Mapped[Tag] = relationship("Tag", foreign_keys=[target])
 
     __table_args__ = (
         Index("ix_tag_alias_target", "target"),
@@ -334,27 +337,27 @@ class TagAlias(Base):
 class ScheduledTask(Base):
     __tablename__ = C.TABLE_SCHEDULED_TASK
 
-    id = Column(BigInteger, Identity(), primary_key=True)
-    name = Column(Text, nullable=False)
-    task = Column(Text, nullable=False)
-    cron = Column(Text, nullable=False)
-    params = Column(JSONB, nullable=True)
-    is_enabled = Column(Boolean, default=False, nullable=False)
-    sort_index = Column(Integer, default=0, nullable=False)
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    task: Mapped[str] = mapped_column(Text, nullable=False)
+    cron: Mapped[str] = mapped_column(Text, nullable=False)
+    params: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    sort_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
 class TaskHistory(Base):
     __tablename__ = C.TABLE_TASK_HISTORY
-    id = Column(BigInteger, Identity(), primary_key=True)
-    name = Column(Text, nullable=False)
-    task_func = Column(Text, nullable=True)
-    arguments = Column(Text)
-    status = Column(Text, nullable=False)
-    start_time = Column(DateTime(timezone=True), nullable=False)
-    end_time = Column(DateTime(timezone=True), nullable=True)
-    duration = Column(Float)
-    result = Column(JSONB)
-    progress = Column(JSONB)
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    task_func: Mapped[str | None] = mapped_column(Text, nullable=True)
+    arguments: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    end_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration: Mapped[float | None] = mapped_column(Float)
+    result: Mapped[Any | None] = mapped_column(JSONB)
+    progress: Mapped[Any | None] = mapped_column(JSONB)
     # No dedup index: repeated enqueues for the same ``task_func`` insert
     # separate pending rows and queue up (task ordering is the worker's job).
 
@@ -375,13 +378,13 @@ class TaskHistory(Base):
 class Token(Base):
     __tablename__ = C.TABLE_TOKEN
 
-    id = Column(BigInteger, Identity(), primary_key=True)
-    name = Column(Text, unique=True, nullable=False)
-    token = Column(Text, nullable=False)
-    premium = Column(Boolean, default=False, nullable=False)
-    valid = Column(Boolean, default=True, nullable=False)
-    sort_index = Column(Integer, default=0, nullable=False)
-    is_follow = Column(Boolean, default=False, nullable=False)
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    name: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    token: Mapped[str] = mapped_column(Text, nullable=False)
+    premium: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    valid: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    sort_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    is_follow: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
 class FailedNovel(Base):
@@ -392,15 +395,15 @@ class FailedNovel(Base):
     # such records must still be captured in the failure ledger.  Deleting
     # a novel cleans its ledger rows explicitly in the repository layer
     # (``SQLAlchemyNovelWriteRepository.delete`` / ``delete_many``).
-    novel_id = Column(
+    novel_id: Mapped[int] = mapped_column(
         BigInteger,
         primary_key=True,
     )
-    failure_type = Column(Text)
-    error_message = Column(Text)
-    failed_times = Column(Integer, default=1, nullable=False)
-    title = Column(Text, nullable=True)
-    last_failed_at = Column(DateTime(timezone=True), nullable=True)
+    failure_type: Mapped[str | None] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    failed_times: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         Index("ix_failed_novel_last_failed_at", "last_failed_at"),
@@ -436,12 +439,12 @@ class SeriesDeadLetter(Base):
     # Same shape as ``failed_novel``: the business key, no ForeignKey (a
     # verdict may exist before/without a ``series`` row, and deleting a
     # ``series`` row must not silently resurrect the fetch attempts).
-    series_id = Column(BigInteger, primary_key=True)
-    consecutive_failures = Column(Integer, default=0, nullable=False)
-    last_error = Column(Text, nullable=True)
-    last_failed_at = Column(DateTime(timezone=True), nullable=True)
+    series_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # NULL = still worth trying; set = excluded from the candidate query.
-    retired_at = Column(DateTime(timezone=True), nullable=True)
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         Index(
@@ -453,11 +456,11 @@ class SeriesDeadLetter(Base):
 
 class SearchHistory(Base):
     __tablename__ = C.TABLE_SEARCH_HISTORY
-    id = Column(BigInteger, Identity(), primary_key=True)
-    type = Column(Text, nullable=False)
-    value = Column(Text, nullable=False)
-    display_value = Column(Text, nullable=True)
-    timestamp = Column(DateTime(timezone=True), nullable=False)
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    type: Mapped[str] = mapped_column(Text, nullable=False)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    display_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
         UniqueConstraint(

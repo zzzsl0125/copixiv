@@ -44,7 +44,7 @@ class TelegramNotifier:
         self,
         token: str = "",
         chat_id: str | int = "",
-        proxy_http: str = "",
+        proxy_http: str | None = None,
     ) -> None:
         self._token: str = token
         self._chat_id: str = str(chat_id) if chat_id else ""

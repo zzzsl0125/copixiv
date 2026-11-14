@@ -122,7 +122,8 @@ async def _fan_out_author_fetch(
     if not authors:
         return [], []
 
-    async with ctx.client.account_rule():
+    client = ctx.require_client()
+    async with client.account_rule():
         gate = asyncio.Semaphore(_FAN_OUT_LIMIT)
 
         async def _one(author_id: int):
@@ -264,11 +265,12 @@ async def novel_follow(args: NovelFollowArgs, ctx: TaskContext) -> TaskResult:
     Collect-then-persist: the feed is fetched without touching the
     database, then processed by :func:`ingest`.
     """
+    client = ctx.require_client()
     fetch_til = datetime.now().astimezone() - timedelta(days=args.days)
-    async with ctx.client.account_rule(
+    async with client.account_rule(
         force_follow=True,
     ):
-        resp = await ctx.client.novel_follow(fetch_til=fetch_til)
+        resp = await client.novel_follow(fetch_til=fetch_til)
 
     novels = filter_chinese(safe_get(resp, "novels", []))
     out = await ingest(
@@ -297,7 +299,8 @@ async def author_fetch(args: AuthorFetchArgs, ctx: TaskContext) -> TaskResult:
     LockNotAvailable conflicts are retried (see ``run_write_transaction``).
     """
     session_factory = ctx.session_factory
-    uow = ctx.uow
+    uow = ctx.require_uow()
+    client = ctx.require_client()
 
     # Plan — read-only, one short read transaction, no lock.
     def _plan(uw) -> tuple[bool, dict | None]:
@@ -313,13 +316,13 @@ async def author_fetch(args: AuthorFetchArgs, ctx: TaskContext) -> TaskResult:
         )
 
     if not author:
-        async with ctx.client.account_rule(
+        async with client.account_rule(
             force_follow=True,
         ):
-            await ctx.client.user_follow_add(args.author_id)
+            await client.user_follow_add(args.author_id)
 
     # Collect — pure network, pages accumulate into resp.novels.
-    resp = await ctx.client.user_novels(args.author_id, fetch_all=True)
+    resp = await client.user_novels(args.author_id, fetch_all=True)
     novels = filter_chinese(safe_get(resp, "novels", []))
 
     # Persist — plan → download → write, each write is a short retried
@@ -327,7 +330,7 @@ async def author_fetch(args: AuthorFetchArgs, ctx: TaskContext) -> TaskResult:
     out = await ingest(
         novels, force=args.redownload,
         session_factory=session_factory,
-        client=ctx.client, file_storage=ctx.file_storage,
+        client=client, file_storage=ctx.file_storage,
         image_downloader=ctx.image_downloader,
     )
 
@@ -341,7 +344,7 @@ async def author_fetch(args: AuthorFetchArgs, ctx: TaskContext) -> TaskResult:
 
     # Resolve author name — webview API doesn't return it.
     mapping = await collect_author_names(
-        {args.author_id}, uow=uow, client=ctx.client,
+        {args.author_id}, uow=uow, client=client,
     )
     await run_write_transaction(
         uow, lambda uw: writeback_author_names(mapping, uw),
@@ -370,13 +373,15 @@ async def author_delete(args: AuthorDeleteArgs, ctx: TaskContext) -> TaskResult:
         ),
     )
 
+    file_storage = ctx.require_file_storage()
+    client = ctx.require_client()
     for path in paths:
-        await asyncio.to_thread(ctx.file_storage.delete_novel_files, path)
+        await asyncio.to_thread(file_storage.delete_novel_files, path)
 
-    async with ctx.client.account_rule(
+    async with client.account_rule(
         force_follow=True
     ):
-        await ctx.client.user_follow_delete(args.author_id)
+        await client.user_follow_delete(args.author_id)
 
     return TaskResult(summary=f"已删除作者 #{args.author_id} 及其全部小说")
 
@@ -395,11 +400,12 @@ async def author_special_follow(ctx: TaskContext) -> TaskResult:
         logger.info("No special followed authors.")
         return TaskResult(summary="无特别关注的作者")
 
+    client = ctx.require_client()
     # Fan out: fetch novels from all authors concurrently.
     # Each call goes through the client semaphore (max 5) and picks
     # the LRU account, so up to 5 accounts call the API in parallel.
     responses = await asyncio.gather(
-        *[ctx.client.user_novels(aid) for aid in author_ids],
+        *[client.user_novels(aid) for aid in author_ids],
         return_exceptions=True,
     )
 
@@ -441,11 +447,12 @@ async def author_special_follow(ctx: TaskContext) -> TaskResult:
 )
 async def novel_ranking(args: NovelRankingArgs, ctx: TaskContext) -> TaskResult:
     """Fetch novel rankings."""
+    client = ctx.require_client()
     titles: list[str] = []
     failed_ids: list[int] = []
     for delta in range(1, args.days + 1):  # days=3 → 昨天/前天/大前天（当天榜单不全，跳过）
         target = datetime.now().astimezone() - timedelta(days=delta)
-        resp = await ctx.client.novel_ranking(
+        resp = await client.novel_ranking(
             mode=args.mode, date=target, fetch_all=True,
         )
         novels = safe_get(resp, "novels", [])
@@ -480,12 +487,13 @@ async def novel_search(args: NovelSearchArgs, ctx: TaskContext) -> TaskResult:
     end = datetime.now().astimezone() - timedelta(days=1)
     end_date = datetime(end.year, end.month, end.day)
 
+    client = ctx.require_client()
     all_titles: list[str] = []
     failed_ids: list[int] = []
-    async with ctx.client.account_rule(need_premium=True):
+    async with client.account_rule(need_premium=True):
         for start_date, end_date in month_ranges(end_date, args.months):
             logger.info(f"Searching {start_date.date()} ~ {end_date.date()}")
-            resp = await ctx.client.search_novel(
+            resp = await client.search_novel(
                 args.keyword, "keyword", "popular_desc",
                 start_date=start_date, end_date=end_date,
                 fetch_minlike=args.minlike,

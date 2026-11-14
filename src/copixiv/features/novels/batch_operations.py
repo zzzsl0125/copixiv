@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 from copixiv.core.exceptions import NotFoundError, ValidationError
 from copixiv.core.services import QuerySpec, parse_search_keyword
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
@@ -66,16 +68,17 @@ def resolve_batch_scope(
     so the endpoint declaring it as a plain ``def`` keeps the session work on
     the worker thread FastAPI runs it in.
     """
-    if cap is _DEFAULT_CAP:
-        cap = BATCH_MAX_NOVELS
+    resolved_cap: int | None = (
+        BATCH_MAX_NOVELS if cap is _DEFAULT_CAP else cast("int | None", cap)
+    )
     if mode == "ids":
         ids = sorted({int(i) for i in novel_ids})
         if not ids:
             raise ValidationError("请先勾选要操作的小说")
-        if cap is not None and len(ids) > cap:
+        if resolved_cap is not None and len(ids) > resolved_cap:
             raise ValidationError(
                 f"已勾选 {len(ids)} 篇，单次批量操作上限为 "
-                f"{cap} 篇，请减少勾选数量"
+                f"{resolved_cap} 篇，请减少勾选数量"
             )
         return ids
 
@@ -83,7 +86,7 @@ def resolve_batch_scope(
     # Only the capped path (sync endpoint) needs the COUNT — the
     # background-task path (cap=None) skips it and goes straight to the
     # ID list.
-    if cap is not None:
+    if resolved_cap is not None:
         matched = novel_repo.count_novels(
             QuerySpec(
                 conditions=conditions or [],
@@ -95,14 +98,14 @@ def resolve_batch_scope(
         # 计数上限，此时按「超过 *cap*」处理 —— 上限取值只会 ≤ COUNT_CAP，所以
         # 截断必然是超限；只比 value 会让「恰好等于 cap 的截断值」漏过检查，
         # 把超限选择放进同步批量操作。
-        if matched.truncated or matched.value > cap:
+        if matched.truncated or matched.value > resolved_cap:
             shown = (
                 f"{matched.value}+" if matched.truncated
                 else str(matched.value)
             )
             raise ValidationError(
                 f"当前筛选匹配 {shown} 篇，超过单次批量操作上限 "
-                f"{cap} 篇，请先缩小筛选范围"
+                f"{resolved_cap} 篇，请先缩小筛选范围"
             )
 
     ids = novel_repo.list_matching_ids(

@@ -103,15 +103,19 @@ class SQLAlchemySeriesRepository(BaseRepository):
 
     def series_with_empty_index(self) -> list[int]:
         """Series with at least one chapter number missing."""
-        return list(self.session.execute(
-            _select(models.Novel.series_id)
-            .where(
-                models.Novel.series_id.isnot(None),
-                models.Novel.series_index.is_(None),
-                ~models.Novel.series_id.in_(_retired_series_subquery()),
-            )
-            .distinct()
-        ).scalars().all())
+        return [
+            int(sid)
+            for sid in self.session.execute(
+                _select(models.Novel.series_id)
+                .where(
+                    models.Novel.series_id.isnot(None),
+                    models.Novel.series_index.is_(None),
+                    ~models.Novel.series_id.in_(_retired_series_subquery()),
+                )
+                .distinct()
+            ).scalars().all()
+            if sid is not None
+        ]
 
     @classmethod
     def _draft_columns(cls) -> list:
@@ -176,4 +180,8 @@ class SQLAlchemySeriesRepository(BaseRepository):
         )
         if limit is not None:
             stmt = stmt.limit(limit)
-        return [int(sid) for sid in self.session.execute(stmt).scalars().all()]
+        return [
+            int(sid)
+            for sid in self.session.execute(stmt).scalars().all()
+            if sid is not None
+        ]

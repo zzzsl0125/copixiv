@@ -126,7 +126,7 @@ class SQLAlchemyTaskRepository(BaseRepository):
             )
             .distinct()
         ).scalars().all()
-        return sorted(rows)
+        return sorted(r for r in rows if r is not None)
 
     def get_history(
         self, limit: int = 50, offset: int = 0
@@ -235,5 +235,5 @@ class SQLAlchemyTaskRepository(BaseRepository):
     def delete_scheduled(self, task_id: int) -> bool:
         return self._delete_by_id(models.ScheduledTask, task_id)
 
-    def reorder_scheduled(self, ids: list[int]) -> bool:
+    def reorder_scheduled(self, ids: list[int]) -> int:
         return self._reorder(models.ScheduledTask, "sort_index", ids)

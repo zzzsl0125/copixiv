@@ -1,7 +1,7 @@
 """Novel API endpoints."""
 
 from collections.abc import Iterator
-from typing import Literal
+from typing import Literal, cast
 from urllib.parse import quote
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, Query
@@ -283,7 +283,9 @@ def get_novels_by_ids(
     truncated = len(body.novel_ids) > BATCH_MAX_NOVELS
     with uow.begin():
         novels = SQLAlchemyNovelRepository(uow.session).get_novels_by_ids(ids)
-    return NovelsByIdsResponse(novels=novels, truncated=truncated)
+    return NovelsByIdsResponse(
+        novels=cast(list, novels), truncated=truncated,
+    )
 
 
 @router.post("/match-ids", response_model=MatchIdsResponse)

@@ -185,7 +185,8 @@ async def fix_series_index(args: FixSeriesIndexArgs, ctx: TaskContext) -> TaskRe
     from copixiv.core.services import guess_series_order, safe_get
     from copixiv.features.novels.ingest import batch_upsert
 
-    uow = ctx.uow
+    uow = ctx.require_uow()
+    client = ctx.require_client()
 
     series_cursor = await _read_cursor(uow, key=_SERIES_CURSOR_KEY)
     orphan_cursor = await _read_cursor(uow, key=_ORPHAN_CURSOR_KEY)
@@ -299,7 +300,7 @@ async def fix_series_index(args: FixSeriesIndexArgs, ctx: TaskContext) -> TaskRe
         """
         if series_id not in rosters:
             try:
-                resp = await ctx.client.novel_series(series_id, fetch_all=True)
+                resp = await client.novel_series(series_id, fetch_all=True)
             except Exception as exc:                     # 网络 / 限流 / 404
                 logger.warning(
                     f"fix_series_index: 系列 {series_id} 名册请求失败: {exc}"
@@ -556,7 +557,7 @@ async def fix_series_index(args: FixSeriesIndexArgs, ctx: TaskContext) -> TaskRe
             await _write_cursor(uow, orphan_next, key=_ORPHAN_CURSOR_KEY)
             continue
         try:
-            data = await ctx.client.webview_novel(novel_id)
+            data = await client.webview_novel(novel_id)
         except Exception as exc:                         # 网络 / 限流 / 404
             logger.warning(
                 f"fix_series_index: #{novel_id} webview 请求失败: {exc}"

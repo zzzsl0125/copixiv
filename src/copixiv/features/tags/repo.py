@@ -6,11 +6,12 @@ name ↔ id translation internally.
 """
 
 from collections.abc import Sequence
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 from sqlalchemy import select
 from sqlalchemy import text as _text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from copixiv.db import models
@@ -210,7 +211,7 @@ class SQLAlchemyTagRepository(BaseRepository):
     def delete_preference(self, pref_id: int) -> bool:
         return self._delete_by_id(models.TagPreference, pref_id)
 
-    def reorder_preferences(self, ids: list[int]) -> bool:
+    def reorder_preferences(self, ids: list[int]) -> int:
         return self._reorder(models.TagPreference, "sort_index", ids)
 
     # -- aliases ------------------------------------------------------------
@@ -421,23 +422,25 @@ class SQLAlchemyTagRepository(BaseRepository):
             # 游标行已不在 tag 里（行被删）：没有诚实的续扫点。
             return {"items": [], "next_offset": 0}
 
-        patterns = [_like_patterns(row.name) for row in page]
+        page_patterns = [_like_patterns(row.name) for row in page]
         rows = self.session.execute(
             _EXPAND_SQL,
             {
                 "ids": [row.id for row in page],
-                "pfx": [pfx for pfx, _ in patterns],
-                "sub": [sub for _, sub in patterns],
+                "pfx": [pfx for pfx, _ in page_patterns],
+                "sub": [sub for _, sub in page_patterns],
                 "ncand": _MAX_CANDIDATES,
             },
         ).all()
-        candidates: dict[int, list[dict]] = {}
+        candidates_by_target: dict[int, list[dict]] = {}
         for row in rows:
-            candidates.setdefault(row.target_id, []).append(_candidate_dict(row))
+            candidates_by_target.setdefault(row.target_id, []).append(
+                _candidate_dict(row)
+            )
 
         items: list[dict] = []
         for row in page:
-            row_candidates = candidates.get(row.id)
+            row_candidates = candidates_by_target.get(row.id)
             if not row_candidates:
                 continue
             items.append(self._make_suggest_item(row, row_candidates))
@@ -496,4 +499,4 @@ class SQLAlchemyTagRepository(BaseRepository):
             ),
             {"source": source, "target": target},
         )
-        return result.rowcount or 0
+        return cast(CursorResult[Any], result).rowcount or 0

@@ -3,7 +3,7 @@
 import asyncio
 import threading
 import time
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 
 from copixiv.log import logger
 
@@ -205,9 +205,9 @@ class AccountPool:
             elif isinstance(result, Exception):
                 logger.error(f"Failed to authenticate {account}: {result}")
 
-    def set_strategy(self, strategy: AccountStrategy) -> ContextVar:
+    def set_strategy(self, strategy: AccountStrategy) -> Token[AccountStrategy]:
         """Temporarily override the account strategy. Returns a reset token."""
         return self._strategy.set(strategy)
 
-    def reset_strategy(self, token) -> None:
+    def reset_strategy(self, token: Token[AccountStrategy]) -> None:
         self._strategy.reset(token)

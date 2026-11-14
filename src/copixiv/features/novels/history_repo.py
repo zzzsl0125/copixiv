@@ -2,10 +2,12 @@
 
 from collections.abc import Sequence
 from datetime import datetime, timezone
+from typing import Any, cast
 
 from sqlalchemy import delete as _delete
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from copixiv.db import models
@@ -57,4 +59,4 @@ class SQLAlchemySearchHistoryRepository(BaseRepository):
     def clear_all(self) -> int:
         """Delete every search-history row. Returns the number deleted."""
         result = self.session.execute(_delete(models.SearchHistory))
-        return result.rowcount or 0
+        return cast(CursorResult[Any], result).rowcount or 0

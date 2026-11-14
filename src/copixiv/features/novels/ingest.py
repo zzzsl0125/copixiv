@@ -117,7 +117,9 @@ async def _download_novels(
     valid: list[NovelDraft] = []
     failed_records: list[tuple[int, str]] = []
     for nid, result in zip(novel_ids, results):
-        if isinstance(result, Exception):
+        if isinstance(result, BaseException):
+            if not isinstance(result, Exception):
+                raise result
             logger.error(
                 f"下载: #{nid} 失败: {type(result).__name__}: {result}"
             )
@@ -393,7 +395,7 @@ def _plan_round(
         return _RoundPlan(existing_meta, download_ids, stored_paths)
 
     download_ids = list(dict.fromkeys(ids or []))
-    stored_paths: dict[int, str] = {}
+    stored_paths = {}
     # Single-novel path: the id may already be known (re-download), in which
     # case its body must go to the stored anchor, not to a path recomputed
     # from a title that may have changed at the source.

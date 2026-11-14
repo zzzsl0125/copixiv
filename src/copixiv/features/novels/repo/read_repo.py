@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -202,7 +203,7 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
                     spec.per_page, spec.min_like or 0, spec.min_text or 0,
                     blocked_names,
                 )
-                cursor_out = None
+                cursor_out: dict[str, Any] | None = None
                 if novels and len(novels) >= spec.per_page:
                     last = novels[-1]
                     cursor_out = {"shuffle": last.shuffle, "id": last.id}

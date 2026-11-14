@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import any_, func, or_, select, update
 from sqlalchemy import delete as _delete
@@ -54,17 +54,17 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         if not novels:
             return 0
 
-        novels = [
-            dict(n.__dict__) if hasattr(n, "__dict__") else dict(n)
+        novel_dicts: list[dict[str, Any]] = [
+            dict(n) if isinstance(n, dict) else dict(n.__dict__)
             for n in novels
         ]
         force_update = force_update or []
 
-        self._ensure_parent_rows(novels)
-        novel_tags_map = self._resolve_tag_aliases(novels)
-        existing_map = self._fetch_existing_novels(novels)
+        self._ensure_parent_rows(novel_dicts)
+        novel_tags_map = self._resolve_tag_aliases(novel_dicts)
+        existing_map = self._fetch_existing_novels(novel_dicts)
         new_ids = self._upsert_rows(
-            novels, existing_map, force_update, novel_tags_map,
+            novel_dicts, existing_map, force_update, novel_tags_map,
         )
         return len(new_ids)
 
@@ -138,7 +138,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
                     filtered[C.COL_CREATE_TIME]
                 )
             nid = int(novel["id"]) if novel.get("id") is not None else None
-            existing = existing_map.get(nid)
+            existing = existing_map.get(nid) if nid is not None else None
 
             for int_field in ("id", "author_id", "series_id", "series_index"):
                 if int_field in filtered and filtered[int_field] is not None:
@@ -164,7 +164,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
                 self.session.add(new_novel)
                 if nid is not None:
                     existing_map[nid] = new_novel
-                new_ids.append(novel.get("id"))
+                    new_ids.append(nid)
 
         self.session.flush()
 
@@ -289,7 +289,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             .values([{"name": t, "reference_count": 0} for t in tag_names])
             .on_conflict_do_nothing(index_elements=["name"])
         )
-        expr = models.Novel.tags
+        expr: Any = models.Novel.tags
         for t in tag_names:
             expr = func.array_append(func.array_remove(expr, t), t)
         changed = list(self.session.execute(
@@ -312,7 +312,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         stmt = (
             select(models.Novel.id)
             .where(
-                models.Novel.id == any_(novel_ids),
+                models.Novel.id == any_(cast(Any, novel_ids)),
                 models.Novel.source.in_(sorted(sources)),
             )
             .order_by(models.Novel.id)
@@ -345,7 +345,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             for field, value in values.items()
         ]
         conditions = [
-            models.Novel.id == any_(novel_ids),
+            models.Novel.id == any_(cast(Any, novel_ids)),
             or_(*changed_conditions),
         ]
         if only_where_null is not None:
@@ -368,7 +368,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         if not novel_ids or not tags:
             return 0
         tag_names = sorted(set(tags))
-        expr = models.Novel.tags
+        expr: Any = models.Novel.tags
         for t in tag_names:
             expr = func.array_remove(expr, t)
         changed = list(self.session.execute(

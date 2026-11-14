@@ -63,7 +63,8 @@ def _connection_args(database_url: str) -> tuple[list[str], dict[str, str]]:
     host = url.host
     # Socket connections put the socket dir in the ``host`` query parameter.
     if host is None and "host" in url.query:
-        host = url.query["host"]
+        query_host = url.query["host"]
+        host = query_host[0] if isinstance(query_host, tuple) else query_host
     if host:
         args += ["--host", host]
 

@@ -247,7 +247,11 @@ class ImageDownloader:
 
         with self._in_flight_lock:
             self._futures.append((novel_id, future))
-        future.add_done_callback(lambda _f, nid=novel_id: self._release(nid))
+
+        def _on_done(_fut: Any, nid: int = novel_id) -> None:
+            self._release(nid)
+
+        future.add_done_callback(_on_done)
 
     def _release(self, novel_id: int) -> None:
         """Remove *novel_id* from the in-flight set (called from the worker thread)."""

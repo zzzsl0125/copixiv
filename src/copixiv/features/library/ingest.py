@@ -503,6 +503,8 @@ def _create_row(
 ) -> tuple[IngestResult, bool]:
     """新书：取号 → 落盘 → 插行 → ``(结果, 这次是否真的写了预设作者)``。"""
     title, parsed_author_name = resolve_metadata(name, parsed)
+    author_id: int | None
+    author_name: str | None
     if preset_author_id is None:
         author_id, author_name = None, parsed_author_name
     else:
@@ -663,7 +665,7 @@ def ingest_uploads(
     # （刚写的这批会命中"无变化"被跳过），是 set-based 的——放进循环里就是
     # N 次全库范围 UPDATE。解析不出名字时**不调用**（那是"待解析"的中间态，
     # 没有名字可写）。
-    if preset_written and preset_author_name:
+    if preset_written and preset_author_id is not None and preset_author_name:
         SQLAlchemyAuthorRepository(session).update_author_name(
             preset_author_id, preset_author_name,
         )

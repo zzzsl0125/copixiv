@@ -17,9 +17,14 @@ import sys
 from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
-from typing import Callable, Generator
+from typing import TYPE_CHECKING, Callable, Generator
 
 from loguru import logger
+
+if TYPE_CHECKING:
+    from types import FrameType
+
+    from loguru import Record
 
 #: How much task log one ``task_history`` row may store.
 #:
@@ -67,6 +72,7 @@ class InterceptHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         # Get corresponding Loguru level if it exists.
+        level: str | int
         try:
             level = logger.level(record.levelname).name
         except ValueError:
@@ -77,8 +83,10 @@ class InterceptHandler(logging.Handler):
         # NOT in ``logging.__file__``, so we advance past it first, then
         # skip every stdlib-logging frame so the reported location is the
         # real call site (e.g. uvicorn, alembic, sqlalchemy).
-        frame, depth = logging.currentframe(), 2
-        frame = frame.f_back  # step past emit into the stdlib logging frames
+        frame: FrameType | None = logging.currentframe()
+        depth = 2
+        if frame is not None:
+            frame = frame.f_back  # step past emit into the stdlib logging frames
         while frame and frame.f_code.co_filename == logging.__file__:
             frame = frame.f_back
             depth += 1
@@ -165,33 +173,24 @@ def setup_logging(log_dir: str | None = None) -> None:
     # ``backtrace=True`` so the *caller* chain above the raise point survives —
     # that chain is what tells you who triggered the failure.  The dump also
     # inlined live values (DB URLs, tokens) into the log.
-    file_kwargs = dict(
-        format=log_format,
-        level="INFO",
-        rotation=LOG_ROTATION,
-        retention=f"{LOG_RETENTION_DAYS} days",
-        compression=LOG_COMPRESSION,
-        encoding="utf-8",
-        backtrace=True,
-        diagnose=False,
-    )
-
-    # Backend log file — all application / library messages.
-    # Exclude only HTTP access-log entries produced by the access-log
-    # middleware (tagged with ``extra.name == "http_access"``).
-    logger.add(
-        directory / "backend.log",
-        filter=lambda record: record["extra"].get("name") != "http_access",
-        **file_kwargs,
-    )
-
-    # Access log file — HTTP request/response entries from the access-log
-    # middleware (tagged with ``extra.name == "http_access"``).
-    logger.add(
-        directory / "access.log",
-        filter=lambda record: record["extra"].get("name") == "http_access",
-        **file_kwargs,
-    )
+    # Backend log excludes HTTP access-log entries; access log keeps only them.
+    file_sinks: list[tuple[str, Callable[["Record"], bool]]] = [
+        ("backend.log", lambda record: record["extra"].get("name") != "http_access"),
+        ("access.log", lambda record: record["extra"].get("name") == "http_access"),
+    ]
+    for filename, sink_filter in file_sinks:
+        logger.add(
+            directory / filename,
+            format=log_format,
+            level="INFO",
+            filter=sink_filter,
+            rotation=LOG_ROTATION,
+            retention=f"{LOG_RETENTION_DAYS} days",
+            compression=LOG_COMPRESSION,
+            encoding="utf-8",
+            backtrace=True,
+            diagnose=False,
+        )
 
     # --- Bridge standard library logging into loguru ---
     logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
@@ -222,7 +221,7 @@ def capture_logs(
     # Filled once at block exit; lets ``get_logs`` stay answerable afterwards.
     _done: list[str] = [""]
 
-    def task_filter(record: dict) -> bool:
+    def task_filter(record: "Record") -> bool:
         if task_id is not None:
             return record["extra"].get("task_id") == task_id
         return True

@@ -89,7 +89,7 @@ def update_summary(
     )
 
     insert_stmt = postgresql_insert(model_class).from_select(
-        [col.key for col in agg_select.selected_columns],
+        [col.key for col in agg_select.selected_columns if col.key is not None],
         agg_select,
     )
     set_dict: dict[str, Any] = {
@@ -165,7 +165,7 @@ class BaseRepository:
 
     def count(self, model_class: type[ModelType]) -> int:
         stmt = select(func.count()).select_from(model_class)
-        return self.session.execute(stmt).scalar()
+        return self.session.execute(stmt).scalar() or 0
 
     # -- shared CRUD helpers (used by token/task/tag/search_history) ----------
 

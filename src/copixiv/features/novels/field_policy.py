@@ -82,7 +82,9 @@ AUTHOR_LOCAL_ONLY_REASON = (
 
 def editable_fields(source: str | None) -> tuple[str, ...]:
     """该来源可编辑的字段；未知来源按 pixiv（最保守）。"""
-    return EDITABLE_FIELDS.get(source, EDITABLE_FIELDS[SOURCE_PIXIV])
+    return EDITABLE_FIELDS.get(
+        source or SOURCE_PIXIV, EDITABLE_FIELDS[SOURCE_PIXIV]
+    )
 
 
 def is_editable(source: str | None, field: str) -> bool:
