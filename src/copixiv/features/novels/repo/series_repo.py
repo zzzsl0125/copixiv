@@ -10,6 +10,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from copixiv.db import constants as C
+from copixiv.db import delta as engine_delta
 from copixiv.db import models
 from copixiv.db.base import BaseRepository, model_to_dict, update_summary
 
@@ -75,6 +76,7 @@ class SQLAlchemySeriesRepository(BaseRepository):
             update(models.Novel),
             [{"id": nid, "series_index": idx} for nid, idx in updates.items()],
         )
+        engine_delta.record_novel_upserts(self.session, updates.keys())
 
     def count_novels_by_series(self, series_id: int) -> int:
         """库内已有多少本挂在这个 series_id 下（预览里的"库内已有 N 本"）。"""

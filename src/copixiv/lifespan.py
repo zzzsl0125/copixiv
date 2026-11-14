@@ -22,6 +22,7 @@ from copixiv.db.engine import (
     create_session_factory,
     init_database,
 )
+from copixiv.db.novel_snapshot import PgSnapshotStore
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.log import logger
 from copixiv.notify.factory import build_notifier
@@ -30,6 +31,7 @@ from copixiv.pixiv.account import AccountStatus, PixivAccount, TokenInfo
 from copixiv.pixiv.accounts import AccountPool
 from copixiv.pixiv.client import PixivClient
 from copixiv.pixiv.patch import apply as apply_pixiv_patches
+from copixiv.query_engine import attach_and_start_engine
 from copixiv.storage.epub.builder import EpubBuilder
 from copixiv.storage.file_storage import FileStorage
 from copixiv.storage.image_downloader import ImageDownloader
@@ -56,6 +58,8 @@ class _AppSingletons:
     notifier: TelegramNotifier | None
     task_manager: TaskManagerSystem
     needs_startup_backup: bool = False
+    query_engine: Any = None
+    snapshot_store: Any = None
 
 
 def _should_auto_backup(backup_dir: str) -> bool:
@@ -205,6 +209,14 @@ def _build(
         notifier=notifier,
     )
 
+    query_engine = None
+    snapshot_store: PgSnapshotStore | None = None
+    if cfg.query_engine != "pg":
+        snapshot_store = PgSnapshotStore(session_factory)
+        query_engine = attach_and_start_engine(
+            snapshot_store, mode=cfg.query_engine, build_initial=True,
+        )
+
     logger.info("Container built successfully.")
 
     return _AppSingletons(
@@ -219,6 +231,8 @@ def _build(
         notifier=notifier,
         task_manager=task_manager,
         needs_startup_backup=needs_startup_backup,
+        query_engine=query_engine,
+        snapshot_store=snapshot_store,
     )
 
 
@@ -251,6 +265,7 @@ def attach_app_state(app: FastAPI, s: _AppSingletons) -> None:
     app.state.epub_builder = s.epub_builder
     app.state.account_pool = s.account_pool
     app.state.task_manager = s.task_manager
+    app.state.query_engine = s.query_engine
 
 
 def create_lifespan(s: _AppSingletons, *, run_background_tasks: bool = True):
@@ -266,9 +281,11 @@ def create_lifespan(s: _AppSingletons, *, run_background_tasks: bool = True):
             if run_background_tasks:
                 total = len(s.account_pool.accounts)
                 logger.info(f"Authenticating {total} accounts in parallel...")
-                warm_task = asyncio.create_task(
-                    asyncio.to_thread(_warm_database, s.session_factory)
-                )
+                warm_task: asyncio.Task[None] | None = None
+                if s.query_engine is None or s.query_engine.mode != "rust":
+                    warm_task = asyncio.create_task(
+                        asyncio.to_thread(_warm_database, s.session_factory)
+                    )
                 await s.account_pool.authenticate_all()
                 active = sum(
                     1 for a in s.account_pool.accounts
@@ -281,7 +298,8 @@ def create_lifespan(s: _AppSingletons, *, run_background_tasks: bool = True):
                         "Account authentication finished: {}/{} active",
                         active, total,
                     )
-                await warm_task
+                if warm_task is not None:
+                    await warm_task
 
                 await s.task_manager.start()
                 if s.needs_startup_backup:
@@ -301,5 +319,7 @@ def create_lifespan(s: _AppSingletons, *, run_background_tasks: bool = True):
             s.image_downloader.shutdown()
             if s.notifier is not None:
                 await s.notifier.close()
+            if s.snapshot_store is not None:
+                s.snapshot_store.detach_runtime()
 
     return lifespan

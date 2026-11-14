@@ -10,6 +10,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from copixiv.db import constants as C
+from copixiv.db import delta as engine_delta
 from copixiv.db import models
 from copixiv.db.base import (
     BaseRepository,
@@ -99,14 +100,17 @@ class SQLAlchemyAuthorRepository(BaseRepository):
         could interact with ``tag`` row locks; narrowing the predicate
         also keeps the write batch short (no no-op row updates).
         """
-        self.session.execute(
+        changed_ids = list(self.session.execute(
             _update(models.Novel)
             .where(
                 models.Novel.author_id == author_id,
                 models.Novel.author_name.is_distinct_from(name),
             )
             .values(author_name=name)
-        )
+            .returning(models.Novel.id)
+        ).scalars().all())
+        if changed_ids:
+            engine_delta.record_novel_upserts(self.session, changed_ids)
         self.session.execute(
             _update(models.Author)
             .where(models.Author.author_id == author_id)
@@ -151,6 +155,7 @@ class SQLAlchemyAuthorRepository(BaseRepository):
             self.session.execute(
                 _delete(models.Novel).where(models.Novel.id.in_(novel_ids))
             )
+            engine_delta.record_novel_deletes(self.session, novel_ids)
             self.session.flush()
             if affected_tags:
                 SQLAlchemyTagRepository(self.session).prune_unused_tags(affected_tags)

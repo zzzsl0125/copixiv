@@ -14,6 +14,7 @@ from copixiv.core.exceptions import NotFoundError
 from copixiv.core.models import EpubStatus, new_shuffle_key
 from copixiv.core.services import parse_pixiv_time
 from copixiv.db import constants as C
+from copixiv.db import delta as engine_delta
 from copixiv.db import models
 from copixiv.db.base import BaseRepository, refresh_parent_summaries
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
@@ -251,6 +252,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         ).scalar_one_or_none()
         if result is None:
             raise NotFoundError(f"Novel {novel_id} not found")
+        engine_delta.record_novel_upserts(self.session, [novel_id])
 
     def toggle_special_follow(self, author_id: int) -> None:
         result = self.session.execute(
@@ -261,6 +263,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         ).scalar_one_or_none()
         if result is None:
             raise NotFoundError(f"Author {author_id} not found")
+        engine_delta.record_special_follow(self.session, author_id, bool(result))
 
     def update_has_epub_status(
         self, novel_ids: list[int], status: EpubStatus
@@ -272,6 +275,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             .where(models.Novel.id.in_(novel_ids))
             .values(has_epub=status)
         )
+        engine_delta.record_novel_upserts(self.session, novel_ids)
 
     def update_metadata(self, novel_id: int, values: dict[str, Any]) -> None:
         """单行元数据更新 —— 卡片「编辑」的写路径（docs/NOVEL_EDIT_DESIGN.md §5）。"""
@@ -310,9 +314,13 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
                 models.FailedNovel.novel_id.in_(novel_ids)
             )
         )
-        self.session.execute(
-            _delete(models.Novel).where(models.Novel.id.in_(novel_ids))
-        )
+        deleted_ids = list(self.session.execute(
+            _delete(models.Novel)
+            .where(models.Novel.id.in_(novel_ids))
+            .returning(models.Novel.id)
+        ).scalars().all())
+        if deleted_ids:
+            engine_delta.record_novel_deletes(self.session, deleted_ids)
         self.session.flush()
         if old_tags:
             SQLAlchemyTagRepository(self.session).prune_unused_tags(old_tags)
@@ -345,6 +353,8 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             .values(tags=expr)
             .returning(models.Novel.id)
         ).scalars().all())
+        if changed:
+            engine_delta.record_novel_upserts(self.session, changed)
         return len(changed)
 
     def filter_ids_by_source(
@@ -403,6 +413,8 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             .values(**values)
             .returning(models.Novel.id)
         ).scalars().all())
+        if changed:
+            engine_delta.record_novel_upserts(self.session, changed)
         return len(changed)
 
     def remove_tags_from_novels(
@@ -425,6 +437,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             .returning(models.Novel.id)
         ).scalars().all())
         if changed:
+            engine_delta.record_novel_upserts(self.session, changed)
             SQLAlchemyTagRepository(self.session).prune_unused_tags(tag_names)
         return len(changed)
 

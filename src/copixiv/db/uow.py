@@ -28,6 +28,8 @@ from contextlib import contextmanager
 
 from sqlalchemy.orm import Session
 
+from copixiv.db import delta as engine_delta
+
 
 class SqlUnitOfWork:
     """A pure transaction boundary around a SQLAlchemy session.
@@ -63,6 +65,9 @@ class SqlUnitOfWork:
             raise RuntimeError("Session accessed outside uow.begin()")
         if self._session is None:
             self._session = self._session_factory()
+            engine = engine_delta.get_attached_engine(self._session_factory)
+            if engine is not None:
+                self._session.info[engine_delta.SESSION_ENGINE_KEY] = engine
         return self._session
 
     @contextmanager
@@ -95,12 +100,18 @@ class SqlUnitOfWork:
         finally:
             self._in_tx = False
             if self._session is not None:
+                engine_delta.clear_pending_delta(self._session)
                 self._session.close()
                 self._session = None
 
     def commit(self) -> None:
         if self._session is not None:
             self._session.commit()
+            pending = engine_delta.pop_pending_delta(self._session)
+            if pending is not None and not pending.is_empty():
+                hook = engine_delta.get_post_commit_hook(self._session_factory)
+                if hook is not None:
+                    hook(pending)
 
     def flush(self) -> None:
         """Force pending changes into the database, inside the current transaction.
@@ -116,4 +127,5 @@ class SqlUnitOfWork:
 
     def rollback(self) -> None:
         if self._session is not None:
+            engine_delta.clear_pending_delta(self._session)
             self._session.rollback()

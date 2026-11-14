@@ -9,18 +9,32 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from copixiv.core.exceptions import ValidationError
-from copixiv.core.models import Novel
+from copixiv.core.models import EpubStatus, Novel
+from copixiv.core.search_text import datetime_to_us, normalize_search_segments, us_to_datetime
 from copixiv.core.services import (
     EXCLUDE_BLOCKED_SETTING_KEY,
     QuerySpec,
     resolve_active,
 )
 from copixiv.db import constants as C
+from copixiv.db import delta as engine_delta
 from copixiv.db import models
 from copixiv.db.base import BaseRepository
+from copixiv.log import logger
+from copixiv.query_engine.port import (
+    EngineCursor,
+    EngineNovelRecord,
+    EngineQuery,
+    NovelQueryEnginePort,
+)
 
 from .query_builder import (
+    _FILTERABLE_NOVEL_FIELDS,
+    _INT_FILTER_COLS,
+    _SORTABLE_NOVEL_FIELDS,
     NovelQueryBuilder,
+    _parse_cursor_val,
+    _parse_query_int,
     blocked_tags_excluded,
     time_axis_col,
 )
@@ -35,6 +49,62 @@ class NovelCount:
 
     value: int
     truncated: bool = False
+
+
+_NOVEL_CARD_COLUMN_NAMES = (
+    "id",
+    "title",
+    "author_id",
+    "author_name",
+    "series_id",
+    "series_name",
+    "series_index",
+    "text",
+    "like",
+    "view",
+    "has_epub",
+    "create_time",
+    "source",
+    "is_favourite",
+    "tags",
+)
+_CARD_COMPARE_FIELDS = _NOVEL_CARD_COLUMN_NAMES + (C.FIELD_IS_SPECIAL_FOLLOW,)
+
+
+def _novel_from_record(rec: EngineNovelRecord) -> Novel:
+    """Materialize a card-projection :class:`Novel` directly from Rust ``NovelRecord``."""
+    return Novel.model_construct(
+        id=rec.id,
+        title=rec.title,
+        author_id=rec.author_id,
+        author_name=rec.author_name,
+        path=None,
+        like=rec.like,
+        view=rec.view,
+        text=rec.text,
+        caption=None,
+        series_id=rec.series_id,
+        series_name=rec.series_name,
+        series_index=rec.series_index,
+        create_time=us_to_datetime(rec.create_time_us),
+        shuffle=0,
+        has_epub=EpubStatus(rec.has_epub),
+        source=rec.source,
+        source_key=None,
+        tags=list(rec.tags),
+        is_favourite=rec.is_favourite,
+        is_special_follow=rec.is_special_follow,
+    )
+
+
+def _card_key(novel: Novel) -> tuple[Any, ...]:
+    return tuple(getattr(novel, field) for field in _CARD_COMPARE_FIELDS)
+
+
+def _novels_cards_match(pg_novels: list[Novel], rs_novels: list[Novel]) -> bool:
+    if len(pg_novels) != len(rs_novels):
+        return False
+    return all(_card_key(pg) == _card_key(rs) for pg, rs in zip(pg_novels, rs_novels, strict=True))
 
 
 def _novel_from_orm(obj) -> Novel:
@@ -75,13 +145,135 @@ def _attach_special_follow(session: Session, novels: list[Novel]) -> None:
 class SQLAlchemyNovelReadRepository(BaseRepository):
     """Read-only repository for novel queries and scope filtering."""
 
-    def __init__(self, session: Session):
+    def __init__(
+        self,
+        session: Session,
+        *,
+        query_engine: NovelQueryEnginePort | None = None,
+    ):
         super().__init__(session)
+        self._query_engine: NovelQueryEnginePort | None = (
+            query_engine
+            if query_engine is not None
+            else session.info.get(engine_delta.SESSION_ENGINE_KEY)
+        )
         self.VALID_NOVEL_FIELDS = {c.name for c in models.Novel.__table__.c}
         self.VALID_NOVEL_QUERY_FIELDS = self.VALID_NOVEL_FIELDS | {
             C.FIELD_TAGS, C.FIELD_KEYWORD, C.FIELD_IS_FAVOURITE,
             C.FIELD_IS_SPECIAL_FOLLOW, C.ORDER_BY_NONE, C.ORDER_BY_RANDOM,
         }
+
+    def _active_engine(self) -> NovelQueryEnginePort | None:
+        eng = self._query_engine
+        if eng is None or eng.mode == "pg" or not eng.ready():
+            return None
+        return eng
+
+    def _compile_engine_query(
+        self,
+        spec: QuerySpec,
+        *,
+        count_blocked: bool = False,
+        restrict_ids: list[int] | None = None,
+    ) -> EngineQuery:
+        for q_type, _qvalue in spec.conditions:
+            self._validate_query_field(q_type)
+        tags, keywords, field_filters = NovelQueryBuilder._categorize(spec.conditions)
+        int_filters: list[tuple[str, int]] = []
+        str_filters: list[tuple[str, str]] = []
+        only_fav = False
+        only_sf = False
+        for qtype, value in field_filters.items():
+            self._validate_query_field(qtype)
+            if qtype == C.FIELD_IS_FAVOURITE:
+                only_fav = True
+                continue
+            if qtype == C.FIELD_IS_SPECIAL_FOLLOW:
+                only_sf = True
+                continue
+            if qtype not in _FILTERABLE_NOVEL_FIELDS:
+                raise ValidationError(f"Field is not filterable: {qtype}")
+            if value == "":
+                continue
+            if qtype in _INT_FILTER_COLS:
+                int_filters.append((qtype, _parse_query_int(value, qtype)))
+            else:
+                str_filters.append((qtype, value))
+        kw_segments: list[str] = []
+        for kw in keywords:
+            kw_segments.extend(normalize_search_segments(kw))
+        return EngineQuery(
+            tags=tuple(tags),
+            keyword_segments=tuple(kw_segments),
+            int_filters=tuple(int_filters),
+            str_filters=tuple(str_filters),
+            only_favourite=only_fav,
+            only_special_follow=only_sf,
+            min_like=spec.min_like,
+            min_text=spec.min_text,
+            exclude_blocked_tags=spec.exclude_blocked_tags,
+            count_blocked=count_blocked,
+            restrict_ids=tuple(restrict_ids) if restrict_ids is not None else None,
+            exclude_ids=tuple(spec.exclude_ids) if spec.exclude_ids else None,
+        )
+
+    @staticmethod
+    def _compile_engine_cursor(
+        cursor: dict | None, order_by: str,
+    ) -> EngineCursor | None | str:
+        if not cursor:
+            return None
+        if not isinstance(cursor, dict):
+            raise ValidationError("Invalid cursor format")
+        if "id" not in cursor:
+            raise ValidationError("Cursor missing 'id'")
+        cursor_id = _parse_query_int(cursor["id"], "cursor.id")
+        if order_by == C.ORDER_BY_RANDOM:
+            if "shuffle" in cursor and "seed" not in cursor:
+                return "FALLBACK_PG"
+            if "seed" not in cursor or "h" not in cursor:
+                raise ValidationError("Cursor missing 'seed'/'h' for random ordering")
+            return EngineCursor(
+                cursor_id=cursor_id,
+                random_seed_hex=str(cursor["seed"]),
+                random_h_hex=str(cursor["h"]),
+            )
+        if order_by == C.ORDER_BY_NONE or order_by not in _SORTABLE_NOVEL_FIELDS:
+            raise ValidationError(f"Invalid order_by for cursor pagination: {order_by}")
+        if order_by == C.COL_ID:
+            return EngineCursor(cursor_id=cursor_id, cursor_int=cursor_id)
+        if order_by not in cursor:
+            raise ValidationError(f"Cursor missing '{order_by}'")
+        raw_val = _parse_cursor_val(order_by, cursor[order_by])
+        if order_by == C.COL_CREATE_TIME:
+            return EngineCursor(cursor_id=cursor_id, cursor_int=datetime_to_us(raw_val))
+        if order_by in _INT_FILTER_COLS:
+            return EngineCursor(cursor_id=cursor_id, cursor_int=int(raw_val))
+        return EngineCursor(cursor_id=cursor_id, cursor_str=str(raw_val))
+
+    def _hydrate_card_novels_ordered(self, novel_ids: list[int]) -> list[Novel]:
+        if not novel_ids:
+            return []
+        cols: list[Any] = [
+            getattr(models.Novel, name) for name in _NOVEL_CARD_COLUMN_NAMES
+        ]
+        cols.append(
+            func.coalesce(models.Author.is_special_follow, False).label(
+                C.FIELD_IS_SPECIAL_FOLLOW,
+            )
+        )
+        stmt = (
+            select(*cols)
+            .select_from(models.Novel)
+            .outerjoin(
+                models.Author,
+                models.Author.author_id == models.Novel.author_id,
+            )
+            .where(models.Novel.id.in_(novel_ids))
+        )
+        rows = self.session.execute(stmt).fetchall()
+        by_id = {row._mapping["id"]: _novel_from_mapping(row._mapping) for row in rows}
+        return [by_id[nid] for nid in novel_ids if nid in by_id]
 
     def get_by_id(self, novel_id: int) -> Novel | None:
         novel = self.session.get(models.Novel, novel_id)
@@ -153,9 +345,21 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         )
 
     def list_blocked_ids(self) -> list[int]:
+        eng = self._active_engine()
+        if eng is not None and eng.mode == "rust":
+            return eng.list_blocked_ids()
         if not self._exclusion_active(None):
-            return []
-        return self._blocked_novel_ids(self._blocked_tag_names())
+            pg_ids: list[int] = []
+        else:
+            pg_ids = self._blocked_novel_ids(self._blocked_tag_names())
+        if eng is not None and eng.mode == "shadow":
+            rs_ids = eng.list_blocked_ids()
+            if set(pg_ids) != set(rs_ids):
+                logger.warning(
+                    "Shadow parity mismatch in list_blocked_ids: pg={} rs={}",
+                    len(pg_ids), len(rs_ids),
+                )
+        return pg_ids
 
     def sort_novel_ids(
         self,
@@ -173,12 +377,16 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         ):
             return list(novel_ids)
 
+        descending = order_direction.upper() == "DESC"
+        eng = self._active_engine()
+        if eng is not None and eng.mode == "rust":
+            return eng.sort_ids(novel_ids, order_by=order_by, descending=descending)
+
         col = (
             time_axis_col(models.Novel)
             if order_by == C.COL_ID
             else getattr(models.Novel, order_by)
         )
-        descending = order_direction.upper() == "DESC"
         stmt = (
             select(models.Novel.id)
             .where(models.Novel.id.in_(novel_ids))
@@ -187,10 +395,17 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
                 models.Novel.id.desc() if descending else models.Novel.id.asc(),
             )
         )
-        return list(self.session.execute(stmt).scalars())
+        pg_ids = list(self.session.execute(stmt).scalars())
+        if eng is not None and eng.mode == "shadow":
+            rs_ids = eng.sort_ids(novel_ids, order_by=order_by, descending=descending)
+            if pg_ids != rs_ids:
+                logger.warning(
+                    "Shadow parity mismatch in sort_novel_ids(order_by={}, desc={}): pg={} rs={}",
+                    order_by, descending, pg_ids[:10], rs_ids[:10],
+                )
+        return pg_ids
 
-    def get_novels(self, spec: QuerySpec) -> dict:
-        """Retrieve a paginated, filtered list of novels per *spec*."""
+    def _get_novels_pg(self, spec: QuerySpec) -> dict:
         if spec.order_by:
             self._validate_query_field(spec.order_by)
         self._validate_order_direction(spec.order_direction)
@@ -233,10 +448,96 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
 
         return {"novels": novels, "cursor": cursor_out}
 
+    def _get_novels_rust(
+        self, eng: NovelQueryEnginePort, spec: QuerySpec,
+    ) -> dict | None:
+        if spec.order_by:
+            self._validate_query_field(spec.order_by)
+        if spec.order_by and spec.order_by not in _SORTABLE_NOVEL_FIELDS:
+            raise ValidationError(f"Invalid order_by field: {spec.order_by}")
+        self._validate_order_direction(spec.order_direction)
+        query = self._compile_engine_query(spec)
+        order_by = spec.order_by or C.COL_ID
+        parsed_cursor = self._compile_engine_cursor(spec.cursor, order_by)
+        if parsed_cursor == "FALLBACK_PG":
+            return None
+        assert not isinstance(parsed_cursor, str)
+        descending = spec.order_direction.upper() == "DESC"
+        page = eng.query_novel_rows(
+            query,
+            order_by=order_by,
+            descending=descending,
+            limit=spec.per_page,
+            cursor=parsed_cursor,
+        )
+        novels = [_novel_from_record(rec) for rec in page.rows]
+        cursor_out: dict[str, Any] | None = None
+        if page.has_more and novels:
+            if order_by == C.ORDER_BY_RANDOM:
+                cursor_out = page.random_cursor
+            else:
+                last = novels[-1]
+                cursor_out = {
+                    "id": last.id,
+                    order_by: getattr(last, order_by, None),
+                }
+        return {"novels": novels, "cursor": cursor_out}
+
+    def get_novels(self, spec: QuerySpec) -> dict:
+        """Retrieve a paginated, filtered list of novels per *spec*."""
+        eng = self._active_engine()
+        if eng is not None and eng.mode == "rust":
+            rust_res = self._get_novels_rust(eng, spec)
+            if rust_res is not None:
+                return rust_res
+
+        pg_res = self._get_novels_pg(spec)
+        if eng is not None and eng.mode == "shadow":
+            try:
+                rust_res = self._get_novels_rust(eng, spec)
+                if rust_res is not None:
+                    pg_novels = pg_res["novels"]
+                    rs_novels = rust_res["novels"]
+                    pg_ids = [n.id for n in pg_novels]
+                    rs_ids = [n.id for n in rs_novels]
+                    pg_more = pg_res["cursor"] is not None
+                    rs_more = rust_res["cursor"] is not None
+                    if spec.order_by not in (C.ORDER_BY_RANDOM, C.ORDER_BY_NONE):
+                        if pg_ids != rs_ids or pg_more != rs_more:
+                            logger.warning(
+                                "Shadow parity mismatch in get_novels(order_by={}): pg={} ({}) rs={} ({})",
+                                spec.order_by, pg_ids[:10], pg_more, rs_ids[:10], rs_more,
+                            )
+                        elif not _novels_cards_match(pg_novels, rs_novels):
+                            logger.warning(
+                                "Shadow card-field mismatch in get_novels(order_by={}): ids={}",
+                                spec.order_by, pg_ids[:10],
+                            )
+            except Exception:
+                logger.exception("Shadow engine error in get_novels")
+        return pg_res
+
     def count_novels(self, spec: QuerySpec) -> NovelCount:
         """Count VISIBLE novels matching *spec* (bounded)."""
+        eng = self._active_engine()
+        if eng is not None and eng.mode == "rust":
+            self._validate_order_direction(spec.order_direction)
+            q = self._compile_engine_query(spec)
+            res = eng.count_novels(q, cap=COUNT_CAP)
+            return NovelCount(res.count, truncated=res.truncated)
+
         blocked_names = self._validate_and_resolve_blocked(spec)
-        return self._count_with_spec(spec, blocked_tag_names=blocked_names)
+        pg_count = self._count_with_spec(spec, blocked_tag_names=blocked_names)
+        if eng is not None and eng.mode == "shadow":
+            q = self._compile_engine_query(spec)
+            res = eng.count_novels(q, cap=COUNT_CAP)
+            rs_count = NovelCount(res.count, truncated=res.truncated)
+            if pg_count != rs_count:
+                logger.warning(
+                    "Shadow parity mismatch in count_novels: pg={} rs={}",
+                    pg_count, rs_count,
+                )
+        return pg_count
 
     def _count_with_spec(
         self,
@@ -262,44 +563,90 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
 
     def count_excluded_novels(self, spec: QuerySpec) -> NovelCount:
         """Count novels matching *spec* that carry blocked tags (同样有界)."""
-        if not self._exclusion_active(spec.exclude_blocked_tags):
-            return NovelCount(0)
-        for q_type, _qvalue in spec.conditions:
-            self._validate_query_field(q_type)
+        eng = self._active_engine()
+        if eng is not None and eng.mode == "rust":
+            q = self._compile_engine_query(spec, count_blocked=True)
+            res = eng.count_novels(q, cap=COUNT_CAP)
+            return NovelCount(res.count, truncated=res.truncated)
 
-        blocked_names = self._blocked_tag_names()
-        if not blocked_names:
-            return NovelCount(0)
-        return self._count_with_spec(
-            spec, blocked_tag_names=blocked_names, count_blocked=True,
-        )
+        if not self._exclusion_active(spec.exclude_blocked_tags):
+            for q_type, _qvalue in spec.conditions:
+                self._validate_query_field(q_type)
+            pg_count = NovelCount(0)
+        else:
+            for q_type, _qvalue in spec.conditions:
+                self._validate_query_field(q_type)
+            blocked_names = self._blocked_tag_names()
+            if not blocked_names:
+                pg_count = NovelCount(0)
+            else:
+                pg_count = self._count_with_spec(
+                    spec, blocked_tag_names=blocked_names, count_blocked=True,
+                )
+        if eng is not None and eng.mode == "shadow":
+            q = self._compile_engine_query(spec, count_blocked=True)
+            res = eng.count_novels(q, cap=COUNT_CAP)
+            rs_count = NovelCount(res.count, truncated=res.truncated)
+            if pg_count != rs_count:
+                logger.warning(
+                    "Shadow parity mismatch in count_excluded_novels: pg={} rs={}",
+                    pg_count, rs_count,
+                )
+        return pg_count
 
     def has_excluded_novels(self, spec: QuerySpec) -> bool:
         """Whether any novel matching *spec* carries blocked tags."""
-        if not self._exclusion_active(spec.exclude_blocked_tags):
-            return False
-        for q_type, _qvalue in spec.conditions:
-            self._validate_query_field(q_type)
+        eng = self._active_engine()
+        if eng is not None and eng.mode == "rust":
+            q = self._compile_engine_query(spec, count_blocked=True)
+            return eng.has_match(q)
 
-        blocked_names = self._blocked_tag_names()
-        if not blocked_names:
-            return False
-        builder = NovelQueryBuilder(
-            self, spec, blocked_tag_names=blocked_names,
-        )
-        stmt = builder.build_existence(count_blocked=True)
-        if stmt is None:
-            return False
-        return self.session.execute(stmt).first() is not None
+        pg_has = False
+        if self._exclusion_active(spec.exclude_blocked_tags):
+            for q_type, _qvalue in spec.conditions:
+                self._validate_query_field(q_type)
+            blocked_names = self._blocked_tag_names()
+            if blocked_names:
+                builder = NovelQueryBuilder(
+                    self, spec, blocked_tag_names=blocked_names,
+                )
+                stmt = builder.build_existence(count_blocked=True)
+                if stmt is not None:
+                    pg_has = self.session.execute(stmt).first() is not None
+        else:
+            for q_type, _qvalue in spec.conditions:
+                self._validate_query_field(q_type)
+
+        if eng is not None and eng.mode == "shadow":
+            q = self._compile_engine_query(spec, count_blocked=True)
+            rs_has = eng.has_match(q)
+            if pg_has != rs_has:
+                logger.warning(
+                    "Shadow parity mismatch in has_excluded_novels: pg={} rs={}",
+                    pg_has, rs_has,
+                )
+        return pg_has
 
     def list_matching_ids(self, spec: QuerySpec) -> list[int]:
         """Return every VISIBLE novel ID matching *spec*, unpaginated."""
+        eng = self._active_engine()
+        if eng is not None and eng.mode == "rust":
+            return eng.list_matching_ids(self._compile_engine_query(spec))
+
         blocked_names = self._validate_and_resolve_blocked(spec)
         builder = NovelQueryBuilder(
             self, spec, blocked_tag_names=blocked_names,
         )
         stmt = builder.build_ids()
-        return list(self.session.execute(stmt).scalars())
+        pg_ids = list(self.session.execute(stmt).scalars())
+        if eng is not None and eng.mode == "shadow":
+            rs_ids = eng.list_matching_ids(self._compile_engine_query(spec))
+            if pg_ids != rs_ids:
+                logger.warning(
+                    "Shadow parity mismatch in list_matching_ids: pg={} rs={}",
+                    len(pg_ids), len(rs_ids),
+                )
+        return pg_ids
 
     def filter_ids_in_scope(
         self,
@@ -309,12 +656,49 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         """Return the subset of *novel_ids* matching *spec*."""
         if not novel_ids:
             return []
+        eng = self._active_engine()
+        if eng is not None and eng.mode == "rust":
+            q = self._compile_engine_query(spec, restrict_ids=novel_ids)
+            return eng.list_matching_ids(q)
+
         blocked_names = self._validate_and_resolve_blocked(spec)
         builder = NovelQueryBuilder(self, spec)
         stmt = builder.build_ids_in_scope(
             novel_ids, blocked_tag_names=blocked_names,
         )
-        return list(self.session.execute(stmt).scalars())
+        pg_ids = list(self.session.execute(stmt).scalars())
+        if eng is not None and eng.mode == "shadow":
+            q = self._compile_engine_query(spec, restrict_ids=novel_ids)
+            rs_ids = eng.list_matching_ids(q)
+            if pg_ids != rs_ids:
+                logger.warning(
+                    "Shadow parity mismatch in filter_ids_in_scope: pg={} rs={}",
+                    pg_ids[:10], rs_ids[:10],
+                )
+        return pg_ids
+
+    def get_novel_cards_by_ids(self, novel_ids: list[int]) -> list[Novel]:
+        """Return card-projection novel models for the given IDs, in caller order."""
+        if not novel_ids:
+            return []
+        eng = self._active_engine()
+        if eng is not None and eng.mode == "rust":
+            return [_novel_from_record(rec) for rec in eng.get_novel_rows_by_ids(novel_ids)]
+
+        pg_novels = self._hydrate_card_novels_ordered(novel_ids)
+        if eng is not None and eng.mode == "shadow":
+            try:
+                rs_novels = [
+                    _novel_from_record(rec) for rec in eng.get_novel_rows_by_ids(novel_ids)
+                ]
+                if not _novels_cards_match(pg_novels, rs_novels):
+                    logger.warning(
+                        "Shadow parity mismatch in get_novel_cards_by_ids: ids={}",
+                        novel_ids[:10],
+                    )
+            except Exception:
+                logger.exception("Shadow engine error in get_novel_cards_by_ids")
+        return pg_novels
 
     def get_novels_by_ids(self, novel_ids: list[int]) -> list[Novel]:
         """Return full novel models for the given IDs, in the given order."""

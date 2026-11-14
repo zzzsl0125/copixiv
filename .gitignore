@@ -59,3 +59,9 @@ docs
 .coverage
 .coverage.*
 htmlcov/
+
+# === Rust / PyO3 ===
+crates/**/target/
+target/
+*.so
+*.pyd

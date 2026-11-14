@@ -14,11 +14,6 @@
   ``series_id`` 是"非空者胜"不会被顶掉，可它的名字下一轮就变了，于是 id 指向新系列、
   名字还是旧的；``author_id`` 则相反，它压根不会被来源顶掉，手改会永久地让
   「作者是谁」与来源不符。
-* ``caption`` **仅本地书**可改（2026-09-22；此前是全局不可编辑）：它在
-  ``_upsert_rows`` 的覆盖白名单里，所以 pixiv 书手改会被下一轮抓取顶掉
-  （→ 400）；而本地书永不进那条写路径、上传时这一列写死 ``None``，填进去的
-  就是用户自己的话。空串与显式 null 同义（都清成 ``NULL``，与 pixiv 的
-  "没有简介就是 NULL"同一形态）——见 :func:`_caption`。
 * **作者与系列编辑的都是 id，不是名字**（2026-09-19 拍板）。上传的本地书
   （``author_id`` / ``series_id`` 均为 NULL）因此才能真正挂到 pixiv 作者与系列名下：
   作者页、系列页、``author_id:`` / ``series_id:`` 搜索全部按 id 工作，而
@@ -38,7 +33,7 @@
 "非空者胜"规则；混用会把用户编辑卷进来源语义（前置提交 b76e8cd 刚把两件事拆开）。
 
 可编辑集合 = ``field_policy.EDITABLE_FIELDS``（local：``title`` / ``author_id`` /
-``series_id`` / ``series_index`` / ``tags`` / ``create_time`` / ``caption``；
+``series_id`` / ``series_index`` / ``tags`` / ``create_time``；
 pixiv 只留 ``series_index`` / ``tags`` / ``create_time``）。
 ``author_name`` / ``series_name`` 只作为 id 的派生物被写；``like`` / ``view`` /
 ``text`` 是机器事实，只读展示；``source`` / ``source_key`` / ``path`` / ``id`` /
@@ -76,10 +71,6 @@ UNKNOWN_AUTHOR = "未知作者"
 
 MAX_TITLE = 300
 MAX_TAGS = 50
-# 简介上限。列是 ``Text``（无长度约束），这里给的是**产品口径**而不是数据库
-# 约束：pixiv 的 caption 本来就能装下几千字的长简介，卡太死会把"从别处粘一段
-# 简介"的正常用法挡在门外；2000 足够，也拦得住误粘一整篇正文。
-MAX_CAPTION = 2000
 
 # 章节号的取值口径：正整数或空（0 = 无章节号，与 NULL 同义）。写侧由本模块执法
 # （0 提交即 400），读侧由命名模板执法（``core/services.py``：0 与 None 一样让
@@ -224,9 +215,6 @@ class UpdateNovelMetadataUseCase:
         if "series_index" in changes:
             values["series_index"] = _series_index(changes["series_index"])
 
-        if "caption" in changes:
-            values["caption"] = _caption(changes["caption"])
-
         if "tags" in changes:
             values["tags"] = self._normalize_tags(changes["tags"], tag_repo)
 
@@ -314,26 +302,6 @@ def _text(raw: Any) -> str:
 def _check_length(label: str, value: str, limit: int) -> None:
     if len(value) > limit:
         raise ValidationError(f"{label}过长（最多 {limit} 字）")
-
-
-def _caption(raw: Any) -> str | None:
-    """简介：去首尾空白；空串与显式 null 一起落成 ``NULL``（清空）。
-
-    为什么空串要归一成 ``NULL``：库里"没有简介"本来就**已经有两副面孔**——
-    pixiv 抓取路径在作品没有简介时落的是空串（``features/novels/ingest.py``
-    的 ``safe_get(n, "caption", "")``），而本地书上传路径写死 ``None``
-    （``features/library/ingest.py``）。编辑器这一侧不必再贡献第三种写法：
-    用户清空简介时给 ``NULL``，读侧一律 ``caption or ''`` 即可（前端现在就是
-    这么渲染的）。**既有行的空串不回填**——这是写入侧的口径，不是数据迁移。
-
-    长度上限是**产品口径**（见 :data:`MAX_CAPTION`）：列本身是 ``Text``，
-    这里拒的是"误粘一整篇正文"，不是数据库装不下。
-    """
-    text = _text(raw)
-    if not text:
-        return None
-    _check_length("简介", text, MAX_CAPTION)
-    return text
 
 
 def _series_index(raw: Any) -> int | None:

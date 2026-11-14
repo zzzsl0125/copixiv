@@ -153,6 +153,10 @@ class AppConfig(BaseModel):
     # port 5433 (see scripts/pg_dev.py); deployments override it via
     # ``config.yaml`` ``database_url`` or ``COPIXIV_DATABASE_URL``.
     database_url: str = "postgresql+psycopg2://postgres@127.0.0.1:5433/copixiv"
+    # Novel list/count/id/sort execution backend:
+    # "rust" (default, in-process copixiv_rs index), "pg" (PostgreSQL only),
+    # or "shadow" (runs both and checks parity). Overridable via COPIXIV_QUERY_ENGINE.
+    query_engine: Literal["rust", "pg", "shadow"] = "rust"
 
     path: PathConfig = Field(default_factory=PathConfig)
     pixiv_client: PixivClientConfig = Field(default_factory=PixivClientConfig)

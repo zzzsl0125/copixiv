@@ -28,10 +28,9 @@ from copixiv.features.novels import field_policy
 class NovelBase(BaseModel):
     """小说列表 / 详情的响应模型。
 
-    字段与领域模型 :class:`copixiv.core.models.Novel` 逐条对应（`path` /
-    `shuffle` / `source_key` 三个内部字段除外），字段集由
-    ``tests/features/test_schema_drift.py`` 钉住。刻意**不**继承领域模型：
-    Pydantic 的 ``ConfigDict(exclude=...)`` 会静默失效、``Field(exclude=True)``
+    字段与领域模型 :class:`copixiv.core.models.Novel` 的卡片投影逐条对应
+    （`path` / `caption` / `shuffle` / `source_key` 内部字段除外）。刻意**不**继承
+    领域模型：Pydantic 的 ``ConfigDict(exclude=...)`` 会静默失效、``Field(exclude=True)``
     挡不住 JSON Schema，而这份 schema 正是前端 codegen 的契约源（§7.4）。
 
     ``create_time`` 是 ``timestamptz`` → ``datetime``，JSON 里是 ISO 字符串；
@@ -45,7 +44,6 @@ class NovelBase(BaseModel):
     like: int = 0
     view: int = 0
     text: int = 0
-    caption: str | None = None
     create_time: datetime | None = None
     has_epub: EpubStatus = EpubStatus.NO
     tags: list[str] = []
@@ -129,17 +127,12 @@ class NovelUpdateRequest(BaseModel):
     （FastAPI 的请求体校验错误 → 422，与仓库既有约定一致；业务规则拒绝走
     ``ValidationError`` → 400）。
 
-    ``title`` / ``author_id`` / ``series_id`` / ``caption`` 能否改由 **``source``
+    ``title`` / ``author_id`` / ``series_id`` 能否改由 **``source``
     决定**（仅本地书），这条业务规则在用例里执法并返回 400——schema 层表达不了
-    "取决于行"的约束。四者的**理由与清单的唯一所有者**是
+    "取决于行"的约束。三者的**理由与清单的唯一所有者**是
     ``features/novels/field_policy.py``，同一份策略由
     ``NovelBase.editable_fields`` 下发给前端；pixiv 书提交它们 → 400，错配的
     修正入口是 ``POST /api/novels/{id}/sync``（按 id 从来源重抓、恢复来源值）。
-
-    ``caption`` 自 2026-09-22 从"全局不可编辑"改成"仅本地书可编辑"：原理由
-    （来源刷新会覆盖、不在界面展示）通篇是拿 pixiv 书论证的，而本地书永不进
-    ``_upsert_rows``、上传时 ``caption`` 写死 ``None``——填进去的就是用户自己的
-    话，没有来源会来顶掉它。详见 ``field_policy.py`` 的模块 docstring。
 
     **作者与系列都是 id 而不是名字**（2026-09-19 拍板）：``author_name`` /
     ``series_name`` 已从可编辑集合移除，提交即 422；身份由 ``author_id`` /
@@ -151,7 +144,7 @@ class NovelUpdateRequest(BaseModel):
 
     "未提交"与"显式 null"必须可区分（PATCH 三态）：调用方用
     ``model_dump(exclude_unset=True)`` 取值——键不出现 = 不动，显式 ``null``
-    = 清空（``series_index`` / ``create_time`` / ``caption`` 允许清空；
+    = 清空（``series_index`` / ``create_time`` 允许清空；
     ``author_id`` / ``series_id`` 显式 null = 解除关联，收尾见
     ``update_metadata.py::_series_columns``：作者保留显示名，系列连名字与章节号
     一起清，2026-09-22）。
@@ -170,8 +163,6 @@ class NovelUpdateRequest(BaseModel):
     series_index: int | None = None
     tags: list[str] | None = None
     create_time: str | None = None
-    # 仅本地书（pixiv 书的这一列是来源的展示性字段，在覆盖白名单里 → 400）。
-    caption: str | None = None
 
     @field_validator("author_id", "series_id", mode="before")
     @classmethod

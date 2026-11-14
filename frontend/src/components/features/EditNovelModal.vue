@@ -10,17 +10,13 @@ import type { AuthorLookup, Novel, NovelUpdatePayload, SeriesLookup } from '../.
  *
  * 契约：docs/NOVEL_EDIT_DESIGN.md §4（不做字段锁）/ §5（PATCH 三态）/ §6.2。
  * 「哪个字段能改」**不在前端判断**：服务端在每本书上下发 `editable_fields`
- * （pixiv 书不含 `title` / `author_id` / `series_id` / `caption`），这里只读那个
+ * （pixiv 书不含 `title` / `author_id` / `series_id`），这里只读那个
  * 数组置灰、收口校验与 payload。原来按 `source === 'local'` 推的那份表已删除
  * ——它与 `update_metadata.py` 的执法规则是同一件事，留两份就会漂移成
  * "能点但保存 400"。
  *
  * 其余拍板仍然决定这里的形态：
  *
- * - `caption` **仅本地书可编辑**（2026-09-22 改版；此前写死 `disabled` 的"全局
- *   不可编辑"是拿 pixiv 书论证的——它在来源覆盖白名单里，手改会被顶回去。
- *   本地书永不进那条写路径、上传时这一列是 NULL，所以放开没有风险）。
- *   置灰依旧只认 `canEdit('caption')`，pixiv 书仍然是只读输入框。
  * - **作者编辑的是 pixiv 作者 ID，不是名字**（2026-09-19）。
  * - **系列同理，编辑 `series_id`**（2026-09-19）：名字由 id 解析
  *   （`series` 行 → 同系列小说行 → pixiv），上传的本地书因此能挂到 pixiv
@@ -61,7 +57,6 @@ const emit = defineEmits<{
 const MAX_TITLE = 300
 const MAX_TAGS = 50
 const MAX_TAG_LENGTH = 100
-const MAX_CAPTION = 2000
 // 与后端 parse_tags 的切分符一致：用户粘贴 "R-18/魔法" 时按两个标签收下。
 const TAG_SPLIT = /[/|#、\\]/
 
@@ -76,7 +71,6 @@ const seriesId = ref('')
 const seriesIndex = ref('')
 const tags = ref<string[]>([])
 const createTime = ref('')
-const caption = ref('')
 const tagInput = ref('')
 
 /** 来源徽章与「同步」按钮看的是来源（'pixiv' 缺省）。 */
@@ -138,7 +132,6 @@ function loadFrom(novel: Novel | null) {
   seriesIndex.value = novel?.series_index != null ? String(novel.series_index) : ''
   tags.value = [...(novel?.tags ?? [])]
   createTime.value = (novel?.create_time ?? '').slice(0, 10)
-  caption.value = novel?.caption ?? ''
   tagInput.value = ''
   // 值没变时 watch 不触发（例如重新打开同一本），这里显式评估一次。
   authorLookup.schedule()
@@ -211,9 +204,6 @@ const validationError = computed<string | null>(() => {
   if (canEdit('tags') && tags.value.some((tag) => tag.length > MAX_TAG_LENGTH)) {
     return `单个标签最多 ${MAX_TAG_LENGTH} 字`
   }
-  if (canEdit('caption') && caption.value.trim().length > MAX_CAPTION) {
-    return `简介过长（最多 ${MAX_CAPTION} 字）`   // 与后端 400 的 detail 同一句话
-  }
   return null
 })
 
@@ -254,17 +244,6 @@ function buildPayload(): NovelUpdatePayload {
     const nextDate = createTime.value.trim()
     if (nextDate !== (novel.create_time ?? '').slice(0, 10)) {
       payload.create_time = nextDate || null
-    }
-  }
-
-  if (canEdit('caption')) {
-    // 去首尾空白后与初值比：服务端也做同一套 `_text` 归一，两边口径一致才
-    // 不会出现"看着没变却提交了"或"看着变了却没提交"。
-    const nextCaption = caption.value.trim()
-    // 空串提交 null（清空）：服务端把空串与 null 都落成 NULL，这里显式给 null
-    // 让 PATCH 的三态在线上就是"清空"，不必依赖服务端兜底。
-    if (nextCaption !== (novel.caption ?? '')) {
-      payload.caption = nextCaption || null
     }
   }
 
@@ -518,22 +497,6 @@ async function handleDelete() {
           data-testid="edit-date"
           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
         />
-      </div>
-
-      <div>
-        <label class="block text-sm font-medium text-gray-700" for="edit-novel-caption">简介</label>
-        <!-- 置灰依据同样是服务端下发的 editable_fields（2026-09-22 前这里写死
-             disabled）：本地书可编辑（没有来源会覆盖它，上传时这一列是 NULL），
-             pixiv 书仍只读——它是来源的展示性字段，提交会 400。 -->
-        <textarea
-          id="edit-novel-caption"
-          v-model="caption"
-          rows="3"
-          :disabled="!canEdit('caption')"
-          :maxlength="MAX_CAPTION"
-          data-testid="edit-caption"
-          class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm resize-none disabled:bg-gray-100 disabled:text-gray-500 disabled:cursor-not-allowed"
-        ></textarea>
       </div>
 
       <p v-if="validationError" class="text-xs text-red-600" data-testid="edit-validation-error">

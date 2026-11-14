@@ -15,6 +15,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
+from copixiv.db import delta as engine_delta
 from copixiv.db import models
 from copixiv.db.base import BaseRepository
 
@@ -206,13 +207,20 @@ class SQLAlchemyTagRepository(BaseRepository):
         pref = models.TagPreference(**pref_data)
         self.session.add(pref)
         self.session.flush()
+        engine_delta.record_blocked_tags_dirty(self.session)
         return pref
 
     def update_preference(self, pref_id: int, pref_data: dict) -> Any | None:
-        return self._update_attrs(models.TagPreference, pref_id, pref_data)
+        pref = self._update_attrs(models.TagPreference, pref_id, pref_data)
+        if pref is not None:
+            engine_delta.record_blocked_tags_dirty(self.session)
+        return pref
 
     def delete_preference(self, pref_id: int) -> bool:
-        return self._delete_by_id(models.TagPreference, pref_id)
+        deleted = self._delete_by_id(models.TagPreference, pref_id)
+        if deleted:
+            engine_delta.record_blocked_tags_dirty(self.session)
+        return deleted
 
     def reorder_preferences(self, ids: list[int]) -> int:
         return self._reorder(models.TagPreference, "sort_index", ids)
@@ -527,7 +535,7 @@ class SQLAlchemyTagRepository(BaseRepository):
 
         from sqlalchemy import text as sa_text
 
-        result = self.session.execute(
+        changed_ids = list(self.session.execute(
             sa_text(
                 """
                 UPDATE novel
@@ -536,9 +544,12 @@ class SQLAlchemyTagRepository(BaseRepository):
                     FROM unnest(array_replace(tags, :source, :target)) AS x
                 )
                 WHERE tags @> ARRAY[:source]::text[]
+                RETURNING id
                 """
             ),
             {"source": source, "target": target},
-        )
+        ).scalars().all())
+        if changed_ids:
+            engine_delta.record_novel_upserts(self.session, changed_ids)
         self.prune_unused_tags([source])
-        return cast(CursorResult[Any], result).rowcount or 0
+        return len(changed_ids)

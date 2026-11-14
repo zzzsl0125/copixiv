@@ -78,6 +78,11 @@ _INDEX_NAME = "novel_search_bigm"
 _LIKE_PREDICATE = "search_lower LIKE lower(:p{n}) ESCAPE '\\'"
 
 
+from copixiv.core.search_text import (
+    normalize_search_segments as _core_normalize_segments,
+)
+
+
 def normalize_segments(keyword: str) -> list[str]:
     """Split *keyword* on whitespace, dropping segments with no letter/digit.
 
@@ -86,13 +91,7 @@ def normalize_segments(keyword: str) -> list[str]:
     predicate at all instead of a no-hit one.  ``str.split()`` uses Python's
     whitespace set (the same set the old query-side segmentation used).
     """
-    if not keyword:
-        return []
-    return [
-        segment
-        for segment in keyword.split()
-        if any(ch.isalpha() or ch.isnumeric() for ch in segment)
-    ]
+    return _core_normalize_segments(keyword)
 
 
 def escape_like(value: str) -> str:

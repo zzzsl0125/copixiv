@@ -18,18 +18,20 @@ forbidden_modules =
     copixiv.pixiv
     copixiv.storage
     copixiv.notify
+    copixiv.query_engine
     copixiv.app
     fastapi
     sqlalchemy
 
 [importlinter:contract:adapters-are-leaves]
-name = 适配层（db/pixiv/storage/notify）不被 features/tasks/app 反向依赖
+name = 适配层（db/pixiv/storage/notify/query_engine）不被 features/tasks/app 反向依赖
 type = forbidden
 source_modules =
     copixiv.db
     copixiv.pixiv
     copixiv.storage
     copixiv.notify
+    copixiv.query_engine
 forbidden_modules =
     copixiv.features
     copixiv.tasks
@@ -57,5 +59,6 @@ source_modules =
     copixiv.pixiv
     copixiv.storage
     copixiv.notify
+    copixiv.query_engine
 forbidden_modules =
     sqlalchemy

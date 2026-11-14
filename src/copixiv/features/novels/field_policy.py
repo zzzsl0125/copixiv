@@ -15,22 +15,9 @@
 错配的出口不是手改，而是**同步**（``POST /api/novels/{id}/sync``，
 ``sync_novel.py``）：按 id 从来源重抓一遍，把来源值恢复回来。
 
-``caption`` 在这一版**从"全局不可编辑"改成"仅本地书可编辑"**（2026-09-22）。
-原拍板（§3 / §10-4）的理由通篇是拿 pixiv 书论证的——``caption`` 在
-``_upsert_rows`` 的无条件覆盖白名单里，手改会被下次抓取顶回去，所以干脆不给入口。
-本地书三条都不成立：
-
-* **没有来源会覆盖**：本地行永不进 ``_upsert_rows``（LIBRARY_DESIGN.md §8-1），
-  而 ``_upsert_rows`` 是唯一的"来源权威"写路径；
-* **"编辑了看不见效果"不成立**：上传路径写死 ``caption=None``
-  （``features/library/ingest.py``），本地书这一列**必然为空**，不是"来源的展示性
-  字段"——填进去的就是用户自己的话；
-* **没有恢复出口也不构成理由**：pixiv 书"改坏了能同步回来"，本地书本来就没有来源，
-  同步对它是 400——这也正是它不会与任何东西打架的原因。
-
-影响面为零：``is_chinese``（读 title+caption 判语种）只在 pixiv 抓取路径调用，
-关键字索引读 ``title/author_name/series_name/tags``（不含 caption），``shuffle``
-是独立随机列。放开它只多一条写库路径（``update_metadata.py::_caption``）。
+``caption`` 已从响应与编辑界面完全移除（2026-11：卡片列表跳过大字段 IO，
+编辑页不再展示或编辑简介；数据库 ``novel.caption`` 列与抓取逻辑 ``is_chinese``
+保持不变）。
 
 **单一所有者**：这份策略由后端下发给前端（``NovelBase.editable_fields``，由本模块
 的 :func:`editable_fields` 派生），前端不再自己判断 ``source``——两端只有一份判断，
@@ -51,7 +38,6 @@ from copixiv.features.library.local_axis import SOURCE_LOCAL, SOURCE_PIXIV
 EDITABLE_FIELDS: dict[str, tuple[str, ...]] = {
     SOURCE_LOCAL: (
         "title", "author_id", "series_id", "series_index", "tags", "create_time",
-        "caption",
     ),
     SOURCE_PIXIV: ("series_index", "tags", "create_time"),
 }
@@ -68,13 +54,10 @@ FIELD_LABELS = {
     "title": "标题",
     "author_id": "作者",
     "series_id": "系列",
-    "caption": "简介",
 }
 
-# ``author_id`` 的理由与另外三个刻意不同：title / series_id 是"会被来源覆盖"，
+# ``author_id`` 的理由与另外两个刻意不同：title / series_id 是"会被来源覆盖"，
 # 而作者不是覆盖问题——来源压根不覆盖它，是"身份以来源为准"，修正入口是同步。
-# ``caption`` 也属"会被来源覆盖"那一类（它在 ``_upsert_rows`` 的覆盖白名单里），
-# 所以复用下面那条模板，不单独造句。
 AUTHOR_LOCAL_ONLY_REASON = (
     "作者仅本地书可编辑（pixiv 书的作者身份以来源为准，可用「同步」修正）"
 )
@@ -95,7 +78,7 @@ def is_editable(source: str | None, field: str) -> bool:
 def rejection_reason(field: str) -> str:
     """pixiv 书提交仅本地字段时的 400 文案——按字段给，集中在这里。
 
-    title / series_id / caption 共用一个模板（同一个"来源会覆盖"的理由），
+    title / series_id 共用一个模板（同一个"来源会覆盖"的理由），
     author_id 单独一句（见 :data:`AUTHOR_LOCAL_ONLY_REASON`）。两句话都带
     「仅本地书可编辑」，前端按这句话做统一提示即可。
     """

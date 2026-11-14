@@ -688,7 +688,7 @@
         "type": "object"
       },
       "NovelBase": {
-        "description": "小说列表 / 详情的响应模型。\n\n字段与领域模型 :class:`copixiv.core.models.Novel` 逐条对应（`path` /\n`shuffle` / `source_key` 三个内部字段除外），字段集由\n``tests/features/test_schema_drift.py`` 钉住。刻意**不**继承领域模型：\nPydantic 的 ``ConfigDict(exclude=...)`` 会静默失效、``Field(exclude=True)``\n挡不住 JSON Schema，而这份 schema 正是前端 codegen 的契约源（§7.4）。\n\n``create_time`` 是 ``timestamptz`` → ``datetime``，JSON 里是 ISO 字符串；\n写侧的 ``NovelUpdateRequest`` 仍收字符串（PATCH 接受日期字面量）。",
+        "description": "小说列表 / 详情的响应模型。\n\n字段与领域模型 :class:`copixiv.core.models.Novel` 的卡片投影逐条对应\n（`path` / `caption` / `shuffle` / `source_key` 内部字段除外）。刻意**不**继承\n领域模型：Pydantic 的 ``ConfigDict(exclude=...)`` 会静默失效、``Field(exclude=True)``\n挡不住 JSON Schema，而这份 schema 正是前端 codegen 的契约源（§7.4）。\n\n``create_time`` 是 ``timestamptz`` → ``datetime``，JSON 里是 ISO 字符串；\n写侧的 ``NovelUpdateRequest`` 仍收字符串（PATCH 接受日期字面量）。",
         "properties": {
           "author_id": {
             "anyOf": [
@@ -711,17 +711,6 @@
               }
             ],
             "title": "Author Name"
-          },
-          "caption": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Caption"
           },
           "create_time": {
             "anyOf": [
@@ -927,7 +916,7 @@
       },
       "NovelUpdateRequest": {
         "additionalProperties": false,
-        "description": "单本元数据编辑的部分更新体。\n\n只列**可编辑**字段。结构性事实（``source`` / ``source_key`` / ``path`` /\n``id`` / ``has_epub``）与任何未知字段一样，提交即被 ``extra=\"forbid\"`` 拒掉\n（FastAPI 的请求体校验错误 → 422，与仓库既有约定一致；业务规则拒绝走\n``ValidationError`` → 400）。\n\n``title`` / ``author_id`` / ``series_id`` / ``caption`` 能否改由 **``source``\n决定**（仅本地书），这条业务规则在用例里执法并返回 400——schema 层表达不了\n\"取决于行\"的约束。四者的**理由与清单的唯一所有者**是\n``features/novels/field_policy.py``，同一份策略由\n``NovelBase.editable_fields`` 下发给前端；pixiv 书提交它们 → 400，错配的\n修正入口是 ``POST /api/novels/{id}/sync``（按 id 从来源重抓、恢复来源值）。\n\n``caption`` 自 2026-09-22 从\"全局不可编辑\"改成\"仅本地书可编辑\"：原理由\n（来源刷新会覆盖、不在界面展示）通篇是拿 pixiv 书论证的，而本地书永不进\n``_upsert_rows``、上传时 ``caption`` 写死 ``None``——填进去的就是用户自己的\n话，没有来源会来顶掉它。详见 ``field_policy.py`` 的模块 docstring。\n\n**作者与系列都是 id 而不是名字**（2026-09-19 拍板）：``author_name`` /\n``series_name`` 已从可编辑集合移除，提交即 422；身份由 ``author_id`` /\n``series_id`` 表达，显示名是它们的解析结果\n（``features/authors/resolve_names.py::lookup_author_profile``、\n``features/novels/resolve_series.py::lookup_series_profile``）。这样上传的\n本地书才能真正挂到 pixiv 作者/系列名下——作者页、系列页、``author_id:`` /\n``series_id:`` 搜索全部按 id 工作，而名字只是一份可刷新的缓存。\n\n\"未提交\"与\"显式 null\"必须可区分（PATCH 三态）：调用方用\n``model_dump(exclude_unset=True)`` 取值——键不出现 = 不动，显式 ``null``\n= 清空（``series_index`` / ``create_time`` / ``caption`` 允许清空；\n``author_id`` / ``series_id`` 显式 null = 解除关联，收尾见\n``update_metadata.py::_series_columns``：作者保留显示名，系列连名字与章节号\n一起清，2026-09-22）。\n\n注意 ``create_time`` 在这里仍是**字符串**（写侧载体）：HTTP 边界接受\n``YYYY-MM-DD`` 之类的日期字面量，由 ``update_metadata._create_time``\n解析成 ``datetime`` 后写库。响应模型 ``NovelBase.create_time`` 才是\n``datetime``（DB 列是 ``timestamptz``）。",
+        "description": "单本元数据编辑的部分更新体。\n\n只列**可编辑**字段。结构性事实（``source`` / ``source_key`` / ``path`` /\n``id`` / ``has_epub``）与任何未知字段一样，提交即被 ``extra=\"forbid\"`` 拒掉\n（FastAPI 的请求体校验错误 → 422，与仓库既有约定一致；业务规则拒绝走\n``ValidationError`` → 400）。\n\n``title`` / ``author_id`` / ``series_id`` 能否改由 **``source``\n决定**（仅本地书），这条业务规则在用例里执法并返回 400——schema 层表达不了\n\"取决于行\"的约束。三者的**理由与清单的唯一所有者**是\n``features/novels/field_policy.py``，同一份策略由\n``NovelBase.editable_fields`` 下发给前端；pixiv 书提交它们 → 400，错配的\n修正入口是 ``POST /api/novels/{id}/sync``（按 id 从来源重抓、恢复来源值）。\n\n**作者与系列都是 id 而不是名字**（2026-09-19 拍板）：``author_name`` /\n``series_name`` 已从可编辑集合移除，提交即 422；身份由 ``author_id`` /\n``series_id`` 表达，显示名是它们的解析结果\n（``features/authors/resolve_names.py::lookup_author_profile``、\n``features/novels/resolve_series.py::lookup_series_profile``）。这样上传的\n本地书才能真正挂到 pixiv 作者/系列名下——作者页、系列页、``author_id:`` /\n``series_id:`` 搜索全部按 id 工作，而名字只是一份可刷新的缓存。\n\n\"未提交\"与\"显式 null\"必须可区分（PATCH 三态）：调用方用\n``model_dump(exclude_unset=True)`` 取值——键不出现 = 不动，显式 ``null``\n= 清空（``series_index`` / ``create_time`` 允许清空；\n``author_id`` / ``series_id`` 显式 null = 解除关联，收尾见\n``update_metadata.py::_series_columns``：作者保留显示名，系列连名字与章节号\n一起清，2026-09-22）。\n\n注意 ``create_time`` 在这里仍是**字符串**（写侧载体）：HTTP 边界接受\n``YYYY-MM-DD`` 之类的日期字面量，由 ``update_metadata._create_time``\n解析成 ``datetime`` 后写库。响应模型 ``NovelBase.create_time`` 才是\n``datetime``（DB 列是 ``timestamptz``）。",
         "properties": {
           "author_id": {
             "anyOf": [
@@ -939,17 +928,6 @@
               }
             ],
             "title": "Author Id"
-          },
-          "caption": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Caption"
           },
           "create_time": {
             "anyOf": [
@@ -3419,7 +3397,7 @@
         ]
       },
       "patch": {
-        "description": "编辑单本小说的元数据（卡片「编辑」按钮）—— docs/NOVEL_EDIT_DESIGN.md §5。\n\nPATCH 三态：未提交的键不动，显式 ``null`` 清空（``series_index`` /\n``create_time`` / ``tags`` / ``caption`` / ``author_id`` / ``series_id``）。\n只提交**发生变化的字段**是前端的约定，服务端不做 diff（写同样的值也是幂等的）。\n\n``title`` / ``author_id`` / ``series_id`` / ``caption`` 仅本地书可改\n（2026-09-22 起前三个收掉、``caption`` 从\"全局不可编辑\"改成此形；清单与\n400 文案的唯一所有者在 ``features/novels/field_policy.py``），pixiv 书提交\n→ 400；结构性字段（``source`` / ``path`` / ``id`` / ``has_epub`` …）在 schema\n层就被 ``extra=\"forbid\"`` 拒掉 → 422（``author_name`` / ``series_name``\n自 2026-09-19 起也在其中：它们是 id 的解析结果，不是可编辑值）。响应是更新后的\n**完整**对象，前端据此原地替换卡片（不整页重取）；同一份对象里带\n``editable_fields``，前端据此置灰输入框。\n\npixiv 书那四列错配之后的出口是**同步**（``POST /{novel_id}/sync``）：按 id\n从来源重抓一遍、恢复来源值，而不是靠手改。\n\n``author_id`` / ``series_id`` 是仅有的可能触发网络请求的字段（本地表没有\n这个名字时问一次 Pixiv）。失败**不致命**：id 照写，名字留 NULL 待补。",
+        "description": "编辑单本小说的元数据（卡片「编辑」按钮）—— docs/NOVEL_EDIT_DESIGN.md §5。\n\nPATCH 三态：未提交的键不动，显式 ``null`` 清空（``series_index`` /\n``create_time`` / ``tags`` / ``author_id`` / ``series_id``）。\n只提交**发生变化的字段**是前端的约定，服务端不做 diff（写同样的值也是幂等的）。\n\n``title`` / ``author_id`` / ``series_id`` 仅本地书可改\n（2026-09-22 起收掉；清单与\n400 文案的唯一所有者在 ``features/novels/field_policy.py``），pixiv 书提交\n→ 400；结构性字段（``source`` / ``path`` / ``id`` / ``has_epub`` …）在 schema\n层就被 ``extra=\"forbid\"`` 拒掉 → 422（``author_name`` / ``series_name``\n自 2026-09-19 起也在其中：它们是 id 的解析结果，不是可编辑值）。响应是更新后的\n**完整**对象，前端据此原地替换卡片（不整页重取）；同一份对象里带\n``editable_fields``，前端据此置灰输入框。\n\npixiv 书那三列错配之后的出口是**同步**（``POST /{novel_id}/sync``）：按 id\n从来源重抓一遍、恢复来源值，而不是靠手改。\n\n``author_id`` / ``series_id`` 是仅有的可能触发网络请求的字段（本地表没有\n这个名字时问一次 Pixiv）。失败**不致命**：id 照写，名字留 NULL 待补。",
         "operationId": "update_novel_metadata_api_novels__novel_id__patch",
         "parameters": [
           {

@@ -282,7 +282,7 @@ def get_novels_by_ids(
     ids = body.novel_ids[:BATCH_MAX_NOVELS]
     truncated = len(body.novel_ids) > BATCH_MAX_NOVELS
     with uow.begin():
-        novels = SQLAlchemyNovelRepository(uow.session).get_novels_by_ids(ids)
+        novels = SQLAlchemyNovelRepository(uow.session).get_novel_cards_by_ids(ids)
     return NovelsByIdsResponse(
         novels=cast(list, novels), truncated=truncated,
     )
@@ -490,11 +490,11 @@ async def update_novel_metadata(
     """编辑单本小说的元数据（卡片「编辑」按钮）—— docs/NOVEL_EDIT_DESIGN.md §5。
 
     PATCH 三态：未提交的键不动，显式 ``null`` 清空（``series_index`` /
-    ``create_time`` / ``tags`` / ``caption`` / ``author_id`` / ``series_id``）。
+    ``create_time`` / ``tags`` / ``author_id`` / ``series_id``）。
     只提交**发生变化的字段**是前端的约定，服务端不做 diff（写同样的值也是幂等的）。
 
-    ``title`` / ``author_id`` / ``series_id`` / ``caption`` 仅本地书可改
-    （2026-09-22 起前三个收掉、``caption`` 从"全局不可编辑"改成此形；清单与
+    ``title`` / ``author_id`` / ``series_id`` 仅本地书可改
+    （2026-09-22 起收掉；清单与
     400 文案的唯一所有者在 ``features/novels/field_policy.py``），pixiv 书提交
     → 400；结构性字段（``source`` / ``path`` / ``id`` / ``has_epub`` …）在 schema
     层就被 ``extra="forbid"`` 拒掉 → 422（``author_name`` / ``series_name``
@@ -502,7 +502,7 @@ async def update_novel_metadata(
     **完整**对象，前端据此原地替换卡片（不整页重取）；同一份对象里带
     ``editable_fields``，前端据此置灰输入框。
 
-    pixiv 书那四列错配之后的出口是**同步**（``POST /{novel_id}/sync``）：按 id
+    pixiv 书那三列错配之后的出口是**同步**（``POST /{novel_id}/sync``）：按 id
     从来源重抓一遍、恢复来源值，而不是靠手改。
 
     ``author_id`` / ``series_id`` 是仅有的可能触发网络请求的字段（本地表没有

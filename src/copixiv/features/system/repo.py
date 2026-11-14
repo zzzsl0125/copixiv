@@ -8,6 +8,8 @@ caller decides the default.
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from copixiv.core.services import EXCLUDE_BLOCKED_SETTING_KEY
+from copixiv.db import delta as engine_delta
 from copixiv.db import models
 from copixiv.db.base import BaseRepository
 
@@ -31,6 +33,8 @@ class SQLAlchemySettingRepository(BaseRepository):
                 set_={"value": value},
             )
         )
+        if key == EXCLUDE_BLOCKED_SETTING_KEY:
+            engine_delta.record_exclude_setting_dirty(self.session)
         return value
 
     def get_bool(self, key: str, default: bool = False) -> bool:

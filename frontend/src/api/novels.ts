@@ -33,8 +33,8 @@ export const novelApi = {
    *
    * 返回**更新后的完整对象**，调用方据此原地替换列表里的那一本（不整页重取）。
    * 服务端两道拒绝（调用方按错误提示呈现即可）：
-   * - 400：pixiv 书提交 `title` / `author_id` / `series_id` / `caption`（仅本地书
-   *   可编辑，理由与文案见 `field_policy.py`——title / series_id / caption 是
+   * - 400：pixiv 书提交 `title` / `author_id` / `series_id`（仅本地书
+   *   可编辑，理由与文案见 `field_policy.py`——title / series_id 是
    *   "来源会覆盖"，author_id 是"作者身份以来源为准"）；
    * - 422：`series_name` / `author_name` 以及 `source` 等结构性字段压根不在
    *   可提交集合里，`extra="forbid"` 直接拒掉。
