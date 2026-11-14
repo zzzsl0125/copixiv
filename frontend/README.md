@@ -34,8 +34,8 @@ bash ../scripts/diag_frontend.sh  # 构建 + 伺服诊断
 
 ## 后端契约
 
-- 小说列表：`GET /api/novels/`，响应 `{novels, cursor, has_excluded}`，`is_favourite` / `is_special_follow` / `has_epub` 为整数（`has_epub`：0 无 / 1 生成中 / 2 可用 / 4 缺源文件），`source` 为 `'pixiv' | 'local'`
-- 批量辅助：`POST /api/novels/sort-ids`（支持 `id` / `like` / `view` / `text` / `create_time`）、`POST /api/novels/match-ids` 与 `GET /api/novels/{ids,count}` 均按当前筛选语义支持 `exclude_blocked`
+- 小说列表：`GET /api/novels/`，响应 `{novels, cursor, has_excluded}`，`is_favourite` / `is_special_follow` / `has_epub` 为整数（`has_epub`：0 无 / 1 生成中 / 2 可用 / 4 缺源文件），`source` 为 `'pixiv' | 'local'`；列表与编辑契约（`NovelBase` / `NovelUpdateRequest` / `EditNovelModal`）不再包含 `caption`
+- 批量辅助：`POST /api/novels/by-ids`（按选中 ID 顺序返回卡片投影）、`POST /api/novels/sort-ids`（支持 `id` / `like` / `view` / `text` / `create_time`）、`POST /api/novels/match-ids` 与 `GET /api/novels/{ids,count}` 均按当前筛选语义支持 `exclude_blocked`
 - Token 列表：`GET /api/tokens/` 返回掩码 token（`****xxxx`），编辑时不要把掩码写回
 
 ## 可选 API Key
