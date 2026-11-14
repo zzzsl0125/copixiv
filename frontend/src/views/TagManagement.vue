@@ -234,7 +234,7 @@ const currentColumns = computed(() => activeTab.value === 'alias' ? aliasColumns
         </button>
       </div>
 
-      <DraggableTable :items="activeTab === 'alias' ? groupedAliases : filteredTags" :columns="currentColumns" :loading="loading" :empty-text="activeTab === 'alias' ? '暂无别名映射' : '暂无标签'" @reorder="onDragEnd">
+      <DraggableTable :items="activeTab === 'alias' ? groupedAliases : filteredTags" :columns="currentColumns" :loading="loading" :item-key="activeTab === 'alias' ? 'target' : 'id'" :disabled="activeTab === 'alias'" :empty-text="activeTab === 'alias' ? '暂无别名映射' : '暂无标签'" @reorder="onDragEnd">
         <template #tag="{ item: tag }" v-if="activeTab !== 'alias'">
           <span class="text-sm font-medium text-gray-900">{{ (tag as TagPreference).tag }}</span>
         </template>

@@ -220,6 +220,9 @@ export function useMasonryLayout<T>(
 
     await nextTick()
 
+    // Shrink-cleanup: drop stale DOM refs beyond the current items length.
+    if (itemEls.length > total) itemEls.length = total
+
     // ---- 先把列宽写到卡片上，再测高 ----
     //
     // 顺序是**硬性**的：`cardStyle()` 现在只返回 `{ position: 'absolute' }`

@@ -1312,7 +1312,9 @@
             "enum": [
               "id",
               "like",
-              "text"
+              "view",
+              "text",
+              "create_time"
             ],
             "title": "Order By",
             "type": "string"
@@ -3342,7 +3344,7 @@
     },
     "/api/novels/sort-ids": {
       "post": {
-        "description": "Order an explicit id list by a novel column — 「查看已选」排序.\n\nReturns the same ids ordered by id/like/text (missing ids dropped).",
+        "description": "Order an explicit id list by a novel column — 「查看已选」排序.\n\nReturns the same ids ordered by id/like/view/text/create_time (missing ids dropped).",
         "operationId": "sort_novel_ids_api_novels_sort_ids_post",
         "requestBody": {
           "content": {

@@ -3,6 +3,7 @@ import { ref, watch, computed, onUnmounted } from 'vue'
 import BaseModal from '../ui/BaseModal.vue'
 import { novelApi, getApiErrorMessage } from '../../api'
 import { downloadBlob, filenameFromContentDisposition } from '../../lib/utils'
+import { shouldExcludeBlocked } from '../../config'
 import { useSystem, useTaskStatus } from '../../composables'
 
 const props = defineProps<{
@@ -170,6 +171,7 @@ watch(() => props.isOpen, async (open) => {
       keyword: props.keyword.trim() || undefined,
       min_like: props.min_like,
       min_text: props.min_text,
+      exclude_blocked: shouldExcludeBlocked(props.keyword, systemConfig.value),
     })
     totalCount.value = result.total
     totalTruncated.value = result.truncated ?? false

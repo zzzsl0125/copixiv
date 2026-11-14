@@ -1,7 +1,8 @@
 import { apiClient, buildApiUrl } from './client'
 import type {
   Novel, NovelUpdatePayload, AuthorLookup, SeriesLookup,
-  GetNovelsParams, BatchScope, BatchOperation, BatchOperationResult,
+  GetNovelsParams, OrderBy, OrderDirection,
+  BatchScope, BatchOperation, BatchOperationResult,
   NovelIdsResponse, NovelsByIdsResponse, MatchIdsResult, NovelCountResult,
   NovelListResult, BatchMetadataRequest, BatchMetadataResult,
 } from '../types'
@@ -189,8 +190,8 @@ export const novelApi = {
   /** Order an explicit id list by a novel column — 「查看已选」排序. */
   async sortNovelIds(
     novelIds: number[],
-    orderBy: string,
-    orderDirection: string,
+    orderBy: Exclude<OrderBy, 'random'>,
+    orderDirection: OrderDirection,
   ) {
     const response = await apiClient.post('/novels/sort-ids', {
       novel_ids: novelIds,
@@ -214,8 +215,12 @@ export const novelApi = {
     keyword?: string
     min_like?: number
     min_text?: number
+    exclude_blocked?: boolean
   }) {
-    const response = await apiClient.post('/novels/match-ids', params)
+    const { exclude_blocked, ...body } = params
+    const response = await apiClient.post('/novels/match-ids', body, {
+      params: exclude_blocked === undefined ? undefined : { exclude_blocked },
+    })
     return response.data as MatchIdsResult
   },
 

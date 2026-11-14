@@ -16,6 +16,7 @@ export {
 export { useToast } from './useToast'
 export { useCollectionViews, type UseCollectionViewsOptions } from './useCollectionViews'
 export { useBatchMode, type BatchMode } from './useBatchMode'
+export { useNovelSidebarBridge, type NovelSidebarHandlers } from './useNovelSidebarBridge'
 export { useTaskStatus } from './useTaskStatus'
 export {
   useIdLookup, parseIdInput, formatIdLookupHint,

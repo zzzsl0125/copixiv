@@ -99,6 +99,21 @@ export function sectionFor(keyword: string): SectionDef {
   return resolveSection(keyword) ? SECTIONS[resolveSection(keyword) as SectionId] : SECTIONS.novels
 }
 
+/**
+ * Resolve whether blocked-tag exclusion applies for *keyword* and *systemConfig*.
+ *
+ * Shelf sections marked ``exclude_blocked: false`` always keep blocked items
+ * visible; browse/search views follow the global system config flag (default true).
+ */
+export function shouldExcludeBlocked(
+  keyword: string,
+  systemConfig: { exclude_blocked_tag_novels?: boolean | null } | null,
+): boolean {
+  const section = resolveSection(keyword.trim())
+  if (section) return SECTIONS[section].exclude_blocked
+  return systemConfig ? (systemConfig.exclude_blocked_tag_novels ?? true) : true
+}
+
 /** 分页页大小：浏览列表（useNovels per_page）与「查看已选/被排除」集合视图
  * （usePagedNovelIdView 每页切片）共用，改页大小只改这一处。 */
 export const DEFAULT_PAGE_SIZE = 30

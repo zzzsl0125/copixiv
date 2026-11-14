@@ -105,7 +105,7 @@ export function useCollectionViews(options: UseCollectionViewsOptions) {
    * id/like/text，`view` / `create_time` 被静默丢弃）。现在只有「random → undefined」
    * 一条规则，未来新增排序字段不必回来改这里。
    */
-  function scopeOrderBy(): OrderBy | undefined {
+  function scopeOrderBy(): Exclude<OrderBy, 'random'> | undefined {
     const o = filters.value.order_by
     return o === 'random' ? undefined : o
   }
@@ -113,7 +113,7 @@ export function useCollectionViews(options: UseCollectionViewsOptions) {
   async function reloadSelectedIds() {
     const ids = batchScope.value?.novel_ids ?? []
     if (ids.length === 0) return
-    const orderBy = filters.value.order_by
+    const orderBy = scopeOrderBy()
     if (orderBy === 'id') {
       // id 排序本地完成（id 列表本来就在内存里）。本地书 id 是**负的时间坐标**
       // （docs/LIBRARY_DESIGN.md §3.1），时间在模上 —— 必须取绝对值，与服务端
@@ -124,14 +124,14 @@ export function useCollectionViews(options: UseCollectionViewsOptions) {
       )
       return
     }
-    if (orderBy === 'like' || orderBy === 'text') {
+    if (orderBy) {
       const result = await novelApi.sortNovelIds(
         ids, orderBy, filters.value.order_direction,
       )
       await selectedView.start(result.ids)
       return
     }
-    await selectedView.start(ids)  // 随机/未知 → 勾选顺序
+    await selectedView.start(ids)  // 随机 → 勾选顺序
   }
 
   let excludedSeq = 0
@@ -212,6 +212,30 @@ export function useCollectionViews(options: UseCollectionViewsOptions) {
     }
   }
 
+  /** Toggle a novel's state field (or author-wide special follow) in active views. */
+  function patchNovelState(
+    payload: { id: number; field: 'is_favourite' | 'is_special_follow'; value: number },
+    authorId?: number,
+  ) {
+    for (const view of [selectedView, excludedView]) {
+      for (const novel of view.novels.value) {
+        if (payload.field === 'is_special_follow' && authorId !== undefined) {
+          if (novel.author_id === authorId) {
+            novel.is_special_follow = payload.value
+          }
+        } else if (novel.id === payload.id) {
+          novel[payload.field] = payload.value
+        }
+      }
+    }
+  }
+
+  /** Remove a deleted novel from both collection views cleanly. */
+  function removeNovel(novelId: number) {
+    selectedView.removeId(novelId)
+    excludedView.removeId(novelId)
+  }
+
   // Leaving batch mode (or an emptied selection) closes the selected view;
   // entering batch mode closes the excluded view (批量模式优先互斥).
   watch(() => batchMode.value, (on) => {
@@ -288,5 +312,7 @@ export function useCollectionViews(options: UseCollectionViewsOptions) {
     toggleViewExcluded,
     handleViewLoadMore,
     patchNovel,
+    patchNovelState,
+    removeNovel,
   }
 }

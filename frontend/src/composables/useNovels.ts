@@ -1,7 +1,7 @@
 import { reactive, ref, onMounted, onUnmounted } from 'vue'
 import { novelApi } from '../api'
 import { parseOrderBy, parseOrderDirection, type Novel, type NovelFilters } from '../types'
-import { DEFAULT_PAGE_SIZE, DEFAULT_MAX_ITEMS, SECTIONS, resolveSection } from '../config'
+import { DEFAULT_PAGE_SIZE, DEFAULT_MAX_ITEMS, SECTIONS, resolveSection, shouldExcludeBlocked } from '../config'
 import { useCursorPagination } from './useCursorPagination'
 import { useSystem } from './useSystem'
 
@@ -29,11 +29,7 @@ export function useNovels() {
    *   `has_excluded` 存在性查询（书架 scope 下实测多 9.2ms，而答案几乎恒定 false）。
    * - 否则跟随全局开关（缺省视为开启）。
    */
-  const excludeBlocked = () => {
-    const section = resolveSection(filters.keyword.trim())
-    if (section) return SECTIONS[section].exclude_blocked
-    return systemConfig.value ? systemConfig.value.exclude_blocked_tag_novels : true
-  }
+  const excludeBlocked = () => shouldExcludeBlocked(filters.keyword, systemConfig.value)
 
   /** 当前搜索范围内是否存在被厌恶标签排除的小说（首屏响应附带）——
    * 控制 ExclusionBar（查看被隐藏的小说）的显示；load-more 不覆盖。 */
@@ -245,6 +241,7 @@ export function useNovels() {
     filters,
     hasExcluded,
     lastFetchedKeyword,
+    excludeBlocked,
     loadNovels,
     handleSearch,
     handleLoadMore,

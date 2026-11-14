@@ -580,7 +580,7 @@ export interface paths {
          * Sort Novel Ids
          * @description Order an explicit id list by a novel column — 「查看已选」排序.
          *
-         *     Returns the same ids ordered by id/like/text (missing ids dropped).
+         *     Returns the same ids ordered by id/like/view/text/create_time (missing ids dropped).
          */
         post: operations["sort_novel_ids_api_novels_sort_ids_post"];
         delete?: never;
@@ -1720,7 +1720,7 @@ export interface components {
              * Order By
              * @enum {string}
              */
-            order_by: "id" | "like" | "text";
+            order_by: "id" | "like" | "view" | "text" | "create_time";
             /**
              * Order Direction
              * @default DESC

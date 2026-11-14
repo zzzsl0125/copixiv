@@ -1,6 +1,9 @@
 import { computed, ref, watch } from 'vue'
-import { novelApi } from '../api'
+import { novelApi, getApiErrorMessage } from '../api'
+import { shouldExcludeBlocked } from '../config'
 import type { NovelFilters, BatchScope } from '../types'
+import { useSystem } from './useSystem'
+import { useToast } from './useToast'
 
 /**
  * Batch-mode state machine.
@@ -17,6 +20,10 @@ import type { NovelFilters, BatchScope } from '../types'
  *   are disabled and the bar prompts the user to narrow the scope first.
  */
 export function useBatchMode(filters: NovelFilters) {
+  const { systemConfig } = useSystem()
+  const toast = useToast()
+  const excludeBlocked = () => shouldExcludeBlocked(filters.keyword, systemConfig.value)
+
   const isBatchMode = ref(false)
   const selectedIds = ref<Set<number>>(new Set())
   const matchedCount = ref(0)
@@ -53,6 +60,7 @@ export function useBatchMode(filters: NovelFilters) {
         keyword: filters.keyword.trim() || undefined,
         min_like: filters.min_like,
         min_text: filters.min_text,
+        exclude_blocked: excludeBlocked(),
       })
       if (seq !== countSeq) return
       matchedCount.value = result.total
@@ -108,20 +116,26 @@ export function useBatchMode(filters: NovelFilters) {
       selectedIds.value = new Set()
       return { removed, remaining: 0 }
     }
-    const result = await novelApi.matchNovelIds({
-      novel_ids: ids,
-      keyword: filters.keyword.trim() || undefined,
-      min_like: filters.min_like,
-      min_text: filters.min_text,
-    })
-    const toRemove = new Set(result.matching_ids)
-    const next = new Set(selectedIds.value)
-    let removed = 0
-    for (const id of toRemove) {
-      if (next.delete(id)) removed++
+    try {
+      const result = await novelApi.matchNovelIds({
+        novel_ids: ids,
+        keyword: filters.keyword.trim() || undefined,
+        min_like: filters.min_like,
+        min_text: filters.min_text,
+        exclude_blocked: excludeBlocked(),
+      })
+      const toRemove = new Set(result.matching_ids)
+      const next = new Set(selectedIds.value)
+      let removed = 0
+      for (const id of toRemove) {
+        if (next.delete(id)) removed++
+      }
+      selectedIds.value = next
+      return { removed, remaining: next.size }
+    } catch (err: unknown) {
+      toast.error(getApiErrorMessage(err, '清除选择失败'))
+      return null
     }
-    selectedIds.value = next
-    return { removed, remaining: next.size }
   }
 
   /** Bulk-add the currently matched IDs into the selection (union). */
@@ -133,6 +147,7 @@ export function useBatchMode(filters: NovelFilters) {
         keyword: filters.keyword.trim() || undefined,
         min_like: filters.min_like,
         min_text: filters.min_text,
+        exclude_blocked: excludeBlocked(),
       })
       const next = new Set(selectedIds.value)
       let added = 0
@@ -144,9 +159,19 @@ export function useBatchMode(filters: NovelFilters) {
       }
       selectedIds.value = next
       return { added, total: result.total, truncated: result.truncated }
+    } catch (err: unknown) {
+      toast.error(getApiErrorMessage(err, '全选匹配失败'))
+      return null
     } finally {
       selectAllLoading.value = false
     }
+  }
+
+  function removeCard(id: number) {
+    if (!selectedIds.value.has(id)) return
+    const next = new Set(selectedIds.value)
+    next.delete(id)
+    selectedIds.value = next
   }
 
   function toggleCard(id: number) {
@@ -174,6 +199,7 @@ export function useBatchMode(filters: NovelFilters) {
     enter,
     exit,
     toggleCard,
+    removeCard,
     isCardSelected,
     selectAllMatched,
     clearSelection,

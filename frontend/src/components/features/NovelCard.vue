@@ -200,7 +200,16 @@ const getTagClass = (tag: string) => {
     </button>
     <div class="p-5 grow flex flex-col">
       <div class="mb-1">
+        <span
+          v-if="isLocal"
+          class="text-lg font-bold text-gray-900 inline-block"
+          :title="novel.title"
+          @click="handleTitleClick"
+        >
+          {{ novel.title }}
+        </span>
         <a
+          v-else
           :href="`https://www.pixiv.net/novel/show.php?id=${novel.id}`"
           target="_blank"
           rel="noopener noreferrer"

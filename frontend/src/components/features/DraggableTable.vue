@@ -18,6 +18,7 @@ const props = defineProps<{
   itemKey?: string
   emptyText?: string
   columnsCount?: number
+  disabled?: boolean
 }>()
 
 const emit = defineEmits<{ (e: 'reorder', items: unknown[]): void }>()
@@ -54,7 +55,7 @@ const getAlignClass = (align?: 'left' | 'center' | 'right') => {
         <thead class="bg-gray-50">
           <slot name="header">
             <tr v-if="columns">
-              <th scope="col" class="w-10 px-6 py-3"></th>
+              <th v-if="!disabled" scope="col" class="w-10 px-6 py-3"></th>
               <th
                 v-for="col in columns"
                 :key="col.key"
@@ -72,6 +73,7 @@ const getAlignClass = (align?: 'left' | 'center' | 'right') => {
           v-model="localItems"
           tag="tbody"
           :item-key="itemKey || 'id'"
+          :disabled="disabled"
           handle=".drag-handle"
           class="bg-white divide-y divide-gray-200"
           :animation="200"
@@ -84,7 +86,7 @@ const getAlignClass = (align?: 'left' | 'center' | 'right') => {
         >
           <template #item="{ element, index }">
             <tr class="hover:bg-gray-50 transition-colors group">
-              <td class="px-6 py-4 whitespace-nowrap text-gray-400 cursor-move drag-handle select-none">
+              <td v-if="!disabled" class="px-6 py-4 whitespace-nowrap text-gray-400 cursor-move drag-handle select-none">
                 <button
                   type="button"
                   class="inline-flex focus:outline-none focus-visible:text-blue-600"
@@ -110,7 +112,7 @@ const getAlignClass = (align?: 'left' | 'center' | 'right') => {
           </template>
           <template #footer>
             <tr v-if="loading && localItems.length === 0">
-              <td :colspan="columnsCount || (columns ? columns.length + 1 : 10)" class="px-6 py-12 text-center text-gray-500">
+              <td :colspan="columnsCount || (columns ? columns.length + (disabled ? 0 : 1) : 10)" class="px-6 py-12 text-center text-gray-500">
                 <slot name="loading">
                   <div class="flex flex-col items-center justify-center">
                     <RefreshCw class="w-6 h-6 animate-spin text-blue-500 mb-2" />
@@ -120,7 +122,7 @@ const getAlignClass = (align?: 'left' | 'center' | 'right') => {
               </td>
             </tr>
             <tr v-else-if="localItems.length === 0">
-              <td :colspan="columnsCount || (columns ? columns.length + 1 : 10)" class="px-6 py-12 text-center text-gray-500">
+              <td :colspan="columnsCount || (columns ? columns.length + (disabled ? 0 : 1) : 10)" class="px-6 py-12 text-center text-gray-500">
                 <slot name="empty">{{ emptyText || '暂无数据' }}</slot>
               </td>
             </tr>
