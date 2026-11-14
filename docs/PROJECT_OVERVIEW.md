@@ -1,187 +1,145 @@
 # copixiv 项目速览
 
 > 事实性速览，与 `MODULARITY.md`（目录边界速查）配套。
-> 原则：**只写不易漂移的结构性内容**；计数类信息（测试数、迁移数、行数）
-> 一律以工具输出为准，不在此维护。
 
 ## 1. 基本信息
 
 | 维度 | 内容 |
 |------|------|
-| 定位 | Pixiv 小说下载管理器 v2 重写版 |
+| 定位 | Pixiv 与本地小说下载/管理系统 v2 |
 | 版本 | 2.0.0（`pyproject.toml`） |
-| 后端 | Python 3.12+，FastAPI + SQLAlchemy 2.0 + croniter + Alembic + loguru |
-| 前端 | Vue 3 + Vite + TypeScript + Tailwind v4 + Vitest（`frontend/package.json`） |
-| 数据库 | PostgreSQL（greenfield 基线 `alembic/versions/0001_postgres_baseline.py`；BIGINT / timestamptz / JSONB / TEXT[]+GIN，详见 docs/pg-migration/） |
-| Pixiv 客户端 | pixivpy3（git 直连 `upbit/pixivpy`）+ 自定义 patch（见 MODULARITY.md `pixiv/`） |
-| 后端端口 | 9000（Vite dev proxy → 9000） |
+| 后端 | Python 3.12+，FastAPI + SQLAlchemy 2.0 + Pydantic v2 + croniter + Alembic + Loguru |
+| 前端 | Vue 3 + Vite + TypeScript + Tailwind CSS v4（`frontend/package.json`） |
+| 数据库 | PostgreSQL（Alembic 迁移 `0001`–`0015`；BIGINT / timestamptz / JSONB / `TEXT[]`+GIN / `pg_bigm`） |
+| Pixiv 客户端 | `pixivpy3`（git 直连 `upbit/pixivpy`）+ 自定义 patch（`pixiv/` 防腐层） |
+| 服务端口 | `9000`（生产同进程托管 `frontend/dist`，Vite dev proxy → `9000`） |
 
 ## 2. 架构
 
-模块化单体：纯核心 + 适配层 + 任务内核 + 按功能切片。依赖规则（哪些是约定、
-哪些有测试执法）见 `MODULARITY.md`：
+模块化单体：组合根 + 纯核心 + 适配层 + 任务内核 + 按功能切片。架构契约由 `.importlinter` + `lint-imports` 执法，详见 `MODULARITY.md`：
 
-```
-app.py（组合根：create_app / lifespan / 中间件 / 异常映射 / 挂载路由）
+```text
+app.py + lifespan.py + middleware.py + error_handlers.py（组合根与装配）
    │
    ▼
 features/*  +  tasks/*         业务切片 + 任务内核
    │
    ▼
-core/                          纯 Python（实体 / 服务 / 异常；无框架/无 SQLAlchemy/无 web 依赖，仅标准库工具函数）
+core/                          纯 Python（实体 / 纯服务 / 异常；零框架与 ORM 依赖）
 
-app.py → features(+tasks) → core；db / pixiv / storage / notify 是适配层，
-只被 features / tasks / app 使用，彼此不互相 import。
+db / pixiv / storage / notify 为适配层，不被反向依赖，也不持有上层引用。
 ```
 
-| 目录 | 职责 |
-|------|------|
-| `app.py` | 组合根：`create_app()` 工厂 + lifespan + 中间件 + 异常映射 |
-| `deps.py` | FastAPI 依赖（类型化 DI） |
-| `features/` | 按功能切片：api + repo + schemas 同置 |
-| `tasks/` | 任务注册表 + 调度内核 + 业务任务 |
-| `core/` | 纯 Python：Pydantic 实体、纯服务、域异常；无框架/无 SQLAlchemy/无 web 依赖（仅标准库工具函数） |
-| `db/` | PostgreSQL 唯一适配：engine / uow / write_lock（事务边界标记）/ backup / models / constants |
-| `pixiv/` | pixivpy3 防腐层（唯一厂商边界） |
-| `storage/` | 文件存储 / 图片下载 / EPUB |
-| `notify/` | 通知后端 |
+| 目录 / 模块 | 职责 |
+|-------------|------|
+| `app.py` | 组合根：`create_app()` 工厂、路由挂载、`mount_frontend`、`main()` |
+| `middleware.py` | API Key 鉴权与请求耗时/日志中间件 |
+| `error_handlers.py` | 域异常 → HTTP 状态码统一映射 |
+| `lifespan.py` | 数据库、账号池、任务系统与自动备份生命周期管理 |
+| `deps.py` | FastAPI DI 依赖（`get_uow` / `get_write_uow` / `get_task_manager` 等） |
+| `features/` | 按功能切片：`accounts` / `authors` / `failures` / `library` / `novels` / `system` / `tags` |
+| `tasks/` | 拆分后的任务内核：`registry` / `executor` / `cron` / `manager` + `kernel` 兼容门面 + 业务任务 |
+| `core/` | 纯 Python：Pydantic 实体、纯服务、域异常；无 FastAPI / SQLAlchemy 依赖 |
+| `db/` | PostgreSQL 唯一适配：`engine` / `uow` / `write_lock` / `backup` / `models` / `constants` / `base` |
+| `pixiv/` | `pixivpy3` 防腐层（唯一允许直接导入 `pixivpy3` 的目录） |
+| `storage/` | 文件存储 / 原子写 / 压缩打包（`zip.py`）/ 图片下载 / EPUB |
+| `notify/` | Telegram 通知后端与工厂 |
 
 ## 3. 目录结构
 
-```
+```text
 src/copixiv/
-├── app.py          # 组合根：create_app / lifespan / 中间件 / 异常映射 / 启动项 / main()
-├── config.py       # 配置模型与加载
-├── deps.py         # FastAPI 依赖（读 app.state 单例）
-├── log.py          # 日志
-├── core/           # 纯 Python：models.py / services.py / exceptions.py（无框架/无 SQLAlchemy/无 web 依赖；含 zip/路径工具）
-├── db/             # engine / uow / write_lock / backup / models / constants / base
-├── pixiv/          # pixivpy3 防腐层（唯一允许 import pixivpy3 的目录）
-├── storage/        # file_storage / image_downloader / epub
-├── notify/         # telegram / factory
-├── tasks/          # kernel.py（registry+context+history+executor+cron ticker+manager）+ novels / batch / maintenance / pipeline / api / schemas / history_repo
-└── features/       # accounts / authors / failures / novels / system / tags（api + repo + schemas）
+├── app.py              # 组合根：create_app / mount_routers / mount_frontend / main()
+├── middleware.py       # API Key 鉴权与请求日志中间件
+├── error_handlers.py   # 域异常映射
+├── lifespan.py         # 启动/关闭生命周期钩子
+├── config.py           # 配置模型与加载
+├── deps.py             # FastAPI 依赖（从 app.state 读取单例）
+├── log.py              # Loguru 日志
+├── export_openapi.py   # OpenAPI schema 导出入口
+├── core/               # 纯 Python：models / services / exceptions / draft / naming / ids / language / calendar / formats
+├── db/                 # engine / uow / write_lock / backup / models / constants / base
+├── pixiv/              # client / patch / account / errors
+├── storage/            # file_storage / image_downloader / epub/ / zip / atomic / assets
+├── notify/             # telegram / factory
+├── tasks/              # registry / executor / cron / manager / kernel / history_repo / schemas / api / novels / batch / maintenance/
+└── features/           # accounts / authors / failures / library / novels(含 repo/) / system / tags
 ```
 
-项目根下还有 `main.py`（uvicorn 入口 shim，真实入口 `copixiv.app.py`）、
-`pyproject.toml`、`config.yaml`（模板 `config.example.yaml`）、`pixiv_token.py`、
-`alembic/`（PG 根基线 + `legacy_sqlite/`）、`download/`（FileStorage 根目录）、
-`frontend/`（Vue 3）、`scripts/`、`docs/`、`deploy/`（systemd 等）、`tests/`。
-
-`tests/` 下分 `architecture/`（pixivpy3 白名单 AST 执法）与 `regression/`
-（写锁、删除路径等回归钉），及各功能的测试目录。
+项目根目录：`main.py`、`pyproject.toml`、`.importlinter`、`config.yaml`（示例 `config.example.yaml`）、`alembic/`（`0001`–`0015` 迁移）、`data/pg/`（本地 `pg_dev.py` PostgreSQL 数据目录）、`download/`（FileStorage 根目录）、`frontend/`（Vue 3）、`scripts/`、`docs/`、`deploy/`（`copixiv.service`）。
 
 ## 4. 数据库
 
-- ORM 模型：`db/models.py`（novel / author / series / tag / tag_preference /
-  tag_alias / failed_novel / search_history / task_history / scheduled_task /
-  setting / token）。PG 形态：ID 为 BIGINT、时间戳为
-  timestamptz、`task_history.result/progress` 与 `scheduled_task.params` 为
-  JSONB；标签改 `novel.tags TEXT[]`（GIN 索引），favourite / special_follow
-  布尔化进宿主表；关键字搜索走物化生成列 `novel.search_lower`（迁移 0007，
-  PostgreSQL 从行生成、不可能漂移）+ `pg_bigm` bigram GIN 索引
-  `novel_search_bigm`，查询侧每段一个 `LIKE`（真子串语义，不会跨词边界假阳性；
-  迁移前的 char-gram 表达式索引 `novel_search_gin` 与两个旧函数**故意保留**以便
-  回滚，见 `docs/perf/PG_BIGM_FEASIBILITY.md`；查询侧见
-  `features/novels/search.py`）
-- 迁移：Alembic（`alembic/versions/0001_postgres_baseline.py` 为 PG 独立根基
-  线，SQLite 时代迁移移至 `alembic/legacy_sqlite/`），启动时由
-  `init_database()` 自动应用
-- 并发：PostgreSQL MVCC 多写者，`db/write_lock.db_write()` 已退化为事务边界
-  标记（不再持锁）；正确性靠多语句事务 + `ON CONFLICT` upsert + 行级锁，
-  热点行冲突由 `run_write_transaction` 指数退避重试
-  （LockNotAvailable / SQLSTATE 55P03）
-- 仓储：按功能归位（novel 读写合并进 `features/novels/repo.py`）
+- **ORM 模型**：`db/models.py`（`author` / `series` / `novel` / `tag` / `tag_preference` / `setting` / `tag_alias` / `scheduled_task` / `task_history` / `token` / `failed_novel` / `series_dead_letter` / `search_history`），与 Alembic `0001`–`0015` 严格对齐（`alembic check` 零漂移）。
+- **检索与排序**：关键词搜索走生成列 `novel.search_lower`（`copixiv_search_text(...)`）+ `pg_bigm` GIN 索引 `novel_search_bigm`，查询侧使用真子串 `LIKE`（`features/novels/search.py`）；时间轴排序通过 `abs(id)` 兼顾正数 Pixiv ID 与负数本地上传 ID（`ix_novel_abs_id`）。
+- **并发事务**：PostgreSQL MVCC 多写者 + 多语句事务 + `lock_timeout='5s'` + `ON CONFLICT` upsert + `run_write_transaction`（针对 `55P03` / `55006` 退避重试）。
+- **Novel 仓储**：`features/novels/repo/` 子包按职责拆分为 `query_builder.py`、`read_repo.py`、`write_repo.py`、`series_repo.py`，对外经 `__init__.py` 暴露统一门面。
 
 ## 5. API
 
 | 前缀 | 模块 | 说明 |
 |------|------|------|
-| `/api/novels` | `features/novels/api.py` | 列表/计数/下载/收藏/批量打包/批量操作/厌恶标签排除 |
+| `/api/novels` | `features/novels/api.py` | 列表/计数/下载/收藏/特别关注/单本编辑同步删除/批量打包/批量操作/厌恶标签排除（含 `sort-ids` / `match-ids`） |
+| `/api/library` | `features/library/api.py` | 本地 TXT/EPUB 上传与入库 |
 | `/api/tasks` | `tasks/api.py` | 任务方法、定时任务管理、立即运行、执行历史 |
-| `/api/system` | `features/system/api.py` | 系统配置（含运行时设置） |
-| `/api/tag-preferences` | `features/tags/preferences.py` | 标签偏好（喜爱/屏蔽） |
-| `/api/tag-aliases` | `features/tags/aliases.py` | 标签别名、相似标签建议 |
+| `/api/system` | `features/system/api.py` | 系统配置（含 `exclude_blocked_tag_novels` / `batch_download_naming`） |
+| `/api/tag-preferences` | `features/tags/preferences.py` | 标签偏好（喜爱/厌恶）与排序 |
+| `/api/tag-aliases` | `features/tags/aliases.py` | 标签别名与相似标签建议 |
 | `/api/search-history` | `features/novels/history_api.py` | 搜索历史 |
 | `/api/tokens` | `features/accounts/api.py` | Pixiv 刷新令牌管理 |
-| `/api/failed-novels` | `features/failures/api.py` | 失败台账：查看/清除/重置计数/重试 |
-
-- `app.py` 的 `create_app()` 逐模块 `include_router` 显式挂载（前缀随路由
-  注册处，见 MODULARITY.md）
-- 写端点必须落在写事务边界里——形态①声明 `Depends(get_write_uow)`，形态②用例自开
-  `run_write_transaction` 并登记进执法清单（见 MODULARITY.md 硬规则 §3.2 与
-  `tests/regression/test_m6_write_lock.py`）
+| `/api/failed-novels` | `features/failures/api.py` | 失败台账查看/清除/重置计数/重试 |
 
 ## 6. 后台任务
 
-- 任务内核：`tasks/kernel.py`（registry + context + history_recorder +
-  executor + cron ticker + manager 合并）
-- 声明式注册：`@register(name, args=Pydantic模型)`；发现：内置
-  `DEFAULT_TASK_MODULES`（novels / batch / maintenance），无第三方插件机制
-- 依赖注入：`TaskContext`（uow / client / storage / epub / notifier / config / write_lock）
-- 任务清单以运行时 `/api/tasks/methods` 为准（`describe_tasks()` 从 Pydantic
-  args 模型推导，无反射）
-- 内置业务任务：`tasks/novels.py`（单本/关注/作者/排行/搜索）、`tasks/batch.py`
-  （批量操作/导出）、`tasks/maintenance/`（搜索索引 / EPUB 对账 / 系列章节号 /
-  孤儿文件回收 / 任务历史裁剪）。后两个是**默认试运行**的运维任务：
-  `prune_orphan_files` 与 `prune_task_history` 只在参数里显式 `apply: true` 时
-  才真正删除，第一次跑应当先看作一份报告
-- 死系列台账：`features/novels/series_ledger.py` + `series_dead_letter` 表。
-  `fix_series_index` 的候选集无法区分「这轮拿不到」与「永远拿不到」，而 pixiv
-  已删的系列会每轮重新成为候选（实测一轮 200 个候选里 183 个是死系列，占 80%
-  运行时间）。规则：**只有确定性 404/410 累加计数**，连续 3 轮才判死并移出候选
-  集；任何一次成功都会清掉台账行，所以判死可逆
-- 会员门禁：`account_rule(need_premium=True)` 在账号池里**找不到 premium 账号时硬失败**
-  （`PremiumRequiredError`），不回退免费账号——按喜好数排序的搜索在免费账号上会返回
-  错误或一堆无关作品，而任务会记成"成功 0 本"。让任务行红掉比静默污染库诚实。
-- 永久失败不重试：4xx（除 408/429）由 `PixivClient._execute_with_retry` 直接抛出，
-  既不消耗重试阶梯也不换账号（已下架的系列曾经每条烧掉 4 次请求 × 4 个账号）。
+- **任务内核拆解**：
+  - `tasks/registry.py`：`@register`、Pydantic 参数模型绑定与 `TaskContext`
+  - `tasks/executor.py`：任务执行、异步结果落库、进度回报与 Telegram 通知
+  - `tasks/cron.py`：基于 `croniter` 的定时任务调度与并发控制
+  - `tasks/manager.py`：`TaskManagerSystem`（生命周期管理、queue polling、enqueue / run_now / reload）
+  - `tasks/kernel.py`：向外统一导出常用符号的兼容门面
+- **业务任务**：`tasks/novels.py`（单本/关注/作者/排行/搜索）、`tasks/batch.py`（大批量删改标签/打包导出）、`tasks/maintenance/`（搜索索引刷新 / EPUB 对账 / 章节号补全 / 孤儿文件回收 / 任务历史裁剪）。
+- **死系列台账**：`features/novels/series_ledger.py` + `series_dead_letter` 表，连续 3 次确定性 404/410 才标记退役。
 
 ## 7. 配置
 
-加载顺序：Pydantic 默认值 → `config.yaml` → 环境变量（前缀 `COPIXIV_`，
-`__` 分隔层级）。完整项与示例见 `config.example.yaml` 与 `src/copixiv/config.py`。
+加载顺序：Pydantic 默认值 → `config.yaml` → 环境变量（前缀 `COPIXIV_`，`__` 分隔层级）。示例见 `config.example.yaml` 与 `src/copixiv/config.py`。
 
-关键节：`path`（token/database/download）、`pixiv_client`（限速/冷却/并发）、
-`proxy`、`telegram`、`notifiers.enabled`（通知后端列表）、`security`
-（api_key / allowed_hosts / allowed_origins）、`batch_download.naming`。
+配置节包括：`path`、`pixiv_client`、`proxy`、`batch_download`、`backup`、`security`、`notifications`（后端列表）。
 
-## 8. 测试
+## 8. 质量门禁
 
 ```bash
-pytest -q                      # 全量
-pytest tests/architecture -q   # 边界执法（pixivpy3 白名单）
-pytest tests/regression -q     # 写锁 / 删除路径等回归钉
-pytest -m "not slow"           # 快速门禁
+bash scripts/run_verification.sh                        # 完整本地验证脚本
+.venv/bin/ruff check src tests scripts                  # 代码静态检查
+.venv/bin/mypy src/copixiv                              # 类型检查
+.venv/bin/lint-imports                                  # 架构边界契约 (.importlinter)
+.venv/bin/alembic check                                 # ORM 模型 ↔ 迁移历史对齐检查
+.venv/bin/pytest tests -v                               # unit / db / integration 测试套件
+npm --prefix frontend run typecheck                     # 前端 TypeScript / Vue 校验
+npm --prefix frontend run build                         # 前端构建
 ```
 
-配置在 `pyproject.toml`：`asyncio_mode = auto`、`pythonpath = ["src"]`。
-
-## 9. 运行
+## 9. 运行与运维
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install .
-cd frontend && npm install && npm run build   # 构建一次，后端直接伺服 dist
-cd .. && python main.py                        # API + 前端 :9000
+.venv/bin/python scripts/pg_dev.py start                # 启动本地 PG (127.0.0.1:5433, data/pg/pgdata)
+cd frontend && npm install && npm run build && cd ..
+.venv/bin/python -u main.py                             # API + 前端 :9000
 ```
 
 ## 10. 关键文件索引
 
-| 文件 | 说明 |
-|------|------|
-| `src/copixiv/app.py` | 组合根：create_app / lifespan / 中间件 / 异常映射 |
-| `src/copixiv/config.py` | 配置模型与加载 |
-| `src/copixiv/deps.py` | FastAPI 依赖（读 app.state 单例） |
-| `src/copixiv/core/models.py` | 全部 Pydantic 实体 |
-| `src/copixiv/core/services.py` | 纯函数服务（parsing / filename / language / tags / exclusion / archive / query_spec 等） |
-| `src/copixiv/core/exceptions.py` | 域异常（无 status_code，映射在 app.py） |
-| `src/copixiv/core/draft.py` | NovelDraft 纯数据结构 + 写路径工厂（build_novel / build_from_webview / build_from_novel_info） |
-| `src/copixiv/db/uow.py` | SqlUnitOfWork（纯事务边界） |
-| `src/copixiv/db/write_lock.py` | 事务边界标记（db_write；PG 迁移后不再持锁） |
-| `src/copixiv/features/novels/repo.py` | novel 读写仓储 |
-| `src/copixiv/features/novels/search.py` | 关键字搜索：分段 LIKE 谓词构造（pg_bigm 子串语义）+ 搜索索引运维 |
-| `src/copixiv/tasks/kernel.py` | 任务注册表 + 调度内核 + 上下文 |
-| `src/copixiv/pixiv/{client,patch,account,errors}.py` | Pixiv 防腐层（MODULARITY.md `pixiv/`） |
-| `tests/architecture/test_vendor_whitelist.py` | pixivpy3 厂商白名单执法 |
-| `tests/regression/test_m6_write_lock.py` | 写锁纪律执法 |
+| 文件 / 包 | 说明 |
+|-----------|------|
+| `src/copixiv/app.py` | 组合根：`create_app` / `mount_routers` / `mount_frontend` |
+| `src/copixiv/{middleware,error_handlers,lifespan}.py` | 中间件、异常映射与生命周期装配 |
+| `src/copixiv/config.py` | Pydantic 配置模型与加载器 |
+| `src/copixiv/deps.py` | FastAPI DI 依赖 |
+| `src/copixiv/core/{models,services,exceptions,draft}.py` | 核心实体、纯服务、域异常与草稿构建 |
+| `src/copixiv/db/{models,engine,uow,write_lock,backup,base}.py` | ORM 模型、PG 引擎、UoW、压缩备份与基础仓储 |
+| `src/copixiv/features/novels/repo/` | 分拆后的小说读/写/查询构造/系列仓储 |
+| `src/copixiv/features/novels/search.py` | `pg_bigm` 分段 `LIKE` 构造 |
+| `src/copixiv/tasks/{registry,executor,cron,manager,kernel}.py` | 任务注册、执行、Cron 调度与生命周期管理器 |
+| `src/copixiv/pixiv/{client,patch,account,errors}.py` | Pixiv 防腐层 |

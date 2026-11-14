@@ -1,91 +1,36 @@
-# copixiv 目录速查
+# copixiv 目录边界与架构约束
 
-> 本文件的定位：**给人和 AI 的目录边界卡**。它写清每个目录的职责、
-> 依赖约定与硬规则，并如实标注**哪些规则有测试钉死、哪些只是约定**。
-> 结构已从六边形分层精简为模块化单体；旧的分层矩阵 / M 编号体系已作废。
+> 本文件定义模块化单体的职责边界、依赖约定以及静态执法规则。
 
 ## 1. 目录职责
 
-| 目录 | 一句话职责 |
-|------|-----------|
-| `src/copixiv/app.py` | 组合根：create_app / lifespan / 中间件 / 异常映射 / 启动项 / main() |
-| `src/copixiv/config.py` | 配置模型与加载 |
-| `src/copixiv/deps.py` | FastAPI 依赖（get_session_factory / get_app_config / get_file_storage / get_task_manager / get_uow / get_write_uow / parse_json_param） |
-| `core/` | 纯 Python：models.py / services.py / exceptions.py / draft.py（无框架、无 SQLAlchemy、无 web 依赖；仅标准库工具函数，含 zip/路径处理） |
-| `db/` | engine / uow（纯事务边界）/ write_lock（事务边界标记，PG 后不再持锁）/ backup / models / constants / base |
-| `pixiv/` | pixivpy3 防腐层（唯一允许 import pixivpy3 的目录） |
-| `storage/` | file_storage / image_downloader / epub 子包 |
-| `notify/` | telegram / factory |
-| `tasks/` | kernel.py（registry + context + history + executor + cron ticker + manager 合并）/ history_repo / schemas / api / novels / batch / maintenance / pipeline |
-| `features/` | accounts / authors / failures / novels / system / tags（每目录 api(+schemas)+repo；novels 另有 ingest / search / 批量用例） |
+| 目录 / 模块 | 职责 |
+|-------------|------|
+| `app.py` / `middleware.py` / `error_handlers.py` / `lifespan.py` | 组合根：FastAPI 工厂、中间件、域异常映射、生命周期与 SPA 静态托管 |
+| `config.py` | Pydantic 配置模型、严格校验与加载 |
+| `deps.py` | FastAPI DI 依赖（`get_uow` / `get_write_uow` / `get_task_manager` 等） |
+| `core/` | 纯 Python 核心：实体 `models.py`、纯服务 `services.py`、异常 `exceptions.py`、`draft.py`、`naming.py`、`ids.py`、`language.py`、`calendar.py`、`formats.py` |
+| `db/` | PostgreSQL 唯一适配层：`engine` / `uow` / `write_lock`（事务边界标记）/ `backup` / `models` / `constants` / `base` |
+| `pixiv/` | `pixivpy3` 防腐层（`client.py` / `patch.py` / `account.py` / `errors.py`） |
+| `storage/` | 本地存储与文件处理：`file_storage.py` / `image_downloader.py` / `zip.py` / `atomic.py` / `assets.py` / `epub/` |
+| `notify/` | 通知后端适配：`telegram.py` / `factory.py` |
+| `tasks/` | 任务内核（`registry.py` / `executor.py` / `cron.py` / `manager.py` / `kernel.py` 兼容门面）+ `history_repo.py` / `api.py` / 业务任务（`novels.py` / `batch.py` / `maintenance/`） |
+| `features/` | 业务功能切片：`accounts` / `authors` / `failures` / `library` / `novels`（含拆分的 `repo/` 子包）/ `system` / `tags` |
 
-## 2. 依赖规则（约定，无矩阵执法）
+## 2. 架构契约（由 `lint-imports` 强制执行）
 
-1. **`core` 不 import 任何其他目录。**
-2. **`db/pixiv/storage/notify` 为适配层**：彼此不互相 import，
-   只被 `features` / `tasks` / `app` 使用。
-3. **`features` 之间允许单向 import**（模块化单体），一行一个方向，避免成环。
+根目录 `.importlinter` 定义了四条静态契约，运行 `.venv/bin/lint-imports` 检查：
 
-> 不再有全局 import 矩阵执法，这是**有意的取舍**——这个体量配不上 7 层矩阵。
-> 前两条靠"目录即文档"与 code review 守住；只有下面的两条是测试执法。
+1. **`core-is-pure`**：`copixiv.core` 为纯 Python 层，禁止导入 `copixiv.{db,features,tasks,pixiv,storage,notify,app}` 以及 `fastapi` / `sqlalchemy`。
+2. **`adapters-are-leaves`**：适配层 `copixiv.{db,pixiv,storage,notify}` 为底层叶子，禁止反向依赖 `copixiv.{features,tasks,app}`。
+3. **`pixivpy3-whitelist`**：除 `copixiv.pixiv` 外，全仓任何业务与核心模块均禁止直接导入 `pixivpy3`（含间接直接引用约束，`allow_indirect_imports = true`）。
+4. **`db-is-the-only-sql-layer`**：除 `db/` 及明确操作会话的业务层外，`copixiv.{core,pixiv,storage,notify}` 禁止导入 `sqlalchemy`。
 
-## 3. 硬规则（违反 = 测试变红）
+## 3. 分层与编码约定
 
-### 3.1 pixivpy3 厂商白名单
-
-`import pixivpy3` 只允许出现在 `pixiv/` 下（`patch.py` / `account.py` /
-`errors.py`，后者因异常族必须继承 `pixivpy3.PixivError`）。其余代码一律
-通过 `pixiv/` 导出的接口与异常族。
-
-执法：`tests/architecture/test_vendor_whitelist.py::test_pixivpy3_vendor_whitelist`
-（AST 扫描整个 `src`，任何新模块 import pixivpy3 都会立刻失败）。
-
-### 3.2 写路径必须走写事务边界（db_write）
-
-- API 写端点必须落在写事务边界里，**只有两种合法形态**：① 声明
-  `Depends(get_write_uow)`（请求级边界，绝大多数写端点）；② 用例自己调
-  `run_write_transaction` 开写事务——给"抓取 / 网络必须在写事务之外"的端点留的口子
-  （如 `features/novels/api.py::sync_novel`，它依赖 `get_uow`）。形态②必须登记进
-  `tests/regression/test_m6_write_lock.py::SELF_MANAGED_WRITE_ENDPOINTS`，并被
-  `test_self_managed_write_endpoints_are_declared` 证明"用例模块里确有
-  `run_write_transaction` 调用"；两种形态**互斥**。读端点用 `get_uow`。
-- 后台任务写库走 `uow.begin()` / `db_write()`。PG 迁移后 `db_write()` 是
-  **事务边界标记**（不再持全局锁——PG 为 MVCC 多写者，全局锁只会变瓶颈）；
-  正确性由「多语句事务 + `ON CONFLICT` upsert + 行级锁」保证，热点行冲突
-  经 `run_write_transaction` 指数退避重试（SQLSTATE 55P03 / LockNotAvailable）。
-  API 与后台任务共享同一套事务纪律。
-
-执法：`tests/regression/test_m6_write_lock.py::test_write_endpoints_declare_write_uow`
-（形态①的接线纪律）与 `::test_self_managed_write_endpoints_are_declared`
-（形态②的自管写事务必须被证明，不能只靠声明）。
-
-### 3.3 不许跨切片 import 私有名字
-
-一个**公开的规则**不该住在另一个切片的私有函数里。审查 2026-10-24 时全仓有 5 处
-`from copixiv.<其他切片>.<模块> import _xxx`，每一处都指向同一个根因——规则放错了
-owner：
-
-| 私有引用 | 真实问题 | 处理 |
-|---|---|---|
-| `tasks/novels.py` → `novels.ingest._month_ranges` | 纯日期工具住在小说抓取管线里 | → `core/calendar.py` |
-| `tasks/novels.py` → `novels.ingest._filter_chinese_novels` | 只被任务层用的列表封装 | → `core/language.py` |
-| `library/api.py` → `novels.update_metadata._author_id` | 三个**不同切片**共用的校验规则 | → `core/ids.py` |
-| `novels/batch_edit_metadata.py` → 同上 | 同上 | 同上 |
-| `export_openapi.py` → `app._mount_routers` | 它有第二个**合法**调用方，下划线在撒谎 | 改名 `mount_routers` |
-
-两种正确出口：规则真通用 → 搬到 `core/` 或给一个公开名字；确实是本切片的内部
-细节 → 就别让别的切片用它。**同一切片内部**（`features/novels` 自己的文件之间、
-`tasks/maintenance` 包内）用私有名是正常封装，不执法。
-
-执法：`tests/architecture/test_no_private_cross_slice.py`（AST 扫 `src/copixiv`，
-跨 owner 的私有 import 即失败；另有一条"守卫会红"的自证）。
-
-> 这三条是**仅剩的**测试执法边界；其余规则在 §2 与 §4，皆为约定，违反不会红。
-
-## 4. 约法三章（新增代码的默认姿势）
-
-1. **新增功能 = 一个 `features/<name>/` 目录**：`api.py` / `repo.py` /
-   `schemas.py` 同置，不各起各的层。
-2. **跨 feature 引用允许，但保持单向**：不要成环（A → B、B → A 互为依赖）。
-3. **`core` 保持纯 Python**：无框架、无 SQLAlchemy、无 web 依赖。标准库
-   工具函数（如 zip/路径处理）允许；别的依赖与副作用放 feature 或适配层。
+1. **`features` 单向依赖**：允许跨功能切片单向引用公开接口，禁止互相循环依赖，也禁止跨切片导入私有符号（`_xxx`）。
+2. **写事务边界纪律**：
+   - 普通 HTTP 写端点通过 `Depends(get_write_uow)` 获取受控事务；
+   - 需先执行外部网络 I/O 再落库的用例（如单本同步、入库管线）使用 `run_write_transaction(...)` 管理短暂写事务并内建 `55P03` / `55006` 退避重试。
+3. **ORM 与迁移同步**：修改 `db/models.py` 后必须同步检查 `.venv/bin/alembic check`，确保不产生隐性 Schema 漂移。
+4. **前端状态隔离**：小说列表、筛选、批量选择与编辑/上传模态作用域收口于 `frontend/src/views/Novels.vue`，外壳 `App.vue` 仅承担导航栏壳层与全局消息/任务状态轮询。
