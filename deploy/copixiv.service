@@ -55,13 +55,13 @@ ExecStart=/home/invocation/project/copixiv/.venv/bin/python -u main.py
 
 # 覆盖一切退出，**包括被外部 SIGTERM 打死的"干净退出"**——systemd 对 Type=simple
 # 把 SIGHUP/SIGINT/SIGTERM/SIGPIPE 视为 clean exit，而 Restart=on-failure 明确
-# 排除这四种信号，于是被杀一次后单元会永远躺着不重启（本机 2026-09-10 / 09-12
-# 两次事故的根因，见 INCIDENT-2026-09-12-copixiv-backend-down.md）。
+# 排除这四种信号，于是被杀一次后单元会永远躺着不重启。
 Restart=always
 RestartSec=5s
 
-# 停止时向整个 cgroup 发 SIGTERM（Python 之外只剩 PostgreSQL 的后台进程）。
-KillMode=control-group
+# 仅杀死主进程（Python）：ExecStartPre 拉起的 PostgreSQL 保留在 cgroup 中，
+# 服务重启时不必冷启数据库。
+KillMode=process
 TimeoutStopSec=30
 
 [Install]
