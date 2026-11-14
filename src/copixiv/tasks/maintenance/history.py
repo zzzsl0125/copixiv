@@ -38,16 +38,15 @@ from datetime import datetime, timedelta, timezone
 
 from pydantic import BaseModel, Field
 from sqlalchemy import delete as _delete_stmt
-from sqlalchemy import func, select as _select
+from sqlalchemy import func
+from sqlalchemy import select as _select
 
 from copixiv.core.models import TaskResult
 from copixiv.db import models
 from copixiv.db.write_lock import read_transaction, run_write_transaction
 from copixiv.log import logger
 
-from ..kernel import TaskContext
-from ..kernel import register
-
+from ..kernel import TaskContext, register
 
 #: ``setting`` row holding the retention policy (JSON object).
 RETENTION_SETTING_KEY = "task_history.retention"
@@ -142,19 +141,23 @@ def _victim_condition(session, keep: int, cutoff: datetime) -> list:
     """The ``WHERE`` shared by the count and the delete — one owner.
 
     A row is a victim only when it satisfies **all** of: not part of the live
-    queue, older than *cutoff*, and below the keep boundary.  When the table is
-    shorter than *keep*, the boundary is ``None`` and **nothing** is a victim.
+    queue, older than *cutoff*, and (when ``keep > 0``) below the keep
+    boundary.  When ``keep > 0`` and the table is shorter than *keep*, the
+    boundary is ``None`` and **nothing** is a victim.  When ``keep <= 0``,
+    no count floor applies and every non-live row older than *cutoff* is
+    eligible.
     """
-    boundary = _keep_boundary(session, keep)
-    if boundary is None:
-        # Fewer rows than the floor: the count rule alone protects the table.
-        return [models.TaskHistory.id.is_(None)]   # matches nothing
-
-    return [
+    conds = [
         models.TaskHistory.status.not_in(("pending", "running")),
         models.TaskHistory.start_time < cutoff,
-        models.TaskHistory.id < boundary,
     ]
+    if keep > 0:
+        boundary = _keep_boundary(session, keep)
+        if boundary is None:
+            # Fewer rows than the floor: the count rule alone protects the table.
+            return [models.TaskHistory.id.is_(None)]   # matches nothing
+        conds.append(models.TaskHistory.id < boundary)
+    return conds
 
 
 def _count_victims(session, keep: int, cutoff: datetime) -> int:

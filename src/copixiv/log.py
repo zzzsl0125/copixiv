@@ -10,17 +10,16 @@ Moved out of the former ``app.logger`` module so that ``infrastructure`` /
 shim was removed — internal code imports from here directly.)
 """
 
+import io
+import logging
 import os
 import sys
-import logging
-import io
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
-from contextlib import contextmanager
-from typing import Generator, Callable
+from typing import Callable, Generator
 
 from loguru import logger
-
 
 #: How much task log one ``task_history`` row may store.
 #:

@@ -18,11 +18,11 @@ from __future__ import annotations
 
 from copixiv.core.draft import NovelDraft
 from copixiv.db.uow import SqlUnitOfWork
+from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 from copixiv.features.novels.repo import (
     SQLAlchemyNovelRepository,
     SQLAlchemySeriesRepository,
 )
-from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 
 
 def persist_novels(
@@ -41,14 +41,23 @@ def persist_novels(
     if not novels:
         return 0
 
-    author_ids = {n.author_id for n in novels}
+    from copixiv.db.base import refresh_parent_summaries
+
+    author_ids = {n.author_id for n in novels if n.author_id}
     series_ids = {n.series_id for n in novels if n.series_id}
 
     SQLAlchemyAuthorRepository(uow.session).ensure_exists(author_ids)
     SQLAlchemySeriesRepository(uow.session).ensure_exists(series_ids)
 
-    count = SQLAlchemyNovelRepository(uow.session).upsert_novels(novels, force_update or [])
-    SQLAlchemyAuthorRepository(uow.session).update_summary(author_ids)
-    SQLAlchemySeriesRepository(uow.session).update_summary(series_ids)
+    novel_repo = SQLAlchemyNovelRepository(uow.session)
+    old_authors, old_series = novel_repo.get_parent_ids(
+        {n.id for n in novels if n.id is not None}
+    )
+    count = novel_repo.upsert_novels(novels, force_update or [])
+    refresh_parent_summaries(
+        uow.session,
+        author_ids=author_ids | old_authors,
+        series_ids=series_ids | old_series,
+    )
 
     return count

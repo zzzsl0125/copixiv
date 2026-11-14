@@ -16,8 +16,7 @@ from copixiv.features.authors.resolve_names import (
     writeback_author_names,
 )
 
-from ..kernel import TaskContext
-from ..kernel import register
+from ..kernel import TaskContext, register
 
 
 @register("sync_empty_name", description="补齐作者名为空的小说")
@@ -35,6 +34,7 @@ async def sync_empty_name(ctx: TaskContext) -> TaskResult:
     re-resolves a pending name is a later fetch of the same work / author.
     """
     from sqlalchemy import select as _select
+
     from copixiv.db import models
 
     # ``TaskContext.uow`` / ``client`` are Optional only for hand-built

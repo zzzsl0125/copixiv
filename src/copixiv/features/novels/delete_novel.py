@@ -1,6 +1,8 @@
 """Use case: delete a novel and its associated files."""
 
 from copixiv.core.exceptions import NotFoundError
+from copixiv.db.uow import SqlUnitOfWork
+from copixiv.db.write_lock import run_write_transaction_sync
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.storage.file_storage import FileStorage
 
@@ -11,31 +13,28 @@ class DeleteNovelUseCase:
     Looks up the novel internally — the endpoint only needs to pass the ID.
     """
 
-    def __init__(self, novel_repo: SQLAlchemyNovelRepository, file_storage: FileStorage):
-        self._repo = novel_repo
+    def __init__(self, uow: SqlUnitOfWork, file_storage: FileStorage):
+        self._uow = uow
         self._file_storage = file_storage
 
     def execute(self, novel_id: int) -> None:
         """Delete a novel by ID, then clean up its files best-effort.
 
-        DB first, files second: a failed DB delete must not leave the
-        database pointing at files that no longer exist (a dangling row
-        is worse than orphaned files — orphans are easy to spot and the
-        weekly ``check_epub``-style sweeps can reclaim them).
-
-        Pure DB + a best-effort local file delete: synchronous, so the
-        endpoint declaring it is a plain ``def`` and FastAPI runs the whole
-        thing (including the blocking ``Session`` work) in its worker thread.
+        DB first (committed), files second: a failed DB delete never removes
+        files on disk.
 
         Raises:
             NotFoundError: If the novel doesn't exist.
         """
-        novel = self._repo.get_by_id(novel_id)
-        if not novel:
-            raise NotFoundError(f"Novel {novel_id} not found")
+        def _delete_tx(tx: SqlUnitOfWork) -> str | None:
+            repo = SQLAlchemyNovelRepository(tx.session)
+            novel = repo.get_by_id(novel_id)
+            if not novel:
+                raise NotFoundError(f"Novel {novel_id} not found")
+            repo.delete(novel_id)
+            return novel.path
 
-        novel_path = novel.path
-        self._repo.delete(novel_id)
+        novel_path = run_write_transaction_sync(self._uow, _delete_tx)
 
         if novel_path:
             # Best-effort cleanup — a failure here must not fail the API

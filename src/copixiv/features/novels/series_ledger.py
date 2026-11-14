@@ -47,7 +47,6 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from copixiv.db import models
 from copixiv.log import logger
 
-
 # 连续多少轮「确定性失败」判死。3 轮 ≈ 连续三夜，足以过滤掉单次的 pixiv 抖动，
 # 又不至于把一个刚被原作者删掉的系列拖上几周。
 RETIRE_AFTER_FAILURES = 3
@@ -84,8 +83,6 @@ def note_failure(
     same series cannot collide, and so the first failure for a series does not
     need a separate existence check.
     """
-    from copixiv.pixiv.errors import PixivApiError
-
     if not is_definitive_error(exc):
         return False
 

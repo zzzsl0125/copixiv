@@ -49,37 +49,17 @@ leave the real consumer untouched. Reads through this package stay valid
 (``maintenance._scan_placeholder(...)`` works for inspection).
 """
 
-from ._cursor import _CURSOR_KEY, _read_cursor, _write_cursor
-from .epub import (
-    _STALE_DAYS,
-    _SWEEP_CHUNK,
-    _no_images_ever_and_stale,
-    _scan_placeholder,
-    _sweep,
-    _txt_has_images,
-    check_epub,
-)
 from .backup import BackupDatabaseArgs, backup_database
+from .epub import check_epub
 from .files import PruneOrphanFilesArgs, prune_orphan_files
-from .refetch import RefetchMissingSourceArgs, refetch_missing_source
 from .history import (
-    DEFAULT_KEEP,
-    DEFAULT_MAX_AGE_DAYS,
     RETENTION_SETTING_KEY,
     PruneTaskHistoryArgs,
     prune_task_history,
 )
+from .refetch import RefetchMissingSourceArgs, refetch_missing_source
 from .search import check_fts, rebuild_fts, sync_empty_name
-from .series import (
-    _ORPHAN_CURSOR_KEY,
-    _SERIES_CURSOR_KEY,
-    _SWEEP_CURSOR_KEY,
-    FixSeriesIndexArgs,
-    _draft_from_row,
-    _page,
-    _stored_columns,
-    fix_series_index,
-)
+from .series import FixSeriesIndexArgs, fix_series_index
 
 __all__ = [
     "backup_database",
@@ -97,11 +77,4 @@ __all__ = [
     "refetch_missing_source",
     "RefetchMissingSourceArgs",
     "RETENTION_SETTING_KEY",
-    "_scan_placeholder",
-    "_sweep",
-    "_read_cursor",
-    "_write_cursor",
-    "_ORPHAN_CURSOR_KEY",
-    "_SERIES_CURSOR_KEY",
-    "_SWEEP_CURSOR_KEY",
 ]

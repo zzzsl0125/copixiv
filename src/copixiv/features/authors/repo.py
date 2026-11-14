@@ -2,13 +2,21 @@
 
 from datetime import datetime, timezone
 
-from sqlalchemy import update as _update, delete as _delete, select as _select, func
+from sqlalchemy import delete as _delete
+from sqlalchemy import func
+from sqlalchemy import select as _select
+from sqlalchemy import update as _update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from copixiv.db import models
 from copixiv.db import constants as C
-from copixiv.db.base import BaseRepository, model_to_dict, update_summary
+from copixiv.db import models
+from copixiv.db.base import (
+    BaseRepository,
+    model_to_dict,
+    refresh_parent_summaries,
+    update_summary,
+)
 
 
 class SQLAlchemyAuthorRepository(BaseRepository):
@@ -21,12 +29,11 @@ class SQLAlchemyAuthorRepository(BaseRepository):
         """INSERT ... ON CONFLICT DO NOTHING placeholder rows (FK safety)."""
         if not author_ids:
             return
-        for aid in author_ids:
-            self.session.execute(
-                pg_insert(models.Author)
-                .values(author_id=aid)
-                .on_conflict_do_nothing()
-            )
+        self.session.execute(
+            pg_insert(models.Author)
+            .values([{"author_id": aid} for aid in sorted(author_ids)])
+            .on_conflict_do_nothing()
+        )
         self.session.flush()
 
     def get_by_id(self, author_id: int) -> dict | None:
@@ -75,15 +82,6 @@ class SQLAlchemyAuthorRepository(BaseRepository):
 
     def update_summary(self, author_ids: set[int] | None = None) -> None:
         """Recalculate author aggregates."""
-        self.update_summary_sync(author_ids)
-
-    def update_summary_sync(self, author_ids: set[int] | None = None) -> None:
-        """Same as :meth:`update_summary`, under the explicit sync name.
-
-        For call sites that are already inside a transaction on this session —
-        a delete path must keep its work on its own connection.  The
-        statements live here once; :meth:`update_summary` delegates here.
-        """
         update_summary(
             self.session, models.Author, C.COL_AUTHOR_ID, author_ids,
             extra_columns=[
@@ -92,16 +90,7 @@ class SQLAlchemyAuthorRepository(BaseRepository):
         )
 
     def update_author_name(self, author_id: int, name: str) -> None:
-        """Entry point — see :meth:`update_author_name_sync`."""
-        self.update_author_name_sync(author_id, name)
-
-    def update_author_name_sync(self, author_id: int, name: str) -> None:
         """Write *name* to the author row **and** normalise its novel rows.
-
-        同步孪生体：语句与谓词只有这一份（``update_author_name`` 只是既有调用点
-        沿用的名字，它委托到这里；本方法体内没有任何 await），给**同步的写路径**用：
-        ``features/library/ingest.py`` 的上传管线是同步的（SQLAlchemy 的
-        ``Session`` 本来就是同步 API），它要在写事务里做同一个收尾。
 
         Only touch novel rows whose name actually changed.  The
         ``sync_tag_refs`` trigger is declared ``UPDATE OF tags``, so an
@@ -130,25 +119,64 @@ class SQLAlchemyAuthorRepository(BaseRepository):
             .values(last_update=datetime.now(timezone.utc))
         )
 
-    def delete_author_and_data(self, author_id: int) -> None:
-        novel_ids = self.session.execute(
-            _select(models.Novel.id).where(models.Novel.author_id == author_id)
-        ).scalars().all()
+    def delete_author_and_data(self, author_id: int) -> list[str]:
+        rows = self.session.execute(
+            _select(models.Novel.id, models.Novel.path, models.Novel.series_id)
+            .where(models.Novel.author_id == author_id)
+        ).all()
+        novel_ids = [r[0] for r in rows]
+        paths = [r[1] for r in rows if r[1]]
+        affected_series_ids = {r[2] for r in rows if r[2] is not None}
+
+        owned_series_ids = set(
+            self.session.execute(
+                _select(models.Series.series_id)
+                .where(models.Series.author_id == author_id)
+            ).scalars().all()
+        )
 
         if novel_ids:
-            # Deleting the novels cascades to failed_novel's explicit cleanup
-            # below and the sync_tag_refs trigger decrements tag counts; the
-            # search index follows automatically (expression index on novel).
+            # failed_novel has no FK to novel; clear ledger rows explicitly.
+            self.session.execute(
+                _delete(models.FailedNovel)
+                .where(models.FailedNovel.novel_id.in_(novel_ids))
+            )
             self.session.execute(
                 _delete(models.Novel).where(models.Novel.id.in_(novel_ids))
             )
 
-        self.session.execute(
-            _delete(models.Series).where(models.Series.author_id == author_id)
-        )
+        check_series = affected_series_ids | owned_series_ids
+        if check_series:
+            non_empty_series = set(
+                self.session.execute(
+                    _select(models.Novel.series_id)
+                    .where(models.Novel.series_id.in_(check_series))
+                    .distinct()
+                ).scalars().all()
+            )
+            empty_series = check_series - non_empty_series
+            if empty_series:
+                self.session.execute(
+                    _delete(models.Series)
+                    .where(models.Series.series_id.in_(empty_series))
+                )
+            if non_empty_series:
+                # Detach deleted author before deleting the author row and
+                # recompute summary aggregates for remaining shared series.
+                self.session.execute(
+                    _update(models.Series)
+                    .where(
+                        models.Series.series_id.in_(non_empty_series),
+                        models.Series.author_id == author_id,
+                    )
+                    .values(author_id=None)
+                )
+                refresh_parent_summaries(self.session, series_ids=non_empty_series)
+
         self.session.execute(
             _delete(models.Author).where(models.Author.author_id == author_id)
         )
+        return paths
 
     def get_empty_author_ids(self) -> list[int]:
         return list(self.session.execute(

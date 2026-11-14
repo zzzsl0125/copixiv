@@ -3,7 +3,8 @@
 from collections.abc import Sequence
 from datetime import datetime, timezone
 
-from sqlalchemy import select, delete as _delete
+from sqlalchemy import delete as _delete
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 

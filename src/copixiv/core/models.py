@@ -5,10 +5,9 @@ Merged from ``domain/models/*`` (8 files + ``__init__.py`` re-exports).
 
 import random
 from datetime import datetime
-from enum import IntEnum, StrEnum
+from enum import IntEnum
 
 from pydantic import BaseModel, Field, model_validator
-
 
 # ---------------------------------------------------------------------------
 # Novel domain entities — pure Pydantic models.
@@ -136,113 +135,6 @@ class Novel(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class Author(BaseModel):
-    """A Pixiv author, with aggregated stats from their novels."""
-
-    author_id: int
-    author_name: str | None = None
-    novel_count: int = 0
-    like: int = 0
-    view: int = 0
-    text: int = 0
-    last_update: datetime | None = None
-
-
-# ---------------------------------------------------------------------------
-# Series domain entity.
-# ---------------------------------------------------------------------------
-
-
-class Series(BaseModel):
-    """A Pixiv series, with aggregated stats from its novels."""
-
-    series_id: int
-    series_name: str | None = None
-    novel_count: int = 0
-    author_id: int | None = None
-    like: int = 0
-    view: int = 0
-    text: int = 0
-
-
-# ---------------------------------------------------------------------------
-# Tag domain entities.
-# ---------------------------------------------------------------------------
-
-
-class TagPreferenceType(StrEnum):
-    favourite = "favourite"
-    blocked = "blocked"
-
-
-class Tag(BaseModel):
-    """A tag, with reference count across all novels."""
-
-    id: int = 0
-    name: str
-    reference_count: int = 0
-
-
-class TagPreference(BaseModel):
-    """User preference for a tag (favourite or blocked)."""
-
-    id: int = 0
-    tag: str
-    preference: TagPreferenceType
-    sort_index: int = 0
-
-
-class TagAlias(BaseModel):
-    """Alias mapping: `source` tag is replaced by `target` tag."""
-
-    id: int = 0
-    source: str
-    target: str
-
-
-# ---------------------------------------------------------------------------
-# Task domain entities.
-# ---------------------------------------------------------------------------
-
-
-class TaskStatus(StrEnum):
-    PENDING = "pending"
-    RUNNING = "running"
-    SUCCESS = "success"
-    FAILED = "failed"
-
-
-class TaskHistory(BaseModel):
-    """Record of a completed or in-progress task execution."""
-
-    id: int = 0
-    name: str
-    # Registered function name (separate from ``name``, which is the display
-    # name).  No dedup semantics — see ``task_history.task_func``.
-    task_func: str | None = None
-    arguments: dict | None = None
-    status: str = TaskStatus.PENDING
-    start_time: datetime
-    end_time: datetime | None = None
-    duration: float | None = None
-    result: dict | None = None
-    # Live progress (S2 d) — column only here; wire-up lands later.
-    progress: str | None = None
-
-
-class ScheduledTask(BaseModel):
-    """A task scheduled to run on a cron expression."""
-
-    id: int = 0
-    name: str
-    task: str
-    cron: str
-    params: dict | None = None
-    is_enabled: bool = False
-    config: dict | None = None
-    sort_index: int = 0
-
-
 # ---------------------------------------------------------------------------
 # TaskResult — structured return value for all background tasks.
 #
@@ -295,45 +187,10 @@ class TaskResult(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class Token(BaseModel):
-    """A Pixiv refresh token stored for account authentication."""
-
-    id: int = 0
-    name: str
-    token: str
-    premium: bool = False
-    valid: bool = True
-    sort_index: int = 0
-
-
-# ---------------------------------------------------------------------------
-# Search history domain entity.
-# ---------------------------------------------------------------------------
-
-
-class SearchHistory(BaseModel):
-    """A previously executed search, stored for quick recall."""
-
-    id: int = 0
-    type: str
-    value: str
-    display_value: str | None = None
-    timestamp: datetime
-
-
 __all__ = [
     "Novel",
     "EpubStatus",
-    "Author",
-    "Series",
-    "Tag",
-    "TagPreference",
-    "TagAlias",
-    "TagPreferenceType",
-    "TaskHistory",
-    "ScheduledTask",
-    "TaskStatus",
     "TaskResult",
-    "Token",
-    "SearchHistory",
+    "SHUFFLE_KEY_MAX",
+    "new_shuffle_key",
 ]

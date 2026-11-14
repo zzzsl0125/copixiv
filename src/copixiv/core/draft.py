@@ -16,11 +16,11 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from copixiv.core.models import EpubStatus
+from copixiv.core.naming import build_path
 from copixiv.core.services import (
-    build_path,
-    parse_tags,
     guess_series_order,
     has_image_placeholders,
+    parse_tags,
     safe_get,
 )
 

@@ -27,10 +27,12 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from copixiv.core.services import safe_get
-from copixiv.log import logger
 from copixiv.db import models
-from copixiv.pixiv.client import PixivClient
+from copixiv.db.uow import SqlUnitOfWork
+from copixiv.db.write_lock import read_transaction
 from copixiv.features.novels.repo import SQLAlchemySeriesRepository
+from copixiv.log import logger
+from copixiv.pixiv.client import PixivClient
 
 
 @dataclass(frozen=True)
@@ -49,34 +51,44 @@ class SeriesProfile:
     source: str  # 'local' | 'pixiv' | 'unknown'
 
 
-async def lookup_series_profile(
-    series_id: int,
-    *,
-    session: Session,
-    client: PixivClient | None,
-) -> SeriesProfile:
-    """Resolve one series id → name.  Read-only, never raises.
-
-    ``async`` only for the optional Pixiv fallback below
-    (:func:`fetch_series_name`); the two local reads are plain synchronous
-    queries on the request's session.
-    """
+def _lookup_series_local(session: Session, series_id: int) -> str | None:
     row = SQLAlchemySeriesRepository(session).get_by_id(series_id)
     name = (row or {}).get("series_name")
     if name:
-        return SeriesProfile(series_id, name, "local")
-
+        return name
     # A series row can exist with a NULL name (placeholder) while its novels
     # already carry one — e.g. the row was created by ``ensure_exists`` right
     # before the first novel of that series was written.
-    stored = session.execute(
+    return session.execute(
         select(func.max(models.Novel.series_name)).where(
             models.Novel.series_id == series_id,
             models.Novel.series_name.isnot(None),
         )
     ).scalar()
-    if stored:
-        return SeriesProfile(series_id, stored, "local")
+
+
+async def lookup_series_profile(
+    series_id: int,
+    *,
+    uow: SqlUnitOfWork | None = None,
+    session: Session | None = None,
+    client: PixivClient | None,
+) -> SeriesProfile:
+    """Resolve one series id → name.  Read-only, never raises.
+
+    Reads the local DB via ``read_transaction(uow, ...)`` when *uow* is
+    provided so no session/connection stays open across the Pixiv network call.
+    """
+    if uow is not None:
+        local_name = await read_transaction(
+            uow, lambda tx: _lookup_series_local(tx.session, series_id)
+        )
+    elif session is not None:
+        local_name = _lookup_series_local(session, series_id)
+    else:
+        raise ValueError("lookup_series_profile requires uow or session")
+    if local_name:
+        return SeriesProfile(series_id, local_name, "local")
 
     name = await fetch_series_name(client, series_id)
     if name:

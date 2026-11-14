@@ -4,16 +4,43 @@ from collections.abc import Iterator
 from typing import Literal
 from urllib.parse import quote
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query, Body, Request
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, Query
 from fastapi.responses import FileResponse, StreamingResponse
 
-from copixiv.deps import (
-    get_app_config, get_file_storage, get_pixiv_client, get_session_factory,
-    get_task_manager, get_uow, get_write_uow, parse_json_param,
-)
-from copixiv.core.services import parse_search_keyword
-from copixiv.core.services import QuerySpec
 from copixiv.core.exceptions import NotFoundError, ValidationError
+from copixiv.core.services import MAX_TAG_LENGTH, QuerySpec, parse_search_keyword, parse_tags
+from copixiv.db import constants as C
+from copixiv.db.uow import SqlUnitOfWork
+from copixiv.db.write_lock import read_transaction, run_write_transaction_sync
+from copixiv.deps import (
+    get_app_config,
+    get_file_storage,
+    get_pixiv_client,
+    get_session_factory,
+    get_task_manager,
+    get_uow,
+    parse_json_param,
+)
+from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
+from copixiv.features.authors.resolve_names import fetch_author_name
+from copixiv.features.novels.batch_download import BatchDownloadUseCase
+from copixiv.features.novels.batch_edit_metadata import BatchEditMetadataUseCase
+from copixiv.features.novels.batch_operations import (
+    BATCH_ID_CHUNK_SIZE,
+    BATCH_MAX_NOVELS,
+    BATCH_MAX_TAGS,
+    BatchDeleteUseCase,
+    BatchTagUseCase,
+    resolve_batch_scope,
+)
+from copixiv.features.novels.delete_novel import DeleteNovelUseCase
+from copixiv.features.novels.get_novel_file import GetNovelFileUseCase
+from copixiv.features.novels.repo import (
+    NovelCount,
+    SQLAlchemyNovelRepository,
+    SQLAlchemySeriesRepository,
+)
+from copixiv.features.novels.resolve_series import fetch_series_name
 from copixiv.features.novels.schemas import (
     AuthorLookupResponse,
     BatchDownloadRequest,
@@ -36,34 +63,13 @@ from copixiv.features.novels.schemas import (
     SeriesLookupResponse,
     SortIdsRequest,
 )
-from copixiv.db.uow import SqlUnitOfWork
-from copixiv.db import constants as C
-from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
-from copixiv.features.authors.resolve_names import lookup_author_profile
-from copixiv.features.novels.repo import (
-    NovelCount,
-    SQLAlchemyNovelRepository,
-    SQLAlchemySeriesRepository,
-)
-from copixiv.features.novels.resolve_series import lookup_series_profile
+from copixiv.features.novels.sync_novel import SyncNovelUseCase
+from copixiv.features.novels.update_metadata import UpdateNovelMetadataUseCase
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
 from copixiv.pixiv.client import PixivClient
 from copixiv.tasks.history_repo import SQLAlchemyTaskRepository
+
 from .record_history import record_search_history
-from copixiv.features.novels.batch_download import BatchDownloadUseCase
-from copixiv.features.novels.batch_edit_metadata import BatchEditMetadataUseCase
-from copixiv.features.novels.batch_operations import (
-    BATCH_ID_CHUNK_SIZE,
-    BATCH_MAX_NOVELS,
-    BATCH_MAX_TAGS,
-    BatchDeleteUseCase,
-    BatchTagUseCase,
-    resolve_batch_scope,
-)
-from copixiv.features.novels.delete_novel import DeleteNovelUseCase
-from copixiv.features.novels.get_novel_file import GetNovelFileUseCase
-from copixiv.features.novels.sync_novel import SyncNovelUseCase
-from copixiv.features.novels.update_metadata import UpdateNovelMetadataUseCase
 
 router = APIRouter()
 
@@ -104,15 +110,15 @@ def get_novels(
         min_text=min_text,
         exclude_blocked_tags=exclude_blocked,
     )
-    results = SQLAlchemyNovelRepository(uow.session).get_novels(spec)
+    with uow.begin():
+        repo = SQLAlchemyNovelRepository(uow.session)
+        results = repo.get_novels(spec)
 
-    # 首屏搜索响应附带「范围内是否存在被厌恶标签排除的小说」——镜像谓词
-    # 存在性查询（~ms 级），让 ExclusionBar 只在确有被隐藏小说时显示。
-    # load-more（带 cursor）与无关键词浏览不计算，保持默认 False。
-    if conditions and cursor_dict is None:
-        results["has_excluded"] = SQLAlchemyNovelRepository(
-            uow.session
-        ).has_excluded_novels(spec)
+        # 首屏搜索响应附带「范围内是否存在被厌恶标签排除的小说」——镜像谓词
+        # 存在性查询（~ms 级），让 ExclusionBar 只在确有被隐藏小说时显示。
+        # load-more（带 cursor）与无关键词浏览不计算，保持默认 False。
+        if conditions and cursor_dict is None:
+            results["has_excluded"] = repo.has_excluded_novels(spec)
 
     if conditions and background_tasks:
         background_tasks.add_task(
@@ -149,16 +155,18 @@ def count_novels(
         exclude_ids=excluded_ids or [],
         exclude_blocked_tags=exclude_blocked,
     )
-    total = SQLAlchemyNovelRepository(uow.session).count_novels(spec)
-    # How many matching novels were hidden by blocked tags (0 when the
-    # exclusion is off / nothing blocked) — powers the ExclusionBar.
-    # Off by default: it is the *slow* tail of this endpoint (the same
-    # keyword bitmap scan repeats), and since the ExclusionBar switched to
-    # a lazy "查看被隐藏的小说" action (which fetches /blocked-ids), no
-    # caller needs it eagerly.  Pass ``with_excluded=true`` to opt in.
-    excluded = NovelCount(0)
-    if with_excluded and exclude_blocked is not False:
-        excluded = SQLAlchemyNovelRepository(uow.session).count_excluded_novels(spec)
+    with uow.begin():
+        repo = SQLAlchemyNovelRepository(uow.session)
+        total = repo.count_novels(spec)
+        # How many matching novels were hidden by blocked tags (0 when the
+        # exclusion is off / nothing blocked) — powers the ExclusionBar.
+        # Off by default: it is the *slow* tail of this endpoint (the same
+        # keyword bitmap scan repeats), and since the ExclusionBar switched to
+        # a lazy "查看被隐藏的小说" action (which fetches /blocked-ids), no
+        # caller needs it eagerly.  Pass ``with_excluded=true`` to opt in.
+        excluded = NovelCount(0)
+        if with_excluded and exclude_blocked is not False:
+            excluded = repo.count_excluded_novels(spec)
     return NovelCountResponse(
         total=total.value,
         excluded=excluded.value,
@@ -191,7 +199,8 @@ def get_matching_novel_ids(
         min_text=min_text,
         exclude_blocked_tags=exclude_blocked,
     )
-    ids = SQLAlchemyNovelRepository(uow.session).list_matching_ids(spec)
+    with uow.begin():
+        ids = SQLAlchemyNovelRepository(uow.session).list_matching_ids(spec)
     return NovelIdsResponse(ids=ids, total=len(ids), truncated=False)
 
 
@@ -216,27 +225,25 @@ def get_blocked_novel_ids(
     unsupported values return the scope order.
     """
     conditions = parse_search_keyword(keyword) if keyword else None
-    blocked_ids = SQLAlchemyNovelRepository(uow.session).list_blocked_ids()
-    if not blocked_ids:
-        return NovelIdsResponse(ids=[], total=0, truncated=False)
+    with uow.begin():
+        repo = SQLAlchemyNovelRepository(uow.session)
+        blocked_ids = repo.list_blocked_ids()
+        if not blocked_ids:
+            return NovelIdsResponse(ids=[], total=0, truncated=False)
 
-    matching: list[int] = []
-    for i in range(0, len(blocked_ids), BATCH_ID_CHUNK_SIZE):
-        chunk = blocked_ids[i:i + BATCH_ID_CHUNK_SIZE]
-        scope_spec = QuerySpec(
-            conditions=conditions or [],
-            min_like=min_like,
-            min_text=min_text,
-            exclude_blocked_tags=False,
-        )
-        matching.extend(
-            SQLAlchemyNovelRepository(uow.session).filter_ids_in_scope(chunk, scope_spec)
-        )
+        matching: list[int] = []
+        for i in range(0, len(blocked_ids), BATCH_ID_CHUNK_SIZE):
+            chunk = blocked_ids[i:i + BATCH_ID_CHUNK_SIZE]
+            scope_spec = QuerySpec(
+                conditions=conditions or [],
+                min_like=min_like,
+                min_text=min_text,
+                exclude_blocked_tags=False,
+            )
+            matching.extend(repo.filter_ids_in_scope(chunk, scope_spec))
 
-    if order_by and order_by != "random":
-        matching = SQLAlchemyNovelRepository(uow.session).sort_novel_ids(
-            matching, order_by, order_direction,
-        )
+        if order_by and order_by != "random":
+            matching = repo.sort_novel_ids(matching, order_by, order_direction)
     return NovelIdsResponse(
         ids=matching, total=len(matching), truncated=False,
     )
@@ -249,14 +256,15 @@ def sort_novel_ids(
 ):
     """Order an explicit id list by a novel column — 「查看已选」排序.
 
-    Returns the same ids ordered by id/like/text (missing ids dropped).
+    Returns the same ids ordered by id/like/view/text/create_time (missing ids dropped).
     """
     ids = sorted({int(i) for i in body.novel_ids})
     if not ids:
         return NovelIdsResponse(ids=[], total=0, truncated=False)
-    ordered = SQLAlchemyNovelRepository(uow.session).sort_novel_ids(
-        ids, body.order_by, body.order_direction,
-    )
+    with uow.begin():
+        ordered = SQLAlchemyNovelRepository(uow.session).sort_novel_ids(
+            ids, body.order_by, body.order_direction,
+        )
     return NovelIdsResponse(ids=ordered, total=len(ordered), truncated=False)
 
 
@@ -273,7 +281,8 @@ def get_novels_by_ids(
     """
     ids = body.novel_ids[:BATCH_MAX_NOVELS]
     truncated = len(body.novel_ids) > BATCH_MAX_NOVELS
-    novels = SQLAlchemyNovelRepository(uow.session).get_novels_by_ids(ids)
+    with uow.begin():
+        novels = SQLAlchemyNovelRepository(uow.session).get_novels_by_ids(ids)
     return NovelsByIdsResponse(novels=novels, truncated=truncated)
 
 
@@ -293,17 +302,17 @@ def match_novel_ids(
     """
     conditions = parse_search_keyword(body.keyword) if body.keyword else None
     matching: list[int] = []
-    for i in range(0, len(body.novel_ids), BATCH_ID_CHUNK_SIZE):
-        chunk = body.novel_ids[i:i + BATCH_ID_CHUNK_SIZE]
-        scope_spec = QuerySpec(
-            conditions=conditions or [],
-            min_like=body.min_like,
-            min_text=body.min_text,
-            exclude_blocked_tags=exclude_blocked,
-        )
-        matching.extend(
-            SQLAlchemyNovelRepository(uow.session).filter_ids_in_scope(chunk, scope_spec)
-        )
+    with uow.begin():
+        repo = SQLAlchemyNovelRepository(uow.session)
+        for i in range(0, len(body.novel_ids), BATCH_ID_CHUNK_SIZE):
+            chunk = body.novel_ids[i:i + BATCH_ID_CHUNK_SIZE]
+            scope_spec = QuerySpec(
+                conditions=conditions or [],
+                min_like=body.min_like,
+                min_text=body.min_text,
+                exclude_blocked_tags=exclude_blocked,
+            )
+            matching.extend(repo.filter_ids_in_scope(chunk, scope_spec))
     return MatchIdsResponse(matching_ids=matching, truncated=False)
 
 
@@ -325,45 +334,59 @@ def batch_task_operation(
     # Scope resolution lives in the application layer (single rule for the
     # sync and background paths — docs/MODULARITY.md §M7): cap=None because
     # the background task chunks selections of any size.
-    ids = resolve_batch_scope(
-        SQLAlchemyNovelRepository(uow.session),
-        mode=scope.mode,
-        novel_ids=scope.novel_ids,
-        keyword=scope.keyword,
-        min_like=scope.min_like,
-        min_text=scope.min_text,
-        excluded_ids=scope.excluded_ids or [],
-        cap=None,
-    )
-
+    cleaned_tags: list[str] = list(body.tags)
     if body.operation in ("add_tags", "remove_tags"):
-        raw = {t.strip() for t in body.tags if t and t.strip()}
-        if not raw:
+        cleaned_tags = parse_tags(list(body.tags))
+        if not cleaned_tags:
             raise ValidationError("请至少输入一个标签")
-        if len(raw) > BATCH_MAX_TAGS:
+        if len(cleaned_tags) > BATCH_MAX_TAGS:
             raise ValidationError(
-                f"一次最多操作 {BATCH_MAX_TAGS} 个标签（当前 {len(raw)} 个）"
+                f"一次最多操作 {BATCH_MAX_TAGS} 个标签（当前 {len(cleaned_tags)} 个）"
             )
+        for tag in cleaned_tags:
+            if len(tag) > MAX_TAG_LENGTH:
+                raise ValidationError(
+                    f"标签过长（单个最多 {MAX_TAG_LENGTH} 字）：{tag[:20]}…"
+                )
+
+    with uow.begin():
+        ids = resolve_batch_scope(
+            SQLAlchemyNovelRepository(uow.session),
+            mode=scope.mode,
+            novel_ids=scope.novel_ids,
+            keyword=scope.keyword,
+            min_like=scope.min_like,
+            min_text=scope.min_text,
+            excluded_ids=scope.excluded_ids or [],
+            cap=None,
+        )
 
     task_id = task_manager.run_task(
         "batch_operation",
         params={
             "operation": body.operation,
             "novel_ids": ids,
-            "tags": body.tags,
+            "tags": cleaned_tags,
         },
     )
     return BatchTaskResponse(task_id=task_id, matched=len(ids))
 
 
 @router.post("/{novel_id}/favourite", status_code=204)
-def toggle_favourite(novel_id: int, uow: SqlUnitOfWork = Depends(get_write_uow)):
-    SQLAlchemyNovelRepository(uow.session).toggle_favourite(novel_id)
+def toggle_favourite(novel_id: int, uow: SqlUnitOfWork = Depends(get_uow)):
+    run_write_transaction_sync(
+        uow, lambda tx: SQLAlchemyNovelRepository(tx.session).toggle_favourite(novel_id)
+    )
 
 
 @router.post("/author/{author_id}/follow", status_code=204)
-def toggle_special_follow(author_id: int, uow: SqlUnitOfWork = Depends(get_write_uow)):
-    SQLAlchemyNovelRepository(uow.session).toggle_special_follow(author_id)
+def toggle_special_follow(author_id: int, uow: SqlUnitOfWork = Depends(get_uow)):
+    run_write_transaction_sync(
+        uow,
+        lambda tx: SQLAlchemyNovelRepository(tx.session).toggle_special_follow(
+            author_id
+        ),
+    )
 
 
 @router.get("/author/{author_id}", response_model=AuthorLookupResponse)
@@ -385,17 +408,26 @@ async def lookup_author(
     ``POST /author/{author_id}/follow`` 已经在这里，作者相关的两个动作挨着更好找，
     也不用动路由前缀的接线测试。
     """
-    session = uow.session
-    profile = await lookup_author_profile(
-        author_id, session=session, client=client,
-    )
+    def _read_author(tx: SqlUnitOfWork) -> tuple[str | None, int]:
+        repo = SQLAlchemyAuthorRepository(tx.session)
+        known = repo.get_names_by_ids({author_id})
+        count = repo.count_novels_by_author(author_id)
+        return known.get(author_id), count
+
+    local_name, novel_count = await read_transaction(uow, _read_author)
+    if local_name is not None:
+        return AuthorLookupResponse(
+            author_id=author_id,
+            author_name=local_name,
+            source="local",
+            novel_count=novel_count,
+        )
+    pixiv_name = await fetch_author_name(client, author_id)
     return AuthorLookupResponse(
-        author_id=profile.author_id,
-        author_name=profile.author_name,
-        source=profile.source,
-        novel_count=SQLAlchemyAuthorRepository(session).count_novels_by_author(
-            author_id,
-        ),
+        author_id=author_id,
+        author_name=pixiv_name,
+        source="pixiv" if pixiv_name else "unknown",
+        novel_count=novel_count,
     )
 
 
@@ -411,17 +443,39 @@ async def lookup_series(
     错误**——id 才是身份，编辑器照样允许保存。名字的来源链更长一点：``series``
     行 → 同系列的 novel 行 → pixiv ``novel_series``（前两步都是本地查询）。
     """
-    session = uow.session
-    profile = await lookup_series_profile(
-        series_id, session=session, client=client,
-    )
+    def _read_series(tx: SqlUnitOfWork) -> tuple[str | None, int]:
+        from sqlalchemy import func as sa_func
+        from sqlalchemy import select as sa_select
+
+        from copixiv.db import models as db_models
+
+        repo = SQLAlchemySeriesRepository(tx.session)
+        row = repo.get_by_id(series_id)
+        name = (row or {}).get("series_name")
+        if not name:
+            name = tx.session.execute(
+                sa_select(sa_func.max(db_models.Novel.series_name)).where(
+                    db_models.Novel.series_id == series_id,
+                    db_models.Novel.series_name.isnot(None),
+                )
+            ).scalar()
+        count = repo.count_novels_by_series(series_id)
+        return name, count
+
+    local_name, novel_count = await read_transaction(uow, _read_series)
+    if local_name:
+        return SeriesLookupResponse(
+            series_id=series_id,
+            series_name=local_name,
+            source="local",
+            novel_count=novel_count,
+        )
+    pixiv_name = await fetch_series_name(client, series_id)
     return SeriesLookupResponse(
-        series_id=profile.series_id,
-        series_name=profile.series_name,
-        source=profile.source,
-        novel_count=SQLAlchemySeriesRepository(session).count_novels_by_series(
-            series_id,
-        ),
+        series_id=series_id,
+        series_name=pixiv_name,
+        source="pixiv" if pixiv_name else "unknown",
+        novel_count=novel_count,
     )
 
 
@@ -429,7 +483,7 @@ async def lookup_series(
 async def update_novel_metadata(
     novel_id: int,
     body: NovelUpdateRequest = Body(...),
-    uow: SqlUnitOfWork = Depends(get_write_uow),
+    uow: SqlUnitOfWork = Depends(get_uow),
     client: PixivClient = Depends(get_pixiv_client),
 ):
     """编辑单本小说的元数据（卡片「编辑」按钮）—— docs/NOVEL_EDIT_DESIGN.md §5。
@@ -453,13 +507,7 @@ async def update_novel_metadata(
     ``author_id`` / ``series_id`` 是仅有的可能触发网络请求的字段（本地表没有
     这个名字时问一次 Pixiv）。失败**不致命**：id 照写，名字留 NULL 待补。
     """
-    use_case = UpdateNovelMetadataUseCase(
-        SQLAlchemyNovelRepository(uow.session),
-        SQLAlchemyTagRepository(uow.session),
-        SQLAlchemyAuthorRepository(uow.session),
-        SQLAlchemySeriesRepository(uow.session),
-        client=client,
-    )
+    use_case = UpdateNovelMetadataUseCase(uow, client=client)
     return await use_case.execute(novel_id, body.model_dump(exclude_unset=True))
 
 
@@ -496,10 +544,11 @@ def download_novel(
     uow: SqlUnitOfWork = Depends(get_uow),
     format: Literal["txt", "epub"] = "txt",
 ):
-    use_case = GetNovelFileUseCase(
-        SQLAlchemyNovelRepository(uow.session), file_storage.download_dir,
-    )
-    file_path, media_type = use_case.execute(novel_id, format)
+    with uow.begin():
+        use_case = GetNovelFileUseCase(
+            SQLAlchemyNovelRepository(uow.session), file_storage.download_dir,
+        )
+        file_path, media_type = use_case.execute(novel_id, format)
     headers = {
         "Content-Disposition": f"attachment; filename*=UTF-8''{quote(file_path.name)}"
     }
@@ -514,7 +563,7 @@ async def batch_download_novels(
 ):
     conditions = parse_search_keyword(body.keyword) if body.keyword else None
     naming = app_config.batch_download.naming
-    use_case = BatchDownloadUseCase(SQLAlchemyNovelRepository(uow.session), naming)
+    use_case = BatchDownloadUseCase(uow, naming)
     result = await use_case.execute(
         conditions,
         order_by=body.order_by,
@@ -529,7 +578,7 @@ async def batch_download_novels(
         excluded_ids=body.excluded_ids,
     )
 
-    from copixiv.core.services import safe_filename
+    from copixiv.core.naming import safe_filename
     desc = safe_filename(result.search_desc.rstrip(".zip").rstrip(".ZIP"))
     headers = {
         "Content-Disposition": (
@@ -554,7 +603,7 @@ def batch_download_preview(
 ):
     conditions = parse_search_keyword(body.keyword) if body.keyword else None
     naming = app_config.batch_download.naming
-    use_case = BatchDownloadUseCase(SQLAlchemyNovelRepository(uow.session), naming)
+    use_case = BatchDownloadUseCase(uow, naming)
     path = use_case.preview(
         conditions,
         order_by=body.order_by,
@@ -573,33 +622,37 @@ def batch_download_preview(
 def batch_operation(
     body: BatchOperationRequest = Body(...),
     file_storage=Depends(get_file_storage),
-    uow: SqlUnitOfWork = Depends(get_write_uow),
+    uow: SqlUnitOfWork = Depends(get_uow),
 ):
-    ids = resolve_batch_scope(
-        SQLAlchemyNovelRepository(uow.session),
-        mode=body.scope.mode,
-        novel_ids=body.scope.novel_ids,
-        keyword=body.scope.keyword,
-        min_like=body.scope.min_like,
-        min_text=body.scope.min_text,
-        excluded_ids=body.scope.excluded_ids,
-    )
+    with uow.begin():
+        ids = resolve_batch_scope(
+            SQLAlchemyNovelRepository(uow.session),
+            mode=body.scope.mode,
+            novel_ids=body.scope.novel_ids,
+            keyword=body.scope.keyword,
+            min_like=body.scope.min_like,
+            min_text=body.scope.min_text,
+            excluded_ids=body.scope.excluded_ids,
+        )
     if body.operation == "delete":
-        use_case = BatchDeleteUseCase(SQLAlchemyNovelRepository(uow.session), file_storage)
+        use_case = BatchDeleteUseCase(uow, file_storage)
         affected = use_case.execute(ids)
     else:
-        use_case = BatchTagUseCase(
-            SQLAlchemyNovelRepository(uow.session),
-            SQLAlchemyTagRepository(uow.session),
-        )
-        affected = use_case.execute(body.operation, ids, body.tags)
+        def _tag_tx(tx: SqlUnitOfWork) -> int:
+            use_case = BatchTagUseCase(
+                SQLAlchemyNovelRepository(tx.session),
+                SQLAlchemyTagRepository(tx.session),
+            )
+            return use_case.execute(body.operation, ids, body.tags)
+
+        affected = run_write_transaction_sync(uow, _tag_tx)
     return BatchOperationResponse(matched=len(ids), affected=affected)
 
 
 @router.post("/batch-metadata", response_model=BatchMetadataResponse)
 async def batch_metadata_operation(
     body: BatchMetadataRequest = Body(...),
-    uow: SqlUnitOfWork = Depends(get_write_uow),
+    uow: SqlUnitOfWork = Depends(get_uow),
     client: PixivClient = Depends(get_pixiv_client),
 ):
     """批量编辑本地书的「作者」/「系列」—— 预演（``apply=false``，默认）或落库。
@@ -623,20 +676,20 @@ async def batch_metadata_operation(
     同形：``POST /{novel_id}/...`` 那几条都要第二段路径，所以不会把
     ``batch-metadata`` 当成 ``novel_id``（``batch-export`` 早已是同样的形状）。
     """
-    ids = resolve_batch_scope(
-        SQLAlchemyNovelRepository(uow.session),
-        mode=body.scope.mode,
-        novel_ids=body.scope.novel_ids,
-        keyword=body.scope.keyword,
-        min_like=body.scope.min_like,
-        min_text=body.scope.min_text,
-        excluded_ids=body.scope.excluded_ids,
-        cap=None,
+    ids = await read_transaction(
+        uow,
+        lambda tx: resolve_batch_scope(
+            SQLAlchemyNovelRepository(tx.session),
+            mode=body.scope.mode,
+            novel_ids=body.scope.novel_ids,
+            keyword=body.scope.keyword,
+            min_like=body.scope.min_like,
+            min_text=body.scope.min_text,
+            excluded_ids=body.scope.excluded_ids,
+            cap=None,
+        ),
     )
 
-    # 三态映射（与 PATCH 共用一份 ``exclude_unset``）：键不出现 → 这个关键字根本
-    # 不传，用例签名里的 ``_UNSET`` 默认值生效（= 不动这个字段）；显式 ``null``
-    # → 传 ``None``（= 解除关联）。``apply`` 不进这里：它有显式默认值 False。
     changes = body.model_dump(exclude_unset=True)
     field_changes = {
         name: changes[name]
@@ -644,14 +697,7 @@ async def batch_metadata_operation(
         if name in changes
     }
 
-    use_case = BatchEditMetadataUseCase(
-        SQLAlchemyNovelRepository(uow.session),
-        SQLAlchemyNovelRepository(uow.session),
-        SQLAlchemyTagRepository(uow.session),
-        SQLAlchemyAuthorRepository(uow.session),
-        SQLAlchemySeriesRepository(uow.session),
-        client=client,
-    )
+    use_case = BatchEditMetadataUseCase(uow, client=client)
     counts = await use_case.execute(ids, apply=body.apply, **field_changes)
     return BatchMetadataResponse(**counts)
 
@@ -660,9 +706,9 @@ async def batch_metadata_operation(
 def delete_novel(
     novel_id: int,
     file_storage=Depends(get_file_storage),
-    uow: SqlUnitOfWork = Depends(get_write_uow),
+    uow: SqlUnitOfWork = Depends(get_uow),
 ):
-    use_case = DeleteNovelUseCase(SQLAlchemyNovelRepository(uow.session), file_storage)
+    use_case = DeleteNovelUseCase(uow, file_storage)
     use_case.execute(novel_id)
 
 
@@ -703,7 +749,7 @@ def download_export_file(
     import json
     from pathlib import Path
 
-    from copixiv.core.services import safe_filename
+    from copixiv.core.naming import safe_filename
 
     file_path = (
         Path(file_storage.download_dir)
@@ -714,7 +760,8 @@ def download_export_file(
 
     # Prefer the user's zip_name (stored in the task arguments).
     filename = f"batch_export_{task_id}.zip"
-    arguments = SQLAlchemyTaskRepository(uow.session).get_task_arguments(task_id)
+    with uow.begin():
+        arguments = SQLAlchemyTaskRepository(uow.session).get_task_arguments(task_id)
     if arguments:
         try:
             args = json.loads(arguments)

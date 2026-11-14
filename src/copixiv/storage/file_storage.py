@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from copixiv.core import formats
-from copixiv.core.services import build_path, safe_filename
+from copixiv.core.naming import build_path, safe_filename
 from copixiv.log import logger
 from copixiv.storage import assets
 from copixiv.storage.atomic import write_text_atomic
@@ -179,13 +179,8 @@ class FileStorage:
 
         novel_id = resolved.stem.rsplit("_", 1)[-1]
         if novel_id.isdigit():
-            parent = resolved.parent
-            for pattern in (f"{novel_id}_u_*", f"{novel_id}_p_*"):
-                for asset in parent.glob(pattern):
-                    _unlink(asset)
-            cover = assets.find_cover(parent, novel_id)
-            if cover is not None:
-                _unlink(cover)
+            for asset in assets.iter_novel_asset_files(resolved.parent, novel_id):
+                _unlink(asset)
 
         # Remove the parent directory when this was the last novel in it.
         # Assets are gone by now, so an "empty directory" really means empty.

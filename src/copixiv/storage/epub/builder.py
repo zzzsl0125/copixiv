@@ -17,15 +17,17 @@ from __future__ import annotations
 import html
 import io
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ebooklib import epub
 
 from copixiv.core import formats
-from copixiv.storage import assets
 from copixiv.core.draft import NovelDraft
 from copixiv.core.services import IMAGE_PLACEHOLDER_PATTERN
-from copixiv.storage.epub import state
-from copixiv.storage.atomic import atomic_write
-
 from copixiv.log import logger
+from copixiv.storage import assets
+from copixiv.storage.atomic import atomic_write
 
 CSS_STYLE = """
 body { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; margin: 5%; text-align: justify; }
@@ -176,8 +178,6 @@ class EpubBuilder:
         from PIL import Image
 
         with Image.open(image_path) as img:
-            fmt = img.format.lower() if img.format else "jpeg"
-
             if (
                 img.mode in ("RGBA", "LA")
                 or (img.mode == "P" and "transparency" in img.info)
@@ -318,8 +318,8 @@ class EpubBuilder:
         if not cover_path or not cover_path.exists():
             return
         try:
-            with open(cover_path, "rb") as f:
-                book.set_cover("cover.jpg", f.read())
+            data, _media_type, _ext = EpubBuilder._compress_image(cover_path)
+            book.set_cover("cover.jpg", data)
         except Exception:
             logger.exception(f"Failed to set cover: {cover_path}")
 

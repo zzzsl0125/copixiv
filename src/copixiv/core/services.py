@@ -17,7 +17,6 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
 
-
 # ---------------------------------------------------------------------------
 # Timestamp normalisation (postgres-migration) — pure functions.
 # ---------------------------------------------------------------------------
@@ -78,6 +77,9 @@ _SPLIT_PATTERN: re.Pattern[str] = re.compile(r"[/|#、\\]")
 def normalize_tag(tag: str) -> str:
     """Normalise a single tag: lowercase, strip delimiters."""
     return tag.strip().lower()
+
+
+MAX_TAG_LENGTH = 100
 
 
 def parse_tags(tags: list[str | dict]) -> list[str]:
@@ -408,19 +410,6 @@ def resolve_active(
     return global_setting_value.strip().lower() in _TRUTHY
 
 
-# ---------------------------------------------------------------------------
-# Backward-compatible re-exports — the naming/ZIP code moved to sibling
-# modules (``core/naming.py`` / ``core/zip.py``), but these names stay
-# importable from here so no call site has to change.
-# ---------------------------------------------------------------------------
-from copixiv.core.naming import (  # noqa: E402  re-exported: call sites still import from services
-    NovelNamingTemplate,
-    _sanitize_path_segment,
-    build_path,
-    safe_filename,
-)
-from copixiv.core.zip import build_batch_zip  # noqa: E402  re-exported
-
 __all__ = [
     "parse_tags",
     "normalize_tag",
@@ -430,14 +419,14 @@ __all__ = [
     "MARKER_OVERLAP",
     "sha256_text",
     "body_unchanged",
-    "safe_filename",
-    "build_path",
-    "NovelNamingTemplate",
-    "_sanitize_path_segment",
     "safe_get",
     "safe_set",
     "guess_series_order",
     "parse_search_keyword",
-    "build_batch_zip",
     "parse_pixiv_time",
+    "QuerySpec",
+    "SearchConditions",
+    "MAX_TAG_LENGTH",
+    "EXCLUDE_BLOCKED_SETTING_KEY",
+    "resolve_active",
 ]

@@ -9,7 +9,6 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from copixiv.db import models
 
-
 _MAX_RETRIES = 3
 
 

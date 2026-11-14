@@ -56,7 +56,10 @@ from typing import Any
 
 from copixiv.core.exceptions import NotFoundError, ValidationError
 from copixiv.core.models import Novel
-from copixiv.core.services import parse_pixiv_time, parse_tags
+from copixiv.core.services import MAX_TAG_LENGTH, parse_pixiv_time, parse_tags
+from copixiv.db.base import refresh_parent_summaries
+from copixiv.db.uow import SqlUnitOfWork
+from copixiv.db.write_lock import read_transaction, run_write_transaction
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 from copixiv.features.authors.resolve_names import lookup_author_profile
 from copixiv.features.novels import field_policy
@@ -73,7 +76,6 @@ UNKNOWN_AUTHOR = "未知作者"
 
 MAX_TITLE = 300
 MAX_TAGS = 50
-MAX_TAG_LENGTH = 100
 # 简介上限。列是 ``Text``（无长度约束），这里给的是**产品口径**而不是数据库
 # 约束：pixiv 的 caption 本来就能装下几千字的长简介，卡太死会把"从别处粘一段
 # 简介"的正常用法挡在门外；2000 足够，也拦得住误粘一整篇正文。
@@ -99,26 +101,19 @@ class UpdateNovelMetadataUseCase:
 
     def __init__(
         self,
-        novel_repo: SQLAlchemyNovelRepository,
-        tag_repo: SQLAlchemyTagRepository,
-        author_repo: SQLAlchemyAuthorRepository,
-        series_repo: SQLAlchemySeriesRepository,
+        uow: SqlUnitOfWork,
         client: PixivClient | None = None,
     ):
-        self._repo = novel_repo
-        self._tags = tag_repo
-        self._authors = author_repo
-        self._series = series_repo
+        self._uow = uow
         # 可选：为 None 时名字只能来自本地表（测试与离线场景）。
         self._client = client
 
     async def execute(self, novel_id: int, changes: dict[str, Any]) -> Novel:
         """应用 *changes*（只含客户端提交的键），返回更新后的域模型。
 
-        ``async`` only because the author/series columns can trigger a live
-        Pixiv name lookup (:func:`lookup_author_profile` /
-        :func:`lookup_series_profile`).  All repository calls are plain
-        synchronous calls; the local-table hit path never touches the network.
+        DB reads and writes run off the event loop via :func:`read_transaction`
+        and :func:`run_write_transaction`; Pixiv lookups never hold an open
+        DB session or transaction.
 
         Raises:
             NotFoundError: 小说不存在 → 404。
@@ -127,11 +122,15 @@ class UpdateNovelMetadataUseCase:
         if not changes:
             raise ValidationError("没有要更新的字段")
 
-        novel = self._repo.get_by_id(novel_id)
-        if novel is None:
-            raise NotFoundError(f"Novel {novel_id} not found")
+        def _prepare(tx: SqlUnitOfWork) -> tuple[Novel, dict[str, Any]]:
+            novel_repo = SQLAlchemyNovelRepository(tx.session)
+            novel = novel_repo.get_by_id(novel_id)
+            if novel is None:
+                raise NotFoundError(f"Novel {novel_id} not found")
+            tag_repo = SQLAlchemyTagRepository(tx.session)
+            return novel, self._build_values(novel, changes, tag_repo)
 
-        values = self._build_values(novel, changes)
+        novel, values = await read_transaction(self._uow, _prepare)
 
         # 作者与系列是仅有的"先解析再落库"的字段（其余全是纯函数归一）：解析要读
         # 本地表、可能还要问一次 Pixiv，所以它们不在 _build_values 里。
@@ -149,32 +148,58 @@ class UpdateNovelMetadataUseCase:
             )
             values.update(series_values)
 
-        self._repo.update_metadata(novel_id, values)
+        def _commit(tx: SqlUnitOfWork) -> Novel:
+            novel_repo = SQLAlchemyNovelRepository(tx.session)
+            author_repo = SQLAlchemyAuthorRepository(tx.session)
+            series_repo = SQLAlchemySeriesRepository(tx.session)
 
-        # 作者行本身也要有名字（`ensure_exists` 刚建的占位行是 NULL），并把
-        # 该名字规范到同作者的全部 novel 行——`update_author_name` 两个都做，
-        # 且用 `IS DISTINCT FROM` 过滤掉无变化的行（刚写的这一行就在其中）。
-        if resolved_author is not None:
-            self._authors.update_author_name(*resolved_author)
+            current = novel_repo.get_by_id(novel_id)
+            if current is None:
+                raise NotFoundError(f"Novel {novel_id} not found")
+            old_author_id = current.author_id
+            old_series_id = current.series_id
 
-        # 系列只写"这一个系列行"的名字：系列名的规范方向是 novel → series
-        # （`update_summary` 取 max(novel.series_name)），改写同系列其它
-        # 小说行既没必要也会覆盖来源值。见 `update_series_name` 的注释。
-        if resolved_series is not None:
-            self._series.update_series_name(*resolved_series)
+            if "author_id" in values and values["author_id"] is not None:
+                author_repo.ensure_exists({values["author_id"]})
+            if "series_id" in values and values["series_id"] is not None:
+                series_repo.ensure_exists({values["series_id"]})
 
-        # 返回读路径的域模型：它已处理 ``is_special_follow`` 的 NULL 归一
-        # （无作者行的本地书会走这条），HTTP 层直接拿它做 response_model 序列化。
-        updated = self._repo.get_by_id(novel_id)
-        if updated is None:  # 并发删除的兜底——上面刚写过，实际不会发生
-            raise NotFoundError(f"Novel {novel_id} not found")
-        return updated
+            novel_repo.update_metadata(novel_id, values)
+
+            if resolved_author is not None:
+                author_repo.update_author_name(*resolved_author)
+            if resolved_series is not None:
+                series_repo.update_series_name(*resolved_series)
+
+            new_author_id = (
+                values["author_id"] if "author_id" in values else old_author_id
+            )
+            new_series_id = (
+                values["series_id"] if "series_id" in values else old_series_id
+            )
+            refresh_parent_summaries(
+                tx.session,
+                author_ids={old_author_id, new_author_id},
+                series_ids={old_series_id, new_series_id},
+            )
+
+            updated = novel_repo.get_by_id(novel_id)
+            if updated is None:  # 并发删除的兜底——上面刚写过，实际不会发生
+                raise NotFoundError(f"Novel {novel_id} not found")
+            return updated
+
+        return await run_write_transaction(self._uow, _commit)
 
     # ------------------------------------------------------------------
     # 校验 / 归一
     # ------------------------------------------------------------------
 
-    def _build_values(self, novel: Novel, changes: dict[str, Any]) -> dict[str, Any]:
+    def _build_values(
+        self,
+        novel: Novel,
+        changes: dict[str, Any],
+        tag_repo: SQLAlchemyTagRepository,
+    ) -> dict[str, Any]:
         """逐字段校验并归一，返回可直接 setattr 的列值字典。"""
         # 先判"这个字段这本书能不能改"：pixiv 书的只读字段即便传的是合法值也拒。
         # 迭代 ``LOCAL_ONLY_FIELDS`` 而不是请求体的键顺序——报错顺序是契约的一部分
@@ -203,7 +228,7 @@ class UpdateNovelMetadataUseCase:
             values["caption"] = _caption(changes["caption"])
 
         if "tags" in changes:
-            values["tags"] = self._normalize_tags(changes["tags"])
+            values["tags"] = self._normalize_tags(changes["tags"], tag_repo)
 
         if "create_time" in changes:
             values["create_time"] = _create_time(changes["create_time"])
@@ -213,33 +238,8 @@ class UpdateNovelMetadataUseCase:
     async def _author_columns(
         self, raw: Any, novel: Novel,
     ) -> tuple[dict[str, Any], tuple[int, str] | None]:
-        """``author_id`` 提交值 → 列值 + 需要写回作者行的 ``(id, 名字)``。
-
-        ``async`` because :func:`lookup_author_profile` may ask Pixiv for the
-        name; every repository call in here is a plain synchronous call.
-
-        三态与三种结果：
-
-        * 显式 ``null``（解除关联）→ 写 ``author_id=NULL``；**显示名保持不动**
-          ——本地书的名字来自文件名解析，把它一起清掉等于凭空丢信息。而
-          「每本书都有作者名可显示」是产品承诺（``docs/LIBRARY_DESIGN.md``
-          §3.3）：没有名字的行就是这条承诺破了的形状。唯一的例外：名字本来
-          就是 NULL（上一轮"解析失败"留下的中间态）时补回「未知作者」——让
-          这一行回到"有名字可显示"的终态，而不是停在待解析。
-        * 给了 id、解析出名字 → 写 ``author_id`` + ``author_name``，并返回名字
-          供 ``update_author_name`` 写进 ``author`` 行与同作者其它行。
-        * 给了 id、解析不出名字 → 仍然写 ``author_id``，``author_name`` 落
-          ``NULL``（"待解析"）。**这不是失败**：id 才是身份，名字是缓存。这个
-          中间态是仓库认可的终态之一——**别把它说成"有兜底任务"**：
-          ``sync_empty_name`` 扫的确实是这种形状（``author_name IS NULL`` 且
-          ``author_id`` 可用），但它默认禁用（``scheduled_task.is_enabled`` 列
-          默认 false，只有手动启用才跑）；会把名字补回来的是**再抓一次该作品 /
-          作者**或下一次「同步」。见模块 docstring。
-        """
+        """``author_id`` 提交值 → 列值 + 需要写回作者行的 ``(id, 名字)``。"""
         if raw is None:
-            # 「每本书都有作者名可显示」（LIBRARY_DESIGN.md §3.3）是产品承诺，
-            # 这里只是**纵深防御**：不变量由承诺 + 编辑器补写共同守——上传路径
-            # 已经保证了它，这一句兜住"解析失败后解除关联"这条中间态。
             values: dict[str, Any] = {"author_id": None}
             if novel.author_name is None:
                 values["author_name"] = UNKNOWN_AUTHOR
@@ -247,12 +247,8 @@ class UpdateNovelMetadataUseCase:
 
         author_id = _author_id(raw)
 
-        # 外键安全：``novel.author_id → author.author_id``，先建占位行
-        # （``ON CONFLICT DO NOTHING``，已有名字的行不受影响）。
-        self._authors.ensure_exists({author_id})
-
         profile = await lookup_author_profile(
-            author_id, session=self._authors.session, client=self._client,
+            author_id, uow=self._uow, client=self._client,
         )
         values = {"author_id": author_id, "author_name": profile.author_name}
         resolved = (
@@ -263,34 +259,8 @@ class UpdateNovelMetadataUseCase:
     async def _series_columns(
         self, raw: Any,
     ) -> tuple[dict[str, Any], tuple[int, str] | None]:
-        """``series_id`` 提交值 → 列值 + 需要写回系列行的 ``(id, 名字)``。
-
-        ``async`` for the same reason as :meth:`_author_columns`: the name
-        resolution may hit Pixiv; the repository calls are synchronous.
-
-        与作者同构，只有两处刻意的不同：
-
-        * **解除关联的收尾不同**。作者那边"id 为空 ⟹ 名字非空"是一条不变量
-          （LIBRARY_DESIGN.md §3.3「每本书都有作者名可显示」），所以解除关联时
-          名字保留、必要时补「未知作者」；系列没有这条不变量，而且本地书的系列名
-          没有独立来源（上传时是 NULL，只可能由 id 解析而来）——留着它就是一个
-          用户清不掉的孤儿显示名，所以解除关联时**连名字与章节号一起清**。
-        * 解析链更长（系列行 → 同系列小说行 → pixiv ``novel_series``），
-          因为 ``series`` 行的名字是从小说行推导出来的，可能还没写上。
-        """
+        """``series_id`` 提交值 → 列值 + 需要写回系列行的 ``(id, 名字)``。"""
         if raw is None:
-            # 解除关联 = 清掉整个"系列三元组"：id 是身份，名字是它的解析结果，
-            # 章节号是它在系列里的位置——三者描述同一个事实，一起进一起出。
-            #
-            # 名字**不能**像作者那样留着（2026-09-22 修）：``author_name`` 在上传
-            # 时来自文件名解析，有独立来源，所以解除作者关联后它仍是这本书的展示
-            # 信息；本地书的 ``series_name`` 上传时是 NULL，只可能由 ``series_id``
-            # 解析而来，留着它就只剩一条"点不动的系列名"——而 ``series_name``
-            # 提交即 422（名字不可编辑），用户没有任何出口能把它清掉。
-            # 章节号同理：脱离系列之后"第几本"没有指代对象。本地书没有来源，
-            # 这一列不会被来源刷新补回；``fix_series_index`` 的孤儿分支虽然会扫
-            # ``series_id IS NULL`` 且号非空的行，但那要问一次 webview——本地书
-            # 没有 pixiv id、取不到响应，会被原样留着；而且该任务默认禁用。
             return {
                 "series_id": None,
                 "series_name": None,
@@ -299,11 +269,8 @@ class UpdateNovelMetadataUseCase:
 
         series_id = _series_id(raw)
 
-        # 外键安全：``novel.series_id → series.series_id``，先建占位行。
-        self._series.ensure_exists({series_id})
-
         profile = await lookup_series_profile(
-            series_id, session=self._series.session, client=self._client,
+            series_id, uow=self._uow, client=self._client,
         )
         values = {"series_id": series_id, "series_name": profile.series_name}
         resolved = (
@@ -311,25 +278,16 @@ class UpdateNovelMetadataUseCase:
         )
         return values, resolved
 
-    def _normalize_tags(self, raw: Any) -> list[str]:
-        """与抓取路径同源归一：``parse_tags`` → ``tag_alias`` 映射 → 去重排序。
-
-        为什么必须走 ``parse_tags``：库里的标签全部出自它（小写 + 去括号 +
-        按 ``/|#、\\`` 切分），手工写入若不做同一套归一，立刻出现 ``R-18`` /
-        ``r-18`` 这类大小写双胞胎，词表与别名建议一起退化
-        （docs/NOVEL_EDIT_DESIGN.md §7）。别名映射让"用户输入的旧名"等价于
-        抓取路径送来的旧名——两条写入路径对词表的贡献保持一致。
-
-        写回是**整组替换**（编辑器所见即所得）；来源刷新的并集语义
-        （``_upsert_rows`` 第 4 步，只增不减）不受影响：它只会往里加。
-        """
+    def _normalize_tags(
+        self, raw: Any, tag_repo: SQLAlchemyTagRepository
+    ) -> list[str]:
         if raw is None:
             raw = []
         if not isinstance(raw, list):
             raise ValidationError("标签必须是字符串数组")
 
         cleaned = parse_tags(raw)
-        alias_map = self._tags.get_alias_map_sync()
+        alias_map = tag_repo.get_alias_map()
         merged = sorted({alias_map.get(tag, tag) for tag in cleaned})
 
         if len(merged) > MAX_TAGS:

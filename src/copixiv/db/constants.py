@@ -15,15 +15,6 @@ TABLE_NOVEL = "novel"
 TABLE_AUTHOR = "author"
 TABLE_SERIES = "series"
 TABLE_TAG = "tag"
-# DEPRECATED placeholder (phase 2): the novel_tag join table is gone —
-# tags now live in ``novel.tags text[]``.  Kept only so repository code
-# referencing ``C.TABLE_NOVEL_TAG`` still imports.
-TABLE_NOVEL_TAG = "novel_tag"
-# DEPRECATED placeholder (phase 2): favourite is now ``novel.is_favourite``.
-TABLE_FAVOURITE = "favourite"
-# DEPRECATED placeholder (phase 2): special_follow is now
-# ``author.is_special_follow``.
-TABLE_SPECIAL_FOLLOW = "special_follow"
 TABLE_FAILED_NOVEL = "failed_novel"
 # Ledger of series pixiv no longer serves (``novel_series`` keeps answering
 # 404).  A *verdict* table, not entity data: it only tells the repair task's
@@ -52,10 +43,6 @@ COL_SOURCE = "source"
 # ``novel.source_key`` — local books only: sha256 of the normalised body
 # (the dedup key; NULL for Pixiv rows).
 COL_SOURCE_KEY = "source_key"
-# ``tag_alias.source`` — the alias's left-hand side.  Renamed (it used to be
-# ``COL_SOURCE``) when ``novel.source`` claimed that name; it has no callers
-# in the repo, only the re-export in ``db/__init__.py``.
-COL_TAG_ALIAS_SOURCE = "source"
 COL_TEXTS = "text"
 COL_LIKES = "like"
 COL_VIEWS = "view"

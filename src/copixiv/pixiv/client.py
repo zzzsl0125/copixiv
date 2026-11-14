@@ -7,23 +7,21 @@ RequestManager.
 
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime
 from urllib.parse import parse_qs, urlparse
 
 from dateutil import parser as date_parser
 from requests.exceptions import RequestException
 
 from copixiv.core.services import safe_get, safe_set
+from copixiv.log import logger
 
 from .account import (
-    AccountStrategy,
-    RateLimitError,
     AccountInvalidError,
+    AccountStrategy,
     PixivApiError,
+    RateLimitError,
 )
 from .accounts import AccountPool
-
-from copixiv.log import logger
 
 
 def _get_next_url(result) -> str | None:
@@ -217,15 +215,15 @@ class PixivClient:
             account = self.pool.select()
             try:
                 return await account.execute(method, *args, **kwargs)
-            except AccountInvalidError:
+            except AccountInvalidError as e:
                 # Account already marked INVALID by authenticate();
                 # select() will skip it on the next iteration.
                 logger.warning(
                     f"Account {account} is invalid, switching "
                     f"(attempt {attempt + 1}/{self._MAX_RETRIES + 1})"
                 )
-                last_error = AccountInvalidError(str(account))
-            except RateLimitError:
+                last_error = e
+            except RateLimitError as e:
                 # Cooldown already started in account.execute().
                 # TODO: parse Retry-After from the HTTP response if
                 # pixivpy3 ever exposes it, rather than using the
@@ -234,8 +232,11 @@ class PixivClient:
                     f"Rate limited on {account}, "
                     f"retry {attempt + 1}/{self._MAX_RETRIES + 1}"
                 )
-                last_error = RateLimitError(str(account))
-                if attempt < self._MAX_RETRIES:
+                last_error = e
+                has_ready = any(
+                    a.valid and not a.in_cooldown for a in self.pool.accounts
+                )
+                if attempt < self._MAX_RETRIES and not has_ready:
                     await asyncio.sleep(self._backoff(attempt))
             except PixivApiError as e:
                 if _is_permanent(e):

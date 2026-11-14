@@ -111,9 +111,9 @@ class TelegramNotifier:
         summary = result.summary if result else ""
 
         lines = [
-            f"✅ <b>Task Completed</b>",
+            "✅ <b>Task Completed</b>",
             f"<b>Task:</b> <code>{_escape(task_name)}</code>",
-            f"<b>Status:</b> success",
+            "<b>Status:</b> success",
             f"<b>Duration:</b> <code>{dur}</code>",
         ]
 
@@ -121,10 +121,12 @@ class TelegramNotifier:
             lines.append(f"<b>New Novels:</b> <code>{count}</code>")
             text = "\n".join(lines)
             if len(titles) > 10:
+                from copixiv.core.naming import safe_filename
+
                 file_content = "\n".join(titles)
-                file_name = (
-                    f"{task_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-                )
+                file_name = safe_filename(
+                    f"{task_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                ) + ".txt"
                 await self._send_document(text, file_content, file_name)
             else:
                 lines.append("<b>Novels:</b>")
@@ -140,9 +142,9 @@ class TelegramNotifier:
 
     async def _send_failure(self, task_name: str, error: str) -> None:
         text = "\n".join([
-            f"❌ <b>Task Failed</b>",
+            "❌ <b>Task Failed</b>",
             f"<b>Task:</b> <code>{_escape(task_name)}</code>",
-            f"<b>Status:</b> failed",
+            "<b>Status:</b> failed",
             f"<b>Error:</b> <code>{_escape(error)}</code>",
         ])
         await self._send_message(text)

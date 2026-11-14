@@ -4,7 +4,8 @@ import json
 from collections.abc import Sequence
 from datetime import datetime, timezone
 
-from sqlalchemy import case, func, select, text as sa_text
+from sqlalchemy import case, select
+from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 
 from copixiv.db import models
@@ -20,9 +21,6 @@ class SQLAlchemyTaskRepository(BaseRepository):
     # -- task history ------------------------------------------------------
 
     def add_task(self, name: str, arguments: dict, task_func: str) -> int:
-        return self.add_task_sync(name, arguments, task_func)
-
-    def add_task_sync(self, name: str, arguments: dict, task_func: str) -> int:
         """Insert a pending history row under *name* (display) + *task_func*.
 
         *task_func* is the registered function name, kept for history/audit.
@@ -42,14 +40,6 @@ class SQLAlchemyTaskRepository(BaseRepository):
         return task.id
 
     def update_task(
-        self, task_id: int, status: str | None, result: str | None = None,
-        duration: float | None = None, progress: str | None = None,
-    ) -> None:
-        self.update_task_sync(
-            task_id, status, result=result, duration=duration, progress=progress,
-        )
-
-    def update_task_sync(
         self, task_id: int, status: str | None, result: str | None = None,
         duration: float | None = None, progress: str | None = None,
     ) -> None:
@@ -93,7 +83,7 @@ class SQLAlchemyTaskRepository(BaseRepository):
             if duration is not None:
                 task.duration = duration
 
-    def get_next_pending_sync(
+    def get_next_pending(
         self,
         task_funcs: Sequence[str] | None = None,
         exclude_funcs: Sequence[str] | None = None,
@@ -223,11 +213,11 @@ class SQLAlchemyTaskRepository(BaseRepository):
     # -- scheduled tasks ----------------------------------------------------
 
     def get_scheduled_tasks(self) -> Sequence[models.ScheduledTask]:
-        return self.get_scheduled_tasks_sync()
-
-    def get_scheduled_tasks_sync(self) -> Sequence[models.ScheduledTask]:
         stmt = select(models.ScheduledTask).order_by(models.ScheduledTask.sort_index)
         return list(self.session.execute(stmt).scalars().all())
+
+    def get_scheduled_task(self, task_id: int) -> models.ScheduledTask | None:
+        return self.session.get(models.ScheduledTask, task_id)
 
     def create_scheduled(
         self, task_data: dict

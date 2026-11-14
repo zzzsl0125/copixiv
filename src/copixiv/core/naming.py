@@ -22,7 +22,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Safe filename and path generation — pure functions.
 # ---------------------------------------------------------------------------

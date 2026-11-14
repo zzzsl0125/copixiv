@@ -11,12 +11,13 @@ import json
 from functools import wraps
 from typing import Any, Callable
 
-from copixiv.core.exceptions import NovelNotFoundError
-from copixiv.log import logger
 from pixivpy3 import AppPixivAPI
-from pixivpy3.aapi import ParsedJson, _MODE, _FILTER, DateOrStr
+from pixivpy3.aapi import _FILTER, _MODE, DateOrStr, ParsedJson
 from pixivpy3.api import BasePixivAPI
 from pixivpy3.utils import PixivError
+
+from copixiv.core.exceptions import NovelNotFoundError
+from copixiv.log import logger
 
 from .errors import PixivHttpError
 
@@ -141,17 +142,54 @@ def _patch_webview_novel() -> None:
 # Patch: tolerant model loading
 # -----------------------------------------------------------------------
 
-def _sanitize_none_to_str(data: Any) -> Any:
-    """Replace None → '' recursively so strict ``str`` fields accept data."""
-    if isinstance(data, dict):
-        return {k: _sanitize_none_to_str(v) for k, v in data.items()}
-    if isinstance(data, list):
-        return [_sanitize_none_to_str(v) for v in data]
-    return "" if data is None else data
+def _sanitize_none_for_validation(data: Any, exc: Exception) -> Any | None:
+    """Replace only ``None`` leaves that failed Pydantic string validation.
+
+    Returns a patched shallow-copied structure when at least one ``string_type``
+    ``None`` error was fixed, or ``None`` if no targeted fix is applicable.
+    """
+    errors_fn = getattr(exc, "errors", None)
+    if not callable(errors_fn) or not isinstance(data, (dict, list)):
+        return None
+
+    import copy
+
+    locs: list[tuple[Any, ...]] = []
+    for err in errors_fn():
+        err_type = err.get("type", "")
+        if err.get("input") is None and "string" in err_type:
+            loc = err.get("loc") or ()
+            if loc:
+                locs.append(tuple(loc))
+    if not locs:
+        return None
+
+    patched = copy.deepcopy(data)
+    for loc in locs:
+        cursor: Any = patched
+        for part in loc[:-1]:
+            if isinstance(cursor, dict) and part in cursor:
+                cursor = cursor[part]
+            elif isinstance(cursor, list) and isinstance(part, int) and 0 <= part < len(cursor):
+                cursor = cursor[part]
+            else:
+                cursor = None
+                break
+        leaf = loc[-1]
+        if isinstance(cursor, dict) and leaf in cursor and cursor[leaf] is None:
+            cursor[leaf] = ""
+        elif (
+            isinstance(cursor, list)
+            and isinstance(leaf, int)
+            and 0 <= leaf < len(cursor)
+            and cursor[leaf] is None
+        ):
+            cursor[leaf] = ""
+    return patched
 
 
 def _permissive_model_construct(json_data: Any, model: type) -> Any:
-    """Try model_validate, retry with None→'' sanitise, then fall back."""
+    """Try model_validate, retry targeted None→'' sanitise, then fall back."""
     if isinstance(json_data, dict) and "error" in json_data:
         error_data = json_data["error"]
         if isinstance(error_data, dict):
@@ -163,34 +201,33 @@ def _permissive_model_construct(json_data: Any, model: type) -> Any:
 
     try:
         return model.model_validate(json_data)
-    except Exception:
-        try:
-            sanitized = _sanitize_none_to_str(json_data)
-            return model.model_validate(sanitized)
-        except Exception:
-            logger.warning(
-                f"model_validate failed for {model.__name__}, "
-                f"falling back to model_construct"
-            )
+    except Exception as exc:
+        sanitized = _sanitize_none_for_validation(json_data, exc)
+        if sanitized is not None:
             try:
-                return model.model_construct(**json_data)
+                return model.model_validate(sanitized)
             except Exception:
-                return json_data
+                pass
+        logger.warning(
+            f"model_validate failed for {model.__name__}, "
+            f"falling back to model_construct"
+        )
+        try:
+            return model.model_construct(**json_data)
+        except Exception:
+            return json_data
 
 
 @safe_patch("_load_result/_load_model")
 def _patch_load_result_and_model() -> None:
-    _original_load_result = AppPixivAPI._load_result
-    _original_load_model = AppPixivAPI._load_model
-
     def _load_result(self, res, model):
         return _permissive_model_construct(self.parse_result(res), model)
 
     def _load_model(cls, data, model):
         return _permissive_model_construct(data, model)
 
-    AppPixivAPI._load_result = _load_result
-    AppPixivAPI._load_model = _load_model
+    AppPixivAPI._load_result = _load_result  # type: ignore[method-assign]
+    AppPixivAPI._load_model = classmethod(_load_model)  # type: ignore[method-assign,assignment]
 
 
 # -----------------------------------------------------------------------

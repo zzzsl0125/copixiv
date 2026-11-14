@@ -1,11 +1,14 @@
 """Base repository — shared SQLAlchemy helpers."""
 
+from collections.abc import Iterable
 from typing import Any, TypeVar
-from sqlalchemy import select, func, update
-from sqlalchemy.orm import Session
+
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.orm import Session
 
 from copixiv.db import constants as C
+from copixiv.db import models
 
 ModelType = TypeVar("ModelType", bound=Any)
 
@@ -66,89 +69,92 @@ def update_summary(
 
     pk_col = getattr(model_class, id_column_name)
     source_col = getattr(models.Novel, id_column_name)
+    target_ids = {i for i in ids if i is not None}
+    if not target_ids:
+        return
 
+    extra = list(extra_columns or ())
     columns_to_select = [
-        source_col,
+        source_col.label(id_column_name),
         func.count(models.Novel.id).label(C.COL_NOVEL_COUNT),
-        func.sum(models.Novel.view).label(C.COL_VIEWS),
-        func.sum(models.Novel.like).label(C.COL_LIKES),
-        func.sum(models.Novel.text).label(C.COL_TEXTS),
+        func.coalesce(func.sum(models.Novel.view), 0).label(C.COL_VIEWS),
+        func.coalesce(func.sum(models.Novel.like), 0).label(C.COL_LIKES),
+        func.coalesce(func.sum(models.Novel.text), 0).label(C.COL_TEXTS),
+        *extra,
     ]
-    if extra_columns:
-        columns_to_select.extend(extra_columns)
+    agg_select = (
+        select(*columns_to_select)
+        .where(source_col.in_(target_ids))
+        .group_by(source_col)
+    )
 
-    rows = session.execute(
-        select(*columns_to_select).where(source_col.in_(ids)).group_by(source_col)
-    ).all()
-
-    for row in rows:
-        mapping = row._mapping
-        target_id = mapping[id_column_name]
-        if target_id is None:
-            # An orphaned ``novel`` row (no author / series) has nothing to
-            # aggregate into — and NULL is not a legal key here.
-            continue
-
-        values = {
-            C.COL_NOVEL_COUNT: mapping[C.COL_NOVEL_COUNT],
-            C.COL_VIEWS: mapping[C.COL_VIEWS],
-            C.COL_LIKES: mapping[C.COL_LIKES],
-            C.COL_TEXTS: mapping[C.COL_TEXTS],
-        }
-        # Derived extras (``author_name`` / ``series_name``): a NULL ``max``
-        # means no novel carries a name — leave the stored value rather than
-        # blanking it on every refresh.
-        values.update({
-            key: val
-            for key, val in mapping.items()
-            if key != id_column_name and key not in values and val is not None
-        })
-        _upsert_summary_row(session, model_class, pk_col, target_id, values)
-
-    # Ids with no novels left: zero their aggregates so a delete is reflected.
-    # ``ids - grouped`` is computed in Python because every caller passes a small
-    # set (one batch's authors / series), not the whole table.
-    seen = {row._mapping[id_column_name] for row in rows}
-    emptied = {i for i in ids if i is not None and i not in seen}
-    if emptied:
-        session.execute(
-            update(model_class)
-            .where(pk_col.in_(emptied))
-            .values(_zeroed_summary())
+    insert_stmt = postgresql_insert(model_class).from_select(
+        [col.key for col in agg_select.selected_columns],
+        agg_select,
+    )
+    set_dict: dict[str, Any] = {
+        C.COL_NOVEL_COUNT: insert_stmt.excluded[C.COL_NOVEL_COUNT],
+        C.COL_VIEWS: insert_stmt.excluded[C.COL_VIEWS],
+        C.COL_LIKES: insert_stmt.excluded[C.COL_LIKES],
+        C.COL_TEXTS: insert_stmt.excluded[C.COL_TEXTS],
+    }
+    for col in extra:
+        # Preserve stored display names / author links when max(...) is NULL.
+        set_dict[col.key] = func.coalesce(
+            insert_stmt.excluded[col.key],
+            getattr(model_class, col.key),
         )
 
-
-def _zeroed_summary() -> dict:
-    """Aggregate columns reset to their "no novels" values.
-
-    Only the four counters.  A *derived name* column (``author_name`` /
-    ``series_name``) is deliberately left alone: "this row has no novels left"
-    says nothing about the name the user still sees on the author / series page.
-    """
-    return {
-        C.COL_NOVEL_COUNT: 0,
-        C.COL_VIEWS: 0,
-        C.COL_LIKES: 0,
-        C.COL_TEXTS: 0,
-    }
-
-
-def _upsert_summary_row(
-    session: Session,
-    model_class: type[ModelType],
-    pk_col,
-    target_id: int,
-    values: dict,
-) -> None:
-    """``INSERT … ON CONFLICT DO UPDATE`` one aggregate row."""
-    insert_values = {pk_col.name: target_id, **values}
     session.execute(
-        postgresql_insert(model_class)
-        # ``index_elements`` must be a keyword: as a positional arg it binds to
-        # ``constraint`` and crashes.
-        .values(insert_values)
-        .on_conflict_do_update(index_elements=[pk_col], set_=values)
+        insert_stmt.on_conflict_do_update(
+            index_elements=[pk_col],
+            set_=set_dict,
+        )
     )
+
+    has_novel = select(1).where(source_col == pk_col).exists()
+    session.execute(
+        update(model_class)
+        .where(pk_col.in_(target_ids), ~has_novel)
+        .values({
+            C.COL_NOVEL_COUNT: 0,
+            C.COL_VIEWS: 0,
+            C.COL_LIKES: 0,
+            C.COL_TEXTS: 0,
+        })
+    )
+
+
+def refresh_parent_summaries(
+    session: Session,
+    *,
+    author_ids: Iterable[int | None] = (),
+    series_ids: Iterable[int | None] = (),
+) -> None:
+    """Recompute author and series summary counters/names for affected IDs."""
+    a_ids = {aid for aid in author_ids if aid is not None}
+    s_ids = {sid for sid in series_ids if sid is not None}
+    if a_ids:
+        update_summary(
+            session,
+            models.Author,
+            C.COL_AUTHOR_ID,
+            a_ids,
+            extra_columns=[
+                func.max(models.Novel.author_name).label(C.COL_AUTHOR_NAME),
+            ],
+        )
+    if s_ids:
+        update_summary(
+            session,
+            models.Series,
+            C.COL_SERIES_ID,
+            s_ids,
+            extra_columns=[
+                func.max(models.Novel.series_name).label(C.COL_SERIES_NAME),
+                func.max(models.Novel.author_id).label(C.COL_AUTHOR_ID),
+            ],
+        )
 
 
 class BaseRepository:
@@ -157,26 +163,9 @@ class BaseRepository:
     def __init__(self, session: Session):
         self.session = session
 
-    def get_by_id(self, model_class: type[ModelType], item_id: Any) -> Any:
-        return self.session.get(model_class, item_id)
-
-    def get_all(
-        self, model_class: type[ModelType], limit: int = 100, offset: int = 0
-    ) -> list[Any]:
-        stmt = select(model_class).limit(limit).offset(offset)
-        return list(self.session.execute(stmt).scalars().all())
-
     def count(self, model_class: type[ModelType]) -> int:
         stmt = select(func.count()).select_from(model_class)
         return self.session.execute(stmt).scalar()
-
-    def get_summary_item(
-        self, model_class: type[ModelType], item_id: int
-    ) -> dict | None:
-        pk_col = list(model_class.__mapper__.primary_key)[0]
-        stmt = select(model_class).where(pk_col == item_id)
-        result = self.session.execute(stmt).scalar_one_or_none()
-        return model_to_dict(result) if result else None
 
     # -- shared CRUD helpers (used by token/task/tag/search_history) ----------
 
@@ -202,36 +191,39 @@ class BaseRepository:
         if obj is None:
             return False
         self.session.delete(obj)
+        self.session.flush()
         return True
 
     def _reorder(
         self, model_class: type[ModelType], sort_field: str, ids: list[int]
     ) -> int:
-        """Assign sort indices 0..n-1 to the rows in *ids* order.
+        """Assign sort indices 0..n-1 with the listed *ids* placed first.
 
-        Afterwards every row of the table gets a dense re-index (rows not
-        listed keep their relative order), so no duplicate / gapped
-        sort_index values can accumulate.  Returns the number of listed
-        rows that were actually found and updated.
+        Loads all rows in a single query, places valid *ids* in caller order
+        (skipping duplicates), keeps remaining rows in their existing
+        ``(sort_field, id)`` order, and assigns dense indices. Returns the
+        number of listed rows that were found.
         """
-        matched = 0
-        for idx, obj_id in enumerate(ids):
-            obj = self.session.get(model_class, obj_id)
-            if obj is not None:
-                setattr(obj, sort_field, idx)
-                matched += 1
-
-        # Flush so the dense re-index below reads the NEW values (the
-        # SELECT would otherwise order by the stale pre-update indices).
-        self.session.flush()
-
-        # Dense re-index: keep the (new) order, close any gaps left by
-        # rows that kept stale indices.
-        remaining = self.session.execute(
+        rows = self.session.execute(
             select(model_class).order_by(
                 getattr(model_class, sort_field), model_class.id
             )
         ).scalars().all()
-        for idx, obj in enumerate(remaining):
+        by_id = {obj.id: obj for obj in rows}
+        ordered: list[Any] = []
+        seen: set[int] = set()
+        matched = 0
+        for obj_id in ids:
+            if obj_id in seen:
+                continue
+            seen.add(obj_id)
+            obj = by_id.get(obj_id)
+            if obj is not None:
+                ordered.append(obj)
+                matched += 1
+        for obj in rows:
+            if obj.id not in seen:
+                ordered.append(obj)
+        for idx, obj in enumerate(ordered):
             setattr(obj, sort_field, idx)
         return matched

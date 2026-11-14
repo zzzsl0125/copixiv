@@ -1,13 +1,13 @@
 """System API endpoints."""
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from copixiv.core.services import EXCLUDE_BLOCKED_SETTING_KEY
 from copixiv.db.uow import SqlUnitOfWork
-from copixiv.deps import get_app_config, get_uow, get_write_uow
+from copixiv.db.write_lock import run_write_transaction_sync
+from copixiv.deps import get_app_config, get_uow
 from copixiv.features.system.repo import SQLAlchemySettingRepository
-
 
 # ---------------------------------------------------------------------------
 # System config schemas — carried with the feature (S1).
@@ -49,18 +49,22 @@ def get_system_config(
     app_config=Depends(get_app_config),
     uow: SqlUnitOfWork = Depends(get_uow),
 ):
-    return _config_response(uow, app_config)
+    with uow.begin():
+        return _config_response(uow, app_config)
 
 
 @router.put("/config", response_model=SystemConfigResponse)
 def update_system_config(
     data: SystemConfigUpdate,
     app_config=Depends(get_app_config),
-    uow: SqlUnitOfWork = Depends(get_write_uow),
+    uow: SqlUnitOfWork = Depends(get_uow),
 ):
-    if data.exclude_blocked_tag_novels is not None:
-        SQLAlchemySettingRepository(uow.session).set_value(
-            EXCLUDE_BLOCKED_SETTING_KEY,
-            "true" if data.exclude_blocked_tag_novels else "false",
-        )
-    return _config_response(uow, app_config)
+    def _write(tx: SqlUnitOfWork):
+        if data.exclude_blocked_tag_novels is not None:
+            SQLAlchemySettingRepository(tx.session).set_value(
+                EXCLUDE_BLOCKED_SETTING_KEY,
+                "true" if data.exclude_blocked_tag_novels else "false",
+            )
+        return _config_response(tx, app_config)
+
+    return run_write_transaction_sync(uow, _write)

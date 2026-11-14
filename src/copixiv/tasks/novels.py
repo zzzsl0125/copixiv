@@ -17,19 +17,17 @@ from datetime import datetime, timedelta
 
 from pydantic import BaseModel
 
-from copixiv.features.authors.resolve_names import collect_author_names, writeback_author_names
-from copixiv.core.language import filter_chinese
 from copixiv.core.calendar import month_ranges
-from copixiv.features.novels.ingest import ingest
+from copixiv.core.language import filter_chinese
 from copixiv.core.models import TaskResult
 from copixiv.core.services import safe_get
 from copixiv.db.write_lock import read_transaction, run_write_transaction
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
+from copixiv.features.authors.resolve_names import collect_author_names, writeback_author_names
+from copixiv.features.novels.ingest import ingest
 from copixiv.log import logger
 
-from .kernel import TaskContext
-from .kernel import register
-
+from .kernel import TaskContext, register
 
 # ---------------------------------------------------------------------------
 # Argument models (JSON contract per task)
@@ -282,7 +280,7 @@ async def novel_follow(args: NovelFollowArgs, ctx: TaskContext) -> TaskResult:
 
     return TaskResult(
         summary=_batch_summary("关注更新", out),
-        new_novel_titles=out.titles,
+        new_novel_titles=out.new_titles,
         failed_ids=out.failed_ids,
     )
 
@@ -353,7 +351,7 @@ async def author_fetch(args: AuthorFetchArgs, ctx: TaskContext) -> TaskResult:
     label = name or f"#{args.author_id}"
     return TaskResult(
         summary=_batch_summary(f"作者 {label}", out),
-        new_novel_titles=out.titles,
+        new_novel_titles=out.new_titles,
         failed_ids=out.failed_ids,
     )
 
@@ -365,12 +363,15 @@ async def author_fetch(args: AuthorFetchArgs, ctx: TaskContext) -> TaskResult:
 )
 async def author_delete(args: AuthorDeleteArgs, ctx: TaskContext) -> TaskResult:
     """Delete an author and all their novels."""
-    await run_write_transaction(
+    paths = await run_write_transaction(
         ctx.uow,
         lambda uw: SQLAlchemyAuthorRepository(uw.session).delete_author_and_data(
             args.author_id
         ),
     )
+
+    for path in paths:
+        await asyncio.to_thread(ctx.file_storage.delete_novel_files, path)
 
     async with ctx.client.account_rule(
         force_follow=True
@@ -428,7 +429,7 @@ async def author_special_follow(ctx: TaskContext) -> TaskResult:
 
     return TaskResult(
         summary=_batch_summary("特别关注", out),
-        new_novel_titles=out.titles,
+        new_novel_titles=out.new_titles,
         failed_ids=out.failed_ids,
     )
 

@@ -4,10 +4,10 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, ConfigDict
 
 from copixiv.core.exceptions import NotFoundError, ValidationError
-from copixiv.deps import get_uow, get_write_uow
 from copixiv.db.uow import SqlUnitOfWork
+from copixiv.db.write_lock import run_write_transaction_sync
+from copixiv.deps import get_uow
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
-
 
 # ---------------------------------------------------------------------------
 # Tag alias schemas — carried with the feature (S1).
@@ -43,7 +43,8 @@ router = APIRouter()
 
 @router.get("/", response_model=list[TagAliasResponse])
 def get_tag_aliases(uow: SqlUnitOfWork = Depends(get_uow)):
-    return SQLAlchemyTagRepository(uow.session).get_aliases()
+    with uow.begin():
+        return SQLAlchemyTagRepository(uow.session).get_aliases()
 
 
 @router.get("/suggest", response_model=TagAliasSuggestListResponse)
@@ -60,20 +61,31 @@ def suggest_tag_aliases(
     前端只把它当不透明整数回传）。``target_tag=`` 模式只指名一个 target，
     没有「页」可续，因此忽略 ``offset`` 且 ``next_offset`` 恒为 0。
     """
-    return SQLAlchemyTagRepository(uow.session).suggest_aliases(limit=limit, offset=offset, target_tag=target_tag)
+    with uow.begin():
+        return SQLAlchemyTagRepository(uow.session).suggest_aliases(
+            limit=limit, offset=offset, target_tag=target_tag
+        )
 
 
 @router.post("/", response_model=TagAliasResponse)
-def create_tag_alias(data: TagAliasBase, uow: SqlUnitOfWork = Depends(get_write_uow)):
+def create_tag_alias(data: TagAliasBase, uow: SqlUnitOfWork = Depends(get_uow)):
     if data.source == data.target:
         raise ValidationError("原标签不能和目标标签相同")
-    alias = SQLAlchemyTagRepository(uow.session).create_alias(data.model_dump())
-    SQLAlchemyTagRepository(uow.session).apply_alias_retroactively(data.source, data.target)
-    return alias
+
+    def _write(tx: SqlUnitOfWork):
+        repo = SQLAlchemyTagRepository(tx.session)
+        alias = repo.create_alias(data.model_dump())
+        repo.apply_alias_retroactively(data.source, data.target)
+        return TagAliasResponse.model_validate(alias)
+
+    return run_write_transaction_sync(uow, _write)
 
 
 @router.delete("/{alias_id}")
-def delete_tag_alias(alias_id: int, uow: SqlUnitOfWork = Depends(get_write_uow)):
-    if not SQLAlchemyTagRepository(uow.session).delete_alias(alias_id):
-        raise NotFoundError(f"Tag alias {alias_id} not found")
-    return {"ok": True}
+def delete_tag_alias(alias_id: int, uow: SqlUnitOfWork = Depends(get_uow)):
+    def _write(tx: SqlUnitOfWork):
+        if not SQLAlchemyTagRepository(tx.session).delete_alias(alias_id):
+            raise NotFoundError(f"Tag alias {alias_id} not found")
+        return {"ok": True}
+
+    return run_write_transaction_sync(uow, _write)

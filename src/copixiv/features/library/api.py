@@ -54,14 +54,17 @@ from dataclasses import asdict
 from fastapi import APIRouter, Depends, File, Form, UploadFile
 
 from copixiv.core.exceptions import ValidationError
+
+# 正整数 pixiv author id 的校验与 400 文案**唯一所有者**是单本 PATCH 那个用例
+# （``0`` / 负数 / 非整数 / 布尔都拒）。这里直接调它，不抄第二份规则：两处文案
+# 一旦漂移，前端按 detail 提示的行为就会跟着分叉。
+from copixiv.core.ids import author_id as _author_id
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.deps import (
     get_file_storage,
     get_pixiv_client,
     get_uow,
-    get_write_uow,
 )
-from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 from copixiv.features.authors.resolve_names import lookup_author_profile
 from copixiv.features.library.ingest import (
     STATUS_CREATED,
@@ -70,10 +73,6 @@ from copixiv.features.library.ingest import (
     ingest_uploads,
 )
 from copixiv.features.library.schemas import UploadResponse, UploadResultItem
-# 正整数 pixiv author id 的校验与 400 文案**唯一所有者**是单本 PATCH 那个用例
-# （``0`` / 负数 / 非整数 / 布尔都拒）。这里直接调它，不抄第二份规则：两处文案
-# 一旦漂移，前端按 detail 提示的行为就会跟着分叉。
-from copixiv.core.ids import author_id as _author_id
 from copixiv.pixiv.client import PixivClient
 
 router = APIRouter()
@@ -119,9 +118,7 @@ async def upload_novels(
     # 旧行为），不是我们写的规则，所以别在这里加校验去改它的形态。
     author_id: int | None = Form(None),
     file_storage=Depends(get_file_storage),
-    # 顺序即语义：读事务（解析，可能一次网络）在写事务（拿咨询锁）之前。
     uow: SqlUnitOfWork = Depends(get_uow),
-    write_uow: SqlUnitOfWork = Depends(get_write_uow),
     client: PixivClient | None = Depends(get_pixiv_client),
 ) -> UploadResponse:
     """把本地 TXT / EPUB 收进库（「我的上传」）。
@@ -152,31 +149,24 @@ async def upload_novels(
         # 0 / 负数 / 布尔 → 400，文案来自 ``_author_id``（唯一所有者）。
         preset_author_id = _author_id(author_id)
 
-        # ---- 解析：读事务（可能一次 pixiv），整批一次 ----
-        # 本地表命中时这一步零网络（``lookup_author_profile`` 先查本地表）。
-        # 占位行（``author`` 有外键）放**解析之后**建：先建就是一个未提交的
-        # INSERT 陪着 HTTP 一起等，正是这条纪律要防的形状。
-        with uow.begin():
-            profile = await lookup_author_profile(
-                preset_author_id, session=uow.session, client=client,
-            )
-            SQLAlchemyAuthorRepository(uow.session).ensure_exists(
-                {preset_author_id}
-            )
+        profile = await lookup_author_profile(
+            preset_author_id, uow=uow, client=client,
+        )
         preset_author_name = profile.author_name
 
     # ---- 落库：写事务（咨询锁在里面），无网络 ----
-    # 占位行的写事务兜底在 ``ingest_uploads`` 里（它在取锁那一步一起做，见
-    # 那边的 ``prepared``）：本函数是那条约定的**实现者之一**，不是它的
-    # 所有者——同一个补写留在两处只会让人以为它需要两遍。
-    with write_uow.begin():
-        results = ingest_uploads(
-            write_uow.session,
+    from copixiv.db.write_lock import run_write_transaction
+
+    results = await run_write_transaction(
+        uow,
+        lambda tx: ingest_uploads(
+            tx.session,
             file_storage,
             payloads,
             preset_author_id=preset_author_id,
             preset_author_name=preset_author_name,
-        )
+        ),
+    )
 
     items = [UploadResultItem(**asdict(result)) for result in results]
     return UploadResponse(

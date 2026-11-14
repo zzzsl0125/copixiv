@@ -90,6 +90,14 @@ _CONTAINER_NS = "urn:oasis:names:tc:opendocument:xmlns:container"
 _OPF_NS = "http://www.idpf.org/2007/opf"
 _DC_NS = "http://purl.org/dc/elements/1.1/"
 
+# Safe XML parser: disable external entity resolution and network access
+# against untrusted uploaded EPUB files (XXE defense).
+_SAFE_XML_PARSER = etree.XMLParser(
+    resolve_entities=False,
+    no_network=True,
+    huge_tree=False,
+)
+
 
 class EpubReadError(ValueError):
     """EPUB 读不出来 / 没有正文（调用方按单条 ``failed`` 处理，不写任何库表）。"""
@@ -149,6 +157,8 @@ def read_epub(data: bytes) -> EpubContent:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             package = _read_package(archive)
             body = _extract_body(archive, package)
+    except EpubReadError:
+        raise
     except (zipfile.BadZipFile, zipfile.LargeZipFile, KeyError, OSError) as exc:
         # 预期的读取失败：畸形 / 损坏 / 结构不对的容器。
         logger.warning("EPUB 读取失败：{}: {}", type(exc).__name__, exc)
@@ -197,7 +207,7 @@ def _opf_path(container_xml: bytes) -> str:
     优先 ``media-type="application/oebps-package+xml"`` 的那一个；没有就退回
     第一个 ``rootfile``（现实里有书错标 media-type，读得出来比严格重要）。
     """
-    root = etree.fromstring(container_xml)
+    root = etree.fromstring(container_xml, parser=_SAFE_XML_PARSER)
     fallback = ""
     for rootfile in root.iter(f"{{{_CONTAINER_NS}}}rootfile"):
         full_path = (rootfile.get("full-path") or "").strip()
@@ -328,7 +338,7 @@ def _read_package(archive: zipfile.ZipFile) -> _Package:
     if not opf_path:
         raise EpubReadError(EPUB_INVALID_ERROR)
     opf_dir = posixpath.dirname(opf_path)
-    opf_root = etree.fromstring(archive.read(opf_path))
+    opf_root = etree.fromstring(archive.read(opf_path), parser=_SAFE_XML_PARSER)
     manifest = _manifest(opf_root, opf_dir)
     return _Package(
         spine=_spine_paths(opf_root, manifest),
@@ -352,7 +362,7 @@ def _extract_body(archive: zipfile.ZipFile, package: _Package) -> str:
 
 
 def _read_member(archive: zipfile.ZipFile, path: str) -> bytes:
-    """读一个成员，最多 _MAX_MEMBER_BYTES（解压炸弹在这里被截断）。
+    """读一个成员，超过 _MAX_MEMBER_BYTES 立即拒绝（防解压炸弹）。
 
     成员名在 OPF 里可能是百分号编码的，而在 zip 里是解码后的字面名（或反过来）
     —— 两种写法都试，第一次命中就用。都没有则抛 KeyError，由 :func:`read_epub`
@@ -362,7 +372,10 @@ def _read_member(archive: zipfile.ZipFile, path: str) -> bytes:
     for candidate in dict.fromkeys(candidates):
         try:
             with archive.open(candidate) as handle:
-                return handle.read(_MAX_MEMBER_BYTES)
+                chunk = handle.read(_MAX_MEMBER_BYTES + 1)
+                if len(chunk) > _MAX_MEMBER_BYTES:
+                    raise EpubReadError(EPUB_TOO_LARGE_ERROR)
+                return chunk
         except KeyError:
             continue
     raise KeyError(path)

@@ -51,8 +51,7 @@ from copixiv.db.write_lock import read_transaction
 from copixiv.features.failures.repo import FailedNovelRepository
 from copixiv.log import logger
 
-from ..kernel import TaskContext
-from ..kernel import register
+from ..kernel import TaskContext, register
 
 
 class RefetchMissingSourceArgs(BaseModel):

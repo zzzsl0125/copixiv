@@ -8,7 +8,8 @@ name ↔ id translation internally.
 from collections.abc import Sequence
 from typing import Any, NamedTuple
 
-from sqlalchemy import select, text as _text, update as _update, func
+from sqlalchemy import select
+from sqlalchemy import text as _text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -20,7 +21,6 @@ from copixiv.db.base import BaseRepository
 # （``novels/search.py`` 只 import sqlalchemy / 标准库，不 import 任何 feature
 # 模块），运行期不成环；另一条方向（``novels/repo.py`` 等 → 本模块）是既有的。
 from copixiv.features.novels.search import escape_like
-
 
 # =========================================================================
 # suggest_aliases — SQL 底座（迁移 0008：tag.search_lower + pg_bigm GIN）
@@ -250,8 +250,8 @@ class SQLAlchemyTagRepository(BaseRepository):
         ).all()
         return {t[0]: t[1] for t in rows}
 
-    def get_alias_map_sync(self) -> dict[str, str]:
-        """Return {source_tag_name: target_tag_name} for all aliases (sync)."""
+    def get_alias_map(self) -> dict[str, str]:
+        """Return {source_tag_name: target_tag_name} for all aliases."""
         rows = self.session.execute(
             select(
                 models.TagAlias.source,
@@ -266,9 +266,6 @@ class SQLAlchemyTagRepository(BaseRepository):
             id_to_name.get(src, str(src)): id_to_name.get(tgt, str(tgt))
             for src, tgt in rows
         }
-
-    def get_alias_map(self) -> dict[str, str]:
-        return self.get_alias_map_sync()
 
     def create_alias(self, alias_data: dict) -> dict:
         """Create a tag alias.  *alias_data* should have 'source' and 'target'
@@ -285,9 +282,33 @@ class SQLAlchemyTagRepository(BaseRepository):
 
         source_name = alias_data["source"]
         target_name = alias_data["target"]
+        if source_name == target_name:
+            raise ValidationError("Source and target tags cannot be the same")
 
         source_id = self._get_or_create_tag_id(source_name)
         target_id = self._get_or_create_tag_id(target_name)
+
+        existing_reverse = self.session.execute(
+            select(models.TagAlias.target).where(models.TagAlias.source == target_id)
+        ).scalar_one_or_none()
+        if existing_reverse is not None:
+            if existing_reverse == source_id:
+                raise ValidationError(
+                    f"Cannot create alias cycle between '{source_name}' and '{target_name}'"
+                )
+            raise ValidationError(
+                f"Target tag '{target_name}' is already aliased to another tag (multi-hop aliases are not supported)"
+            )
+
+        incoming_source = self.session.execute(
+            select(models.TagAlias.id)
+            .where(models.TagAlias.target == source_id)
+            .limit(1)
+        ).scalar_one_or_none()
+        if incoming_source is not None:
+            raise ValidationError(
+                f"Source tag '{source_name}' is already the target of another alias (multi-hop aliases are not supported)"
+            )
 
         alias = models.TagAlias(source=source_id, target=target_id)
         self.session.add(alias)
@@ -460,9 +481,19 @@ class SQLAlchemyTagRepository(BaseRepository):
             return 0
         self._get_or_create_tag_id(target)
 
+        from sqlalchemy import text as sa_text
+
         result = self.session.execute(
-            _update(models.Novel)
-            .where(models.Novel.tags.contains([source]))
-            .values(tags=func.array_replace(models.Novel.tags, source, target))
+            sa_text(
+                """
+                UPDATE novel
+                SET tags = ARRAY(
+                    SELECT DISTINCT x
+                    FROM unnest(array_replace(tags, :source, :target)) AS x
+                )
+                WHERE tags @> ARRAY[:source]::text[]
+                """
+            ),
+            {"source": source, "target": target},
         )
         return result.rowcount or 0

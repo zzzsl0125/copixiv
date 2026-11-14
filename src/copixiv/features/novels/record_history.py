@@ -19,12 +19,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from copixiv.db.uow import SqlUnitOfWork
 from copixiv.core.services import SearchConditions
-from copixiv.log import logger
+from copixiv.db.uow import SqlUnitOfWork
+from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 from copixiv.features.novels.history_repo import SQLAlchemySearchHistoryRepository
 from copixiv.features.novels.repo import SQLAlchemySeriesRepository
-from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
+from copixiv.log import logger
 
 
 def record_search_history(
@@ -62,20 +62,22 @@ def _record_in_transaction(uow: SqlUnitOfWork, conditions: SearchConditions) -> 
     with uow.begin():
         for qtype, value in conditions:
             try:
-                display_value = None
-                if qtype == "author_id" and value.isdigit():
-                    author = SQLAlchemyAuthorRepository(uow.session).get_by_id(int(value))
-                    if author:
-                        display_value = author.get("author_name")
-                elif qtype == "series_id" and value.isdigit():
-                    series = SQLAlchemySeriesRepository(uow.session).get_by_id(int(value))
-                    if series:
-                        display_value = series.get("series_name")
-                SQLAlchemySearchHistoryRepository(uow.session).add_or_update(
-                    qtype, value, display_value,
-                )
+                with uow.session.begin_nested():
+                    display_value = None
+                    if qtype == "author_id" and value.isdigit():
+                        author = SQLAlchemyAuthorRepository(uow.session).get_by_id(int(value))
+                        if author:
+                            display_value = author.get("author_name")
+                    elif qtype == "series_id" and value.isdigit():
+                        series = SQLAlchemySeriesRepository(uow.session).get_by_id(int(value))
+                        if series:
+                            display_value = series.get("series_name")
+                    SQLAlchemySearchHistoryRepository(uow.session).add_or_update(
+                        qtype, value, display_value,
+                    )
             except Exception:
-                # Per-item guard: skip the bad entry, keep the batch.
+                # Per-item guard: skip the bad entry, keep the batch (SAVEPOINT
+                # rolls back any pending ORM state added before the failure).
                 logger.exception(
                     "Failed to record one search-history entry (%s=%r)",
                     qtype, value,

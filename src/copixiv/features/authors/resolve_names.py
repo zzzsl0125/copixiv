@@ -26,12 +26,12 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
+from copixiv.core.services import safe_get
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.db.write_lock import read_transaction
-from copixiv.pixiv.client import PixivClient
-from copixiv.core.services import safe_get
-from copixiv.log import logger
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
+from copixiv.log import logger
+from copixiv.pixiv.client import PixivClient
 
 
 async def collect_author_names(
@@ -134,7 +134,8 @@ class AuthorProfile:
 async def lookup_author_profile(
     author_id: int,
     *,
-    session: Session,
+    uow: SqlUnitOfWork | None = None,
+    session: Session | None = None,
     client: PixivClient | None,
 ) -> AuthorProfile:
     """Resolve one author id → name, **read-only**, local table first.
@@ -148,7 +149,17 @@ async def lookup_author_profile(
     key is ``ensure_exists``'s job, and that belongs to the write path).  Never
     raises: an unreachable Pixiv degrades to ``source='unknown'``.
     """
-    known = SQLAlchemyAuthorRepository(session).get_names_by_ids({author_id})
+    if uow is not None:
+        known = await read_transaction(
+            uow,
+            lambda tx: SQLAlchemyAuthorRepository(tx.session).get_names_by_ids(
+                {author_id}
+            ),
+        )
+    elif session is not None:
+        known = SQLAlchemyAuthorRepository(session).get_names_by_ids({author_id})
+    else:
+        raise ValueError("lookup_author_profile requires uow or session")
     if author_id in known:
         return AuthorProfile(author_id, known[author_id], "local")
 

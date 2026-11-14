@@ -22,11 +22,11 @@ import requests
 
 from copixiv.core import formats
 from copixiv.core.draft import NovelDraft
+from copixiv.log import logger
 from copixiv.pixiv.http import create_image_session, pick_image_url
 from copixiv.storage import assets
 from copixiv.storage.atomic import atomic_write
 from copixiv.storage.epub import state
-from copixiv.log import logger
 
 
 def _is_decodable_image(path: Path) -> bool:
@@ -45,6 +45,17 @@ def _is_decodable_image(path: Path) -> bool:
         return True
     except (UnidentifiedImageError, OSError, ValueError):
         return False
+
+
+def _existing_epub_finished(epub_path: Path, needs_epub: bool | None) -> bool:
+    """Return True if *epub_path* already satisfies *needs_epub* (blocking zip I/O)."""
+    if not epub_path.exists() or not state.is_readable_container(epub_path):
+        return False
+    if needs_epub is False:
+        return True
+    if needs_epub is None:
+        return not state.has_raw_markers(epub_path)
+    return bool(needs_epub is True and state.is_complete(epub_path))
 
 
 class ImageDownloader:
@@ -203,40 +214,11 @@ class ImageDownloader:
         needs_epub = state.needs_epub(novel.content)
 
         epub_path = formats.sibling_path(Path(path_str), formats.EPUB)
-        if epub_path.exists() and not force and state.is_readable_container(epub_path):
-            if needs_epub is False:
-                # Nothing to embed and a readable file is already there:
-                # genuinely finished.  Reporting ``done`` here is what keeps a
-                # re-download of an image-less novel from downgrading an
-                # existing DONE to NO_IMAGES merely because the fresh body
-                # carries no marker.
-                #
-                # Deliberately *not* ``state.is_complete``: a body with no
-                # placeholders can never need an EPUB, so a pre-existing file
-                # (even an image-less one from an earlier run) is the final
-                # state.  Re-judging it here would downgrade a legitimately
-                # DONE row — the exact regression this branch exists to stop.
-                self._record_outcome(novel_id, "done")
-                return
-            if needs_epub is None and not state.has_raw_markers(epub_path):
-                # No body to judge: the only observable defect is an unresolved
-                # marker (a file we know the reader would see as raw text).
-                # Absent a body, "no images embedded" is not a verdict — a
-                # plain-text novel built without pictures is legitimately done.
-                self._record_outcome(novel_id, "done")
-                return
-            if needs_epub is True and state.is_complete(epub_path):
-                # Marker-bearing text, finished file (markers resolved *and*
-                # illustrations embedded): done.  Asking the same predicate the
-                # reconciler uses is the point of ``state`` — the old
-                # marker-only check called a "缺图框" EPUB done while
-                # ``check_epub`` kept it PENDING, so two guards disagreed about
-                # the very same file.
-                self._record_outcome(novel_id, "done")
-                return
-            # File exists but is not finished for the body we have (raw markers,
-            # or needed images that never landed) — fall through and rebuild it
-            # instead of reporting a finished novel that isn't.
+        if not force and await asyncio.to_thread(
+            _existing_epub_finished, epub_path, needs_epub
+        ):
+            self._record_outcome(novel_id, "done")
+            return
 
         if not novel.images and not novel.illusts and needs_epub is not True:
             # No downloadable asset in this API payload and the body needs no
@@ -263,7 +245,8 @@ class ImageDownloader:
                 self._in_flight.discard(novel_id)
             raise
 
-        self._futures.append((novel_id, future))
+        with self._in_flight_lock:
+            self._futures.append((novel_id, future))
         future.add_done_callback(lambda _f, nid=novel_id: self._release(nid))
 
     def _release(self, novel_id: int) -> None:

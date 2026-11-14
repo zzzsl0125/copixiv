@@ -11,9 +11,8 @@ The rule this module encodes:
 
 * the data layer is **plain synchronous Python**;
 * the async world (FastAPI endpoints, task coroutines) uses it through
-  exactly two seams — :func:`copixiv.deps.get_uow` /
-  :func:`copixiv.deps.get_write_uow` for requests (FastAPI runs sync
-  ``yield`` dependencies in the very thread that runs the endpoint) and
+  ``get_uow`` for requests (endpoints open explicit ``with uow.begin():`` or
+  use :func:`copixiv.db.write_lock.read_transaction` / ``run_write_transaction``) and
   :func:`copixiv.db.write_lock.run_write_transaction` for tasks
   (``asyncio.to_thread`` once around the whole transaction).
 
@@ -51,6 +50,7 @@ class SqlUnitOfWork:
     def __init__(self, session_factory):
         self._session_factory = session_factory
         self._session: Session | None = None
+        self._in_tx: bool = False
 
     @property
     def session_factory(self):
@@ -59,6 +59,8 @@ class SqlUnitOfWork:
 
     @property
     def session(self) -> Session:
+        if not self._in_tx:
+            raise RuntimeError("Session accessed outside uow.begin()")
         if self._session is None:
             self._session = self._session_factory()
         return self._session
@@ -74,6 +76,9 @@ class SqlUnitOfWork:
         KeyboardInterrupt or a generator shutdown on the way out still
         rolls back explicitly instead of leaving the transaction open.
         """
+        if self._in_tx or self._session is not None:
+            raise RuntimeError("Nested SqlUnitOfWork.begin() is not allowed")
+        self._in_tx = True
         try:
             yield
         except BaseException:
@@ -88,6 +93,7 @@ class SqlUnitOfWork:
         else:
             self.commit()
         finally:
+            self._in_tx = False
             if self._session is not None:
                 self._session.close()
                 self._session = None

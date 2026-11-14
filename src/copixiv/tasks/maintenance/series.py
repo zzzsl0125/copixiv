@@ -16,10 +16,8 @@ from copixiv.features.novels.repo import (
 )
 from copixiv.log import logger
 
+from ..kernel import TaskContext, register
 from ._cursor import _read_cursor, _write_cursor
-from ..kernel import TaskContext
-from ..kernel import register
-
 
 # ---------------------------------------------------------------------------
 # fix_series_index —— 章节号 / 系列 id 修复（见任务 docstring）
@@ -378,20 +376,19 @@ async def fix_series_index(args: FixSeriesIndexArgs, ctx: TaskContext) -> TaskRe
             ),
         )
 
-        fills: list = []      # 号为空 → 直接补（不需要 force_update）
-        fixes: list = []      # 号是错值 → 必须 force_update 才写得进去
+        fills: dict[int, int] = {}
+        fixes: dict[int, int] = {}
         for columns in stored:
             novel_id = int(columns["id"])
             want = authority.get(novel_id)
             if want is None:
                 continue            # 名册里没有这一本（受限 / 未收录）→ 不动它
-            draft = _draft_from_row(columns, series_index=want)
-            if not draft.author_id:
+            if not columns.get("author_id"):
                 continue            # 连作者都没有：写不进去（见 _write_glue_single）
             if columns["series_index"] is None:
-                fills.append(draft)
+                fills[novel_id] = want
             elif int(columns["series_index"]) != want:
-                fixes.append(draft)
+                fixes[novel_id] = want
 
         glue: list = []
         glued: set[int] = set()
@@ -412,11 +409,13 @@ async def fix_series_index(args: FixSeriesIndexArgs, ctx: TaskContext) -> TaskRe
             glued.add(novel_id)
 
         if fills or fixes or glue:
+            index_updates = {**fills, **fixes}
+
             def _write(uw) -> None:
-                if fills:
-                    batch_upsert(fills, uw)
-                if fixes:
-                    batch_upsert(fixes, uw, force_update=["series_index"])
+                if index_updates:
+                    SQLAlchemySeriesRepository(
+                        uw.session
+                    ).update_series_indices(index_updates)
                 if glue:
                     batch_upsert(
                         glue, uw,
@@ -496,20 +495,13 @@ async def fix_series_index(args: FixSeriesIndexArgs, ctx: TaskContext) -> TaskRe
         )
         return novel_id in glued, filled, fixed
 
-    async def _clear_orphan_index(
-        columns: dict, author_id: int | None = None,
-    ) -> bool:
+    async def _clear_orphan_index(columns: dict) -> bool:
         """作品已不在任何系列 → 清章节号（``series_name`` 保留不动）。"""
-        author_id = columns.get("author_id") or author_id
-        if not author_id:
-            return False                  # 连作者都缺 → 什么都不改（下轮重试）
         await run_write_transaction(
             uow,
-            lambda uw: batch_upsert(
-                [_draft_from_row(columns, author_id=author_id, series_index=None)],
-                uw,
-                force_update=["series_index"],
-            ),
+            lambda uw: SQLAlchemySeriesRepository(
+                uw.session
+            ).update_series_indices({int(columns["id"]): None}),
         )
         return True
 
@@ -588,7 +580,7 @@ async def fix_series_index(args: FixSeriesIndexArgs, ctx: TaskContext) -> TaskRe
             stats["fixed"] += fixed
             stats["glued"] += 1 if ok else 0
         else:
-            ok = await _clear_orphan_index(columns, author_id)
+            ok = await _clear_orphan_index(columns)
             stats["cleared"] += 1 if ok else 0
         if not ok:
             stats["failed"] += 1

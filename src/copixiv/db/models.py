@@ -35,6 +35,8 @@ from sqlalchemy import (
     Integer,
     Text,
     UniqueConstraint,
+)
+from sqlalchemy import (
     text as sa_text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
@@ -54,13 +56,6 @@ Base = declarative_base()
 class TagPreferenceORM(str, enum.Enum):
     favourite = "favourite"
     blocked = "blocked"
-
-
-class TaskStatusORM(str, enum.Enum):
-    PENDING = "pending"
-    RUNNING = "running"
-    SUCCESS = "success"
-    FAILED = "failed"
 
 
 # Reserved-word column names: SQLAlchemy auto-quotes ``like`` but ``view`` /
@@ -286,7 +281,7 @@ class TagPreference(Base):
     __tablename__ = C.TABLE_TAG_PREFERENCE
 
     id = Column(BigInteger, Identity(), primary_key=True)
-    tag = Column(Text, unique=True, index=True, nullable=False)
+    tag = Column(Text, unique=True, nullable=False)
     preference = Column(Text, nullable=False)
     sort_index = Column(Integer, default=0, nullable=False)
 
@@ -316,7 +311,6 @@ class TagAlias(Base):
         BigInteger,
         ForeignKey(f"{C.TABLE_TAG}.id"),
         unique=True,
-        index=True,
         nullable=False,
     )
     target = Column(
@@ -363,6 +357,19 @@ class TaskHistory(Base):
     progress = Column(JSONB)
     # No dedup index: repeated enqueues for the same ``task_func`` insert
     # separate pending rows and queue up (task ordering is the worker's job).
+
+    __table_args__ = (
+        Index(
+            "ix_task_history_pending",
+            "id",
+            postgresql_where=sa_text("status = 'pending'"),
+        ),
+        Index(
+            "ix_task_history_active_func",
+            "task_func",
+            postgresql_where=sa_text("status IN ('pending', 'running')"),
+        ),
+    )
 
 
 class Token(Base):

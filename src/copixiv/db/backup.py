@@ -12,6 +12,7 @@ import importlib.util
 import os
 import shutil
 import subprocess
+import sys
 from datetime import date
 from pathlib import Path
 
@@ -40,7 +41,7 @@ def _pg_bin(name: str) -> str:
         Path(__file__).resolve().parent.parent.parent.parent
         / ".venv"
         / "lib"
-        / "python3.12"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
         / "site-packages"
         / "pgserver"
         / "pginstall"
@@ -106,20 +107,26 @@ def backup_database(
 
     this_week = date.today().strftime("%G-W%V")
     dest = backup_path / f"{this_week}.dump"
+    tmp_dest = dest.with_suffix(".dump.tmp")
 
-    if dest.exists():
-        dest.unlink()
+    if tmp_dest.exists():
+        tmp_dest.unlink()
 
     args, env = _connection_args(database_url)
-    cmd = [_pg_bin("pg_dump"), "--format=custom", "--file", str(dest), *args]
+    cmd = [_pg_bin("pg_dump"), "--format=custom", "--file", str(tmp_dest), *args]
 
     merged_env = {**os.environ, **env}
     try:
         subprocess.run(cmd, check=True, env=merged_env)
+        tmp_dest.replace(dest)
     except subprocess.CalledProcessError as e:
+        tmp_dest.unlink(missing_ok=True)
         raise RuntimeError(
             f"pg_dump failed for {database_url!r}: {e}"
         ) from e
+    except BaseException:
+        tmp_dest.unlink(missing_ok=True)
+        raise
 
     return str(dest)
 

@@ -11,12 +11,15 @@ from datetime import datetime
 from typing import Literal
 
 from pydantic import (
-    BaseModel, ConfigDict, Field, computed_field, field_validator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    computed_field,
+    field_validator,
 )
 
 from copixiv.core.models import EpubStatus
 from copixiv.features.novels import field_policy
-
 
 # ---------------------------------------------------------------------------
 # Novels
@@ -349,7 +352,7 @@ class SortIdsRequest(BaseModel):
     """Order an explicit id list by a novel column — 「查看已选」排序."""
 
     novel_ids: list[int]
-    order_by: Literal["id", "like", "text"]
+    order_by: Literal["id", "like", "view", "text", "create_time"]
     order_direction: Literal["ASC", "DESC"] = "DESC"
 
 

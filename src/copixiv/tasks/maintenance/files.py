@@ -63,8 +63,7 @@ from copixiv.db.write_lock import read_transaction
 from copixiv.log import logger
 from copixiv.storage import assets
 
-from ..kernel import TaskContext
-from ..kernel import register
+from ..kernel import TaskContext, register
 
 
 class PruneOrphanFilesArgs(BaseModel):

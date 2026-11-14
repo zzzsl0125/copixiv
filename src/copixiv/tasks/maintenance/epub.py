@@ -8,26 +8,23 @@ Everything here except the task itself runs in a worker thread
 (:func:`asyncio.to_thread`) — pure file I/O and decisions, no DB access.
 """
 
-from pathlib import Path
 import asyncio
 import time
+from pathlib import Path
 
 from copixiv.core import formats
-from copixiv.core.models import EpubStatus
-from copixiv.core.models import TaskResult
+from copixiv.core.models import EpubStatus, TaskResult
 from copixiv.core.services import (
     MARKER_OVERLAP,
     has_image_placeholders_bytes,
 )
 from copixiv.db.write_lock import read_transaction, run_write_transaction
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
+from copixiv.log import logger
 from copixiv.storage import assets
 from copixiv.storage.epub import state
-from copixiv.log import logger
 
-from ._cursor import _CURSOR_KEY, _read_cursor, _write_cursor
-from ..kernel import TaskContext
-from ..kernel import register
+from ..kernel import TaskContext, register
 
 
 @register("check_epub", description="核对 EPUB 状态与磁盘文件是否一致")
@@ -112,6 +109,7 @@ async def check_epub(ctx: TaskContext) -> TaskResult:
     repeats work, never stranding rows — the sweep is idempotent).
     """
     from sqlalchemy import select as _select
+
     from copixiv.db import models
 
     uow = ctx.uow
@@ -146,28 +144,19 @@ async def check_epub(ctx: TaskContext) -> TaskResult:
     # holding one transaction open for the whole file-I/O pass is exactly what
     # this task should not do.  Coverage is unchanged — *every* row is still
     # examined every run, which is the property the cursor removal bought.
-    def _read_page(uw, after_id: int) -> list:
+    def _read_page(uw, after_id: int | None) -> list:
+        stmt = _select(
+            models.Novel.id, models.Novel.path, models.Novel.has_epub
+        )
+        if after_id is not None:
+            stmt = stmt.where(models.Novel.id > after_id)
         return uw.session.execute(
-            _select(
-                models.Novel.id, models.Novel.path, models.Novel.has_epub
-            )
-            .where(models.Novel.id > after_id)
-            .order_by(models.Novel.id)
-            .limit(_SWEEP_READ_PAGE)
+            stmt.order_by(models.Novel.id).limit(_SWEEP_READ_PAGE)
         ).fetchall()
 
-    async def _page(after_id: int) -> list:
+    async def _page(after_id: int | None) -> list:
         # One read transaction (one thread hop) per keyset page.
         return await read_transaction(uow, lambda uw: _read_page(uw, after_id))
-
-    # A leftover cursor from the old design would make the next reader think
-    # part of the table was already done; clear it once, then forget it.
-    if await _read_cursor(uow):
-        await _write_cursor(uow, 0)
-
-    if not await _page(0):
-        return TaskResult(summary="EPUB 状态检查: 无需修复（空库）")
-
 
     # The sweep is file-I/O bound and must not monopolise the event loop: on
     # 2026-09-14 a single run left every API endpoint timing out while it held
@@ -225,7 +214,7 @@ async def check_epub(ctx: TaskContext) -> TaskResult:
     # examined so the summary can still say "全表 N 行".
     examined = 0
     seen = 0
-    after_id = 0
+    after_id: int | None = None
     while True:
         rows = await _page(after_id)
         if not rows:
@@ -248,6 +237,9 @@ async def check_epub(ctx: TaskContext) -> TaskResult:
             await _flush()
             # Explicit yield: give the HTTP handlers a turn between chunks.
             await asyncio.sleep(0)
+
+    if not seen:
+        return TaskResult(summary="EPUB 状态检查: 无需修复（空库）")
 
     logger.info(
         f"check_epub: 本轮 {seen} 行（{time.monotonic() - started:.0f}s），"
@@ -280,14 +272,6 @@ async def check_epub(ctx: TaskContext) -> TaskResult:
         )
     )
 
-
-
-_CURSOR_KEY = "check_epub.cursor"
-
-# Retained only so the one-time cursor cleanup in ``check_epub`` can clear a
-# ``setting`` row left behind by the old bounded-slice design.  Nothing reads
-# the cursor to decide what to scan any more — see the task docstring.
-_LEGACY_CURSOR_KEY = _CURSOR_KEY
 
 
 def _sweep(

@@ -128,6 +128,18 @@ def has_illustration_assets(directory: Path, novel_id: int | str) -> bool:
     return False
 
 
+def iter_novel_asset_files(directory: Path, novel_id: int | str) -> list[Path]:
+    """返回目录下属于 *novel_id* 的全部资产文件（封面 / 内嵌图 / 关联插图）。"""
+    nid_str = str(novel_id)
+    if not nid_str.isdigit():
+        return []
+    matched: list[Path] = []
+    for path in directory.glob(f"{nid_str}_*"):
+        if _ASSET_STEM_RE.match(path.stem) or _COVER_STEM_RE.match(path.stem):
+            matched.append(path)
+    return matched
+
+
 __all__ = [
     "COVER",
     "ILLUSTRATION",
@@ -138,6 +150,7 @@ __all__ = [
     "find_cover",
     "has_illustration_assets",
     "iter_assets",
+    "iter_novel_asset_files",
     "novel_id_of",
     "scan_assets",
 ]

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import QueuePool
 
 
@@ -49,7 +49,7 @@ def create_database_engine(
         # hits a lock it cannot acquire.  MVCC means ordinary writes don't
         # need the old SQLite single-writer serialization; this is just a
         # safety valve for the rare long-running lock.
-        cursor.execute("SET lock_timeout = '60s'")
+        cursor.execute("SET lock_timeout = '5s'")
         cursor.close()
 
     return engine
@@ -81,8 +81,8 @@ def run_migrations(database_url: str, project_root: str | None = None) -> None:
         project_root: Root directory containing alembic.ini.  Defaults to
             searching upward from this file's location.
     """
-    from alembic.config import Config
     from alembic import command
+    from alembic.config import Config
 
     if project_root is None:
         p = Path(__file__).resolve().parent
@@ -103,5 +103,5 @@ def init_database(engine: Engine, database_url: str | None = None) -> None:
     parameter is retained for backwards compatibility — the migration runner
     uses its own engine internally via *database_url*.
     """
-    url = database_url or str(engine.url)
+    url = database_url or engine.url.render_as_string(hide_password=False)
     run_migrations(url)

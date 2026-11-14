@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from copixiv.core.exceptions import NotFoundError, ValidationError
+from copixiv.core.services import QuerySpec, parse_search_keyword
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
 from copixiv.storage.file_storage import FileStorage
-from copixiv.core.services import parse_search_keyword
-from copixiv.core.services import QuerySpec
 
 # Hard safety cap per SYNCHRONOUS batch operation — one HTTP request must
 # never walk the whole library.  The frontend prompts the user to narrow
@@ -128,12 +127,17 @@ class BatchDeleteUseCase:
     call after the rows are already gone.
     """
 
-    def __init__(self, novel_repo: SQLAlchemyNovelRepository, file_storage: FileStorage):
-        self._repo = novel_repo
+    def __init__(self, uow, file_storage: FileStorage):
+        self._uow = uow
         self._file_storage = file_storage
 
     def execute(self, novel_ids: list[int]) -> int:
-        paths = self._repo.delete_many(novel_ids)
+        from copixiv.db.write_lock import run_write_transaction_sync
+
+        paths = run_write_transaction_sync(
+            self._uow,
+            lambda tx: SQLAlchemyNovelRepository(tx.session).delete_many(novel_ids),
+        )
         for path in paths:
             if path:
                 self._file_storage.delete_novel_files(path)
@@ -154,7 +158,15 @@ class BatchTagUseCase:
     def execute(
         self, operation: str, novel_ids: list[int], tags: list[str],
     ) -> int:
-        tag_set = {t.strip() for t in tags if t and t.strip()}
+        from copixiv.core.services import MAX_TAG_LENGTH, parse_tags
+
+        cleaned_tags = parse_tags(list(tags))
+        for tag in cleaned_tags:
+            if len(tag) > MAX_TAG_LENGTH:
+                raise ValidationError(
+                    f"标签过长（单个最多 {MAX_TAG_LENGTH} 字）：{tag[:20]}…"
+                )
+        tag_set = set(cleaned_tags)
         if not tag_set:
             raise ValidationError("请至少输入一个标签")
         if len(tag_set) > BATCH_MAX_TAGS:

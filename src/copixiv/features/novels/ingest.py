@@ -20,22 +20,18 @@ adapters pass the fields they need (``session_factory``, ``client``,
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime
-
-from copixiv.db.uow import SqlUnitOfWork
-from copixiv.db.write_lock import read_transaction, run_write_transaction
 
 from copixiv.core.draft import NovelDraft, NovelInfoLike, build_from_novel_info
 from copixiv.core.models import EpubStatus
+from copixiv.db.uow import SqlUnitOfWork
+from copixiv.db.write_lock import read_transaction, run_write_transaction
+from copixiv.features.authors.resolve_names import collect_author_names, writeback_author_names
+from copixiv.features.failures.repo import FailedNovelRepository
 from copixiv.features.novels.download_novel import fetch_novel_and_assets
 from copixiv.features.novels.persist import persist_novels
-from copixiv.features.novels.series_index import resolve_series_indices
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
-from copixiv.features.failures.repo import FailedNovelRepository
-from copixiv.features.authors.resolve_names import collect_author_names, writeback_author_names
-
+from copixiv.features.novels.series_index import resolve_series_indices
 from copixiv.log import logger
-
 
 # ---------------------------------------------------------------------------
 # Batch upsert
@@ -224,7 +220,7 @@ def _upsert_batch(
     failed_records: list[tuple[int, str]],
     failed_repo,
     titles: dict[int, str],
-) -> tuple[list[str], int]:
+) -> tuple[list[str], list[str], int]:
     """Persist phase（只写）：在调用方的短写事务里跑。
 
     记录失败、upsert 已有元数据与刚下载的条目、清掉成功项的失败标记 —— 全部
@@ -238,6 +234,7 @@ def _upsert_batch(
     """
     new_count = 0
     titles_out: list[str] = []
+    new_titles_out: list[str] = []
 
     if existing_meta:
         new_count += batch_upsert(existing_meta, uow)
@@ -245,6 +242,9 @@ def _upsert_batch(
 
     if downloaded:
         success_ids = {d.id for d in downloaded}
+        already_in_db = SQLAlchemyNovelRepository(uow.session).get_existing_ids(
+            success_ids
+        )
         # ``path`` is fill-once by default ("non-empty wins"), because it is the
         # anchor every reader resolves and rewriting it would orphan the file
         # that is already there.  The download path is the one writer allowed to
@@ -267,12 +267,16 @@ def _upsert_batch(
         failed_ids = {nid for nid, _ in failed_records}
         failed_repo.forget_many(success_ids - failed_ids)
         titles_out = [d.title for d in downloaded if d.title]
+        new_titles_out = [
+            d.title for d in downloaded
+            if d.title and d.id not in already_in_db
+        ]
         logger.info(f"_upsert_batch: {len(downloaded)} novels downloaded and upserted")
 
     for nid, reason in failed_records:
         failed_repo.record(nid, "download", reason, title=titles.get(nid))
 
-    return titles_out, new_count
+    return titles_out, new_titles_out, new_count
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +313,7 @@ class IngestOutcome:
     """
 
     titles: list[str] = field(default_factory=list)
+    new_titles: list[str] = field(default_factory=list)
     new_author_ids: set[int] = field(default_factory=set)
     failed: list[tuple[int, str]] = field(default_factory=list)
     new_count: int = 0
@@ -547,7 +552,7 @@ async def ingest(
 
     names = await _collect_names(downloaded, uow, client)
 
-    titles, new_count = await run_write_transaction(
+    titles, new_titles, new_count = await run_write_transaction(
         uow,
         lambda write_uow: _persist_round(
             write_uow,
@@ -562,6 +567,7 @@ async def ingest(
 
     return IngestOutcome(
         titles=titles,
+        new_titles=new_titles,
         new_author_ids=names.author_ids,
         failed=failed_records + assets.failures,
         new_count=new_count,
@@ -600,7 +606,7 @@ def _persist_round(
     titles: dict[int, str],
     done_ids: list[int],
     mapping: dict[int, str],
-) -> tuple[list[str], int]:
+) -> tuple[list[str], list[str], int]:
     """Persist phase —— 一个短写事务里的全部写操作，**没有全局写锁**。
 
     ``run_write_transaction`` 在 LockNotAvailable（SQLSTATE 55P03）上退避重试，
@@ -614,7 +620,7 @@ def _persist_round(
     COMMIT）跑在同一个 worker 线程里，绝不能是 ``async def``——anyio 不会 await
     协程，只会把它当普通返回值，写入就静默丢了。
     """
-    titles_out, new_count = _upsert_batch(
+    titles_out, new_titles_out, new_count = _upsert_batch(
         existing_meta, downloaded, uow,
         failed_records=failed_records,
         failed_repo=FailedNovelRepository(uow.session),
@@ -629,4 +635,4 @@ def _persist_round(
         logger.info(f"_persist: {len(done_ids)} novels marked EPUB DONE")
     if mapping:
         writeback_author_names(mapping, uow)
-    return titles_out, new_count
+    return titles_out, new_titles_out, new_count

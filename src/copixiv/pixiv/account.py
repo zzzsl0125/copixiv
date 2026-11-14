@@ -7,8 +7,6 @@ from enum import Enum
 
 from pixivpy3 import AppPixivAPI, PixivError
 
-from copixiv.core.services import safe_get
-
 from copixiv.log import logger
 
 from .errors import (
@@ -235,6 +233,13 @@ class PixivAccount:
         # Per-account rate limiting: ensure min_interval since the
         # *last completed* API call on this account (not since select).
         async with self._req_lock:
+            # Re-check cooldown inside the lock in case another coroutine hit
+            # a 429 while we were queued on _req_lock.
+            if self.in_cooldown:
+                wait = self.cooldown_remaining
+                logger.warning(f"{self} 处于冷却中，等待 {wait:.0f} 秒")
+                await asyncio.sleep(wait)
+
             elapsed = time.monotonic() - self._last_call_end
             if elapsed < self.min_interval:
                 await asyncio.sleep(self.min_interval - elapsed)
@@ -283,7 +288,7 @@ class PixivAccount:
                 # transient 5xx (``_is_permanent``).  Dropping it here made
                 # every 4xx look retryable.
                 raise PixivApiError(str(e), status_code=e.status_code) from e
-            except (RateLimitError, AccountInvalidError, PixivApiError) as e:
+            except (RateLimitError, AccountInvalidError, PixivApiError):
                 # Already classified (raised by the error-body fallback
                 # inside the try) — never re-classify.
                 raise

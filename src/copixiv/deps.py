@@ -1,19 +1,12 @@
-"""FastAPI dependencies — session lifecycle, unit of work, query parsing,
+"""FastAPI dependencies — session factory, unit of work, query parsing,
 and typed access to the application services on ``app.state``.
 
 The ``app.state`` bag is populated by the container's lifespan; it is
 read ONLY here, so endpoints depend on typed functions instead of
 string-keyed state attributes.
-
-The two UoW dependencies are deliberately **synchronous generators**.
-FastAPI runs a sync ``yield`` dependency in the same worker thread as the
-node that declares it, so the session is created, used and closed on one
-thread — the requirement SQLAlchemy ``Session`` imposes.  Declaring them
-``async`` would put the blocking session work back on the event loop.
 """
 
 import json
-from collections.abc import Iterator
 
 from fastapi import Depends, HTTPException, Request
 
@@ -28,6 +21,11 @@ def get_session_factory(request: Request):
 def get_app_config(request: Request):
     """The application config object (app.state)."""
     return request.app.state.config
+
+
+def get_account_pool(request: Request):
+    """The process-wide Pixiv account pool (app.state)."""
+    return request.app.state.account_pool
 
 
 def get_file_storage(request: Request):
@@ -55,36 +53,14 @@ def get_task_manager(request: Request):
 
 def get_uow(
     session_factory=Depends(get_session_factory),
-) -> Iterator[SqlUnitOfWork]:
-    """Yield a request-scoped unit of work.
+) -> SqlUnitOfWork:
+    """Return an unopened request-scoped unit of work.
 
-    The UoW creates its session from the process-wide ``session_factory``
-    and owns the full session lifecycle.  The transaction commits on clean
-    exit and rolls back on exception, so endpoints never touch
-    commit/rollback or the session lifecycle themselves.
-
-    Synchronous on purpose: FastAPI runs this in the worker thread of the
-    endpoint that depends on it, so the ``Session`` never crosses threads.
+    Callers open explicit transaction scopes around each DB unit:
+    ``with uow.begin():`` (or ``run_write_transaction`` / ``read_transaction``
+    in async endpoints and background tasks).
     """
-    uow = SqlUnitOfWork(session_factory)
-    with uow.begin():
-        yield uow
-
-
-def get_write_uow(
-    session_factory=Depends(get_session_factory),
-) -> Iterator[SqlUnitOfWork]:
-    """Yield a request-scoped UoW inside a documented write boundary.
-
-    Same lifecycle as :func:`get_uow`; the ``db_write()`` marker only says
-    "this request writes" — PostgreSQL MVCC needs no process-wide lock, so
-    correctness comes from the transaction plus ``ON CONFLICT`` upserts.
-    """
-    from copixiv.db.write_lock import db_write
-
-    uow = SqlUnitOfWork(session_factory)
-    with db_write(), uow.begin():
-        yield uow
+    return SqlUnitOfWork(session_factory)
 
 
 def parse_json_param(value: str | None, name: str) -> dict | None:

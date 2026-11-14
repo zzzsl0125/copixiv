@@ -449,12 +449,14 @@ def _handle_duplicate(
     preset_author_id: int | None,
     preset_author_name: str | None,
     root: Path,
+    touched_author_ids: set[int] | None = None,
 ) -> tuple[IngestResult, bool]:
     """已在库的那一条 → ``(结果, 这次是否真的写了预设作者)``。"""
     # 只有真的要动那一行时才加载它（纯重复件仍是一次 SELECT 了事）——
     # 两个 helper 收同一个 ORM 对象，不再各自 ``session.get`` 一次。
     needs_row = preset_author_id is not None or parsed.original is not None
     novel = session.get(models.Novel, existing_id) if needs_row else None
+    old_author_id = novel.author_id if novel is not None else None
 
     wrote_preset = False
     duplicate_author_name: str | None = None
@@ -464,6 +466,10 @@ def _handle_duplicate(
         wrote_preset = _apply_preset_to_duplicate(
             session, novel, preset_author_id, preset_author_name,
         )
+        if wrote_preset and touched_author_ids is not None:
+            if old_author_id is not None:
+                touched_author_ids.add(old_author_id)
+            touched_author_ids.add(preset_author_id)
         # 回显这次写进去的名字（解析不出就是 None，响应里该字段不下发）——
         # 前端据此显示「已在库中《…》· 已挂作者：X」。
         duplicate_author_name = preset_author_name
@@ -603,6 +609,7 @@ def ingest_uploads(
     prepared = False
     # 这批是否真的把预设作者写进了某些行 —— 决定收尾要不要回写 author 行。
     preset_written = False
+    touched_author_ids: set[int] = set()
 
     for filename, data in files:
         name = clean_filename(filename)
@@ -636,6 +643,7 @@ def ingest_uploads(
                 preset_author_id=preset_author_id,
                 preset_author_name=preset_author_name,
                 root=root,
+                touched_author_ids=touched_author_ids,
             )
         else:
             result, wrote_preset = _create_row(
@@ -644,6 +652,8 @@ def ingest_uploads(
                 preset_author_name=preset_author_name,
                 root=root,
             )
+            if wrote_preset and preset_author_id is not None:
+                touched_author_ids.add(preset_author_id)
         # 失败的那条不写表，也就不该触发作者行收尾。
         preset_written = preset_written or wrote_preset
         results.append(result)
@@ -654,8 +664,13 @@ def ingest_uploads(
     # N 次全库范围 UPDATE。解析不出名字时**不调用**（那是"待解析"的中间态，
     # 没有名字可写）。
     if preset_written and preset_author_name:
-        SQLAlchemyAuthorRepository(session).update_author_name_sync(
+        SQLAlchemyAuthorRepository(session).update_author_name(
             preset_author_id, preset_author_name,
         )
+
+    if touched_author_ids:
+        from copixiv.db.base import refresh_parent_summaries
+
+        refresh_parent_summaries(session, author_ids=touched_author_ids)
 
     return results

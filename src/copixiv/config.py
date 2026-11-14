@@ -18,24 +18,14 @@ from pydantic import (
     model_validator,
 )
 
-
 # ---------------------------------------------------------------------------
 # Config models
 # ---------------------------------------------------------------------------
 
 
 class PathConfig(BaseModel):
-    """Filesystem paths for data and tokens.
+    """Filesystem paths for stored novel data."""
 
-    ``database`` is **DEPRECATED** (postgres-migration): the database is now a
-    PostgreSQL server addressed by ``AppConfig.database_url``, not a file path.
-    The field is retained only so an existing ``config.yaml`` that still lists
-    ``path.database`` keeps parsing; it is ignored by the application.  Remove
-    it in a later cleanup pass.
-    """
-
-    token: str = "pixiv_token.py"
-    database: str = "database/database.db"  # DEPRECATED — see AppConfig.database_url
     download: str = "download"
 
 
@@ -108,16 +98,18 @@ class SecurityConfig(BaseModel):
 
     @model_validator(mode="after")
     def _derive_allowed_origins(self) -> "SecurityConfig":
-        if self.allowed_origins is not None:
+        if self.allowed_origins:
             return self
         if self.allowed_hosts:
             origins: list[str] = []
             for host in self.allowed_hosts:
+                origins.append(f"http://{host}:9000")
                 origins.append(f"http://{host}:5173")
                 origins.append(f"http://{host}:4173")
             self.allowed_origins = origins
         else:
             self.allowed_origins = [
+                "http://localhost:9000", "http://127.0.0.1:9000",
                 "http://localhost:5173", "http://127.0.0.1:5173",
                 "http://localhost:4173", "http://127.0.0.1:4173",
             ]
@@ -157,11 +149,9 @@ class AppConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    # PostgreSQL connection string (postgres-migration).  This replaces the
-    # SQLite ``path.database`` as the single source of truth for how the app
-    # reaches its database.  Default targets the local dev instance on port
-    # 5433 (see scripts/pg_dev.py); a real deployment overrides it via
-    # ``config.yaml`` ``database_url`` (or, once supported, an env override).
+    # PostgreSQL connection string.  Default targets the local dev instance on
+    # port 5433 (see scripts/pg_dev.py); deployments override it via
+    # ``config.yaml`` ``database_url`` or ``COPIXIV_DATABASE_URL``.
     database_url: str = "postgresql+psycopg2://postgres@127.0.0.1:5433/copixiv"
 
     path: PathConfig = Field(default_factory=PathConfig)
@@ -258,10 +248,10 @@ def _fail_fast_on_legacy_config(raw: dict) -> None:
 
     proxy = raw.get("proxy")
     if isinstance(proxy, dict) and ("http" in proxy or "https" in proxy):
-        reasons.append("- 旧 proxy 的 http/https 双键 → 单键 proxy.url（env: COPIXIV_PROXY_URL）")
+        reasons.append("- 旧 proxy 的 http/https 双键 → 单键 proxy.url（env: COPIXIV_PROXY__URL）")
 
     if os.environ.get("COPIXIV_PROXY_HTTP") or os.environ.get("COPIXIV_PROXY_HTTPS"):
-        reasons.append("- COPIXIV_PROXY_HTTP/HTTPS → COPIXIV_PROXY_URL")
+        reasons.append("- COPIXIV_PROXY_HTTP/HTTPS → COPIXIV_PROXY__URL")
 
     if not reasons:
         return

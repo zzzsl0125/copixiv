@@ -15,7 +15,6 @@ each one crosses into the synchronous data layer exactly once:
 
 from copixiv.db.write_lock import read_transaction, run_write_transaction
 
-
 _CURSOR_KEY = "check_epub.cursor"
 
 
@@ -24,6 +23,7 @@ def _read_cursor_sync(uow, key: str) -> int:
     import json
 
     from sqlalchemy import select as _select
+
     from copixiv.db import models
 
     value = uow.session.execute(

@@ -88,6 +88,24 @@ def _run_write_sync(
     raise AssertionError("unreachable: retry loop must return or raise")
 
 
+def run_write_transaction_sync(
+    uow,
+    fn: Callable[[Any], Any],
+    *,
+    max_attempts: int = 3,
+    base_delay: float = 0.05,
+    max_delay: float = 0.5,
+) -> Any:
+    """Synchronous variant of :func:`run_write_transaction` for sync callers."""
+    return _run_write_sync(
+        uow,
+        fn,
+        max_attempts=max_attempts,
+        base_delay=base_delay,
+        max_delay=max_delay,
+    )
+
+
 async def run_write_transaction(
     uow,
     fn: Callable[[Any], Any],

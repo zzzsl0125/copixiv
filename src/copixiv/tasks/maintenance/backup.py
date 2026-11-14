@@ -57,7 +57,7 @@ def _database_url(ctx: TaskContext) -> str:
         bind = session.get_bind()
         if bind is None or bind.url is None:
             raise RuntimeError("backup_database: session has no bound engine")
-        return str(bind.url)
+        return bind.url.render_as_string(hide_password=False)
 
 
 @register(

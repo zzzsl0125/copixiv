@@ -60,8 +60,8 @@ from copixiv.features.authors.resolve_names import (
 from copixiv.features.library.local_axis import SOURCE_PIXIV
 from copixiv.features.novels.ingest import batch_upsert
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
-from copixiv.pixiv.client import PixivClient
 from copixiv.log import logger
+from copixiv.pixiv.client import PixivClient
 
 # 本次覆盖的来源权威字段。刻意**不含** ``series_index``（猜测值，None 会抹掉
 # 库里已有的）与 ``path``（文件锚，只在库中为 NULL 时才允许被填）——原因见模块

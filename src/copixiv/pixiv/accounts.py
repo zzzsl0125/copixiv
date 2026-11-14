@@ -1,18 +1,19 @@
 """Account pool — manages multiple Pixiv accounts with LRU selection."""
 
 import asyncio
+import threading
 import time
 from contextvars import ContextVar
 
+from copixiv.log import logger
+
 from .account import (
-    PixivAccount,
-    AccountStrategy,
     AccountInvalidError,
-    RateLimitError,
+    AccountStrategy,
+    PixivAccount,
+    TokenInfo,
 )
 from .errors import PremiumRequiredError
-
-from copixiv.log import logger
 
 
 class AccountPool:
@@ -26,18 +27,75 @@ class AccountPool:
     temporarily override the account selection.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        proxy_http: str | None = "",
+        proxy_https: str | None = "",
+        min_interval: float = 2.0,
+        cooling_duration: float = 120.0,
+    ):
         self._accounts: list[PixivAccount] = []
+        self._lock = threading.Lock()
+        self._proxy_http = proxy_http
+        self._proxy_https = proxy_https
+        self._min_interval = min_interval
+        self._cooling_duration = cooling_duration
         self._strategy: ContextVar[AccountStrategy] = ContextVar(
             "strategy", default=AccountStrategy()
         )
 
     def add_account(self, account: PixivAccount) -> None:
-        self._accounts.append(account)
+        with self._lock:
+            self._accounts.append(account)
 
     @property
     def accounts(self) -> list[PixivAccount]:
-        return self._accounts
+        with self._lock:
+            return list(self._accounts)
+
+    def reload_from_tokens(self, tokens: list[dict]) -> None:
+        """Rebuild the in-memory pool from persisted token rows.
+
+        Reuses existing :class:`PixivAccount` instances (preserving active OAuth
+        sessions, rate-limit cooldowns, and request locks) whenever the refresh
+        token string matches; disabled rows (``valid=False``) are excluded.
+        """
+        with self._lock:
+            existing = {a.token_info.token: a for a in self._accounts}
+            rebuilt: list[PixivAccount] = []
+            for entry in tokens:
+                if not entry.get("valid", True):
+                    continue
+                tok = entry["token"]
+                name = entry["name"]
+                premium = bool(entry.get("premium", False))
+                follow = bool(entry.get("is_follow", False))
+                acc = existing.get(tok)
+                if acc is not None:
+                    acc.username = name
+                    acc.token_info.username = name
+                    acc.token_info.premium = premium
+                    acc.token_info.valid = True
+                    acc.token_info.follow = follow
+                    rebuilt.append(acc)
+                else:
+                    rebuilt.append(
+                        PixivAccount(
+                            token_info=TokenInfo(
+                                token=tok,
+                                username=name,
+                                premium=premium,
+                                valid=True,
+                                follow=follow,
+                            ),
+                            proxy_http=self._proxy_http or "",
+                            proxy_https=self._proxy_https or "",
+                            min_interval=self._min_interval,
+                            cooling_duration=self._cooling_duration,
+                        )
+                    )
+            self._accounts = rebuilt
+            logger.info(f"Reloaded AccountPool: {len(rebuilt)} valid accounts")
 
     def select(self, strategy: AccountStrategy | None = None) -> PixivAccount:
         """Select the least-recently-used non-cooldown account.
@@ -47,7 +105,8 @@ class AccountPool:
         """
         strat = strategy or self._strategy.get()
 
-        candidates = [a for a in self._accounts if a.valid]
+        with self._lock:
+            candidates = [a for a in self._accounts if a.valid]
         if not candidates:
             raise RuntimeError("No valid Pixiv accounts available")
 
@@ -78,8 +137,11 @@ class AccountPool:
         # selectors so the call never hard-fails.
         if strat.force_follow:
             flagged = [a for a in candidates if a.token_info.follow]
-            if flagged:
-                return flagged[0]
+            ready_flagged = [a for a in flagged if not a.in_cooldown]
+            if ready_flagged:
+                chosen = min(ready_flagged, key=lambda a: a.last_req_time)
+                chosen.last_req_time = time.monotonic()
+                return chosen
 
         # Force a specific account (deprecated legacy string selector,
         # kept for callers that still pass an explicit account label)
@@ -92,7 +154,14 @@ class AccountPool:
                 or a.token_info.username == strat.force_account
             ]
             if forced:
-                return forced[0]
+                ready_forced = [a for a in forced if not a.in_cooldown]
+                chosen = (
+                    min(ready_forced, key=lambda a: a.last_req_time)
+                    if ready_forced
+                    else min(forced, key=lambda a: a.cooldown_remaining)
+                )
+                chosen.last_req_time = time.monotonic()
+                return chosen
 
         # LRU over all non-cooldown candidates (not just "available" /
         # ACTIVE).  Unauthenticated accounts have last_req_time == 0.0,

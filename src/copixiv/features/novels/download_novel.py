@@ -18,14 +18,13 @@ novels that are actually re-fetched.
 
 from dataclasses import replace
 
-from copixiv.core.exceptions import NovelNotFoundError
 from copixiv.core.draft import NovelDraft, build_from_webview
+from copixiv.core.exceptions import NovelNotFoundError
 from copixiv.core.services import body_unchanged
+from copixiv.log import logger
 from copixiv.pixiv.client import PixivClient
 from copixiv.storage.file_storage import FileStorage
 from copixiv.storage.image_downloader import ImageDownloader
-
-from copixiv.log import logger
 
 
 async def fetch_novel_and_assets(
