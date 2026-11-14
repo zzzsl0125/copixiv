@@ -9,11 +9,12 @@ from typing import BinaryIO
 from copixiv.core import formats
 from copixiv.core.exceptions import NotFoundError, ValidationError
 from copixiv.core.models import EpubStatus
-from copixiv.core.services import build_batch_zip
-from copixiv.core.services import NovelNamingTemplate
-from copixiv.core.services import SearchConditions
-from copixiv.core.services import QuerySpec
+from copixiv.core.naming import NovelNamingTemplate
+from copixiv.core.services import QuerySpec, SearchConditions
+from copixiv.db.uow import SqlUnitOfWork
+from copixiv.db.write_lock import read_transaction
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
+from copixiv.storage.zip import build_batch_zip
 
 
 @dataclass
@@ -42,8 +43,8 @@ class BatchDownloadUseCase:
             could be added to the ZIP.
     """
 
-    def __init__(self, novel_repo: SQLAlchemyNovelRepository, naming_template: str | None = None):
-        self._repo = novel_repo
+    def __init__(self, uow: SqlUnitOfWork, naming_template: str | None = None):
+        self._uow = uow
         self._naming_template = naming_template
 
     async def execute(
@@ -61,35 +62,38 @@ class BatchDownloadUseCase:
         novel_ids: list[int] | None = None,
         excluded_ids: list[int] | None = None,
     ) -> BatchDownloadResult:
-        """Build the ZIP.  Async **only** because of the ``asyncio.to_thread``
-        around :func:`build_batch_zip` below: deflate compression is real CPU
-        work on a whole selection.  All repository calls are synchronous
-        blocking calls on the calling thread's session.
+        """Build the ZIP.
+
+        DB reads run inside :func:`read_transaction` off the event loop, then
+        ZIP compression runs via ``asyncio.to_thread``.
         """
-        if novel_ids:
-            # Explicit selection — filters/order are irrelevant; a stable
-            # id-descending order keeps the result deterministic.
-            all_novels = self._repo.get_novels_by_ids(novel_ids)
-            novels = sorted(
-                all_novels, key=lambda n: n.id or 0, reverse=True,
-            )[:limit]
-            if not novels:
-                raise NotFoundError("未找到匹配条件的小说")
-        else:
-            results = self._repo.get_novels(
-                QuerySpec(
-                    conditions=conditions or [],
-                    order_by=order_by,
-                    order_direction=order_direction,
-                    per_page=limit,
-                    min_like=min_like,
-                    min_text=min_text,
-                    exclude_ids=excluded_ids or [],
+        def _load_novels(tx: SqlUnitOfWork):
+            repo = SQLAlchemyNovelRepository(tx.session)
+            if novel_ids:
+                # Explicit selection — filters/order are irrelevant; a stable
+                # id-descending order keeps the result deterministic.
+                all_novels = repo.get_novels_by_ids(novel_ids)
+                selected = sorted(
+                    all_novels, key=lambda n: n.id or 0, reverse=True,
+                )[:limit]
+            else:
+                results = repo.get_novels(
+                    QuerySpec(
+                        conditions=conditions or [],
+                        order_by=order_by,
+                        order_direction=order_direction,
+                        per_page=limit,
+                        min_like=min_like,
+                        min_text=min_text,
+                        exclude_ids=excluded_ids or [],
+                    )
                 )
-            )
-            novels = results.get("novels", [])
-            if not novels:
-                raise NotFoundError("未找到匹配条件的小说")
+                selected = results.get("novels", [])
+            return selected
+
+        novels = await read_transaction(self._uow, _load_novels)
+        if not novels:
+            raise NotFoundError("未找到匹配条件的小说")
 
         naming = naming_template or self._naming_template
         try:
@@ -132,31 +136,29 @@ class BatchDownloadUseCase:
         inside the ZIP — a live preview of the naming rule — or ``None``
         when no novels match.
 
-        Pure DB read plus template resolution: synchronous, so the endpoint
-        can be a plain ``def`` and FastAPI keeps the blocking session work on
-        the worker thread.
-
         Raises:
             ValidationError: If the template does not contain ``{id}``.
         """
-        if novel_ids:
-            all_novels = self._repo.get_novels_by_ids(novel_ids)
-            novels = sorted(
-                all_novels, key=lambda n: n.id or 0, reverse=True,
-            )[:1]
-        else:
-            results = self._repo.get_novels(
-                QuerySpec(
-                    conditions=conditions or [],
-                    order_by=order_by,
-                    order_direction=order_direction,
-                    per_page=1,
-                    min_like=min_like,
-                    min_text=min_text,
-                    exclude_ids=excluded_ids or [],
+        with self._uow.begin():
+            repo = SQLAlchemyNovelRepository(self._uow.session)
+            if novel_ids:
+                all_novels = repo.get_novels_by_ids(novel_ids)
+                novels = sorted(
+                    all_novels, key=lambda n: n.id or 0, reverse=True,
+                )[:1]
+            else:
+                results = repo.get_novels(
+                    QuerySpec(
+                        conditions=conditions or [],
+                        order_by=order_by,
+                        order_direction=order_direction,
+                        per_page=1,
+                        min_like=min_like,
+                        min_text=min_text,
+                        exclude_ids=excluded_ids or [],
+                    )
                 )
-            )
-            novels = results.get("novels", [])
+                novels = results.get("novels", [])
         if not novels:
             return None
 

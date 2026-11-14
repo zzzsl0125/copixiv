@@ -33,21 +33,20 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from copixiv.core.exceptions import ValidationError
+from copixiv.core.models import TaskResult
+from copixiv.db.write_lock import read_transaction, run_write_transaction
 from copixiv.features.novels.batch_operations import (
     BATCH_ID_CHUNK_SIZE,
     BATCH_MAX_TAGS,
 )
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
-from copixiv.tasks.history_repo import SQLAlchemyTaskRepository
-from copixiv.core.exceptions import ValidationError
-from copixiv.core.models import TaskResult
-from copixiv.core.services import build_batch_zip
-from copixiv.db.write_lock import read_transaction, run_write_transaction
 from copixiv.log import logger
+from copixiv.storage.zip import build_batch_zip
+from copixiv.tasks.history_repo import SQLAlchemyTaskRepository
 
-from .kernel import TaskContext
-from .kernel import register
+from .kernel import TaskContext, register
 
 BATCH_TASK_NAME = "batch_operation"
 EXPORT_TASK_NAME = "batch_export"

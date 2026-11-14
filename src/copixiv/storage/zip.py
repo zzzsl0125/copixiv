@@ -2,14 +2,9 @@
 
 :func:`build_batch_zip` turns a list of novel rows into a seekable ZIP of
 their files (txt / EPUB), resolving arcnames through
-:class:`copixiv.core.naming.NovelNamingTemplate`.  It is pure in the sense
-that matters here: no database, no HTTP, no app state — only stdlib
-``zipfile``/``tempfile`` over paths the caller already resolved.
-
-Separate from :mod:`copixiv.core.services` because packaging is its own
-concern (spooling budget, ZIP-writing mechanics, progress reporting) and the
-only place that needs ``zipfile`` at all.  ``services`` re-exports
-:func:`build_batch_zip` for existing call sites.
+:class:`copixiv.core.naming.NovelNamingTemplate`. It stays in ``storage/``
+because writing ZIP archives from disk files is a filesystem I/O adapter
+(``zipfile``/``tempfile`` over paths the caller resolved).
 """
 
 from __future__ import annotations
@@ -23,9 +18,8 @@ from copixiv.core import formats
 from copixiv.core.models import EpubStatus
 from copixiv.core.naming import NovelNamingTemplate
 
-
 # ---------------------------------------------------------------------------
-# Batch ZIP archive builder — pure function.
+# Batch ZIP archive builder — pure packaging helper.
 # ---------------------------------------------------------------------------
 
 # Buffers up to 8 MB stay in memory; larger batches (e.g. 200 EPUBs)
@@ -46,7 +40,7 @@ def build_batch_zip(
     """Build a ZIP of novel files matching the given criteria.
 
     Args:
-        novels: List of novel dicts, each containing at least ``id``, ``path``,
+        novels: List of novel models/objects containing at least ``id``, ``path``,
                 ``title``, ``author_name``, ``series_id``, ``series_name``,
                 ``series_index``, and ``has_epub``.
         format_mode: ``'txt'`` or ``'prefer_epub'`` (prefers EPUB when available).
