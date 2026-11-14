@@ -32,14 +32,22 @@ dependencies = [
 
 [project.optional-dependencies]
 # 本地开发环境：pgserver 提供自带的 PG16 二进制（scripts/pg_dev.py 用它起
-# 本地实例，端口 5433）。测试套件已于 2026-11-09 全部移除（用户决定重写），
-# 新的门禁是 ruff / mypy / import-linter。
+# 本地实例，端口 5433），pytest/ruff/mypy/import-linter 对应验证与 CI 门禁。
 dev = [
     "pgserver>=0.1.4",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
     "ruff>=0.17",
     "mypy>=1.14",
     "import-linter>=2.1",
 ]
+
+[tool.hatch.metadata]
+# dependencies 中包含 pixivpy3 的 Git 直接引用，需显式允许以便 PEP 517 构建元数据。
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/copixiv"]
 
 [tool.ruff]
 line-length = 110
