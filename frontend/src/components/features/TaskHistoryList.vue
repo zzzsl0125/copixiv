@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { RefreshCw, Clock, FileText, CheckCircle, XCircle, Download } from '@lucide/vue'
 import LoadMore from './LoadMore.vue'
 import LogViewer from './LogViewer.vue'
@@ -7,7 +7,7 @@ import { getApiErrorMessage, novelApi, taskApi } from '../../api'
 import { downloadUrl } from '../../lib/utils'
 import type { TaskHistory } from '../../types'
 
-defineProps<{
+const props = defineProps<{
   history: TaskHistory[]
   loading: boolean
   hasMore: boolean
@@ -15,13 +15,41 @@ defineProps<{
 
 const emit = defineEmits<{ (e: 'loadMore'): void }>()
 
+interface ParsedTaskResult {
+  log: string
+  summary: string
+  new_novels_count: number | null | undefined
+  new_novel_titles: string[]
+}
+
+interface RowStaticCache {
+  result: TaskHistory['result']
+  arguments: TaskHistory['arguments']
+  startTime: TaskHistory['start_time']
+  parsedResult: ParsedTaskResult
+  argsText: string
+  batchLabel: string
+  startTimeText: string
+}
+
+interface TaskHistoryRow {
+  item: TaskHistory
+  isBatch: boolean
+  argsText: string
+  batchLabel: string
+  progressText: string
+  startTimeText: string
+  newNovelsCount: number | null | undefined
+  newNovelTitles: string[]
+}
+
 const logModalOpen = ref(false)
 const currentLog = ref('')
 const titlesModalOpen = ref(false)
 const currentTitles = ref('')
 
-const parseResult = (resultStr?: string | Record<string, any> | null) => {
-  if (!resultStr) return { log: '', summary: '', new_novels_count: null, new_novel_titles: [] as string[] }
+const parseResult = (resultStr?: string | Record<string, any> | null): ParsedTaskResult => {
+  if (!resultStr) return { log: '', summary: '', new_novels_count: null, new_novel_titles: [] }
   // ``result`` no longer carries ``log`` (the list endpoint strips it); the
   // log is fetched on demand. Everything else stays inline.
   // Handle the case where the API already returns a parsed object (not a JSON string)
@@ -44,7 +72,7 @@ const parseResult = (resultStr?: string | Record<string, any> | null) => {
       }
     }
   } catch { /* legacy plain text log */ }
-  return { log: resultStr, summary: '', new_novels_count: null, new_novel_titles: [] as string[] }
+  return { log: resultStr, summary: '', new_novels_count: null, new_novel_titles: [] }
 }
 
 /** Compact label for batch_* rows (args contain a huge ID list). */
@@ -77,12 +105,58 @@ const batchArgsLabel = (item: TaskHistory) => {
 const isBatchTask = (item: TaskHistory) =>
   item.name === 'batch_operation' || item.name === 'batch_export'
 
-/** Live progress for running/pending rows — prefer the dedicated `progress`
- * column, falling back to the (legacy) result summary. */
-const liveProgress = (item: TaskHistory) => {
-  if (typeof item.progress === 'string' && item.progress) return item.progress
-  return parseResult(item.result).summary || ''
+const formatDate = (dateStr?: string | null) => {
+  if (!dateStr) return '-'
+  return new Date(dateStr).toLocaleString()
 }
+
+// Per-row cache keyed by the reactive item proxy so polling one active row
+// does not re-run JSON.parse / JSON.stringify across unchanged history rows.
+const rowCache = new WeakMap<TaskHistory, RowStaticCache>()
+
+const getStaticFields = (item: TaskHistory, isBatch: boolean): RowStaticCache => {
+  const cached = rowCache.get(item)
+  if (
+    cached &&
+    cached.result === item.result &&
+    cached.arguments === item.arguments &&
+    cached.startTime === item.start_time
+  ) {
+    return cached
+  }
+  const next: RowStaticCache = {
+    result: item.result,
+    arguments: item.arguments,
+    startTime: item.start_time,
+    parsedResult: parseResult(item.result),
+    argsText: isBatch ? '' : (item.arguments ? JSON.stringify(item.arguments) : 'None'),
+    batchLabel: isBatch ? batchArgsLabel(item) : '',
+    startTimeText: formatDate(item.start_time),
+  }
+  rowCache.set(item, next)
+  return next
+}
+
+const rows = computed<TaskHistoryRow[]>(() =>
+  props.history.map((item) => {
+    const isBatch = isBatchTask(item)
+    const fields = getStaticFields(item, isBatch)
+    const progressText =
+      typeof item.progress === 'string' && item.progress
+        ? item.progress
+        : fields.parsedResult.summary || ''
+    return {
+      item,
+      isBatch,
+      argsText: fields.argsText,
+      batchLabel: fields.batchLabel,
+      progressText,
+      startTimeText: fields.startTimeText,
+      newNovelsCount: fields.parsedResult.new_novels_count,
+      newNovelTitles: fields.parsedResult.new_novel_titles,
+    }
+  }),
+)
 
 const handleDownloadExport = (item: TaskHistory) => {
   // Navigate straight to the attachment URL (works in in-app browsers /
@@ -116,15 +190,9 @@ const showLog = async (item: TaskHistory) => {
   }
 }
 
-const showTitles = (result: string | Record<string, any> | null | undefined) => {
-  const parsed = parseResult(result)
-  currentTitles.value = parsed.new_novel_titles.join('\n')
+const showTitles = (titles: string[]) => {
+  currentTitles.value = titles.join('\n')
   titlesModalOpen.value = true
-}
-
-const formatDate = (dateStr?: string | null) => {
-  if (!dateStr) return '-'
-  return new Date(dateStr).toLocaleString()
 }
 
 /** Backend stores status values lowercase ("success"/"failed"/...). */
@@ -140,55 +208,55 @@ const statusIs = (status: string, ...names: string[]) =>
           <RefreshCw class="w-6 h-6 animate-spin mx-auto text-blue-500 mb-2" /> 加载中...
         </li>
         <li v-else-if="history.length === 0" class="px-6 py-12 text-center text-gray-500">暂无历史记录</li>
-        <li v-for="item in history" :key="item.id" class="px-6 py-4 hover:bg-gray-50 transition-colors">
+        <li v-for="row in rows" :key="row.item.id" class="px-6 py-4 hover:bg-gray-50">
           <div class="flex items-center justify-between w-full">
             <div class="flex items-center min-w-0 flex-1">
               <div class="shrink-0 mr-4">
-                <div v-if="statusIs(item.status, 'success')" class="text-green-500"><CheckCircle class="w-8 h-8" /></div>
-                <div v-else-if="statusIs(item.status, 'failed')" class="text-red-500"><XCircle class="w-8 h-8" /></div>
-                <div v-else-if="statusIs(item.status, 'running')" class="text-blue-500 animate-spin"><RefreshCw class="w-8 h-8" /></div>
-                <div v-else-if="statusIs(item.status, 'pending')" class="text-yellow-500"><Clock class="w-8 h-8" /></div>
+                <div v-if="statusIs(row.item.status, 'success')" class="text-green-500"><CheckCircle class="w-8 h-8" /></div>
+                <div v-else-if="statusIs(row.item.status, 'failed')" class="text-red-500"><XCircle class="w-8 h-8" /></div>
+                <div v-else-if="statusIs(row.item.status, 'running')" class="text-blue-500 animate-spin"><RefreshCw class="w-8 h-8" /></div>
+                <div v-else-if="statusIs(row.item.status, 'pending')" class="text-yellow-500"><Clock class="w-8 h-8" /></div>
                 <div v-else class="text-gray-400"><Clock class="w-8 h-8" /></div>
               </div>
               <div class="min-w-0 flex-1 ml-4 grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-4 items-center">
-                <div class="col-span-1">
-                  <p class="text-sm font-medium text-gray-900 truncate">{{ item.name }}</p>
-                  <template v-if="isBatchTask(item)">
-                    <p class="text-xs text-gray-500 mt-1 truncate">{{ batchArgsLabel(item) }}</p>
+                <div class="col-span-1 min-w-0">
+                  <p class="text-sm font-medium text-gray-900 truncate">{{ row.item.name }}</p>
+                  <template v-if="row.isBatch">
+                    <p class="text-xs text-gray-500 mt-1 truncate">{{ row.batchLabel }}</p>
                     <!-- 进度优先读 progress 列；为空时回退到 result summary（兼容旧数据/终态） -->
-                    <p v-if="statusIs(item.status, 'running', 'pending') && liveProgress(item)" class="text-xs text-blue-600 mt-0.5 truncate" :title="liveProgress(item)">
-                      {{ liveProgress(item) }}
+                    <p v-if="statusIs(row.item.status, 'running', 'pending') && row.progressText" class="text-xs text-blue-600 mt-0.5 truncate" :title="row.progressText">
+                      {{ row.progressText }}
                     </p>
                   </template>
-                  <p v-else class="text-xs text-gray-500 mt-1 font-mono truncate max-w-lg" :title="item.arguments ? JSON.stringify(item.arguments) : 'None'">args: {{ item.arguments ? JSON.stringify(item.arguments) : 'None' }}</p>
+                  <p v-else class="text-xs text-gray-500 mt-1 font-mono truncate max-w-lg" :title="row.argsText">args: {{ row.argsText }}</p>
                 </div>
                 <div class="col-span-1 text-xs text-gray-500 flex flex-col justify-center">
-                  <span>开始: {{ formatDate(item.start_time) }}</span>
-                  <span v-if="parseResult(item.result).new_novels_count !== null && parseResult(item.result).new_novels_count !== undefined" class="text-green-600 font-medium mt-0.5">
-                    新增小说: {{ parseResult(item.result).new_novels_count }}
+                  <span>开始: {{ row.startTimeText }}</span>
+                  <span v-if="row.newNovelsCount !== null && row.newNovelsCount !== undefined" class="text-green-600 font-medium mt-0.5">
+                    新增小说: {{ row.newNovelsCount }}
                   </span>
-                  <span v-if="typeof item.duration === 'number'" class="mt-0.5">耗时: {{ item.duration.toFixed(2) }}s</span>
+                  <span v-if="typeof row.item.duration === 'number'" class="mt-0.5">耗时: {{ row.item.duration.toFixed(2) }}s</span>
                 </div>
                 <div class="col-span-1 flex items-center justify-start sm:justify-end">
                   <div class="w-auto sm:w-48 flex flex-wrap gap-2 sm:flex-nowrap justify-start sm:justify-end">
                     <button
-                      v-if="item.name === 'batch_export' && statusIs(item.status, 'success')"
-                      @click="handleDownloadExport(item)"
+                      v-if="row.item.name === 'batch_export' && statusIs(row.item.status, 'success')"
+                      @click="handleDownloadExport(row.item)"
                       class="inline-flex items-center px-2.5 py-1.5 border border-blue-300 shadow-sm text-xs font-medium rounded text-blue-700 bg-blue-50 hover:bg-blue-100 focus:outline-none transition-colors"
                     >
                       <Download class="w-3.5 h-3.5 mr-1" />
                       下载
                     </button>
                     <button
-                      v-if="parseResult(item.result).new_novel_titles && parseResult(item.result).new_novel_titles.length > 0"
-                      @click="showTitles(item.result || '')"
+                      v-if="row.newNovelTitles.length > 0"
+                      @click="showTitles(row.newNovelTitles)"
                       class="inline-flex items-center px-2.5 py-1.5 border border-gray-300 shadow-sm text-xs font-medium rounded text-gray-700 bg-white hover:bg-gray-50 focus:outline-none transition-colors"
                     >
                       <FileText class="w-3.5 h-3.5 mr-1" /> 清单
                     </button>
                     <button
-                      v-if="item.has_log || statusIs(item.status, 'failed')"
-                      @click="showLog(item)"
+                      v-if="row.item.has_log || statusIs(row.item.status, 'failed')"
+                      @click="showLog(row.item)"
                       class="inline-flex items-center px-2.5 py-1.5 border border-gray-300 shadow-sm text-xs font-medium rounded text-gray-700 bg-white hover:bg-gray-50 focus:outline-none transition-colors"
                     >
                       <FileText class="w-3.5 h-3.5 mr-1" /> 日志

@@ -118,10 +118,10 @@ onMounted(() => { loadTasks(); loadHistory() })
 </script>
 
 <template>
-  <div class="flex-1 flex flex-col min-w-0 h-full bg-gray-50">
+  <div class="flex-1 flex flex-col min-w-0 bg-gray-50">
     <PageHeader title="任务管理" @toggle-sidebar="$emit('toggle-sidebar')" />
 
-    <main class="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-grow overflow-auto">
+    <main class="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-grow">
       <SectionHeader
         :tabs="[{ name: 'scheduled', label: '计划任务' }, { name: 'history', label: '任务队列' }]"
         :active-tab="activeTab"

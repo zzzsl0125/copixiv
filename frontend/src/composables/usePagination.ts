@@ -19,9 +19,12 @@ export function usePagination<T>(
   const error = ref<string | null>(null)
   const hasMore = ref(false)
   const offset = ref(0)
+  let generation = 0
+  let refreshing = false
 
   const loadData = async (loadMore = false) => {
     if (loading.value) return
+    generation += 1
     if (!loadMore) {
       offset.value = 0
       items.value = []
@@ -59,18 +62,22 @@ export function usePagination<T>(
    *
    * ``loadData()`` clears the list before fetching, which flashes an empty
    * state on every poll.  Instead of replacing every object, this MERGES
-   * the fresh rows by ``id`` into the existing ones: unchanged rows keep
-   * their object identity (and therefore produce zero DOM writes), only
-   * genuinely changed fields are patched — the visible update is a single
-   * text node (e.g. the progress summary), never a row re-render.
-   * ``silent`` skips the loading flag (no spinner blips on background polls).
+   * the fresh page-0 rows by ``id`` into the existing ones while preserving
+   * any already-loaded subsequent pages: unchanged rows keep their object
+   * identity (and therefore produce zero DOM writes), only genuinely changed
+   * fields are patched, and ``silent`` skips the loading flag.
    */
   const refresh = async (options: { silent?: boolean } = {}) => {
-    if (loading.value) return
+    if (loading.value || refreshing) return
+    refreshing = true
+    const runGen = generation
     if (!options.silent) loading.value = true
     try {
       const result = await fetcher(0, pageSize)
-      const newItems = Array.isArray(result) ? result : result.items
+      if (runGen !== generation) return
+
+      const isArrayResult = Array.isArray(result)
+      const newItems = isArrayResult ? result : result.items
 
       const byId = new Map<unknown, T>()
       for (const it of items.value) {
@@ -84,10 +91,15 @@ export function usePagination<T>(
       const sameValue = (a: unknown, b: unknown) =>
         a === b || JSON.stringify(a) === JSON.stringify(b)
 
-      const merged: T[] = []
-      let changed = newItems.length !== items.value.length
+      const mergedHead: T[] = []
+      const headIds = new Set<unknown>()
+      let changed = false
+
       for (const fresh of newItems) {
         const freshObj = fresh as { id?: unknown }
+        if (freshObj.id !== undefined && freshObj.id !== null) {
+          headIds.add(freshObj.id)
+        }
         const old = freshObj.id !== undefined && freshObj.id !== null
           ? byId.get(freshObj.id)
           : undefined
@@ -100,22 +112,45 @@ export function usePagination<T>(
               changed = true
             }
           }
-          merged.push(old)
+          mergedHead.push(old)
         } else {
           changed = true
-          merged.push(fresh)
+          mergedHead.push(fresh)
         }
       }
 
+      // Keep pages 2+ loaded via LoadMore intact so background polling does
+      // not truncate scrolled history back to pageSize.
+      const tail: T[] = !isArrayResult && newItems.length >= pageSize
+        ? items.value.filter((it) => {
+            const id = (it as { id?: unknown }).id
+            return id !== undefined && id !== null && !headIds.has(id)
+          })
+        : []
+
+      const merged = [...mergedHead, ...tail]
+      if (
+        !changed &&
+        (merged.length !== items.value.length ||
+          merged.some((it, idx) => it !== items.value[idx]))
+      ) {
+        changed = true
+      }
+
       if (changed) items.value = merged
-      offset.value = newItems.length
-      hasMore.value = Array.isArray(result) || result.total === undefined
-        ? newItems.length >= pageSize
-        : offset.value < result.total
+      offset.value = merged.length
+      hasMore.value = isArrayResult
+        ? false
+        : result.total !== undefined
+          ? offset.value < result.total
+          : newItems.length >= pageSize
     } catch (err: unknown) {
-      error.value = getApiErrorMessage(err, '加载失败')
+      if (runGen === generation) {
+        error.value = getApiErrorMessage(err, '加载失败')
+      }
     } finally {
-      loading.value = false
+      refreshing = false
+      if (!options.silent) loading.value = false
     }
   }
 

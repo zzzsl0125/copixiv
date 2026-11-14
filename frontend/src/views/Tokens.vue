@@ -86,10 +86,10 @@ const columns: TableColumn[] = [
 </script>
 
 <template>
-  <div class="flex-1 flex flex-col min-w-0 h-full bg-gray-50">
+  <div class="flex-1 flex flex-col min-w-0 bg-gray-50">
     <PageHeader title="账号管理" @toggle-sidebar="$emit('toggle-sidebar')" />
 
-    <main class="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-grow overflow-auto">
+    <main class="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-grow">
       <SectionHeader :tabs="[{ name: 'list', label: '账号列表' }]" active-tab="list" add-button-text="添加 Token" :show-refresh="true" :loading="loading" @add="openModal()" @refresh="loadTokens()" />
 
       <div v-if="error" class="mb-6 bg-red-50 text-red-600 p-4 rounded-lg flex items-center gap-2">
