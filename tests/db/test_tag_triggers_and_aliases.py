@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from copixiv.core.draft import build_novel
 from copixiv.core.exceptions import ValidationError
@@ -42,11 +42,55 @@ def test_tag_triggers_track_insert_update_delete(uow: SqlUnitOfWork):
         assert _tag_count(uow.session, "beta") == 0
         assert _tag_count(uow.session, "gamma") == 1
 
-    # Delete novel 1 -> alpha drops to 1, gamma drops to 0
+    # Delete novel 1 -> alpha drops to 1, gamma drops to 0 and is pruned
     with uow.begin():
         SQLAlchemyNovelRepository(uow.session).delete(1)
         assert _tag_count(uow.session, "alpha") == 1
         assert _tag_count(uow.session, "gamma") == 0
+        assert (
+            uow.session.execute(
+                select(models.Tag).where(models.Tag.name == "gamma")
+            ).scalar_one_or_none()
+            is None
+        )
+        # Trigger must not create any session temp tables (migration 0016)
+        temp_count = uow.session.execute(
+            text(
+                "SELECT COUNT(*) FROM pg_class "
+                "WHERE relpersistence = 't' AND relname = '_tag_ref_deltas'"
+            )
+        ).scalar_one()
+        assert temp_count == 0
+
+
+def test_aliased_zero_ref_tag_survives_until_alias_deleted(uow: SqlUnitOfWork):
+    with uow.begin():
+        persist_novels(
+            uow,
+            [build_novel(id=20, title="Aliased", author_id=1, author_name="A", tags=["src_alias"])],
+        )
+
+    with uow.begin():
+        tag_repo = SQLAlchemyTagRepository(uow.session)
+        alias = tag_repo.create_alias({"source": "src_alias", "target": "dst_alias"})
+        tag_repo.apply_alias_retroactively("src_alias", "dst_alias")
+
+        # src_alias stays because tag_alias references it, even with reference_count == 0
+        src_row = uow.session.execute(
+            select(models.Tag).where(models.Tag.name == "src_alias")
+        ).scalar_one_or_none()
+        assert src_row is not None
+        assert src_row.reference_count == 0
+
+        # Deleting the alias immediately prunes the unreferenced src_alias row
+        assert tag_repo.delete_alias(alias["id"]) is True
+        assert (
+            uow.session.execute(
+                select(models.Tag).where(models.Tag.name == "src_alias")
+            ).scalar_one_or_none()
+            is None
+        )
+        assert _tag_count(uow.session, "dst_alias") == 1
 
 
 def test_alias_single_hop_and_cycle_guards(uow: SqlUnitOfWork):

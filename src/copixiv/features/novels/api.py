@@ -299,8 +299,7 @@ def match_novel_ids(
     Intersects the accumulated selection with the CURRENT search scope so
     the clear action only removes what belongs to the visible scope (the
     rest of the selection survives across searches).  Any-size input: the
-    ID list is processed in internal chunks to stay under SQLite's
-    variable limit.
+    ID list is processed in internal chunks to keep each PostgreSQL query bounded.
     """
     conditions = parse_search_keyword(body.keyword) if body.keyword else None
     matching: list[int] = []

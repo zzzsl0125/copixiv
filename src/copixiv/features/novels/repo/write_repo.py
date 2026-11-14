@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from copixiv.core.draft import NovelDraft
 from copixiv.core.exceptions import NotFoundError
-from copixiv.core.models import EpubStatus
+from copixiv.core.models import EpubStatus, new_shuffle_key
 from copixiv.core.services import parse_pixiv_time
 from copixiv.db import constants as C
 from copixiv.db import models
@@ -21,6 +21,12 @@ from copixiv.log import logger
 
 from .read_repo import SQLAlchemyNovelReadRepository
 from .series_repo import SQLAlchemySeriesRepository
+
+# Passive metadata-only refreshes skip UPDATE when nothing meaningful changed
+# (pure view-count bumps or <5 like jitter with identical core fields/tags),
+# preserving PG HOT updates and avoiding GIN index / trigger write amplification.
+_MIN_PASSIVE_LIKE_DELTA = 5
+_NOISE_ONLY_FIELDS = frozenset({"view", "like"})
 
 # ``update_metadata_many`` allowed columns (author + series metadata edit).
 BATCH_METADATA_COLUMNS = frozenset({
@@ -145,22 +151,42 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
                     filtered[int_field] = int(filtered[int_field])
 
             if existing:
-                for key, value in filtered.items():
-                    if (getattr(existing, key, None) is None and value) or key in update_fields_set:
-                        setattr(existing, key, value)
-                if novel_tags_map and nid is not None:
-                    incoming = novel_tags_map.get(nid, set())
-                    current = set(existing.tags or [])
-                    if incoming - current:
-                        existing.tags = sorted(current | incoming)
+                incoming_tags = (
+                    novel_tags_map.get(nid, set())
+                    if novel_tags_map and nid is not None
+                    else set()
+                )
+                current_tags = set(existing.tags or [])
+                tags_changed = bool(incoming_tags - current_tags)
+
+                pending_changes = {
+                    key: value
+                    for key, value in filtered.items()
+                    if (
+                        (getattr(existing, key, None) is None and value)
+                        or key in update_fields_set
+                    )
+                    and getattr(existing, key, None) != value
+                }
+
+                if not force_update and not tags_changed and set(pending_changes) <= _NOISE_ONLY_FIELDS:
+                    like_delta = abs(
+                        int(pending_changes.get("like", existing.like)) - int(existing.like)
+                    )
+                    if like_delta < _MIN_PASSIVE_LIKE_DELTA:
+                        continue
+
+                for key, value in pending_changes.items():
+                    setattr(existing, key, value)
+                if tags_changed:
+                    existing.tags = sorted(current_tags | incoming_tags)
             else:
                 if novel_tags_map and nid is not None:
                     normalized_tags = sorted(novel_tags_map.get(nid, []))
                     filtered = {**filtered, "tags": normalized_tags}
                 new_novel = models.Novel(**filtered)
                 if "shuffle" not in filtered or not filtered["shuffle"]:
-                    import random as _random
-                    new_novel.shuffle = _random.randint(0, 2**31 - 1)
+                    new_novel.shuffle = new_shuffle_key()
                 self.session.add(new_novel)
                 if nid is not None:
                     existing_map[nid] = new_novel
@@ -204,6 +230,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         if novel is None:
             return
         parent_ids = _summary_ids(novel)
+        old_tags = list(novel.tags or [])
         self.session.execute(
             _delete(models.FailedNovel).where(
                 models.FailedNovel.novel_id == novel_id
@@ -211,6 +238,8 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         )
         self.session.delete(novel)
         self.session.flush()
+        if old_tags:
+            SQLAlchemyTagRepository(self.session).prune_unused_tags(old_tags)
         self._refresh_summaries(parent_ids)
 
     def toggle_favourite(self, novel_id: int) -> None:
@@ -249,9 +278,16 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         novel = self.session.get(models.Novel, novel_id)
         if novel is None:
             return
+        removed_tags = (
+            set(novel.tags or []) - set(values["tags"] or [])
+            if "tags" in values
+            else set()
+        )
         for field, value in values.items():
             setattr(novel, field, value)
         self.session.flush()
+        if removed_tags:
+            SQLAlchemyTagRepository(self.session).prune_unused_tags(removed_tags)
 
     # ---- batch operations ----------------------------------------------------
 
@@ -260,9 +296,15 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         if not novel_ids:
             return []
         rows = self.session.execute(
-            select(models.Novel.path, models.Novel.author_id, models.Novel.series_id)
+            select(
+                models.Novel.path,
+                models.Novel.author_id,
+                models.Novel.series_id,
+                models.Novel.tags,
+            )
             .where(models.Novel.id.in_(novel_ids))
         ).all()
+        old_tags = {t for row in rows for t in (row.tags or [])}
         self.session.execute(
             _delete(models.FailedNovel).where(
                 models.FailedNovel.novel_id.in_(novel_ids)
@@ -272,6 +314,8 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             _delete(models.Novel).where(models.Novel.id.in_(novel_ids))
         )
         self.session.flush()
+        if old_tags:
+            SQLAlchemyTagRepository(self.session).prune_unused_tags(old_tags)
         self._refresh_summaries(
             ({row.author_id for row in rows}, {row.series_id for row in rows})
         )
@@ -380,6 +424,8 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             .values(tags=expr)
             .returning(models.Novel.id)
         ).scalars().all())
+        if changed:
+            SQLAlchemyTagRepository(self.session).prune_unused_tags(tag_names)
         return len(changed)
 
 

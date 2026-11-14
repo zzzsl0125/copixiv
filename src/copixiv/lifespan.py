@@ -55,6 +55,7 @@ class _AppSingletons:
     client: PixivClient
     notifier: TelegramNotifier | None
     task_manager: TaskManagerSystem
+    needs_startup_backup: bool = False
 
 
 def _should_auto_backup(backup_dir: str) -> bool:
@@ -159,6 +160,7 @@ def _build(
         cfg = load_config(config_source)
 
     engine: Engine | None = None
+    needs_startup_backup = False
     if session_factory is None:
         engine = create_database_engine(cfg.database_url)
         session_factory = create_session_factory(engine)
@@ -166,13 +168,11 @@ def _build(
             init_database(engine, cfg.database_url)
             logger.info("Database initialized (Alembic migrations applied).")
 
-        if (
+        needs_startup_backup = (
             not skip_auto_backup
             and _should_auto_backup(cfg.backup.dir)
             and not _has_enabled_backup_schedule(session_factory)
-        ):
-            logger.info("First startup this week — creating automatic backup.")
-            _maybe_backup(cfg)
+        )
 
     file_storage = FileStorage(cfg.path.download or "download")
     epub_builder = EpubBuilder()
@@ -218,6 +218,7 @@ def _build(
         client=client,
         notifier=notifier,
         task_manager=task_manager,
+        needs_startup_backup=needs_startup_backup,
     )
 
 
@@ -260,6 +261,7 @@ def create_lifespan(s: _AppSingletons, *, run_background_tasks: bool = True):
         logger.info("Starting copixiv v2...")
         attach_app_state(app, s)
 
+        backup_task: asyncio.Task[None] | None = None
         try:
             if run_background_tasks:
                 total = len(s.account_pool.accounts)
@@ -282,9 +284,19 @@ def create_lifespan(s: _AppSingletons, *, run_background_tasks: bool = True):
                 await warm_task
 
                 await s.task_manager.start()
+                if s.needs_startup_backup:
+                    logger.info("First startup this week — running automatic backup in background.")
+                    backup_task = asyncio.create_task(
+                        asyncio.to_thread(_maybe_backup, s.config)
+                    )
             yield
         finally:
             logger.info("Shutting down copixiv v2...")
+            if backup_task is not None and not backup_task.done():
+                try:
+                    await backup_task
+                except Exception:
+                    logger.exception("Background startup backup failed during shutdown.")
             await s.task_manager.stop()
             s.image_downloader.shutdown()
             if s.notifier is not None:

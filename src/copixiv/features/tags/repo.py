@@ -5,10 +5,11 @@ continues to work with tag *names*; this repository handles the
 name ↔ id translation internally.
 """
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import Any, NamedTuple, cast
 
-from sqlalchemy import select
+from sqlalchemy import delete as _delete
+from sqlalchemy import exists, or_, select
 from sqlalchemy import text as _text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
@@ -115,6 +116,7 @@ _EXPAND_SQL = _text(
             SELECT t2.id, t2.name, t2.reference_count
             FROM tag t2
             WHERE t2.id <> p.id
+              AND t2.reference_count > 0
               AND NOT EXISTS (SELECT 1 FROM tag_alias a WHERE a.source = t2.id)
               AND NOT EXISTS (SELECT 1 FROM tag_alias a WHERE a.target = t2.id)
               AND (t2.search_lower LIKE lower(p.pfx) ESCAPE '\\'
@@ -149,6 +151,7 @@ _TARGET_SQL = _text(
             SELECT t2.id, t2.name, t2.reference_count
             FROM tag t2
             WHERE t2.id <> tgt.id
+              AND t2.reference_count > 0
               AND NOT EXISTS (SELECT 1 FROM tag_alias a WHERE a.source = t2.id)
               AND NOT EXISTS (SELECT 1 FROM tag_alias a WHERE a.target = t2.id)
               AND (t2.search_lower LIKE lower(:pfx) ESCAPE '\\'
@@ -329,11 +332,49 @@ class SQLAlchemyTagRepository(BaseRepository):
             "target": target_name,
         }
 
+    def _unaliased_zero_predicate(self):
+        """Condition matching orphan tag rows with <= 0 refs and no alias FK."""
+        return (
+            models.Tag.reference_count <= 0,
+            ~exists().where(
+                or_(
+                    models.TagAlias.source == models.Tag.id,
+                    models.TagAlias.target == models.Tag.id,
+                )
+            ),
+        )
+
+    def prune_unused_tags(self, tag_names: Iterable[str] | None = None) -> int:
+        """Delete zero-reference tag rows not referenced by any ``tag_alias``."""
+        stmt = _delete(models.Tag).where(*self._unaliased_zero_predicate())
+        if tag_names is not None:
+            names = sorted({n for n in tag_names if n})
+            if not names:
+                return 0
+            stmt = stmt.where(models.Tag.name.in_(names))
+        result = self.session.execute(stmt)
+        return cast(CursorResult[Any], result).rowcount or 0
+
+    def prune_unused_tag_ids(self, tag_ids: Iterable[int]) -> int:
+        """Delete zero-reference tag rows by ID when no ``tag_alias`` references them."""
+        ids = sorted(set(tag_ids))
+        if not ids:
+            return 0
+        stmt = (
+            _delete(models.Tag)
+            .where(*self._unaliased_zero_predicate(), models.Tag.id.in_(ids))
+        )
+        result = self.session.execute(stmt)
+        return cast(CursorResult[Any], result).rowcount or 0
+
     def delete_alias(self, alias_id: int) -> bool:
         alias = self.session.get(models.TagAlias, alias_id)
         if alias is None:
             return False
+        tag_ids = {alias.source, alias.target}
         self.session.delete(alias)
+        self.session.flush()
+        self.prune_unused_tag_ids(tag_ids)
         return True
 
     # ------------------------------------------------------------------
@@ -499,4 +540,5 @@ class SQLAlchemyTagRepository(BaseRepository):
             ),
             {"source": source, "target": target},
         )
+        self.prune_unused_tags([source])
         return cast(CursorResult[Any], result).rowcount or 0

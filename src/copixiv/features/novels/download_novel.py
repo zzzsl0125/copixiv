@@ -24,7 +24,7 @@ from copixiv.core.services import body_unchanged
 from copixiv.log import logger
 from copixiv.pixiv.client import PixivClient
 from copixiv.storage.file_storage import FileStorage
-from copixiv.storage.image_downloader import ImageDownloader
+from copixiv.storage.image_downloader import AssetBatch, ImageDownloader
 
 
 async def fetch_novel_and_assets(
@@ -34,6 +34,7 @@ async def fetch_novel_and_assets(
     image_downloader: ImageDownloader,
     redownload: bool = False,
     stored_path: str | None = None,
+    asset_batch: AssetBatch | None = None,
 ) -> NovelDraft | None:
     """Fetch a novel from Pixiv and persist its text + assets.
 
@@ -116,7 +117,7 @@ async def fetch_novel_and_assets(
     # — that path also heals a missing/corrupt EPUB — but without force, so an
     # existing valid EPUB short-circuits (image_downloader.py:210-227).
     await image_downloader.process_novel_assets(
-        data, force=redownload or rewrote,
+        data, force=redownload or rewrote, batch=asset_batch,
     )
 
     return data

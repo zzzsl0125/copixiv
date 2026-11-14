@@ -32,6 +32,7 @@ from copixiv.features.novels.persist import persist_novels
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.features.novels.series_index import resolve_series_indices
 from copixiv.log import logger
+from copixiv.storage.image_downloader import AssetBatch
 
 # ---------------------------------------------------------------------------
 # Batch upsert
@@ -76,6 +77,7 @@ async def _download_novels(
     image_downloader,
     redownload: bool = False,
     stored_paths: dict[int, str] | None = None,
+    asset_batch: AssetBatch | None = None,
 ) -> tuple[list[NovelDraft], list[tuple[int, str]]]:
     """Download novels via webview concurrently.
 
@@ -104,6 +106,7 @@ async def _download_novels(
         data = await fetch_novel_and_assets(
             nid, client, file_storage, image_downloader, redownload,
             stored_path=(stored_paths or {}).get(nid),
+            asset_batch=asset_batch,
         )
         if data is None:
             logger.warning(f"下载: #{nid} webview 返回空")
@@ -227,12 +230,11 @@ def _upsert_batch(
 
     记录失败、upsert 已有元数据与刚下载的条目、清掉成功项的失败标记 —— 全部
     落在**调用方**的事务里（本函数从不自己开事务，也不 commit）。返回
-    ``(本轮下载到的标题, 新插入行数)``。
+    ``(本轮下载到的标题, 本轮新增标题, 新插入行数)``。
 
-    失败记录写在 upsert **之后**：一本既下载成功、又 asset 处理失败的书会被
-    上面那条路径写进库（于是满足了 ``failed_novel`` 的外键）。而在持久化之前
-    就失败的**新**书没有 ``novel`` 行、按外键记不进去——那些被跳过，下一轮抓取
-    自然重试（见 ``FailedNovelRepository.record``）。
+    ``failed_novel`` 表刻意不设外键（见 :class:`FailedNovelRepository`），
+    因此无论是在落库前下载阶段失败的新书、还是下载成功但后续资产处理失败的书，
+    都能在下方统一写入失败台账。
     """
     new_count = 0
     titles_out: list[str] = []
@@ -415,6 +417,7 @@ async def _download_round(
     *,
     force: bool,
     stored_paths: dict[int, str],
+    asset_batch: AssetBatch | None = None,
 ) -> tuple[list[NovelDraft], list[tuple[int, str]]]:
     """Download phase —— 并发网络 / 文件 I/O，**不碰数据库**。
 
@@ -438,38 +441,43 @@ async def _download_round(
         ]
     return await _download_novels(
         download_ids, client, file_storage, image_downloader,
-        redownload=force, stored_paths=stored_paths,
+        redownload=force, stored_paths=stored_paths, asset_batch=asset_batch,
     )
 
 
-async def _settle_assets(image_downloader, downloaded: list[NovelDraft]) -> _AssetOutcome:
+async def _settle_assets(
+    image_downloader,
+    downloaded: list[NovelDraft],
+    asset_batch: AssetBatch | None = None,
+) -> _AssetOutcome:
     """Gate phase —— 等本轮的后台图片 / EPUB 任务收尾。
 
     写事务因此只看见文件**确实在盘上**的条目（没有"下载完了但 EPUB 还没好"
     的竞态）。失败与"真的做完了"一起带回去，与下载失败在同一个事务里落库。
 
-    ``await_all`` / ``drain_outcomes`` **都必须按本轮 id 限定**：ImageDownloader
-    是应用级单例、并发的 ingest 共享它（扇出任务会 gather 若干个
-    ``author_fetch``，每个都走到这里）。不限定的话，先到的那一轮会把别人那一轮
-    的 future 领走，于是它 gate 了个寂寞——EPUB 落盘了而 ``has_epub`` 停在
-    PENDING；drain 不限定则会把别人那一轮的 outcome 偷来，那条 UPDATE 打在本
-    事务还没写入的行上，DONE 就丢了。
+    使用调用专属的 ``AssetBatch`` 隔离并发任务（``novel_ranking`` /
+    ``novel_search`` 扇出多个 ``author_fetch``），确保即便两批重叠到同一本
+    小说，也能各自拿到独立、完整的完成通知与结局状态。
     """
     if image_downloader is None:
         return _AssetOutcome([], [])
 
-    ids = [d.id for d in downloaded]
-    failures = await image_downloader.await_all(ids)
-    if failures:
-        logger.warning(
-            f"ingest: {len(failures)} novels failed image/EPUB processing",
-        )
+    if asset_batch is not None:
+        failures = await asset_batch.await_all()
+        if failures:
+            logger.warning(
+                f"ingest: {len(failures)} novels failed image/EPUB processing",
+            )
+        outcomes = asset_batch.drain_outcomes()
+    else:
+        ids = [d.id for d in downloaded]
+        failures = await image_downloader.await_all(ids)
+        if failures:
+            logger.warning(
+                f"ingest: {len(failures)} novels failed image/EPUB processing",
+            )
+        outcomes = image_downloader.drain_outcomes(ids)
 
-    # 生产方自报的结果：EPUB 管线自己说哪些做完了（"done"）、哪些不需要
-    # （"skipped"）、哪些失败了。gate 之后立刻 drain —— 本轮每个 worker 到那时
-    # 都已经登记过了。"done" 就是让 draft 的 has_epub=PENDING 在持久事务里变成
-    # DONE 的依据，而不是等每周的对账任务（2026-09 根因："做完不置位"）。
-    outcomes = image_downloader.drain_outcomes(ids)
     done_ids = [nid for nid, outcome in outcomes.items() if outcome == "done"]
     return _AssetOutcome(failures, done_ids)
 
@@ -545,12 +553,14 @@ async def ingest(
         uow, lambda read_uow: _plan_round(novels, ids, read_uow, force=force),
     )
 
+    asset_batch = image_downloader.new_batch() if image_downloader is not None else None
+
     downloaded, failed_records = await _download_round(
         plan.download_ids, client, file_storage, image_downloader,
-        force=force, stored_paths=plan.stored_paths,
+        force=force, stored_paths=plan.stored_paths, asset_batch=asset_batch,
     )
 
-    assets = await _settle_assets(image_downloader, downloaded)
+    assets = await _settle_assets(image_downloader, downloaded, asset_batch=asset_batch)
 
     names = await _collect_names(downloaded, uow, client)
 

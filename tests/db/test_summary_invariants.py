@@ -161,3 +161,45 @@ async def test_summary_invariants_across_all_write_paths(uow: SqlUnitOfWork, tmp
         _assert_summaries_consistent(uow.session)
         s100 = uow.session.get(models.Series, 100)
         assert s100 is not None and s100.novel_count == 0
+
+
+def test_passive_upsert_skips_view_and_small_like_churn(uow: SqlUnitOfWork):
+    with uow.begin():
+        persist_novels(
+            uow,
+            [build_novel(id=7001, title="Quiet", author_id=1, author_name="A", like=100, view=500, text=1000)],
+        )
+
+    # Pure view bump + tiny like jitter (<5) without force_update -> skipped
+    with uow.begin():
+        persist_novels(
+            uow,
+            [build_novel(id=7001, title="Quiet", author_id=1, author_name="A", like=103, view=950, text=1000)],
+        )
+        row = uow.session.get(models.Novel, 7001)
+        assert row is not None
+        assert row.like == 100
+        assert row.view == 500
+
+    # Like delta >= 5 -> triggers update (refreshing both like and view)
+    with uow.begin():
+        persist_novels(
+            uow,
+            [build_novel(id=7001, title="Quiet", author_id=1, author_name="A", like=106, view=980, text=1000)],
+        )
+        row = uow.session.get(models.Novel, 7001)
+        assert row is not None
+        assert row.like == 106
+        assert row.view == 980
+
+    # Explicit force_update -> always applies even for tiny deltas
+    with uow.begin():
+        persist_novels(
+            uow,
+            [build_novel(id=7001, title="Quiet", author_id=1, author_name="A", like=107, view=999, text=1000)],
+            force_update=["author_id"],
+        )
+        row = uow.session.get(models.Novel, 7001)
+        assert row is not None
+        assert row.like == 107
+        assert row.view == 999

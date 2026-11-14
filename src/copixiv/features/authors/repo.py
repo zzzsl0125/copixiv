@@ -17,6 +17,7 @@ from copixiv.db.base import (
     refresh_parent_summaries,
     update_summary,
 )
+from copixiv.features.tags.repo import SQLAlchemyTagRepository
 
 
 class SQLAlchemyAuthorRepository(BaseRepository):
@@ -121,12 +122,18 @@ class SQLAlchemyAuthorRepository(BaseRepository):
 
     def delete_author_and_data(self, author_id: int) -> list[str]:
         rows = self.session.execute(
-            _select(models.Novel.id, models.Novel.path, models.Novel.series_id)
+            _select(
+                models.Novel.id,
+                models.Novel.path,
+                models.Novel.series_id,
+                models.Novel.tags,
+            )
             .where(models.Novel.author_id == author_id)
         ).all()
         novel_ids = [r[0] for r in rows]
         paths = [r[1] for r in rows if r[1]]
         affected_series_ids = {r[2] for r in rows if r[2] is not None}
+        affected_tags = {t for r in rows for t in (r[3] or [])}
 
         owned_series_ids = set(
             self.session.execute(
@@ -144,6 +151,9 @@ class SQLAlchemyAuthorRepository(BaseRepository):
             self.session.execute(
                 _delete(models.Novel).where(models.Novel.id.in_(novel_ids))
             )
+            self.session.flush()
+            if affected_tags:
+                SQLAlchemyTagRepository(self.session).prune_unused_tags(affected_tags)
 
         check_series = affected_series_ids | owned_series_ids
         if check_series:
