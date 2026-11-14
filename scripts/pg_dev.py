@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Local PostgreSQL dev-instance manager for copixiv (postgres-migration).
+"""Local PostgreSQL dev-instance manager for copixiv.
 
 Wraps the ``pgserver``-bundled PostgreSQL 16 binaries.  The data directory and
-Unix socket live under ``.spike/`` so the sandbox can reach them.
+Unix socket live under ``data/pg/`` and logs under ``log/``.
 
 Usage::
 
@@ -12,13 +12,12 @@ Usage::
     python scripts/pg_dev.py stop                # stop the instance (keeps data)
 
 Port: 5433 (matches ``AppConfig.database_url`` default).  Socket dir:
-``<repo>/.spike/sock``.  Data dir: ``<repo>/.spike/pgdata``.
+``<repo>/data/pg/sock``.  Data dir: ``<repo>/data/pg/pgdata``.
 """
 
 from __future__ import annotations
 
 import importlib.util
-import os
 import shutil
 import subprocess
 import sys
@@ -52,9 +51,9 @@ def _pg_bin_dir() -> Path:
     )
 
 
-PGDATA = PROJECT_ROOT / ".spike" / "pgdata"
-SOCK_DIR = PROJECT_ROOT / ".spike" / "sock"
-LOG_FILE = PROJECT_ROOT / ".spike" / "pg.log"
+PGDATA = PROJECT_ROOT / "data" / "pg" / "pgdata"
+SOCK_DIR = PROJECT_ROOT / "data" / "pg" / "sock"
+LOG_FILE = PROJECT_ROOT / "log" / "pg.log"
 PORT = 5433
 DB_USER = "postgres"
 
@@ -107,6 +106,7 @@ def _psql(database: str, sql: str) -> str:
 def _ensure_dirs() -> None:
     SOCK_DIR.mkdir(parents=True, exist_ok=True)
     PGDATA.mkdir(parents=True, exist_ok=True)
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 
 def _server_answers() -> bool:
@@ -134,7 +134,6 @@ def _server_answers() -> bool:
 
 
 def _server_opts() -> list[str]:
-    # The socket directory (-k) MUST be under .spike/ (sandbox constraint).
     return ["-k", str(SOCK_DIR), "-p", str(PORT)]
 
 

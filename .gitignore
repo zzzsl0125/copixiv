@@ -23,12 +23,7 @@ frontend/dist-ssr/
 *.local
 
 # === Database (local data, not source) ===
-.spike/
-database/*.db
-database/*.db-shm
-database/*.db-wal
-database/*.db.lock
-database/backups/
+data/
 backups/
 
 # === Log files ===
@@ -41,9 +36,6 @@ download/
 config.yaml
 pixiv_token.py
 
-# === Test environment ===
-test_env/
-
 # === IDE / Editor ===
 .vscode/
 !.vscode/extensions.json
@@ -54,23 +46,11 @@ test_env/
 .DS_Store
 Thumbs.db
 
-# === Tool local data ===
-.ccg/
-
 # === OS ===
 .directory
 
-# === 3rd Party ===
-3rdparty
-
-# === docs === 
+# === docs ===
 docs
-
-# === zcode ===
-.zcode
-
-# === 路径迁移时的整树快照（venv/pgdata 副本，非源码）===
-.pathfix-backup-*/
 
 # npm cache override for sandboxed runs
 .npm-cache/
@@ -79,5 +59,3 @@ docs
 .coverage
 .coverage.*
 htmlcov/
-# 验证/冒烟脚本的临时目录（不入库）
-.smoke/

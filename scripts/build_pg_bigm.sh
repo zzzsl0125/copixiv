@@ -95,7 +95,7 @@ command -v make >/dev/null || { echo "!! 缺少 make" >&2; exit 1; }
 command -v gcc >/dev/null || command -v cc >/dev/null || { echo "!! 缺少 C 编译器" >&2; exit 1; }
 
 # ---- 取源码（浅取指定 SHA，避免依赖 tag 不可移动 + 省流量）---------------
-WORK="${PG_BIGM_SRC_DIR:-$ROOT/.spike/pgbuild}"
+WORK="${PG_BIGM_SRC_DIR:-$ROOT/data/pg/pgbuild}"
 SRC="$WORK/pg_bigm"
 if [ ! -f "$SRC/Makefile" ]; then
   echo "== 拉取源码到 $SRC =="
