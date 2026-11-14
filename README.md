@@ -1,15 +1,6 @@
 # copixiv
 
-Pixiv 小说下载与管理系统（v2）：抓取、检索、管理与导出 Pixiv 中文小说，并支持本地 TXT / EPUB 上传入库与进程内高速检索。
-
-## 功能特性
-
-- **批量入库与本地上传**：支持爬取关注更新、作者作品、排行榜或搜索结果入库；也支持上传本地 TXT / EPUB（负数自增 ID、正文规范化哈希去重）并编辑元数据（作者 ID / 系列 ID / 章节号 / 标签 / 发布时间 / 本地标题）
-- **Rust 进程内检索与真随机推荐**：默认通过 Rust（PyO3 + `maturin`）扩展 `copixiv_rs` 将全部列表查询、计数、`/ids`、`/blocked-ids`、`/by-ids` 与无偏 `splitmix64` 随机分页在进程内存中直出完成，不回表 PostgreSQL；支持通过 `query_engine` 配置秒级回落 `pg` 或开启 `shadow` 影子对拍，PostgreSQL `pg_bigm` 索引与全文规范化链路完整保留作为真源与降级兜底
-- **个人喜好与厌恶标签排除**：支持收藏作品、特别关注作者、标签偏好（喜爱 / 厌恶）与标签别名聚合映射；启用排除开关时（默认开启），带厌恶标签的小说从列表、搜索、计数、`/by-ids` 与全选中隐藏，并支持「查看被隐藏的小说」与范围内筛选排序
-- **定时任务与死系列台账**：内置任务队列与 `croniter` 调度，支持进度追踪（`progress`）、Telegram 通知与连续确定性 404/410 死系列追踪（`series_dead_letter`）
-- **Pixiv 账号池**：支持多 Pixiv 账号并发爬取、热重载、负载均衡与冷却，可指定追更账号（`is_follow`）
-- **单进程一体部署**：FastAPI 直接静态托管构建后的 `frontend/dist`（`:9000`），API 与前端页面同源同端口
+抓取、检索、管理与导出 Pixiv 中文小说。	
 
 ## 技术栈
 
@@ -19,7 +10,7 @@ Pixiv 小说下载与管理系统（v2）：抓取、检索、管理与导出 Pi
 | 检索引擎 | Rust (`crates/copixiv_rs`，PyO3 + `roaring` + `memchr` + `rayon` + `parking_lot`) |
 | 前端 | Vue 3 + Vite + TypeScript + Tailwind CSS v4（`frontend/package.json`） |
 | 数据库 | PostgreSQL（Alembic 迁移 `0001`–`0016`；`BIGINT` / `timestamptz` / `JSONB` / `TEXT[]`+GIN / `pg_bigm`） |
-| Pixiv 客户端 | `pixivpy3`（git 直连 `upbit/pixivpy`）+ `pixiv/` 防腐层补丁 |
+| Pixiv 客户端 | `pixivpy3`+ `pixiv/` 防腐层补丁 |
 | 服务端口 | `9000`（生产由后端同进程托管 `frontend/dist`，Vite 开发代理转发 `/api` → `9000`） |
 
 ---
