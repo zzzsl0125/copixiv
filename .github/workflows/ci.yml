@@ -3,7 +3,7 @@ name: CI
 # 触发时机：push 到任意分支 + 任何 Pull Request。
 # 同一分支上多次快速 push 时取消仍在运行的旧任务（节省额度）。
 #
-# 后端门禁：ruff + mypy + import-linter + 纯单元测试（tests/unit）+ OpenAPI 一致性；
+# 后端门禁：Rust 单测 + ruff + mypy + import-linter + 纯单元测试（tests/unit）+ OpenAPI 一致性；
 # tests/db 与 tests/integration 依赖带 pg_bigm 扩展的 PostgreSQL，在本地验证。
 on:
   push:
@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   backend:
-    name: Backend (ruff + mypy + import-linter)
+    name: Backend (Rust + ruff + mypy + import-linter + unit)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -26,8 +26,19 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install dependencies
-        run: pip install ".[dev]" ruff mypy import-linter
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/copixiv_rs
+
+      - name: Install dependencies and build Rust extension
+        run: |
+          pip install ".[dev]" ruff mypy import-linter maturin
+          pip install --no-build-isolation ./crates/copixiv_rs
+
+      - name: Rust unit tests (cargo test)
+        run: PYO3_PYTHON="$(command -v python)" cargo test --manifest-path crates/copixiv_rs/Cargo.toml
 
       - name: Lint (ruff)
         run: ruff check src tests scripts

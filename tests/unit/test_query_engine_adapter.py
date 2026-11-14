@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import importlib
+import sys
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from copixiv.core.search_text import (
     SlimNovelTuple,
@@ -175,3 +179,19 @@ def test_abs_id_null_sort_order_and_js_safe_random_cursor():
         (-200, "Local200", "local", None),
         (300, "Pixiv300", "pixiv", 5000),
     ]
+
+
+def test_lazy_rust_import_allows_pure_python_boot(monkeypatch: pytest.MonkeyPatch) -> None:
+    import copixiv.query_engine as query_engine_pkg
+
+    orig_adapter = sys.modules["copixiv.query_engine.adapter"]
+    monkeypatch.setitem(sys.modules, "copixiv_rs", None)
+    monkeypatch.delitem(sys.modules, "copixiv.query_engine.adapter", raising=False)
+    monkeypatch.delitem(sys.modules, "copixiv.export_openapi", raising=False)
+    monkeypatch.setattr(query_engine_pkg, "adapter", orig_adapter)
+
+    reloaded_adapter = importlib.import_module("copixiv.query_engine.adapter")
+    importlib.import_module("copixiv.export_openapi")
+
+    with pytest.raises(ModuleNotFoundError, match="COPIXIV_QUERY_ENGINE=pg"):
+        reloaded_adapter.RustNovelQueryEngine()

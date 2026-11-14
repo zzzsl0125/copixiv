@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-
-import copixiv_rs
+from typing import TYPE_CHECKING
 
 from copixiv.core.exceptions import ValidationError
 from copixiv.core.search_text import SlimNovelTuple
@@ -18,9 +17,24 @@ from copixiv.query_engine.port import (
     EngineQuery,
 )
 
+if TYPE_CHECKING:
+    import copixiv_rs
 
-def _to_rust_filter(q: EngineQuery) -> copixiv_rs.QueryFilter:
-    return copixiv_rs.QueryFilter(
+
+def _rust_module():
+    try:
+        import copixiv_rs
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "copixiv_rs native extension is not installed. "
+            "Build it with `maturin develop --release --manifest-path crates/copixiv_rs/Cargo.toml` "
+            "or set query_engine='pg' (COPIXIV_QUERY_ENGINE=pg)."
+        ) from exc
+    return copixiv_rs
+
+
+def _to_rust_filter(ext, q: EngineQuery) -> copixiv_rs.QueryFilter:
+    return ext.QueryFilter(
         tags=list(q.tags),
         keyword_segments=list(q.keyword_segments),
         int_filters=list(q.int_filters),
@@ -41,7 +55,8 @@ class RustNovelQueryEngine:
 
     def __init__(self, mode: EngineMode = "rust") -> None:
         self._mode: EngineMode = mode
-        self._rs = copixiv_rs.NovelQueryEngine()
+        self._ext = _rust_module()
+        self._rs = self._ext.NovelQueryEngine()
 
     @property
     def mode(self) -> EngineMode:
@@ -54,7 +69,7 @@ class RustNovelQueryEngine:
         return self._rs.stats()
 
     def create_staging(self, capacity: int = 0) -> copixiv_rs.StagingEngine:
-        return copixiv_rs.StagingEngine(capacity=capacity)
+        return self._ext.StagingEngine(capacity=capacity)
 
     def swap_from_staging(
         self,
@@ -98,7 +113,7 @@ class RustNovelQueryEngine:
         fn = getattr(self._rs, method_name)
         try:
             items, has_more, rand_tuple = fn(
-                _to_rust_filter(query),
+                _to_rust_filter(self._ext, query),
                 order_by=order_by or "none",
                 descending=descending,
                 limit=limit,
@@ -163,14 +178,14 @@ class RustNovelQueryEngine:
         return list(self._rs.get_novel_rows_by_ids(novel_ids))
 
     def count_novels(self, query: EngineQuery, *, cap: int) -> EngineCountResult:
-        matched, truncated = self._rs.count_novels(_to_rust_filter(query), cap)
+        matched, truncated = self._rs.count_novels(_to_rust_filter(self._ext, query), cap)
         return EngineCountResult(count=matched, truncated=truncated)
 
     def has_match(self, query: EngineQuery) -> bool:
-        return self._rs.has_match(_to_rust_filter(query))
+        return self._rs.has_match(_to_rust_filter(self._ext, query))
 
     def list_matching_ids(self, query: EngineQuery) -> list[int]:
-        return self._rs.list_matching_ids(_to_rust_filter(query))
+        return self._rs.list_matching_ids(_to_rust_filter(self._ext, query))
 
     def list_blocked_ids(self) -> list[int]:
         return self._rs.list_blocked_ids()

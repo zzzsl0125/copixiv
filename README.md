@@ -182,7 +182,7 @@ tests/                  # unit/、db/（PG 与 Rust 影子/对拍测试）与 in
 ## 质量门禁与基准
 
 ```bash
-bash scripts/run_verification.sh                        # 完整本地验证（ruff → mypy → lint-imports → pytest → 前端构建）
+bash scripts/run_verification.sh                        # 完整本地验证（cargo test → ruff → mypy → lint-imports → OpenAPI → pytest → 前端 codegen + 构建）
 cargo test --manifest-path crates/copixiv_rs/Cargo.toml # Rust 检索引擎单元测试（需 PYO3_PYTHON 指向 .venv Python）
 .venv/bin/alembic check                                 # ORM 模型 ↔ 迁移历史对齐检查
 .venv/bin/python scripts/bench_engine_comparison.py     # 只读基准：对比当前库上 PG vs Rust 延迟与结果一致性
