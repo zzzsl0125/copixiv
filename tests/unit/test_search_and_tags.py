@@ -1,15 +1,12 @@
-"""Layer 1 unit tests: keyword search parsing, LIKE escaping, and tag normalization."""
+"""Layer 1 unit tests: keyword search parsing, segment normalization, and tag normalization."""
 
 from __future__ import annotations
 
-from copixiv.core.services import normalize_tag, parse_search_keyword, parse_tags
-from copixiv.features.novels.search import (
-    escape_like,
-    keyword_condition,
-    keyword_params,
-    like_predicate,
-    normalize_segments,
-)
+import pytest
+
+from copixiv.core.exceptions import ValidationError
+from copixiv.core.search import normalize_search_segments, parse_search_keyword
+from copixiv.core.text import normalize_tag, parse_tags, validate_tags
 
 
 def test_parse_search_keyword_combines_typed_and_bare_conditions():
@@ -34,34 +31,35 @@ def test_parse_search_keyword_empty_and_punctuation():
     assert parse_search_keyword("123456") == [("keyword", "123456")]
 
 
-def test_escape_like_and_keyword_predicates():
-    assert escape_like(r"100%_a\b") == r"100\%\_a\\b"
-
-    assert normalize_segments("--- ... !!") == []
-    assert like_predicate("--- ...") is None
-    assert keyword_condition("--- ...") is None
-
-    assert normalize_segments("哈利 波特 ---") == ["哈利", "波特"]
-    assert like_predicate("哈利 波特") == (
-        "search_lower LIKE lower(:p0) ESCAPE '\\' AND "
-        "search_lower LIKE lower(:p1) ESCAPE '\\'"
-    )
-    assert keyword_params("BanG_Dream! %100") == {
-        "p0": r"%BanG\_Dream!%",
-        "p1": r"%\%100%",
-    }
+def test_normalize_search_segments_drops_punctuation_only():
+    assert normalize_search_segments("") == []
+    assert normalize_search_segments("--- ... !!") == []
+    assert normalize_search_segments("哈利 波特 ---") == ["哈利", "波特"]
+    assert normalize_search_segments("BanG_Dream! %100") == ["BanG_Dream!", "%100"]
 
 
 def test_parse_tags_normalizes_splits_and_deduplicates_in_order():
     assert parse_tags([]) == []
     assert parse_tags([None, "", "  ", {"name": ""}]) == []
 
-    tags = parse_tags([
-        "  Sci-Fi (SF) ",
-        {"name": "R-18/中文|百合#校园、日常\\短篇"},
-        "sci-fi sf",
-        "百合",
-        "ALPHA",
-    ])
+    tags = parse_tags(
+        [
+            "  Sci-Fi (SF) ",
+            {"name": "R-18/中文|百合#校园、日常\\短篇"},
+            "sci-fi sf",
+            "百合",
+            "ALPHA",
+        ]
+    )
     assert tags == ["sci-fi sf", "r-18", "中文", "百合", "校园", "日常", "短篇", "alpha"]
     assert normalize_tag("  FooBar ") == "foobar"
+
+
+def test_validate_tags_enforces_empty_count_and_length_bounds():
+    with pytest.raises(ValidationError, match="请至少输入一个标签"):
+        validate_tags([" ", None], require_non_empty=True)
+    with pytest.raises(ValidationError, match="一次最多操作 2 个标签"):
+        validate_tags(["a", "b", "c"], max_count=2)
+    with pytest.raises(ValidationError, match="标签过长"):
+        validate_tags(["abcdef"], max_length=5)
+    assert validate_tags(["  Alpha ", "beta/ALPHA"], max_count=5) == ["alpha", "beta"]

@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
-from datetime import timezone
+from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 
-from copixiv.core.draft import build_from_novel_info, build_from_webview
-from copixiv.core.language import filter_chinese, is_chinese
-from copixiv.core.models import EpubStatus
-from copixiv.core.services import (
+from copixiv.core.draft import (
+    build_from_novel_info,
+    build_from_webview,
     guess_series_order,
+)
+from copixiv.core.models import EpubStatus, NovelSource, TaskResult
+from copixiv.core.text import (
+    body_unchanged,
+    filter_chinese,
     has_image_placeholders,
     has_image_placeholders_bytes,
-    parse_pixiv_time,
+    is_chinese,
 )
+from copixiv.core.time import month_ranges, parse_pixiv_time
 
 
 def test_is_chinese_and_filter_chinese():
@@ -21,17 +26,22 @@ def test_is_chinese_and_filter_chinese():
     assert is_chinese(title="海") is True
     assert is_chinese(title="日本語の小説", caption="テスト") is False
     assert is_chinese(title="日本語", tags=["中文"]) is True
-    assert is_chinese(
-        title="第一章",
-        caption="<p>Shop: https://example.com/abcdefghijklmnop</p>正文开始",
-    ) is True
+    assert (
+        is_chinese(
+            title="第一章",
+            caption="<p>Shop: https://example.com/abcdefghijklmnop</p>正文开始",
+        )
+        is True
+    )
     assert is_chinese(title="Roll over", caption="English only lyrics") is False
 
-    kept = filter_chinese([
-        {"title": "中文小说", "caption": "", "tags": []},
-        {"title": "これは日本語", "caption": "", "tags": []},
-        SimpleNamespace(title="English", caption="", tags=[SimpleNamespace(name="Chinese")]),
-    ])
+    kept = filter_chinese(
+        [
+            {"title": "中文小说", "caption": "", "tags": []},
+            {"title": "これは日本語", "caption": "", "tags": []},
+            SimpleNamespace(title="English", caption="", tags=[SimpleNamespace(name="Chinese")]),
+        ]
+    )
     assert len(kept) == 2
 
 
@@ -90,7 +100,7 @@ def test_guess_series_order_and_time_and_placeholders():
 
     dt_date = parse_pixiv_time("2026-01-02")
     assert dt_date is not None
-    assert dt_date.tzinfo == timezone.utc
+    assert dt_date.tzinfo == UTC
     assert dt_date.hour == 15  # 00:00 JST == 15:00 previous day UTC
     assert parse_pixiv_time("") is None
 
@@ -98,3 +108,31 @@ def test_guess_series_order_and_time_and_placeholders():
     assert has_image_placeholders("plain text") is False
     assert has_image_placeholders_bytes(b"prefix [pixivimage:456-1] suffix") is True
     assert has_image_placeholders_bytes(b"no markers here") is False
+
+
+def test_text_language_symbols_body_hash_month_ranges_and_models():
+    # Katakana middle dot / prolonged sound mark / double hyphen in Chinese titles are allowed
+    assert is_chinese(title="阿斯托尔福・测试ー章节゠终章") is True
+    assert body_unchanged("同一份正文", "同一份正文") is True
+    assert body_unchanged("旧正文", "新正文") is False
+    assert body_unchanged("", "") is False
+    assert body_unchanged(None, "x") is False
+
+    # month_ranges preserves tzinfo and rolls back cleanly across year boundary
+    jst = timezone(timedelta(hours=9))
+    end = datetime(2026, 2, 15, 18, 30, tzinfo=jst)
+    windows = list(month_ranges(end, 4))
+    assert windows == [
+        (datetime(2026, 2, 1, 18, 30, tzinfo=jst), end),
+        (datetime(2026, 1, 1, tzinfo=jst), datetime(2026, 1, 31, tzinfo=jst)),
+        (datetime(2025, 12, 1, tzinfo=jst), datetime(2025, 12, 31, tzinfo=jst)),
+        (datetime(2025, 11, 1, tzinfo=jst), datetime(2025, 11, 30, tzinfo=jst)),
+    ]
+    assert all(start.tzinfo == jst and stop.tzinfo == jst for start, stop in windows)
+
+    # TaskResult.new_novel_count is a computed_field; NovelSource carries string values
+    res = TaskResult(summary="ok", new_novel_titles=["甲", "乙"])
+    assert res.new_novel_count == 2
+    assert res.model_dump()["new_novel_count"] == 2
+    assert NovelSource.PIXIV.value == "pixiv"
+    assert NovelSource.LOCAL.value == "local"

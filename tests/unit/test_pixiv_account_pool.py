@@ -1,4 +1,4 @@
-"""Layer 3 integration tests: AccountPool LRU selection, follow cooldown fallback, and premium guard."""
+"""Layer 1 unit tests: AccountPool LRU selection, follow cooldown fallback, and premium guard."""
 
 from __future__ import annotations
 
@@ -10,7 +10,11 @@ from copixiv.pixiv.errors import PremiumRequiredError
 
 
 def _make_account(
-    name: str, *, premium: bool = False, follow: bool = False, valid: bool = True,
+    name: str,
+    *,
+    premium: bool = False,
+    follow: bool = False,
+    valid: bool = True,
 ) -> PixivAccount:
     return PixivAccount(
         token_info=TokenInfo(
@@ -40,7 +44,7 @@ def test_account_pool_lru_rotation():
     assert pool.select().username == "a1"
 
 
-def test_account_pool_force_follow_prefers_flagged_and_falls_back_on_cooldown():
+def test_account_pool_force_follow_pins_flagged_even_during_cooldown_and_falls_back_when_absent():
     pool = AccountPool()
     normal = _make_account("normal", follow=False)
     follower = _make_account("follower", follow=True)
@@ -51,10 +55,15 @@ def test_account_pool_force_follow_prefers_flagged_and_falls_back_on_cooldown():
     assert chosen is follower
     assert chosen.last_req_time > 0.0
 
-    # Put follow account in cooldown -> falls back to normal account instead of failing
+    # Put follow account in cooldown -> must NOT switch to normal account's feed
     follower.start_cooldown(60.0)
-    fallback = pool.select(AccountStrategy(force_follow=True))
-    assert fallback is normal
+    pinned = pool.select(AccountStrategy(force_follow=True))
+    assert pinned is follower
+
+    # Only falls back when no valid follow account exists in the pool
+    pool_no_follow = AccountPool()
+    pool_no_follow.add_account(normal)
+    assert pool_no_follow.select(AccountStrategy(force_follow=True)) is normal
 
 
 def test_account_pool_need_premium_raises_when_absent_and_selects_when_present():

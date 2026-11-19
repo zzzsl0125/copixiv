@@ -11,11 +11,15 @@ from copixiv.core.draft import build_novel
 from copixiv.db import models
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.library.ingest import ingest_uploads
-from copixiv.features.novels.batch_edit_metadata import BatchEditMetadataUseCase
-from copixiv.features.novels.delete_novel import DeleteNovelUseCase
-from copixiv.features.novels.persist import persist_novels
+from copixiv.features.novels.ingest import persist_novels
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
-from copixiv.features.novels.update_metadata import UpdateNovelMetadataUseCase
+from copixiv.features.novels.use_cases.batch_edit_metadata import (
+    BatchEditMetadataUseCase,
+)
+from copixiv.features.novels.use_cases.delete_novel import DeleteNovelUseCase
+from copixiv.features.novels.use_cases.update_metadata import (
+    UpdateNovelMetadataUseCase,
+)
 from copixiv.storage.file_storage import FileStorage
 
 
@@ -58,7 +62,10 @@ def _assert_summaries_consistent(session) -> None:
         if series.series_id in novel_series_aggs:
             cnt, likes, views, texts, max_author = novel_series_aggs[series.series_id]
             assert (series.novel_count, series.like, series.view, series.text) == (
-                cnt, likes, views, texts,
+                cnt,
+                likes,
+                views,
+                texts,
             )
             assert series.author_id == max_author
             assert series.author_id is not None
@@ -76,13 +83,27 @@ async def test_summary_invariants_across_all_write_paths(uow: SqlUnitOfWork, tmp
             uow,
             [
                 build_novel(
-                    id=1001, title="P1", author_id=10, author_name="Author10",
-                    like=50, view=500, text=1000, series_id=100, series_name="S100",
+                    id=1001,
+                    title="P1",
+                    author_id=10,
+                    author_name="Author10",
+                    like=50,
+                    view=500,
+                    text=1000,
+                    series_id=100,
+                    series_name="S100",
                     download_dir=str(tmp_path),
                 ),
                 build_novel(
-                    id=1002, title="P2", author_id=10, author_name="Author10",
-                    like=30, view=300, text=2000, series_id=100, series_name="S100",
+                    id=1002,
+                    title="P2",
+                    author_id=10,
+                    author_name="Author10",
+                    like=30,
+                    view=300,
+                    text=2000,
+                    series_id=100,
+                    series_name="S100",
                     download_dir=str(tmp_path),
                 ),
             ],
@@ -95,8 +116,15 @@ async def test_summary_invariants_across_all_write_paths(uow: SqlUnitOfWork, tmp
             uow,
             [
                 build_novel(
-                    id=1002, title="P2", author_id=20, author_name="Author20",
-                    like=40, view=400, text=2500, series_id=200, series_name="S200",
+                    id=1002,
+                    title="P2",
+                    author_id=20,
+                    author_name="Author20",
+                    like=40,
+                    view=400,
+                    text=2500,
+                    series_id=200,
+                    series_name="S200",
                     download_dir=str(tmp_path),
                 ),
             ],
@@ -108,7 +136,7 @@ async def test_summary_invariants_across_all_write_paths(uow: SqlUnitOfWork, tmp
         res = ingest_uploads(
             uow.session,
             storage,
-            [("LocalA.txt", "本地作品正文A".encode("utf-8")), ("LocalB.txt", "本地作品正文B".encode("utf-8"))],
+            [("LocalA.txt", "本地作品正文A".encode()), ("LocalB.txt", "本地作品正文B".encode())],
             preset_author_id=10,
             preset_author_name="Author10",
         )
@@ -120,7 +148,7 @@ async def test_summary_invariants_across_all_write_paths(uow: SqlUnitOfWork, tmp
         ingest_uploads(
             uow.session,
             storage,
-            [("LocalA.txt", "本地作品正文A".encode("utf-8"))],
+            [("LocalA.txt", "本地作品正文A".encode())],
             preset_author_id=20,
             preset_author_name="Author20",
         )
@@ -160,21 +188,30 @@ async def test_summary_invariants_across_all_write_paths(uow: SqlUnitOfWork, tmp
         SQLAlchemyNovelRepository(uow.session).delete_many([1001, 1002, local_ids[1]])
         _assert_summaries_consistent(uow.session)
         s100 = uow.session.get(models.Series, 100)
-        assert s100 is not None and s100.novel_count == 0
+        assert s100 is not None
+        assert s100.novel_count == 0
 
 
 def test_passive_upsert_skips_view_and_small_like_churn(uow: SqlUnitOfWork):
     with uow.begin():
         persist_novels(
             uow,
-            [build_novel(id=7001, title="Quiet", author_id=1, author_name="A", like=100, view=500, text=1000)],
+            [
+                build_novel(
+                    id=7001, title="Quiet", author_id=1, author_name="A", like=100, view=500, text=1000
+                )
+            ],
         )
 
     # Pure view bump + tiny like jitter (<5) without force_update -> skipped
     with uow.begin():
         persist_novels(
             uow,
-            [build_novel(id=7001, title="Quiet", author_id=1, author_name="A", like=103, view=950, text=1000)],
+            [
+                build_novel(
+                    id=7001, title="Quiet", author_id=1, author_name="A", like=103, view=950, text=1000
+                )
+            ],
         )
         row = uow.session.get(models.Novel, 7001)
         assert row is not None
@@ -185,7 +222,11 @@ def test_passive_upsert_skips_view_and_small_like_churn(uow: SqlUnitOfWork):
     with uow.begin():
         persist_novels(
             uow,
-            [build_novel(id=7001, title="Quiet", author_id=1, author_name="A", like=106, view=980, text=1000)],
+            [
+                build_novel(
+                    id=7001, title="Quiet", author_id=1, author_name="A", like=106, view=980, text=1000
+                )
+            ],
         )
         row = uow.session.get(models.Novel, 7001)
         assert row is not None
@@ -196,7 +237,11 @@ def test_passive_upsert_skips_view_and_small_like_churn(uow: SqlUnitOfWork):
     with uow.begin():
         persist_novels(
             uow,
-            [build_novel(id=7001, title="Quiet", author_id=1, author_name="A", like=107, view=999, text=1000)],
+            [
+                build_novel(
+                    id=7001, title="Quiet", author_id=1, author_name="A", like=107, view=999, text=1000
+                )
+            ],
             force_update=["author_id"],
         )
         row = uow.session.get(models.Novel, 7001)

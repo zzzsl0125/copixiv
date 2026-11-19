@@ -2,58 +2,98 @@
 
 from __future__ import annotations
 
-from fastapi.testclient import TestClient
+import io
+import json
+import zipfile
+from pathlib import Path
 
-from copixiv.app import create_app
-from copixiv.config import AppConfig
+from fastapi.testclient import TestClient
+from tests.factories import make_test_app
+
 from copixiv.core.draft import NovelDraft
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 
 
-def test_http_endpoints_rust_engine_and_live_mutations(committed_session_factory):
+def test_http_endpoints_rust_engine_and_live_mutations(
+    committed_session_factory,
+    tmp_path: Path,
+):
     from copixiv.db import models
 
     uow = SqlUnitOfWork(committed_session_factory)
+    novel1_txt = tmp_path / "download" / "0000" / "One_1.txt"
+    novel1_txt.parent.mkdir(parents=True, exist_ok=True)
+    novel1_txt.write_text("Novel One Body", encoding="utf-8")
     with uow.begin():
-        SQLAlchemyNovelRepository(uow.session).upsert_novels([
-            NovelDraft(id=1, title="One", path="i/1.txt", author_id=10, author_name="Auth10", like=100, text=1000, tags=["tagA"]),
-            NovelDraft(id=2, title="Two", path="i/2.txt", author_id=10, author_name="Auth10", like=200, text=2000, tags=["tagA", "spoiler"]),
-            NovelDraft(id=-5, title="LocalFive", path="i/neg5.txt", author_id=10, author_name="Auth10", like=300, text=3000, tags=["tagA"]),
-            NovelDraft(id=4, title="Four", path="i/4.txt", author_id=20, author_name="Auth20", like=50, text=500, tags=["tagB"]),
-        ])
+        SQLAlchemyNovelRepository(uow.session).upsert_novels(
+            [
+                NovelDraft(
+                    id=1,
+                    title="One",
+                    path=str(novel1_txt),
+                    author_id=10,
+                    author_name="Auth10",
+                    like=100,
+                    text=1000,
+                    tags=["tagA"],
+                ),
+                NovelDraft(
+                    id=2,
+                    title="Two",
+                    path="i/2.txt",
+                    author_id=10,
+                    author_name="Auth10",
+                    like=200,
+                    text=2000,
+                    tags=["tagA", "spoiler"],
+                ),
+                NovelDraft(
+                    id=-5,
+                    title="LocalFive",
+                    path="i/neg5.txt",
+                    author_id=10,
+                    author_name="Auth10",
+                    like=300,
+                    text=3000,
+                    tags=["tagA"],
+                ),
+                NovelDraft(
+                    id=4,
+                    title="Four",
+                    path="i/4.txt",
+                    author_id=20,
+                    author_name="Auth20",
+                    like=50,
+                    text=500,
+                    tags=["tagB"],
+                ),
+            ]
+        )
         local_row = uow.session.get(models.Novel, -5)
         assert local_row is not None
         local_row.source = "local"
 
-    cfg = AppConfig(query_engine="rust")
-    app = create_app(
-        cfg,
-        session_factory=committed_session_factory,
-        skip_init_db=True,
-        skip_auto_backup=True,
-        mount_spa=False,
-        run_background_tasks=False,
-    )
+    app = make_test_app(committed_session_factory, tmp_path)
 
     with TestClient(app, base_url="http://localhost") as client:
         assert app.state.query_engine is not None
         assert app.state.query_engine.ready()
 
         # Paginated listing & count
-        r = client.get("/api/novels/?order_by=like&order_direction=DESC&per_page=2")
+        r = client.get("/api/novels?order_by=like&order_direction=DESC&per_page=2")
         assert r.status_code == 200
         body = r.json()
         assert [n["id"] for n in body["novels"]] == [-5, 2]
         assert body["cursor"] is not None
 
         r_p2 = client.get(
-            "/api/novels/",
+            "/api/novels",
             params={
                 "order_by": "like",
                 "order_direction": "DESC",
                 "per_page": 2,
-                "cursor": f'{{"id": {body["cursor"]["id"]}, "like": {body["cursor"]["like"]}}}',
+                "cursor": json.dumps({"id": body["cursor"]["id"], "like": body["cursor"]["like"]}),
             },
         )
         assert r_p2.status_code == 200
@@ -72,15 +112,13 @@ def test_http_endpoints_rust_engine_and_live_mutations(committed_session_factory
         ).json()["matching_ids"] == [1]
 
         # Random pagination across full corpus yields every ID once with string hex cursors
-        import json as _json
-
         rand_ids: list[int] = []
         cursor_obj = None
         for _ in range(5):
             params = {"order_by": "random", "per_page": 2}
             if cursor_obj is not None:
-                params["cursor"] = _json.dumps(cursor_obj)
-            rr = client.get("/api/novels/", params=params)
+                params["cursor"] = json.dumps(cursor_obj)
+            rr = client.get("/api/novels", params=params)
             assert rr.status_code == 200
             rb = rr.json()
             rand_ids.extend(n["id"] for n in rb["novels"])
@@ -94,7 +132,7 @@ def test_http_endpoints_rust_engine_and_live_mutations(committed_session_factory
 
         # Block tag via HTTP API -> immediate exclusion in /count, /blocked-ids, has_excluded
         rp = client.post(
-            "/api/tag-preferences/",
+            "/api/tag-preferences",
             json={"tag": "spoiler", "preference": "blocked", "sort_index": 0},
         )
         assert rp.status_code in (200, 201)
@@ -102,7 +140,7 @@ def test_http_endpoints_rust_engine_and_live_mutations(committed_session_factory
         rc = client.get("/api/novels/count", params={"with_excluded": True}).json()
         assert rc["total"] == 3
         assert rc["excluded"] == 1
-        r_search = client.get("/api/novels/", params={"keyword": "spoiler"}).json()
+        r_search = client.get("/api/novels", params={"keyword": "spoiler"}).json()
         assert r_search["novels"] == []
         assert r_search["has_excluded"] is True
 
@@ -134,3 +172,14 @@ def test_http_endpoints_rust_engine_and_live_mutations(committed_session_factory
 
         bad_caption = client.patch("/api/novels/-5", json={"caption": "nope"})
         assert bad_caption.status_code == 422
+
+        # Condition-based batch-download in Rust mode hydrates paths & strips only trailing .zip
+        dl = client.post(
+            "/api/novels/batch-download",
+            json={"keyword": "One", "zip_name": "top.zip", "format_mode": "txt"},
+        )
+        assert dl.status_code == 200
+        assert "top.zip" in dl.headers.get("content-disposition", "")
+        with zipfile.ZipFile(io.BytesIO(dl.content)) as zf:
+            assert len(zf.namelist()) == 1
+            assert zf.read(zf.namelist()[0]) == b"Novel One Body"

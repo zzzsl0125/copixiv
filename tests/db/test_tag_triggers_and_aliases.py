@@ -1,4 +1,4 @@
-"""Layer 2 DB tests: trg_sync_tag_refs triggers, single-hop alias cycle guard, and retroactive dedup."""
+"""Layer 2 DB tests: trg_sync_tag_refs triggers, alias guards, retroactive dedup, and Rust tag suggestions."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from copixiv.core.draft import build_novel
 from copixiv.core.exceptions import ValidationError
 from copixiv.db import models
 from copixiv.db.uow import SqlUnitOfWork
-from copixiv.features.novels.persist import persist_novels
+from copixiv.features.novels.ingest import persist_novels
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
 
@@ -48,19 +48,19 @@ def test_tag_triggers_track_insert_update_delete(uow: SqlUnitOfWork):
         assert _tag_count(uow.session, "alpha") == 1
         assert _tag_count(uow.session, "gamma") == 0
         assert (
-            uow.session.execute(
-                select(models.Tag).where(models.Tag.name == "gamma")
-            ).scalar_one_or_none()
+            uow.session.execute(select(models.Tag).where(models.Tag.name == "gamma")).scalar_one_or_none()
             is None
         )
-        # Trigger must not create any session temp tables (migration 0016)
+        # Trigger must not create any session temp tables (migration 0016+)
         temp_count = uow.session.execute(
-            text(
-                "SELECT COUNT(*) FROM pg_class "
-                "WHERE relpersistence = 't' AND relname = '_tag_ref_deltas'"
-            )
+            text("SELECT COUNT(*) FROM pg_class WHERE relpersistence = 't' AND relname = '_tag_ref_deltas'")
         ).scalar_one()
         assert temp_count == 0
+
+    # Non-tag UPDATE leaves reference counts untouched (0017 EXCEPT early exit)
+    with uow.begin():
+        SQLAlchemyNovelRepository(uow.session).toggle_favourite(2)
+        assert _tag_count(uow.session, "alpha") == 1
 
 
 def test_aliased_zero_ref_tag_survives_until_alias_deleted(uow: SqlUnitOfWork):
@@ -85,9 +85,7 @@ def test_aliased_zero_ref_tag_survives_until_alias_deleted(uow: SqlUnitOfWork):
         # Deleting the alias immediately prunes the unreferenced src_alias row
         assert tag_repo.delete_alias(alias["id"]) is True
         assert (
-            uow.session.execute(
-                select(models.Tag).where(models.Tag.name == "src_alias")
-            ).scalar_one_or_none()
+            uow.session.execute(select(models.Tag).where(models.Tag.name == "src_alias")).scalar_one_or_none()
             is None
         )
         assert _tag_count(uow.session, "dst_alias") == 1
@@ -120,11 +118,17 @@ def test_apply_alias_retroactively_deduplicates_tags_and_updates_counts(uow: Sql
             uow,
             [
                 build_novel(
-                    id=10, title="Both", author_id=1, author_name="A",
+                    id=10,
+                    title="Both",
+                    author_id=1,
+                    author_name="A",
                     tags=["old_tag", "new_tag", "other"],
                 ),
                 build_novel(
-                    id=11, title="OnlyOld", author_id=1, author_name="A",
+                    id=11,
+                    title="OnlyOld",
+                    author_id=1,
+                    author_name="A",
                     tags=["old_tag"],
                 ),
             ],
@@ -137,8 +141,53 @@ def test_apply_alias_retroactively_deduplicates_tags_and_updates_counts(uow: Sql
 
         n10 = uow.session.get(models.Novel, 10)
         n11 = uow.session.get(models.Novel, 11)
-        assert n10 is not None and sorted(n10.tags) == ["new_tag", "other"]
-        assert n11 is not None and n11.tags == ["new_tag"]
+        assert n10 is not None
+        assert sorted(n10.tags) == ["new_tag", "other"]
+        assert n11 is not None
+        assert n11.tags == ["new_tag"]
         assert _tag_count(uow.session, "old_tag") == 0
         assert _tag_count(uow.session, "new_tag") == 2
         assert _tag_count(uow.session, "other") == 1
+
+
+def test_suggest_aliases_end_to_end_via_rust_tag_index(uow: SqlUnitOfWork):
+    with uow.begin():
+        persist_novels(
+            uow,
+            [
+                build_novel(id=101, title="N1", author_id=1, author_name="A", tags=["百合", "百合漫画"]),
+                build_novel(
+                    id=102, title="N2", author_id=1, author_name="A", tags=["日常", "%高中生", "%高中生女子"]
+                ),
+                build_novel(
+                    id=103, title="N3", author_id=1, author_name="A", tags=["aliased_src", "aliased_tgt"]
+                ),
+            ],
+        )
+    with uow.begin():
+        tag_repo = SQLAlchemyTagRepository(uow.session)
+        tag_repo.create_alias({"source": "aliased_src", "target": "aliased_tgt"})
+
+    with uow.begin():
+        tag_repo = SQLAlchemyTagRepository(uow.session)
+        # Literal '%' does not act as SQL wildcard
+        pct = tag_repo.suggest_aliases(limit=5, offset=0, target_tag="%高中生")
+        assert pct["next_offset"] == 0
+        assert len(pct["items"]) == 1
+        assert [c["name"] for c in pct["items"][0]["candidates"]] == ["%高中生女子"]
+
+        # Aliased source AND target are both excluded from suggestions
+        assert tag_repo.suggest_aliases(limit=5, offset=0, target_tag="aliased_src")["items"] == []
+        assert tag_repo.suggest_aliases(limit=5, offset=0, target_tag="aliased_tgt")["items"] == []
+
+        # New novel committed -> TagIndex syncs incrementally without restart
+        persist_novels(
+            uow,
+            [build_novel(id=104, title="N4", author_id=1, author_name="A", tags=["百合小説"])],
+        )
+
+    with uow.begin():
+        yuri = SQLAlchemyTagRepository(uow.session).suggest_aliases(limit=5, offset=0, target_tag="百合")
+        cand_names = [c["name"] for c in yuri["items"][0]["candidates"]]
+        assert "百合漫画" in cand_names
+        assert "百合小説" in cand_names

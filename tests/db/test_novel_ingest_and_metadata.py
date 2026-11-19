@@ -1,0 +1,291 @@
+"""Layer 2 DB tests: Pixiv novel ingest pipeline, metadata edit policy, and batch operations."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from tests.factories import make_local_novel
+
+from copixiv.core.exceptions import NotFoundError, ValidationError
+from copixiv.core.models import EpubStatus
+from copixiv.db import models
+from copixiv.db.uow import SqlUnitOfWork
+from copixiv.features.novels.field_policy import editable_fields
+from copixiv.features.novels.ingest import ingest
+from copixiv.features.novels.repo import SQLAlchemyNovelRepository
+from copixiv.features.novels.use_cases.batch_download import BatchDownloadUseCase
+from copixiv.features.novels.use_cases.batch_operations import (
+    BatchDeleteUseCase,
+    BatchTagUseCase,
+)
+from copixiv.features.novels.use_cases.update_metadata import (
+    UpdateNovelMetadataUseCase,
+)
+from copixiv.features.tags.repo import SQLAlchemyTagRepository
+from copixiv.storage.file_storage import FileStorage
+
+
+def _fake_webview(novel_id: int, *, title: str, author_id: int = 10, text: str = "这是中文正文内容"):
+    return SimpleNamespace(
+        id=novel_id,
+        title=title,
+        user_id=author_id,
+        rating={"bookmark": 120, "view": 500},
+        caption="中文简介",
+        series_id=None,
+        series_title=None,
+        series_navigation=None,
+        cdate="2026-01-02T03:04:05+09:00",
+        tags=["中文", "科幻"],
+        text=text,
+        images=[],
+        illusts=[],
+        cover_url=None,
+    )
+
+
+def _fake_novel_info(novel_id: int, *, title: str, author_id: int = 10, author_name: str = "Auth10"):
+    return SimpleNamespace(
+        id=novel_id,
+        title=title,
+        caption="中文简介",
+        tags=[SimpleNamespace(name="中文"), SimpleNamespace(name="日常")],
+        user=SimpleNamespace(id=author_id, name=author_name),
+        series=None,
+        total_bookmarks=200,
+        total_view=1000,
+        text_length=len("这是中文正文内容"),
+        create_date="2026-01-02T03:04:05+09:00",
+    )
+
+
+class _DummyAssetBatch:
+    async def await_all(self) -> list[tuple[int, str]]:
+        return []
+
+    def drain_outcomes(self) -> dict[int, str]:
+        return {}
+
+
+class _DummyImageDownloader:
+    def __init__(self) -> None:
+        self.processed: list[int] = []
+
+    def new_batch(self) -> _DummyAssetBatch:
+        return _DummyAssetBatch()
+
+    async def process_novel_assets(self, data, *, force: bool = False, batch=None) -> None:
+        del force, batch
+        self.processed.append(data.id)
+
+
+@pytest.mark.asyncio
+async def test_ingest_persists_new_updates_existing_metadata_and_records_failures(
+    committed_session_factory,
+    fake_pixiv_client,
+    tmp_path: Path,
+):
+    storage = FileStorage(str(tmp_path))
+    downloader = _DummyImageDownloader()
+    fake_pixiv_client.webview_responses[101] = _fake_webview(101, title="Novel 101")
+    fake_pixiv_client.user_detail_responses[10] = {"user": {"id": 10, "name": "AuthorTen"}}
+    # Novel 102 returns None -> recorded in failed_novel
+    fake_pixiv_client.webview_responses[102] = None
+
+    outcome = await ingest(
+        ids=[101, 102],
+        session_factory=committed_session_factory,
+        client=fake_pixiv_client,
+        file_storage=storage,
+        image_downloader=downloader,
+    )
+    assert outcome.new_count == 1
+    assert outcome.new_titles == ["Novel 101"]
+    assert outcome.failed_ids == [102]
+    assert downloader.processed == [101]
+
+    with committed_session_factory() as session:
+        n101 = session.get(models.Novel, 101)
+        assert n101 is not None
+        assert n101.author_name == "AuthorTen"
+        assert n101.has_epub == EpubStatus.NO_IMAGES
+        assert Path(n101.path).is_file()
+        author10 = session.get(models.Author, 10)
+        assert author10 is not None
+        assert author10.novel_count == 1
+        assert session.get(models.FailedNovel, 102) is not None
+
+        # Mark 101 DONE manually; a metadata-only ingest via novelInfo must preserve DONE
+        n101.has_epub = EpubStatus.DONE
+        session.commit()
+
+    info101 = _fake_novel_info(101, title="Novel 101 Updated")
+    outcome2 = await ingest(
+        [info101],
+        session_factory=committed_session_factory,
+        client=fake_pixiv_client,
+        file_storage=storage,
+        image_downloader=downloader,
+    )
+    assert outcome2.new_count == 0
+    with committed_session_factory() as session:
+        n101_after = session.get(models.Novel, 101)
+        assert n101_after is not None
+        assert n101_after.title == "Novel 101 Updated"
+        assert n101_after.has_epub == EpubStatus.DONE
+
+
+@pytest.mark.asyncio
+async def test_update_novel_metadata_policy_and_unlink_semantics(
+    committed_session_factory,
+    fake_pixiv_client,
+    tmp_path: Path,
+):
+    assert "title" in editable_fields("local")
+    assert "title" not in editable_fields("pixiv")
+
+    uow = SqlUnitOfWork(committed_session_factory)
+    with uow.begin():
+        uow.session.add(models.Author(author_id=77, author_name="LocalAuth"))
+        uow.session.add(models.Series(series_id=88, series_name="LocalSeries", author_id=77))
+        uow.session.add(
+            models.Novel(
+                id=501,
+                title="PixivBook",
+                author_id=77,
+                author_name="LocalAuth",
+                path=str(tmp_path / "501.txt"),
+                source="pixiv",
+                has_epub=EpubStatus.NO_IMAGES,
+            )
+        )
+        uow.session.add(
+            make_local_novel(
+                -501,
+                title="LocalOrig",
+                author_id=77,
+                author_name="LocalAuth",
+                path=str(tmp_path / "-501.txt"),
+            )
+        )
+
+    uc = UpdateNovelMetadataUseCase(uow, client=fake_pixiv_client)
+
+    with pytest.raises(ValidationError, match="没有要更新的字段"):
+        await uc.execute(-501, {})
+    with pytest.raises(ValidationError, match="章节号必须是正整数"):
+        await uc.execute(501, {"series_index": 0})
+    with pytest.raises(ValidationError, match="仅本地书可编辑"):
+        await uc.execute(501, {"title": "CannotChange"})
+
+    # Local novel can attach author/series, then unlink them with asymmetric semantics
+    updated = await uc.execute(
+        -501,
+        {
+            "title": "LocalRenamed",
+            "author_id": 77,
+            "series_id": 88,
+            "series_index": 3,
+            "tags": ["TagA", "TagB/TagC"],
+        },
+    )
+    assert updated.title == "LocalRenamed"
+    assert updated.series_name == "LocalSeries"
+    assert updated.series_index == 3
+    assert set(updated.tags) == {"taga", "tagb", "tagc"}
+
+    unlinked = await uc.execute(-501, {"author_id": None, "series_id": None})
+    # Unlinking author preserves display name; unlinking series clears id, name, and index
+    assert unlinked.author_id is None
+    assert unlinked.author_name == "LocalAuth"
+    assert unlinked.series_id is None
+    assert unlinked.series_name is None
+    assert unlinked.series_index is None
+
+
+@pytest.mark.asyncio
+async def test_batch_tag_delete_and_download_by_ids(
+    committed_session_factory,
+    tmp_path: Path,
+):
+    storage = FileStorage(str(tmp_path))
+    p1 = tmp_path / "b1.txt"
+    p2 = tmp_path / "b2.txt"
+    p1.write_text("body 1", encoding="utf-8")
+    p2.write_text("body 2", encoding="utf-8")
+
+    uow = SqlUnitOfWork(committed_session_factory)
+    with uow.begin():
+        uow.session.add(models.Author(author_id=10, author_name="Auth10"))
+        uow.session.add_all(
+            [
+                models.Novel(
+                    id=1001,
+                    title="B1",
+                    author_id=10,
+                    author_name="Auth10",
+                    path=str(p1),
+                    text=6,
+                    like=5,
+                    view=20,
+                    has_epub=EpubStatus.NO_IMAGES,
+                    tags=["old"],
+                    source="pixiv",
+                ),
+                models.Novel(
+                    id=1002,
+                    title="B2",
+                    author_id=10,
+                    author_name="Auth10",
+                    path=str(p2),
+                    text=6,
+                    like=5,
+                    view=20,
+                    has_epub=EpubStatus.NO_IMAGES,
+                    tags=[],
+                    source="pixiv",
+                ),
+            ]
+        )
+        uow.session.add(models.FailedNovel(novel_id=1001, failure_type="download", error_message="err"))
+        tag_repo = SQLAlchemyTagRepository(uow.session)
+        tag_repo.create_alias({"source": "alias_src", "target": "alias_dst"})
+
+    with uow.begin():
+        tag_uc = BatchTagUseCase(
+            SQLAlchemyNovelRepository(uow.session),
+            SQLAlchemyTagRepository(uow.session),
+        )
+        added = tag_uc.execute("add_tags", [1001, 1002], ["alias_src"])
+        assert added == 2
+        assert "alias_dst" in uow.session.get(models.Novel, 1001).tags
+
+        removed = tag_uc.execute("remove_tags", [1001], ["old"])
+        assert removed == 1
+        assert "old" not in uow.session.get(models.Novel, 1001).tags
+
+    # Batch download by explicit IDs
+    dl_uc = BatchDownloadUseCase(uow)
+    dl_res = await dl_uc.execute(novel_ids=[1001, 1002, 999999], format_mode="txt")
+    try:
+        assert len(dl_res.titles) == 2
+        assert dl_res.missing_ids == []
+    finally:
+        dl_res.zip_buffer.close()
+
+    with pytest.raises(NotFoundError):
+        await dl_uc.execute(novel_ids=[999999])
+
+    # Batch delete cleans DB rows, failed_novel ledger, and files on disk
+    del_uc = BatchDeleteUseCase(uow, storage)
+    del_uc.execute([1001, 1002])
+    assert not p1.exists()
+    assert not p2.exists()
+    with uow.begin():
+        assert uow.session.get(models.Novel, 1001) is None
+        assert uow.session.get(models.FailedNovel, 1001) is None
+        author = uow.session.get(models.Author, 10)
+        assert author is not None
+        assert author.novel_count == 0

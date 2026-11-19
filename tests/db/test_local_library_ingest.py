@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-import io
-import zipfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from copixiv.core import formats
+from tests.factories import make_simple_epub
+
+from copixiv.core import naming as formats
 from copixiv.core.models import EpubStatus
 from copixiv.db import models
 from copixiv.db.uow import SqlUnitOfWork
@@ -16,46 +18,24 @@ from copixiv.features.library.ingest import (
     STATUS_FAILED,
     ingest_uploads,
 )
+from copixiv.features.library.local_axis import next_local_id
+from copixiv.features.system.repo import SQLAlchemySettingRepository
 from copixiv.storage.file_storage import FileStorage
 
 
-def _make_epub_bytes(title: str, creator: str, body_text: str) -> bytes:
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as zf:
-        zf.writestr("mimetype", "application/epub+zip")
-        zf.writestr(
-            "META-INF/container.xml",
-            '<?xml version="1.0"?><container version="1.0" '
-            'xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles>'
-            '<rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>'
-            "</rootfiles></container>",
-        )
-        zf.writestr(
-            "OEBPS/content.opf",
-            f'<?xml version="1.0" encoding="utf-8"?>'
-            f'<package xmlns="http://www.idpf.org/2007/opf" version="3.0">'
-            f'<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
-            f"<dc:title>{title}</dc:title><dc:creator>{creator}</dc:creator>"
-            f"</metadata><manifest>"
-            f'<item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>'
-            f"</manifest><spine><itemref idref=\"c1\"/></spine></package>",
-        )
-        zf.writestr("OEBPS/ch1.xhtml", f"<html><body><p>{body_text}</p></body></html>")
-    return buf.getvalue()
-
-
 def test_local_ingest_utf8_gb18030_epub_and_monotonic_negative_ids(
-    uow: SqlUnitOfWork, tmp_path: Path,
+    uow: SqlUnitOfWork,
+    tmp_path: Path,
 ):
     storage = FileStorage(str(tmp_path))
-    epub_bytes = _make_epub_bytes("EPUB标题", "EPUB作者", "第三本书的正文内容")
+    epub_bytes = make_simple_epub("EPUB标题", "EPUB作者", "第三本书的正文内容")
 
     with uow.begin():
         results = ingest_uploads(
             uow.session,
             storage,
             [
-                ("《第一本书》作者：甲.txt", "第一本UTF8正文\r\n第二行".encode("utf-8")),
+                ("《第一本书》作者：甲.txt", "第一本UTF8正文\r\n第二行".encode()),
                 ("第二本书.txt", "这是GB18030编码的中文小说正文内容，足够长以通过检测。".encode("gb18030")),
                 ("ignored_name.epub", epub_bytes),
                 ("bad.epub", b"not-a-zip"),
@@ -88,7 +68,8 @@ def test_local_ingest_utf8_gb18030_epub_and_monotonic_negative_ids(
 
 
 def test_local_ingest_dedup_attaches_epub_and_updates_preset_author(
-    uow: SqlUnitOfWork, tmp_path: Path,
+    uow: SqlUnitOfWork,
+    tmp_path: Path,
 ):
     storage = FileStorage(str(tmp_path))
     body = "完全相同的规范化正文内容"
@@ -104,7 +85,7 @@ def test_local_ingest_dedup_attaches_epub_and_updates_preset_author(
         assert nid is not None
 
     # Re-upload identical body as EPUB + preset_author_id=900
-    epub_same_body = _make_epub_bytes("Orig", "Auth", body)
+    epub_same_body = make_simple_epub("Orig", "Auth", body)
     with uow.begin():
         r2 = ingest_uploads(
             uow.session,
@@ -128,3 +109,36 @@ def test_local_ingest_dedup_attaches_epub_and_updates_preset_author(
         assert author is not None
         assert author.novel_count == 1
         assert author.text == len(body)
+
+
+def test_setting_get_bool_respects_default_and_concurrent_next_local_id(
+    committed_session_factory,
+):
+    with committed_session_factory() as session:
+        repo = SQLAlchemySettingRepository(session)
+        repo.set_value("k_invalid", "maybe")
+        repo.set_value("k_false", "false")
+        repo.set_value("k_true", "ON")
+        session.commit()
+
+    with committed_session_factory() as session:
+        repo = SQLAlchemySettingRepository(session)
+        assert repo.get_bool("k_invalid", default=True) is True
+        assert repo.get_bool("k_invalid", default=False) is False
+        assert repo.get_bool("k_false", default=True) is False
+        assert repo.get_bool("k_true", default=False) is True
+
+    # Concurrent next_local_id calls advancing the sequence must return strictly distinct negative IDs
+    barrier = threading.Barrier(4)
+
+    def _allocate() -> int:
+        barrier.wait(timeout=5)
+        with committed_session_factory() as session:
+            nid = next_local_id(session)
+            session.commit()
+            return nid
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        ids = list(pool.map(lambda _: _allocate(), range(4)))
+    assert all(nid < 0 for nid in ids)
+    assert len(set(ids)) == 4

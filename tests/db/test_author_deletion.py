@@ -8,7 +8,7 @@ from copixiv.core.draft import build_novel
 from copixiv.db import models
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
-from copixiv.features.novels.persist import persist_novels
+from copixiv.features.novels.ingest import persist_novels
 
 
 def test_delete_author_cleans_novels_failures_empty_series_and_recomputes_shared_series(
@@ -20,18 +20,39 @@ def test_delete_author_cleans_novels_failures_empty_series_and_recomputes_shared
             [
                 # Author 10 owns Series 100 exclusively (200 shared with Author 20)
                 build_novel(
-                    id=101, title="A10_S100", author_id=10, author_name="A10",
-                    series_id=100, series_name="SoloSeries", like=10, view=100, text=500,
+                    id=101,
+                    title="A10_S100",
+                    author_id=10,
+                    author_name="A10",
+                    series_id=100,
+                    series_name="SoloSeries",
+                    like=10,
+                    view=100,
+                    text=500,
                     download_dir="dl",
                 ),
                 build_novel(
-                    id=102, title="A10_S200", author_id=10, author_name="A10",
-                    series_id=200, series_name="SharedSeries", like=20, view=200, text=600,
+                    id=102,
+                    title="A10_S200",
+                    author_id=10,
+                    author_name="A10",
+                    series_id=200,
+                    series_name="SharedSeries",
+                    like=20,
+                    view=200,
+                    text=600,
                     download_dir="dl",
                 ),
                 build_novel(
-                    id=201, title="A20_S200", author_id=20, author_name="A20",
-                    series_id=200, series_name="SharedSeries", like=35, view=350, text=700,
+                    id=201,
+                    title="A20_S200",
+                    author_id=20,
+                    author_name="A20",
+                    series_id=200,
+                    series_name="SharedSeries",
+                    like=35,
+                    view=350,
+                    text=700,
                     download_dir="dl",
                 ),
             ],
@@ -42,9 +63,7 @@ def test_delete_author_cleans_novels_failures_empty_series_and_recomputes_shared
         s200.author_id = 10
 
         uow.session.add(
-            models.FailedNovel(
-                novel_id=101, failure_type="http_404", error_message="404", failed_times=1
-            )
+            models.FailedNovel(novel_id=101, failure_type="http_404", error_message="404", failed_times=1)
         )
         uow.session.flush()
 

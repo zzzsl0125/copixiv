@@ -4,16 +4,13 @@ from __future__ import annotations
 
 import importlib
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
-from copixiv.core.search_text import (
-    SlimNovelTuple,
-    datetime_to_us,
-    normalize_search_segments,
-    us_to_datetime,
-)
+from copixiv.core.search import normalize_search_segments
+from copixiv.core.snapshot_types import SlimNovelTuple
+from copixiv.core.time import datetime_to_us, us_to_datetime
 from copixiv.query_engine.adapter import RustNovelQueryEngine
 from copixiv.query_engine.port import EngineCursor, EngineQuery
 
@@ -64,7 +61,7 @@ def _build_engine(
     exclude_default: bool = True,
     sf_authors: list[int] | None = None,
 ) -> RustNovelQueryEngine:
-    engine = RustNovelQueryEngine(mode="rust")
+    engine = RustNovelQueryEngine()
     staging = engine.create_staging(capacity=len(rows))
     staging.push_batch(rows)
     engine.swap_from_staging(
@@ -77,14 +74,14 @@ def _build_engine(
 
 
 def test_datetime_to_us_precision_and_timezone_normalization():
-    utc_dt = datetime(2025, 1, 13, 15, 0, 0, 123456, tzinfo=timezone.utc)
+    utc_dt = datetime(2025, 1, 13, 15, 0, 0, 123456, tzinfo=UTC)
     us = datetime_to_us(utc_dt)
     assert us == 1736780400 * 1_000_000 + 123456
     assert us_to_datetime(us) == utc_dt
     plus8 = datetime(2025, 1, 13, 23, 0, 0, 123456, tzinfo=timezone(timedelta(hours=8)))
     assert datetime_to_us(plus8) == us
-    assert us_to_datetime(datetime_to_us(datetime(1969, 12, 31, 23, 59, 59, 500000, tzinfo=timezone.utc))) == (
-        datetime(1969, 12, 31, 23, 59, 59, 500000, tzinfo=timezone.utc)
+    assert us_to_datetime(datetime_to_us(datetime(1969, 12, 31, 23, 59, 59, 500000, tzinfo=UTC))) == (
+        datetime(1969, 12, 31, 23, 59, 59, 500000, tzinfo=UTC)
     )
     assert datetime_to_us(None) is None
     assert us_to_datetime(None) is None
@@ -122,63 +119,114 @@ def test_abs_id_null_sort_order_and_js_safe_random_cursor():
     q = EngineQuery()
 
     # abs(id) DESC -> 300, +200, -200, 100
-    assert eng.query_novels(q, order_by="id", descending=True, limit=10).ids == [300, 200, -200, 100]
-    assert eng.query_novels(q, order_by="id", descending=False, limit=10).ids == [100, -200, 200, 300]
+    assert [r.id for r in eng.query_novel_rows(q, order_by="id", descending=True, limit=10).rows] == [
+        300,
+        200,
+        -200,
+        100,
+    ]
+    assert [r.id for r in eng.query_novel_rows(q, order_by="id", descending=False, limit=10).rows] == [
+        100,
+        -200,
+        200,
+        300,
+    ]
 
     # PG NULLS FIRST on DESC, NULLS LAST on ASC for create_time
-    assert eng.query_novels(
-        q, order_by="create_time", descending=True, limit=10,
-    ).ids == [200, -200, 300, 100]
-    assert eng.query_novels(
-        q, order_by="create_time", descending=False, limit=10,
-    ).ids == [100, 300, -200, 200]
+    assert [
+        r.id
+        for r in eng.query_novel_rows(
+            q,
+            order_by="create_time",
+            descending=True,
+            limit=10,
+        ).rows
+    ] == [200, -200, 300, 100]
+    assert [
+        r.id
+        for r in eng.query_novel_rows(
+            q,
+            order_by="create_time",
+            descending=False,
+            limit=10,
+        ).rows
+    ] == [100, 300, -200, 200]
 
     # Non-null create_time cursor excludes NULL rows in both directions
-    assert eng.query_novels(
-        q,
-        order_by="create_time",
-        descending=True,
-        limit=10,
-        cursor=EngineCursor(cursor_id=300, cursor_int=5000),
-    ).ids == [100]
-    assert eng.query_novels(
-        q,
-        order_by="create_time",
-        descending=False,
-        limit=10,
-        cursor=EngineCursor(cursor_id=100, cursor_int=1000),
-    ).ids == [300]
+    assert [
+        r.id
+        for r in eng.query_novel_rows(
+            q,
+            order_by="create_time",
+            descending=True,
+            limit=10,
+            cursor=EngineCursor(cursor_id=300, cursor_int=5000),
+        ).rows
+    ] == [100]
+    assert [
+        r.id
+        for r in eng.query_novel_rows(
+            q,
+            order_by="create_time",
+            descending=False,
+            limit=10,
+            cursor=EngineCursor(cursor_id=100, cursor_int=1000),
+        ).rows
+    ] == [300]
 
     # Stateless true-random walk produces hex cursors (JS safe) and covers all 4 rows cleanly.
     seen: list[int] = []
     cur: EngineCursor | None = None
     while True:
-        page = eng.query_novels(q, order_by="random", descending=True, limit=2, cursor=cur)
-        seen.extend(page.ids)
+        page = eng.query_novel_rows(q, order_by="random", descending=True, limit=2, cursor=cur)
+        seen.extend(r.id for r in page.rows)
         if not page.has_more:
             assert page.random_cursor is None
             break
         rc = page.random_cursor
         assert rc is not None
-        assert isinstance(rc["seed"], str) and len(rc["seed"]) == 16
-        assert isinstance(rc["h"], str) and len(rc["h"]) == 16
+        assert isinstance(rc["seed"], str)
+        assert len(rc["seed"]) == 16
+        assert isinstance(rc["h"], str)
+        assert len(rc["h"]) == 16
         assert isinstance(rc["id"], int)
         cur = EngineCursor(
             cursor_id=rc["id"],
             random_seed_hex=rc["seed"],
             random_h_hex=rc["h"],
         )
-    assert len(seen) == 4 and set(seen) == {-200, 100, 200, 300}
+    assert len(seen) == 4
+    assert set(seen) == {-200, 100, 200, 300}
 
-    # Direct row materialization matches query_novels order & preserves all attributes.
-    page_rows = eng.query_novel_rows(q, order_by="id", descending=True, limit=2)
-    assert [r.id for r in page_rows.rows] == [300, 200]
-    assert page_rows.has_more is True
+    # Direct row lookup by IDs preserves caller order & attributes.
     by_ids = eng.get_novel_rows_by_ids([-200, 999, 300])
     assert [(r.id, r.title, r.source, r.create_time_us) for r in by_ids] == [
         (-200, "Local200", "local", None),
         (300, "Pixiv300", "pixiv", 5000),
     ]
+
+
+def test_tag_suggestions_rebuild_flag_and_memory_breakdown():
+    eng = RustNovelQueryEngine()
+    stg = eng.create_staging(capacity=1)
+    stg.push_batch([_row(1, title="Book", tags=["百合"])])
+    eng.swap_from_staging(
+        stg,
+        [],
+        True,
+        [],
+        tags=[(1, "百合", 10), (2, "百合漫画", 5), (3, "日常", 8)],
+        aliased_tag_ids=[],
+    )
+    assert eng.needs_rebuild() is False
+    items, next_off = eng.suggest_tag_aliases(limit=5, offset=0, target_tag="百合")
+    assert next_off == 0
+    assert len(items) == 1
+    assert [c.name for c in items[0].candidates] == ["百合漫画"]
+    breakdown = eng.memory_breakdown()
+    assert any(name == "postings_slab" for name, _, _ in breakdown)
+    eng.mark_needs_rebuild()
+    assert eng.needs_rebuild() is True
 
 
 def test_lazy_rust_import_allows_pure_python_boot(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -193,5 +241,5 @@ def test_lazy_rust_import_allows_pure_python_boot(monkeypatch: pytest.MonkeyPatc
     reloaded_adapter = importlib.import_module("copixiv.query_engine.adapter")
     importlib.import_module("copixiv.export_openapi")
 
-    with pytest.raises(ModuleNotFoundError, match="COPIXIV_QUERY_ENGINE=pg"):
+    with pytest.raises(ModuleNotFoundError, match="maturin develop"):
         reloaded_adapter.RustNovelQueryEngine()
