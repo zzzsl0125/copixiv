@@ -1,17 +1,20 @@
 """Token API endpoints."""
 
-from fastapi import APIRouter, Depends
+import threading
+
+from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict
 
 from copixiv.core.exceptions import NotFoundError
+from copixiv.db.tx import run_write_transaction_sync
 from copixiv.db.uow import SqlUnitOfWork
-from copixiv.db.write_lock import run_write_transaction_sync
-from copixiv.deps import get_account_pool, get_uow
+from copixiv.deps import AccountPoolDep, UowDep
 from copixiv.features.accounts.repo import SQLAlchemyTokenRepository
 
 # ---------------------------------------------------------------------------
 # Token schemas — carried with the feature (S1 pilot).
 # ---------------------------------------------------------------------------
+
 
 class TokenBase(BaseModel):
     name: str
@@ -36,6 +39,7 @@ class TokenResponse(TokenBase):
 
 
 router = APIRouter()
+_POOL_SYNC_LOCK = threading.Lock()
 
 
 def _mask_token(token: str) -> str:
@@ -57,15 +61,12 @@ def _token_to_masked_dict(t) -> dict:
     }
 
 
-@router.get("/", response_model=list[TokenResponse])
-def get_tokens(uow: SqlUnitOfWork = Depends(get_uow)):
+@router.get("", response_model=list[TokenResponse])
+def get_tokens(uow: UowDep):
     # Build each row manually so the masked token (not the raw refresh_token)
     # is what the response model validates and serializes.
     with uow.begin():
-        return [
-            _token_to_masked_dict(t)
-            for t in SQLAlchemyTokenRepository(uow.session).get_all()
-        ]
+        return [_token_to_masked_dict(t) for t in SQLAlchemyTokenRepository(uow.session).get_all()]
 
 
 def _snapshot_tokens(repo: SQLAlchemyTokenRepository) -> list[dict]:
@@ -82,11 +83,19 @@ def _snapshot_tokens(repo: SQLAlchemyTokenRepository) -> list[dict]:
     ]
 
 
-@router.post("/", response_model=TokenResponse)
+def _sync_account_pool(uow: SqlUnitOfWork, account_pool) -> None:
+    """Serialize pool reloads from latest committed DB state."""
+    with _POOL_SYNC_LOCK:
+        with uow.begin():
+            tokens = _snapshot_tokens(SQLAlchemyTokenRepository(uow.session))
+        account_pool.reload_from_tokens(tokens)
+
+
+@router.post("", response_model=TokenResponse)
 def create_token(
     data: TokenBase,
-    uow: SqlUnitOfWork = Depends(get_uow),
-    account_pool=Depends(get_account_pool),
+    uow: UowDep,
+    account_pool: AccountPoolDep,
 ):
     # The request schema still accepts the full token; only the response
     # is masked so the client can't read back the secret it just submitted.
@@ -98,10 +107,10 @@ def create_token(
         if want_follow:
             repo.set_follow(created.id, True)
             created.is_follow = True
-        return _token_to_masked_dict(created), _snapshot_tokens(repo)
+        return _token_to_masked_dict(created)
 
-    res, tokens = run_write_transaction_sync(uow, _write)
-    account_pool.reload_from_tokens(tokens)
+    res = run_write_transaction_sync(uow, _write)
+    _sync_account_pool(uow, account_pool)
     return res
 
 
@@ -109,8 +118,8 @@ def create_token(
 def update_token(
     token_id: int,
     data: TokenUpdate,
-    uow: SqlUnitOfWork = Depends(get_uow),
-    account_pool=Depends(get_account_pool),
+    uow: UowDep,
+    account_pool: AccountPoolDep,
 ):
     def _write(tx: SqlUnitOfWork):
         repo = SQLAlchemyTokenRepository(tx.session)
@@ -125,41 +134,38 @@ def update_token(
             if not repo.set_follow(token_id, bool(follow_val)):
                 raise NotFoundError(f"Token {token_id} not found")
             result.is_follow = bool(follow_val)
-        return _token_to_masked_dict(result), _snapshot_tokens(repo)
+        return _token_to_masked_dict(result)
 
-    res, tokens = run_write_transaction_sync(uow, _write)
-    account_pool.reload_from_tokens(tokens)
+    res = run_write_transaction_sync(uow, _write)
+    _sync_account_pool(uow, account_pool)
     return res
 
 
-@router.delete("/{token_id}")
+@router.delete("/{token_id}", status_code=204)
 def delete_token(
     token_id: int,
-    uow: SqlUnitOfWork = Depends(get_uow),
-    account_pool=Depends(get_account_pool),
+    uow: UowDep,
+    account_pool: AccountPoolDep,
 ):
     def _write(tx: SqlUnitOfWork):
         repo = SQLAlchemyTokenRepository(tx.session)
         if not repo.delete(token_id):
             raise NotFoundError(f"Token {token_id} not found")
-        return _snapshot_tokens(repo)
 
-    tokens = run_write_transaction_sync(uow, _write)
-    account_pool.reload_from_tokens(tokens)
-    return {"ok": True}
+    run_write_transaction_sync(uow, _write)
+    _sync_account_pool(uow, account_pool)
 
 
-@router.post("/reorder/")
+@router.post("/reorder")
 def reorder_tokens(
     ids: list[int],
-    uow: SqlUnitOfWork = Depends(get_uow),
-    account_pool=Depends(get_account_pool),
+    uow: UowDep,
+    account_pool: AccountPoolDep,
 ):
     def _write(tx: SqlUnitOfWork):
         repo = SQLAlchemyTokenRepository(tx.session)
         repo.reorder(ids)
-        return _snapshot_tokens(repo)
 
-    tokens = run_write_transaction_sync(uow, _write)
-    account_pool.reload_from_tokens(tokens)
+    run_write_transaction_sync(uow, _write)
+    _sync_account_pool(uow, account_pool)
     return {"ok": True}

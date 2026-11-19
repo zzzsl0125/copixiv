@@ -1,14 +1,4 @@
-"""NovelDraft — the write-path carrier, plus the factory functions that build it.
-
-This module owns the **write path**: everything that turns raw Pixiv API
-payloads into the object that repositories persist.  The read path keeps
-returning the :class:`~copixiv.core.models.Novel` model (see the read
-repository); :class:`NovelDraft` is deliberately a plain frozen dataclass —
-no runtime validation, no serializer, no pydantic machinery — so the
-repository can convert it to a row dict with ``dict(n.__dict__)`` in a
-worker thread without any serializer-rebuild race (see
-``features/novels/repo.py``).
-"""
+"""NovelDraft — write-path carrier, field accessors, and factory builders."""
 
 from __future__ import annotations
 
@@ -17,25 +7,69 @@ from typing import Any, Protocol
 
 from copixiv.core.models import EpubStatus
 from copixiv.core.naming import build_path
-from copixiv.core.services import (
-    guess_series_order,
-    has_image_placeholders,
-    parse_tags,
-    safe_get,
-)
+from copixiv.core.text import has_image_placeholders, parse_tags
+
+
+def safe_get(data: Any, path: str, default: Any = None) -> Any:
+    """Read a (possibly nested) field from a Pydantic model or dict."""
+    if data is None:
+        return default
+    keys = path.split(".")
+    for i, key in enumerate(keys):
+        if data is None:
+            return default
+        is_last = i == len(keys) - 1
+        if isinstance(data, dict):
+            if is_last:
+                return data.get(key, default)
+            data = data.get(key)
+        else:
+            if is_last:
+                return getattr(data, key, default)
+            data = getattr(data, key, None)
+    return default
+
+
+def safe_set(data: Any, path: str, value: Any) -> None:
+    """Set a (possibly nested) field on a Pydantic model or dict."""
+    if data is None:
+        raise ValueError("Cannot set on None")
+    keys = path.split(".")
+    for key in keys[:-1]:
+        if isinstance(data, dict):
+            if key not in data:
+                data[key] = {}
+            data = data[key]
+        else:
+            data = getattr(data, key)
+    last = keys[-1]
+    if isinstance(data, dict):
+        data[last] = value
+    else:
+        setattr(data, last, value)
+
+
+def guess_series_order(navigation: Any) -> int | None:
+    """Infer a novel's 1-based chapter order from Pixiv series navigation."""
+    try:
+        prev = safe_get(navigation, "prevNovel")
+        if prev is not None:
+            order = safe_get(prev, "contentOrder")
+            if order is not None:
+                return int(order) + 1
+        nxt = safe_get(navigation, "nextNovel")
+        if nxt is not None:
+            order = safe_get(nxt, "contentOrder")
+            if order is not None:
+                return int(order) - 1
+        return None
+    except (TypeError, ValueError):
+        return None
 
 
 @dataclass(frozen=True)
 class NovelDraft:
-    """A frozen write-path carrier built from raw Pixiv API data.
-
-    Mirrors the fields produced by :func:`build_novel`; the repository
-    converts it to a row dict via ``dict(n.__dict__)`` (a frozen dataclass,
-    so no runtime validation / serializer race) and persists only the
-    columns in its whitelist.  ``has_epub=None`` means "don't overwrite the
-    stored value" on a metadata-only refresh; ``download_dir`` records the
-    root the draft was built for (only used to compute ``path``).
-    """
+    """Frozen write-path carrier built from raw Pixiv API payloads."""
 
     id: int
     title: str
@@ -50,17 +84,9 @@ class NovelDraft:
     series_name: str | None = None
     series_index: int | None = None
     create_time: str | None = None
-    # ``None`` = "don't overwrite the stored value" (metadata-only refresh).
     has_epub: EpubStatus | None = None
     tags: list[str] = field(default_factory=list)
     content: str | None = None
-    #: Did *this* fetch replace the body file?  ``False`` for a metadata-only
-    #: draft, and for a re-download whose text was byte-identical to the local
-    #: copy (the content-change check in ``download_novel``).  Once the
-    #: transient ``content`` is dropped this is the only record that a write
-    #: happened, and task adapters report it to the operator ("已更新" vs
-    #: "已存在，跳过") instead of guessing from ``new_count`` — that guess
-    #: called a genuine re-download a skip (see ``IngestOutcome``).
     rewrote_body: bool = False
     images: dict | None = None
     illusts: dict | None = None
@@ -69,14 +95,14 @@ class NovelDraft:
 
 
 class UserInfoLike(Protocol):
-    """The fields ``build_from_novel_info`` reads from a pixivpy3 user object."""
+    """Input contract for the user object attached to a Pixiv novel item."""
 
     id: int
     name: str
 
 
 class SeriesInfoLike(Protocol):
-    """The fields read from a pixivpy3 series object (may be ``None``)."""
+    """Input contract for the optional series object on a Pixiv novel item."""
 
     id: Any
     title: Any
@@ -84,12 +110,7 @@ class SeriesInfoLike(Protocol):
 
 
 class NovelInfoLike(Protocol):
-    """Input contract for novelInfo-style data (a pixivpy3 Novel object).
-
-    The ingest pipeline (``copixiv.features.novels.ingest``) feeds the same kind of
-    objects into its plan phase, so this Protocol documents the shared
-    input contract for both consumers.
-    """
+    """Input contract for Pixiv novel metadata items passed into ingest."""
 
     id: int
     title: str
@@ -119,20 +140,13 @@ def build_novel(
     create_time: str | None = None,
     has_epub: EpubStatus | None = EpubStatus.NO,
     tags: list[str | dict] | None = None,
-    # Transient fields — consumed by download/asset code, never persisted
     content: str | None = None,
     images: dict | None = None,
     illusts: dict | None = None,
     cover_url: str | None = None,
     download_dir: str = "download",
 ) -> NovelDraft:
-    """Build a canonical :class:`NovelDraft` from raw Pixiv API fields.
-
-    The returned draft contains everything needed for both DB persistence
-    and asset download.  Transient fields (``content``, ``images``,
-    ``illusts``, ``cover_url``) are excluded from persistence by the
-    repository's column whitelist.
-    """
+    """Build a canonical :class:`NovelDraft` from raw Pixiv API fields."""
     return NovelDraft(
         id=id,
         title=title,
@@ -157,16 +171,8 @@ def build_novel(
     )
 
 
-# ---- Higher-level builders that use the factory ----
-
 def build_from_webview(data: Any, download_dir: str = "download") -> NovelDraft:
-    """Build a :class:`NovelDraft` from a ``webview_novel`` API response.
-
-    Tolerates missing ``text`` (deleted/restricted novels may return None):
-    ``text`` falls back to 0 and ``has_epub`` to ``NO_IMAGES`` (the terminal
-    "body has no image placeholder" state — never the legacy unclassified
-    ``NO``, which would make the row look like unfinished business forever).
-    """
+    """Build a :class:`NovelDraft` from a webview novel payload."""
     if not data:
         return NovelDraft(id=0, title="", author_id=0)
 
@@ -184,15 +190,9 @@ def build_from_webview(data: Any, download_dir: str = "download") -> NovelDraft:
         series_name=data.series_title,
         series_index=guess_series_order(data.series_navigation),
         create_time=data.cdate,
-        has_epub=(
-            EpubStatus.PENDING
-            if has_image_placeholders(body)
-            else EpubStatus.NO_IMAGES
-        ),
+        has_epub=(EpubStatus.PENDING if has_image_placeholders(body) else EpubStatus.NO_IMAGES),
         tags=data.tags,
         content=body,
-        # The webview API returns ``images``/``illusts`` as empty *lists*
-        # (not dicts) for novels without images — normalise to None.
         images=data.images if isinstance(data.images, dict) else None,
         illusts=data.illusts if isinstance(data.illusts, dict) else None,
         cover_url=data.cover_url,
@@ -200,16 +200,8 @@ def build_from_webview(data: Any, download_dir: str = "download") -> NovelDraft:
     )
 
 
-def build_from_novel_info(
-    data: NovelInfoLike, download_dir: str = "download"
-) -> NovelDraft:
-    """Build a :class:`NovelDraft` from a ``novelInfo`` API response (metadata only).
-
-    The body text is not available, so the image-placeholder state (and
-    thus ``has_epub``) cannot be computed here: ``has_epub`` is ``None``,
-    which the repository interprets as "leave the stored value untouched" —
-    otherwise every metadata refresh would overwrite PENDING/DONE with NO.
-    """
+def build_from_novel_info(data: NovelInfoLike, download_dir: str = "download") -> NovelDraft:
+    """Build a metadata-only :class:`NovelDraft` from a novel list item."""
     user = data.user
     series = data.series
     return build_novel(
@@ -233,10 +225,13 @@ def build_from_novel_info(
 
 __all__ = [
     "NovelDraft",
-    "UserInfoLike",
-    "SeriesInfoLike",
     "NovelInfoLike",
-    "build_novel",
+    "SeriesInfoLike",
+    "UserInfoLike",
     "build_from_novel_info",
     "build_from_webview",
+    "build_novel",
+    "guess_series_order",
+    "safe_get",
+    "safe_set",
 ]

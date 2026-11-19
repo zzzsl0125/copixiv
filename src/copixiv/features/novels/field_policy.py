@@ -29,7 +29,7 @@
 
 from __future__ import annotations
 
-from copixiv.features.library.local_axis import SOURCE_LOCAL, SOURCE_PIXIV
+from copixiv.core.models import SOURCE_LOCAL, SOURCE_PIXIV
 
 # 每个来源可编辑的字段。元组顺序 = 响应里 ``editable_fields`` 的顺序。
 #
@@ -37,7 +37,12 @@ from copixiv.features.library.local_axis import SOURCE_LOCAL, SOURCE_PIXIV
 # 一个字段，也不要让一条来源不明的行接受手改后被某次刷新顶掉。
 EDITABLE_FIELDS: dict[str, tuple[str, ...]] = {
     SOURCE_LOCAL: (
-        "title", "author_id", "series_id", "series_index", "tags", "create_time",
+        "title",
+        "author_id",
+        "series_id",
+        "series_index",
+        "tags",
+        "create_time",
     ),
     SOURCE_PIXIV: ("series_index", "tags", "create_time"),
 }
@@ -45,9 +50,7 @@ EDITABLE_FIELDS: dict[str, tuple[str, ...]] = {
 # 仅本地书可编辑的字段：**从表派生**（local 有、pixiv 没有），不手写第二份清单。
 # 顺序即 400 报错顺序——同一请求提交多个非法字段时，报的是这里最靠前的那个。
 LOCAL_ONLY_FIELDS: tuple[str, ...] = tuple(
-    field
-    for field in EDITABLE_FIELDS[SOURCE_LOCAL]
-    if field not in EDITABLE_FIELDS[SOURCE_PIXIV]
+    field for field in EDITABLE_FIELDS[SOURCE_LOCAL] if field not in EDITABLE_FIELDS[SOURCE_PIXIV]
 )
 
 FIELD_LABELS = {
@@ -58,16 +61,12 @@ FIELD_LABELS = {
 
 # ``author_id`` 的理由与另外两个刻意不同：title / series_id 是"会被来源覆盖"，
 # 而作者不是覆盖问题——来源压根不覆盖它，是"身份以来源为准"，修正入口是同步。
-AUTHOR_LOCAL_ONLY_REASON = (
-    "作者仅本地书可编辑（pixiv 书的作者身份以来源为准，可用「同步」修正）"
-)
+AUTHOR_LOCAL_ONLY_REASON = "作者仅本地书可编辑（pixiv 书的作者身份以来源为准，可用「同步」修正）"
 
 
 def editable_fields(source: str | None) -> tuple[str, ...]:
     """该来源可编辑的字段；未知来源按 pixiv（最保守）。"""
-    return EDITABLE_FIELDS.get(
-        source or SOURCE_PIXIV, EDITABLE_FIELDS[SOURCE_PIXIV]
-    )
+    return EDITABLE_FIELDS.get(source or SOURCE_PIXIV, EDITABLE_FIELDS[SOURCE_PIXIV])
 
 
 def is_editable(source: str | None, field: str) -> bool:

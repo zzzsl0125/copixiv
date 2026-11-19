@@ -1,2 +1,1 @@
-"""System feature package — runtime config endpoints and settings repository.
-"""
+"""System feature package — runtime config endpoints and settings repository."""

@@ -2,9 +2,11 @@
 
 import json
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from contextlib import suppress
+from datetime import UTC, datetime
+from typing import Any
 
-from sqlalchemy import case, select
+from sqlalchemy import case, or_, select, update
 from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 
@@ -33,55 +35,64 @@ class SQLAlchemyTaskRepository(BaseRepository):
             arguments=json.dumps(arguments, ensure_ascii=False),
             status="pending",
             # timestamptz — store an aware UTC datetime (not an ISO string).
-            start_time=datetime.now(timezone.utc),
+            start_time=datetime.now(UTC),
         )
         self.session.add(task)
         self.session.flush()
         return task.id
 
     def update_task(
-        self, task_id: int, status: str | None, result: str | None = None,
-        duration: float | None = None, progress: str | None = None,
+        self,
+        task_id: int,
+        status: str | None,
+        result: dict[str, Any] | str | None = None,
+        duration: float | None = None,
+        progress: Any | None = None,
     ) -> None:
-        """Update one history row; ``status=None`` means "progress only".
-
-        A progress-only write must not touch ``status`` / ``end_time``.  The
-        batch tasks report progress through a fire-and-forget
-        ``run_coroutine_threadsafe`` (see ``tasks/batch.py``), so a late
-        progress write can land *after* the executor recorded the terminal
-        status.  Without this guard it would rewrite a finished row back to
-        ``running`` and leave the old ``end_time`` behind — the UI then shows
-        an eternally running task whose button stays disabled.
-        """
+        """Update one history row; ``status=None`` means "progress only"."""
         task = self.session.get(models.TaskHistory, task_id)
         if task is not None:
             if status is not None:
                 task.status = status
-            # end_time only on terminal states — "running" rows must not
-            # carry an end timestamp, and a progress-only update never
-            # touches either column.
-            if status in ("success", "failed", "interrupted"):
-                task.end_time = datetime.now(timezone.utc)
+            if status in ("success", "failed", "interrupted", "cancelled"):
+                task.end_time = datetime.now(UTC)
             if result is not None:
-                # result/progress are JSONB columns.  Store a parsed dict so
-                # reads return structured data (the API response model already
-                # parses a JSON string defensively, but the ORM should not
-                # leave a raw JSON string behind either).
                 if isinstance(result, str):
-                    try:
+                    with suppress(json.JSONDecodeError, TypeError):
                         result = json.loads(result)
-                    except (json.JSONDecodeError, TypeError):
-                        pass
                 task.result = result
-            # Live progress lives in its own column.  We only ever write
-            # (never clear) progress here — callers that want to stop showing
-            # it pass Nothing, and the front-end gates on status.  This keeps
-            # old "running" rows and terminal rows with a stale progress
-            # harmless instead of destructively wiping data.
             if progress is not None:
                 task.progress = progress
             if duration is not None:
                 task.duration = duration
+
+    def cancel_pending(self, task_id: int) -> bool:
+        """Atomically transition a pending task row to ``cancelled``."""
+        now = datetime.now(UTC)
+        cancelled_id = self.session.execute(
+            update(models.TaskHistory)
+            .where(
+                models.TaskHistory.id == task_id,
+                models.TaskHistory.status == "pending",
+            )
+            .values(
+                status="cancelled",
+                end_time=now,
+                result={"summary": "任务已手动取消"},
+            )
+            .returning(models.TaskHistory.id)
+        ).scalar_one_or_none()
+        return cancelled_id is not None
+
+    def get_task_status(
+        self,
+        task_id: int,
+    ) -> tuple[str, str | None, Any] | None:
+        """Return ``(status, task_func, arguments)`` for *task_id*, or ``None``."""
+        row = self.session.get(models.TaskHistory, task_id)
+        if row is None:
+            return None
+        return row.status, row.task_func, row.arguments
 
     def get_next_pending(
         self,
@@ -106,7 +117,10 @@ class SQLAlchemyTaskRepository(BaseRepository):
             stmt = stmt.where(models.TaskHistory.task_func.in_(task_funcs))
         if exclude_funcs:
             stmt = stmt.where(
-                models.TaskHistory.task_func.not_in(exclude_funcs)
+                or_(
+                    models.TaskHistory.task_func.is_(None),
+                    models.TaskHistory.task_func.not_in(exclude_funcs),
+                )
             )
         return self.session.execute(stmt).scalar_one_or_none()
 
@@ -118,29 +132,28 @@ class SQLAlchemyTaskRepository(BaseRepository):
         did with ``limit=100`` — a 7.4 MB response while anything was running,
         and blind to anything beyond the first 100 rows).
         """
-        rows = self.session.execute(
-            select(models.TaskHistory.task_func)
-            .where(
-                models.TaskHistory.status.in_(("pending", "running")),
-                models.TaskHistory.task_func.isnot(None),
+        rows = (
+            self.session.execute(
+                select(models.TaskHistory.task_func)
+                .where(
+                    models.TaskHistory.status.in_(("pending", "running")),
+                    models.TaskHistory.task_func.isnot(None),
+                )
+                .distinct()
             )
-            .distinct()
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         return sorted(r for r in rows if r is not None)
 
-    def get_history(
-        self, limit: int = 50, offset: int = 0
-    ) -> Sequence[models.TaskHistory]:
-        stmt = (
-            select(models.TaskHistory)
-            .order_by(models.TaskHistory.id.desc())
-            .limit(limit)
-            .offset(offset)
-        )
+    def get_history(self, limit: int = 50, offset: int = 0) -> Sequence[models.TaskHistory]:
+        stmt = select(models.TaskHistory).order_by(models.TaskHistory.id.desc()).limit(limit).offset(offset)
         return list(self.session.execute(stmt).scalars().all())
 
     def get_history_rows(
-        self, limit: int = 50, offset: int = 0,
+        self,
+        limit: int = 50,
+        offset: int = 0,
     ) -> list[dict]:
         """History rows **without** the log payload, plus a ``has_log`` flag.
 
@@ -192,9 +205,7 @@ class SQLAlchemyTaskRepository(BaseRepository):
     def get_task_log(self, task_id: int) -> str | None:
         """Return just the stored log text for one row (``None`` if none)."""
         log = self.session.execute(
-            select(models.TaskHistory.result["log"]).where(
-                models.TaskHistory.id == task_id
-            )
+            select(models.TaskHistory.result["log"]).where(models.TaskHistory.id == task_id)
         ).scalar()
         return log if isinstance(log, str) else None
 
@@ -219,18 +230,19 @@ class SQLAlchemyTaskRepository(BaseRepository):
     def get_scheduled_task(self, task_id: int) -> models.ScheduledTask | None:
         return self.session.get(models.ScheduledTask, task_id)
 
-    def create_scheduled(
-        self, task_data: dict
-    ) -> models.ScheduledTask:
+    def create_scheduled(self, task_data: dict) -> models.ScheduledTask:
         task = models.ScheduledTask(**task_data)
         self.session.add(task)
         self.session.flush()
         return task
 
-    def update_scheduled(
-        self, task_id: int, task_data: dict
-    ) -> models.ScheduledTask | None:
-        return self._update_attrs(models.ScheduledTask, task_id, task_data)
+    def update_scheduled(self, task_id: int, task_data: dict) -> models.ScheduledTask | None:
+        return self._update_attrs(
+            models.ScheduledTask,
+            task_id,
+            task_data,
+            allow_none_fields=("params",),
+        )
 
     def delete_scheduled(self, task_id: int) -> bool:
         return self._delete_by_id(models.ScheduledTask, task_id)

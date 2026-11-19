@@ -20,21 +20,24 @@ frontend can show what failed, when, and why — and act on it:
   frontend's pagination state)
 """
 
-from datetime import datetime
+from __future__ import annotations
 
-from fastapi import APIRouter, Body, Depends, Query
+from datetime import datetime
+from typing import Annotated
+
+from fastapi import APIRouter, Query
 from pydantic import BaseModel, ConfigDict
 
 from copixiv.core.exceptions import ValidationError
-from copixiv.db.uow import SqlUnitOfWork
-from copixiv.db.write_lock import run_write_transaction_sync
-from copixiv.deps import get_task_manager, get_uow
+from copixiv.core.models import BatchTaskResponse
+from copixiv.db.tx import run_write_transaction_sync
+from copixiv.deps import TaskManagerDep, UowDep
 from copixiv.features.failures.repo import FailedNovelRepository
-from copixiv.features.novels.schemas import BatchTaskResponse
 
 # ---------------------------------------------------------------------------
 # Failed-novel ledger schemas — carried with the feature (S1).
 # ---------------------------------------------------------------------------
+
 
 class FailedNovelItem(BaseModel):
     """One download-failure record.
@@ -68,6 +71,7 @@ class FailedNovelCountResponse(BaseModel):
 class FailedNovelRetryRequest(BaseModel):
     novel_ids: list[int]
 
+
 router = APIRouter()
 
 
@@ -78,13 +82,13 @@ MAX_RETRY_IDS = 500
 
 @router.get("", response_model=FailedNovelListResponse)
 def list_failed_novels(
-    offset: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=500),
-    uow: SqlUnitOfWork = Depends(get_uow),
+    uow: UowDep,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ):
     with uow.begin():
         repo = FailedNovelRepository(uow.session)
-        items = repo.list(offset=offset, limit=limit)
+        items = repo.list_failures(offset=offset, limit=limit)
         total = repo.count()
         return FailedNovelListResponse(
             items=[FailedNovelItem.model_validate(i) for i in items],
@@ -96,7 +100,7 @@ def list_failed_novels(
 
 @router.get("/count", response_model=FailedNovelCountResponse)
 def count_failed_novels(
-    uow: SqlUnitOfWork = Depends(get_uow),
+    uow: UowDep,
 ):
     with uow.begin():
         return FailedNovelCountResponse(count=FailedNovelRepository(uow.session).count())
@@ -105,18 +109,16 @@ def count_failed_novels(
 @router.delete("/{novel_id}", status_code=204)
 def delete_failed_novel(
     novel_id: int,
-    uow: SqlUnitOfWork = Depends(get_uow),
+    uow: UowDep,
 ):
     """Clear one failure record (unblocks automatic retry)."""
-    run_write_transaction_sync(
-        uow, lambda tx: FailedNovelRepository(tx.session).forget(novel_id)
-    )
+    run_write_transaction_sync(uow, lambda tx: FailedNovelRepository(tx.session).forget(novel_id))
 
 
 @router.post("/{novel_id}/reset-count", status_code=204)
 def reset_failed_novel_count(
     novel_id: int,
-    uow: SqlUnitOfWork = Depends(get_uow),
+    uow: UowDep,
 ):
     """Reset one record's failure count to 0 — the record stays.
 
@@ -124,52 +126,44 @@ def reset_failed_novel_count(
     info) remains visible in the 「失败记录」 view while the novel is
     unblocked for automatic retry.
     """
-    run_write_transaction_sync(
-        uow, lambda tx: FailedNovelRepository(tx.session).reset_count(novel_id)
-    )
+    run_write_transaction_sync(uow, lambda tx: FailedNovelRepository(tx.session).reset_count(novel_id))
 
 
 @router.post("/reset-count", status_code=204)
 def reset_all_failed_novel_counts(
-    uow: SqlUnitOfWork = Depends(get_uow),
+    uow: UowDep,
 ):
     """Reset every failure count to 0 — records stay, all unblocked."""
-    run_write_transaction_sync(
-        uow, lambda tx: FailedNovelRepository(tx.session).reset_all()
-    )
+    run_write_transaction_sync(uow, lambda tx: FailedNovelRepository(tx.session).reset_all())
 
 
 @router.delete("", status_code=204)
 def clear_all_failed_novels(
-    uow: SqlUnitOfWork = Depends(get_uow),
+    uow: UowDep,
 ):
     """Clear the whole ledger."""
-    run_write_transaction_sync(
-        uow, lambda tx: FailedNovelRepository(tx.session).clear_all()
-    )
+    run_write_transaction_sync(uow, lambda tx: FailedNovelRepository(tx.session).clear_all())
 
 
 @router.post("/retry", response_model=BatchTaskResponse)
 def retry_failed_novels(
-    body: FailedNovelRetryRequest = Body(...),
-    task_manager=Depends(get_task_manager),
+    body: FailedNovelRetryRequest,
+    task_manager: TaskManagerDep,
 ):
     """Enqueue a background ``failed_retry`` task for the given ids."""
     ids = list(dict.fromkeys(body.novel_ids))
     if not ids:
         raise ValidationError("请至少选择一本小说")
     if len(ids) > MAX_RETRY_IDS:
-        raise ValidationError(
-            f"一次最多重试 {MAX_RETRY_IDS} 本（当前 {len(ids)} 本）"
-        )
+        raise ValidationError(f"一次最多重试 {MAX_RETRY_IDS} 本（当前 {len(ids)} 本）")
     task_id = task_manager.run_task("failed_retry", params={"novel_ids": ids})
     return BatchTaskResponse(task_id=task_id, matched=len(ids))
 
 
 @router.post("/retry-all", response_model=BatchTaskResponse)
 def retry_all_failed_novels(
-    uow: SqlUnitOfWork = Depends(get_uow),
-    task_manager=Depends(get_task_manager),
+    uow: UowDep,
+    task_manager: TaskManagerDep,
 ):
     """Enqueue a background ``failed_retry`` task for EVERY failure record.
 

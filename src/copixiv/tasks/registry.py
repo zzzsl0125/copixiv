@@ -6,10 +6,13 @@ import importlib
 import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Literal
 
 from pydantic import BaseModel
 
 from copixiv.log import logger
+
+TaskLane = Literal["fetch", "general"]
 
 # Built-in task modules — the single source of truth for the task set.
 DEFAULT_TASK_MODULES: tuple[str, ...] = (
@@ -27,13 +30,9 @@ class TaskSpec:
     description: str
     func: Callable[..., Awaitable[object]]
     args_model: type[BaseModel] | None = None
-
-
-# Fetching queue partition (all other task functions go to the general lane).
-FETCH_TASK_NAMES: tuple[str, ...] = (
-    "novel_fetch", "novel_follow", "novel_ranking", "novel_search",
-    "author_fetch", "author_delete", "author_special_follow", "failed_retry",
-)
+    lane: TaskLane = "general"
+    timeout: float | None = None
+    notify: bool = True
 
 
 _registry: dict[str, TaskSpec] = {}
@@ -43,6 +42,10 @@ def register(
     name: str,
     description: str = "",
     args: type[BaseModel] | None = None,
+    *,
+    lane: TaskLane = "general",
+    timeout: float | None = None,
+    notify: bool = True,
 ) -> Callable:
     """Register an async task function under *name* with a declarative manifest."""
 
@@ -58,6 +61,9 @@ def register(
             description=(description or (func.__doc__ or "").strip()),
             func=func,
             args_model=args,
+            lane=lane,
+            timeout=timeout,
+            notify=notify,
         )
         return func
 
@@ -75,20 +81,23 @@ def get_task(name: str) -> Callable[..., Awaitable[object]] | None:
     return spec.func if spec else None
 
 
+def task_names_for_lane(lane: TaskLane) -> tuple[str, ...]:
+    """Return all registered task names currently assigned to *lane*."""
+    return tuple(name for name, spec in _registry.items() if spec.lane == lane)
+
+
 def describe_tasks() -> list[dict]:
     """Return task descriptors for the ``/api/tasks/methods`` contract."""
     discover_tasks()
     methods = []
     for spec in _registry.values():
-        methods.append({
-            "name": spec.name,
-            "description": spec.description,
-            "arguments": (
-                spec.args_model.model_json_schema()
-                if spec.args_model is not None
-                else None
-            ),
-        })
+        methods.append(
+            {
+                "name": spec.name,
+                "description": spec.description,
+                "arguments": (spec.args_model.model_json_schema() if spec.args_model is not None else None),
+            }
+        )
     return methods
 
 

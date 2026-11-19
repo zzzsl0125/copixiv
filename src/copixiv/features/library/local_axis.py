@@ -29,15 +29,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy import text as sa_text
 
+from copixiv.core.models import SOURCE_LOCAL, SOURCE_PIXIV
 from copixiv.db import models
-
-SOURCE_LOCAL = "local"
-SOURCE_PIXIV = "pixiv"
 
 # 坐标游标（迁移 0005 建的 ``novel_local_id_seq``，0006 改名并改为承载坐标）。
 COORD_SEQUENCE = "novel_local_coord_seq"
@@ -54,15 +52,15 @@ COORD_SEQUENCE = "novel_local_coord_seq"
 # 2026-09-17T15:00Z，近 90 天实测增速 8,509 号/天。增速会漂移，但空轴场景下
 # 的量级误差（几天的作品号 ≈ 几万）远小于「钉在 2012」。
 SEED_ID = 29_155_910
-SEED_AT = datetime(2026, 9, 17, 15, 0, tzinfo=timezone.utc)
+SEED_AT = datetime(2026, 9, 17, 15, 0, tzinfo=UTC)
 SEED_IDS_PER_DAY = 8509.0
 
 
 def seed_coord(now: datetime | None = None) -> int:
     """空轴兜底：把时刻线性外推成作品号坐标（恒 ≥ 1）。"""
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
+        now = now.replace(tzinfo=UTC)
     days = (now - SEED_AT).total_seconds() / 86400.0
     return max(1, int(SEED_ID + days * SEED_IDS_PER_DAY))
 
@@ -80,9 +78,7 @@ def pixiv_watermark(session) -> int | None:
     取到本地行，取负后翻成正数 —— 那就踩进 pixiv 号段了。
     """
     return session.execute(
-        select(func.max(models.Novel.id)).where(
-            models.Novel.source == SOURCE_PIXIV
-        )
+        select(func.max(models.Novel.id)).where(models.Novel.source == SOURCE_PIXIV)
     ).scalar()
 
 
@@ -98,14 +94,19 @@ def next_local_id(session, now: datetime | None = None) -> int:
 
     coord = int(session.execute(select(func.nextval(COORD_SEQUENCE))).scalar_one())
     if coord < floor:
-        # 抓取把水位推到了游标前面 → 拨到水位（只向前，永不下调）
+        # 并发上传都看到水位高于序列时，用事务级咨询锁串行推进并重检，
+        # 避免多事务同时调用 setval(..., false) 把同一坐标发给两本新书。
         session.execute(
-            sa_text(f"SELECT setval('{COORD_SEQUENCE}', :v, false)"),
-            {"v": floor},
+            sa_text("SELECT pg_advisory_xact_lock(hashtext(:seq))"),
+            {"seq": COORD_SEQUENCE},
         )
-        coord = int(
-            session.execute(select(func.nextval(COORD_SEQUENCE))).scalar_one()
-        )
+        coord = int(session.execute(select(func.nextval(COORD_SEQUENCE))).scalar_one())
+        if coord < floor:
+            session.execute(
+                sa_text(f"SELECT setval('{COORD_SEQUENCE}', :v, false)"),
+                {"v": floor},
+            )
+            coord = int(session.execute(select(func.nextval(COORD_SEQUENCE))).scalar_one())
     return -coord
 
 

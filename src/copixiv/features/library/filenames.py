@@ -14,12 +14,12 @@ from __future__ import annotations
 
 import re
 
-UNKNOWN_AUTHOR = "未知作者"
+from copixiv.core.models import UNKNOWN_AUTHOR
+
+UNNAMED_TITLE = "未命名"
 
 # ``【作者】标题`` / ``[作者] 标题`` —— 方括号（中英文）打头即作者。
-_BRACKET_RE = re.compile(
-    r"^\s*[【\[]\s*(?P<author>[^】\]]+?)\s*[】\]]\s*(?P<title>.+?)\s*$"
-)
+_BRACKET_RE = re.compile(r"^\s*[【\[]\s*(?P<author>[^】\]]+?)\s*[】\]]\s*(?P<title>.+?)\s*$")
 
 # ``作者 - 标题`` 的分隔符：半角/全角连字符**两侧要有空白**，破折号（– —）
 # 可无空白。半角 ``-`` 不带空白时不当分隔符 —— 否则
@@ -27,10 +27,21 @@ _BRACKET_RE = re.compile(
 _DASH_SEPARATORS = (" - ", " － ", " – ", " — ", " –", "—", "–")
 
 # 「(完结)」这类尾部状态标记：只有括号内容命中已知标记才剥掉，避免误删标题。
-_STATUS_MARKERS = frozenset({
-    "完结", "已完结", "完结文", "全本", "全集", "完", "连载", "未完结",
-    "txt", "精校", "校对",
-})
+_STATUS_MARKERS = frozenset(
+    {
+        "完结",
+        "已完结",
+        "完结文",
+        "全本",
+        "全集",
+        "完",
+        "连载",
+        "未完结",
+        "txt",
+        "精校",
+        "校对",
+    }
+)
 _TRAILING_GROUP_RE = re.compile(r"[（(\[【]\s*([^）)\]】]{0,16}?)\s*[）)\]】]\s*$")
 
 # 上传文件名可能带上的两种后缀（先剥掉再解析）。
@@ -65,7 +76,7 @@ def _split_dash(stem: str) -> tuple[str, str] | None:
         if index <= 0:
             continue
         author = stem[:index].strip()
-        title = stem[index + len(separator):].strip()
+        title = stem[index + len(separator) :].strip()
         if author and title:
             return author, title
     return None
@@ -99,7 +110,7 @@ def parse_filename(filename: str) -> tuple[str, str]:
         if split:
             author, title = split
 
-    title = _strip_status_markers(title).strip() or title.strip() or stem
+    title = _strip_status_markers(title).strip() or title.strip() or stem or UNNAMED_TITLE
     return title, (author.strip() or UNKNOWN_AUTHOR)
 
 

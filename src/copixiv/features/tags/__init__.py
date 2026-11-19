@@ -1,2 +1,1 @@
-"""Tags feature package (preferences, aliases, and tag repository).
-"""
+"""Tags feature package (preferences, aliases, and tag repository)."""

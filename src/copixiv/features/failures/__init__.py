@@ -1,2 +1,1 @@
-"""Failures feature package — the download-failure ledger.
-"""
+"""Failures feature package — the download-failure ledger."""

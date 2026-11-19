@@ -1,17 +1,18 @@
 """System API endpoints."""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 from pydantic import BaseModel
 
-from copixiv.core.services import EXCLUDE_BLOCKED_SETTING_KEY
+from copixiv.core.search import EXCLUDE_BLOCKED_SETTING_KEY
+from copixiv.db.tx import run_write_transaction_sync
 from copixiv.db.uow import SqlUnitOfWork
-from copixiv.db.write_lock import run_write_transaction_sync
-from copixiv.deps import get_app_config, get_uow
+from copixiv.deps import AppConfigDep, UowDep
 from copixiv.features.system.repo import SQLAlchemySettingRepository
 
 # ---------------------------------------------------------------------------
 # System config schemas — carried with the feature (S1).
 # ---------------------------------------------------------------------------
+
 
 class SystemConfigResponse(BaseModel):
     batch_download_naming: str
@@ -20,6 +21,7 @@ class SystemConfigResponse(BaseModel):
 
 class SystemConfigUpdate(BaseModel):
     exclude_blocked_tag_novels: bool | None = None
+
 
 router = APIRouter()
 
@@ -36,9 +38,7 @@ def _config_response(uow: SqlUnitOfWork, app_config) -> dict:
     """
     return {
         "batch_download_naming": app_config.batch_download.naming,
-        "exclude_blocked_tag_novels": SQLAlchemySettingRepository(
-            uow.session
-        ).get_bool(
+        "exclude_blocked_tag_novels": SQLAlchemySettingRepository(uow.session).get_bool(
             EXCLUDE_BLOCKED_SETTING_KEY, default=True
         ),
     }
@@ -46,8 +46,8 @@ def _config_response(uow: SqlUnitOfWork, app_config) -> dict:
 
 @router.get("/config", response_model=SystemConfigResponse)
 def get_system_config(
-    app_config=Depends(get_app_config),
-    uow: SqlUnitOfWork = Depends(get_uow),
+    app_config: AppConfigDep,
+    uow: UowDep,
 ):
     with uow.begin():
         return _config_response(uow, app_config)
@@ -56,8 +56,8 @@ def get_system_config(
 @router.put("/config", response_model=SystemConfigResponse)
 def update_system_config(
     data: SystemConfigUpdate,
-    app_config=Depends(get_app_config),
-    uow: SqlUnitOfWork = Depends(get_uow),
+    app_config: AppConfigDep,
+    uow: UowDep,
 ):
     def _write(tx: SqlUnitOfWork):
         if data.exclude_blocked_tag_novels is not None:

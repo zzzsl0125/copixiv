@@ -1,2 +1,1 @@
-"""Feature modules — one directory per feature, with its api and repo co-located.
-"""
+"""Feature modules — one directory per feature, with its api and repo co-located."""

@@ -1,2 +1,1 @@
-"""Accounts feature package.
-"""
+"""Accounts feature package."""

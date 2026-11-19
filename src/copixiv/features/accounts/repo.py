@@ -49,9 +49,7 @@ class SQLAlchemyTokenRepository(BaseRepository):
         """
         if is_follow:
             self.session.execute(
-                update(models.Token)
-                .where(models.Token.id != token_id)
-                .values(is_follow=False)
+                update(models.Token).where(models.Token.id != token_id).values(is_follow=False)
             )
         token = self.session.get(models.Token, token_id)
         if token is None:

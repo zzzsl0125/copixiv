@@ -3,23 +3,23 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select, update
 
 from copixiv.core.models import TaskResult
 from copixiv.db import models
+from copixiv.db.tx import run_write_transaction
 from copixiv.db.uow import SqlUnitOfWork
-from copixiv.db.write_lock import db_write
+from copixiv.features.novels.ingest.asset_pipeline import NovelAssetPipeline
 from copixiv.log import capture_logs, logger
 from copixiv.pixiv.client import PixivClient
 from copixiv.storage.file_storage import FileStorage
-from copixiv.storage.image_downloader import ImageDownloader
 from copixiv.tasks.history_repo import SQLAlchemyTaskRepository
 
 from .registry import TaskSpec
@@ -33,7 +33,7 @@ class TaskContext:
     session_factory: Any = None  # SQLAlchemy sessionmaker（tasks 层不 import app 层）
     client: PixivClient | None = None
     file_storage: FileStorage | None = None
-    image_downloader: ImageDownloader | None = None
+    image_downloader: NovelAssetPipeline | None = None
     backup_dir: str = "backups"
     task_id: int | None = None
 
@@ -41,8 +41,7 @@ class TaskContext:
         """Return a fresh UnitOfWork sharing the process session factory."""
         if self.session_factory is None:
             raise RuntimeError(
-                "TaskContext.session_factory is not set — the context was "
-                "not built by the task kernel."
+                "TaskContext.session_factory is not set — the context was not built by the task kernel."
             )
         return SqlUnitOfWork(self.session_factory)
 
@@ -68,6 +67,32 @@ class TaskContext:
             raise RuntimeError("TaskContext.file_storage is not set")
         return self.file_storage
 
+    async def report_progress(self, progress: Any) -> None:
+        """Write live progress into ``task_history`` via an isolated short session.
+
+        Uses ``self.child_uow()`` (never ``self.uow``) so concurrent callbacks
+        or background progress writers cannot race on the task's primary UoW.
+        Never touches ``status`` / ``end_time`` and never raises.
+        """
+        task_id = self.task_id
+        if task_id is None:
+            return
+        target_uow = self.child_uow() if self.session_factory is not None else self.uow
+        if target_uow is None:
+            return
+        try:
+
+            def _write(uw: SqlUnitOfWork) -> None:
+                SQLAlchemyTaskRepository(uw.session).update_task(
+                    task_id,
+                    None,
+                    progress=progress,
+                )
+
+            await run_write_transaction(target_uow, _write)
+        except Exception:  # noqa: BLE001 — progress must never kill the task
+            logger.exception("任务进度更新失败（不影响执行）")
+
 
 class TaskHistoryRecorder:
     """Records task lifecycle rows (enqueue + status/result updates)."""
@@ -90,9 +115,9 @@ class TaskHistoryRecorder:
         self,
         task_id: int,
         status: str | None,
-        result: str | None = None,
+        result: dict[str, Any] | str | None = None,
         duration: float | None = None,
-        progress: str | None = None,
+        progress: Any | None = None,
     ) -> None:
         """Update a TaskHistory row in a short write transaction."""
         await asyncio.to_thread(
@@ -110,15 +135,18 @@ class TaskHistoryRecorder:
         self,
         task_id: int,
         status: str | None,
-        result: str | None = None,
+        result: dict[str, Any] | str | None = None,
         duration: float | None = None,
-        progress: str | None = None,
+        progress: Any | None = None,
     ) -> None:
         """Synchronous body of :meth:`update` (runs in a worker thread)."""
-        with db_write(), self._session_factory() as session:
+        with self._session_factory() as session:
             repo = SQLAlchemyTaskRepository(session)
             repo.update_task(
-                task_id, status, result=result, duration=duration,
+                task_id,
+                status,
+                result=result,
+                duration=duration,
                 progress=progress,
             )
             session.commit()
@@ -129,12 +157,16 @@ class TaskHistoryRecorder:
             return
         try:
             with self._session_factory() as session:
-                alive = set(session.execute(
-                    select(models.TaskHistory.id).where(
-                        models.TaskHistory.id.in_(self._live_pending),
-                        models.TaskHistory.status == "pending",
+                alive = set(
+                    session.execute(
+                        select(models.TaskHistory.id).where(
+                            models.TaskHistory.id.in_(self._live_pending),
+                            models.TaskHistory.status == "pending",
+                        )
                     )
-                ).scalars().all())
+                    .scalars()
+                    .all()
+                )
         except Exception:
             logger.exception("Failed to prune live pending task ids.")
             return
@@ -142,7 +174,8 @@ class TaskHistoryRecorder:
         if dropped:
             self._live_pending.difference_update(dropped)
             logger.info(
-                "Pruned {} abandoned live-pending task id(s).", len(dropped),
+                "Pruned {} abandoned live-pending task id(s).",
+                len(dropped),
             )
 
     def recover_stale(self) -> None:
@@ -154,9 +187,7 @@ class TaskHistoryRecorder:
                     models.TaskHistory.status.in_(("pending", "running"))
                 )
                 if self._live_pending:
-                    stmt = stmt.where(
-                        models.TaskHistory.id.not_in(self._live_pending)
-                    )
+                    stmt = stmt.where(models.TaskHistory.id.not_in(self._live_pending))
                 stale_ids = session.execute(stmt).scalars().all()
                 if not stale_ids:
                     return
@@ -165,7 +196,7 @@ class TaskHistoryRecorder:
                     .where(models.TaskHistory.id.in_(stale_ids))
                     .values(
                         status="interrupted",
-                        end_time=datetime.now(timezone.utc),
+                        end_time=datetime.now(UTC),
                         result={"summary": "服务重启导致中断"},
                     )
                 )
@@ -195,13 +226,18 @@ class TaskExecutor:
         *,
         recorder: TaskHistoryRecorder,
         notifier,
+        is_user_cancelled: Callable[[int], bool] | None = None,
     ) -> None:
         """Execute a task, record history, and send notifications."""
         name = spec.name
         logger.info("Starting task '{}' (id={})...", name, task_id)
         await self._run_inner(
-            spec, params, task_id,
-            recorder=recorder, notifier=notifier,
+            spec,
+            params,
+            task_id,
+            recorder=recorder,
+            notifier=notifier,
+            is_user_cancelled=is_user_cancelled,
         )
 
     async def _run_inner(
@@ -212,6 +248,7 @@ class TaskExecutor:
         *,
         recorder: TaskHistoryRecorder,
         notifier,
+        is_user_cancelled: Callable[[int], bool] | None = None,
     ) -> None:
         """Body of the task lifecycle — status tracking + execution."""
         name = spec.name
@@ -228,33 +265,39 @@ class TaskExecutor:
                 result_val = await self._execute(spec, params, ctx)
                 status = "success"
                 logger.info(
-                    "Task '{}' (id={}) completed successfully.", name, task_id,
+                    "Task '{}' (id={}) completed successfully.",
+                    name,
+                    task_id,
                 )
 
-            except (asyncio.TimeoutError, TimeoutError):
+            except TimeoutError:
                 status = "failed"
-                error_msg = "Task timed out after 30 minutes"
+                effective_timeout = spec.timeout if spec.timeout is not None else self.TIMEOUT_SECONDS
+                error_msg = f"Task timed out after {effective_timeout:g}s"
                 logger.error("Task '{}' (id={}) timed out.", name, task_id)
             except asyncio.CancelledError:
                 duration = time.time() - start_time
+                user_cancelled = is_user_cancelled(task_id) if is_user_cancelled is not None else False
+                cancel_status = "cancelled" if user_cancelled else "interrupted"
+                cancel_summary = "任务已手动取消" if user_cancelled else "任务被中断（服务关闭/重启）"
                 try:
                     await recorder.update(
-                        task_id, "interrupted",
-                        result=json.dumps(
-                            {
-                                "log": get_logs(),
-                                "summary": "任务被中断（服务关闭/重启）",
-                                "new_novels_count": 0,
-                                "new_novel_titles": [],
-                            },
-                            ensure_ascii=False,
-                        ),
+                        task_id,
+                        cancel_status,
+                        result={
+                            "log": get_logs(),
+                            "summary": cancel_summary,
+                            "new_novels_count": 0,
+                            "new_novel_titles": [],
+                        },
                         duration=duration,
                     )
                 except Exception:
                     logger.exception(
-                        "Failed to record interrupted status for task '{}' "
-                        "(id={}).", name, task_id,
+                        "Failed to record %s status for task '{}' (id={}).",
+                        cancel_status,
+                        name,
+                        task_id,
                     )
                 raise
             except Exception as exc:
@@ -268,29 +311,27 @@ class TaskExecutor:
         duration = time.time() - start_time
         result = self._normalize_result(result_val)
 
-        if status == "failed" and not result.failed_ids and (
-            not result.summary or result.summary == "完成"
-        ):
+        if status == "failed" and not result.failed_ids and (not result.summary or result.summary == "完成"):
             result = result.model_copy(
                 update={"summary": error_msg or "任务失败（未记录原因）"},
             )
 
-        result_data = json.dumps(
-            {
-                "log": log_output,
-                "summary": result.summary,
-                "new_novels_count": result.new_novel_count,
-                "new_novel_titles": result.new_novel_titles,
-                "failed_ids": result.failed_ids,
-            },
-            ensure_ascii=False,
-        )
+        result_data = {
+            "log": log_output,
+            "summary": result.summary,
+            "new_novels_count": result.new_novel_count,
+            "new_novel_titles": result.new_novel_titles,
+            "failed_ids": result.failed_ids,
+        }
 
         await recorder.update(
-            task_id, status, result=result_data, duration=duration,
+            task_id,
+            status,
+            result=result_data,
+            duration=duration,
         )
 
-        if notifier is not None:
+        if notifier is not None and spec.notify:
             await notifier.send_task_result(
                 task_name=name,
                 status=status,
@@ -311,21 +352,13 @@ class TaskExecutor:
             task_id=task_id,
         )
 
-    async def _execute(
-        self, spec: TaskSpec, params: dict, ctx: TaskContext
-    ) -> Any:
+    async def _execute(self, spec: TaskSpec, params: dict, ctx: TaskContext) -> Any:
         """Validate params against the args model and run the function."""
-        args_obj = (
-            spec.args_model.model_validate(params)
-            if spec.args_model is not None
-            else None
-        )
+        args_obj = spec.args_model.model_validate(params) if spec.args_model is not None else None
 
-        if args_obj is None:
-            coro = spec.func(ctx=ctx)
-        else:
-            coro = spec.func(args_obj, ctx=ctx)
-        return await asyncio.wait_for(coro, timeout=self.TIMEOUT_SECONDS)
+        coro = spec.func(ctx=ctx) if args_obj is None else spec.func(args_obj, ctx=ctx)
+        timeout = spec.timeout if spec.timeout is not None else self.TIMEOUT_SECONDS
+        return await asyncio.wait_for(coro, timeout=timeout)
 
     @staticmethod
     def _normalize_result(result_val: Any) -> TaskResult:

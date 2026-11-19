@@ -1,17 +1,27 @@
-"""Pure domain entities — Pydantic models with no ORM coupling.
+"""Pure domain entities, shared ID rules, and value objects — zero framework coupling."""
 
-Merged from ``domain/models/*`` (8 files + ``__init__.py`` re-exports).
-"""
+from __future__ import annotations
 
 import random
 from datetime import datetime
-from enum import IntEnum
+from enum import IntEnum, StrEnum
+from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, computed_field
 
-# ---------------------------------------------------------------------------
-# Novel domain entities — pure Pydantic models.
-# ---------------------------------------------------------------------------
+from copixiv.core.exceptions import ValidationError
+
+
+class NovelSource(StrEnum):
+    """Origin of a novel row in ``novel.source``."""
+
+    PIXIV = "pixiv"
+    LOCAL = "local"
+
+
+SOURCE_PIXIV = NovelSource.PIXIV.value
+SOURCE_LOCAL = NovelSource.LOCAL.value
+UNKNOWN_AUTHOR = "未知作者"
 
 
 class EpubStatus(IntEnum):
@@ -42,6 +52,7 @@ class EpubStatus(IntEnum):
     never be repaired.  Splitting the two meanings is the point; ``4`` exists
     for the same reason (one more fact that must not hide behind ``0``).
     """
+
     NO = 0
     PENDING = 1
     DONE = 2
@@ -49,148 +60,94 @@ class EpubStatus(IntEnum):
     MISSING_SOURCE = 4
 
 
-# ---------------------------------------------------------------------------
-# ``novel.shuffle`` — 随机浏览的预计算排序键。
-# ---------------------------------------------------------------------------
-#
-# **唯一所有者是这里。** 新建行时两条写路径都要给一个随机值：抓取
-# （``novels/repo.py::_upsert_rows``）与上传（``features/library/ingest.py``）。
-# 各自抄一份 ``random.randint(0, 2**31 - 1)`` 正是那种"约定漂移一次、随机浏览
-# 就退化"的形状，而且它属于**领域词汇**（"这本新书在随机序列里排哪儿"），
-# 不属于任何一条写路径。
-#
-# 范围取 int4 正半区：列是 ``Integer``，而负值会让 ``ORDER BY shuffle`` 的
-# 顺序扫描与"从随机偏移开始 seek"这两条读法分叉（见
-# ``repo.py::_get_random_novels_shuffle``）。
+# Preserves positive signed int32 range for precomputed random seek order.
 SHUFFLE_KEY_MAX = 2**31 - 1
 
 
 def new_shuffle_key(rng=random) -> int:
-    """一个新的随机浏览键（``0..SHUFFLE_KEY_MAX``，两端都可能取到）。"""
+    """Return a fresh random-browsing shuffle key in ``[0, SHUFFLE_KEY_MAX]``."""
     return rng.randint(0, SHUFFLE_KEY_MAX)
 
 
 class Novel(BaseModel):
-    """A Pixiv novel, stored locally after download.
-
-    Read-path domain object: the read repository builds these from ORM
-    rows.  The *write* path is carried by
-    :class:`~copixiv.core.draft.NovelDraft` (built by the
-    factory functions in ``core/draft.py``); plain dicts only
-    appear at the HTTP wire boundary.
-
-    Types mirror the database columns: ``create_time`` is a ``timestamptz``
-    in PostgreSQL, so the read model carries a ``datetime`` (the *write*
-    carrier, :class:`~copixiv.core.draft.NovelDraft`, keeps the source's
-    string and converts it at persist time).
-
-    The transient asset fields (``content`` / ``images`` / ``illusts`` /
-    ``cover_url``) intentionally live **only** on ``NovelDraft``: their real
-    readers (``storage/image_downloader.py``,
-    ``storage/epub/builder.py``) take the write carrier, so a copy on the
-    read model would have no consumer and would mislead.
-    """
+    """Read-path domain entity representing a stored Pixiv or local novel."""
 
     id: int
     title: str
-    # ``author_id`` is nullable: novels orphaned by the SQLite→PG migration
-    # (author row missing) keep NULL, and a deleted Pixiv author stays NULL.
-    # Mirrors ``Series.author_id``.
     author_id: int | None = None
     author_name: str | None = None
     path: str | None = None
     like: int = 0
     view: int = 0
-    text: int = 0  # 正文字符数（content 才是正文文本）
+    text: int = 0
     caption: str | None = None
     series_id: int | None = None
     series_name: str | None = None
     series_index: int | None = None
     create_time: datetime | None = None
-    # Shuffle key for random browsing — persisted column.  The write path
-    # assigns a random value on insert (never overwritten on refresh);
-    # the read path uses it for keyset pagination in random order.
     shuffle: int = 0
-    # ``has_epub=None`` means "don't overwrite the stored value" on a
-    # metadata-only refresh; the DB column itself is never NULL in practice.
     has_epub: EpubStatus | None = None
-    # Where the row came from — ``'pixiv'`` (scraper) or ``'local'`` (a TXT /
-    # EPUB uploaded through 「我的上传」, docs/LIBRARY_DESIGN.md §2).  The list
-    # response carries it so the card can show a 「本地」 badge.
-    source: str = "pixiv"
-    # Local books only: sha256 of the normalised body (the dedup key);
-    # NULL for Pixiv rows.
+    source: NovelSource = NovelSource.PIXIV
     source_key: str | None = None
-
-    # Tags are the ``novel.tags text[]`` column (read straight from the row).
     tags: list[str] = Field(default_factory=list)
-
-    # Display flags — not persisted, joined from other tables
     is_favourite: bool = False
     is_special_follow: bool = False
 
 
-# ---------------------------------------------------------------------------
-# Author domain entity.
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# TaskResult — structured return value for all background tasks.
-#
-# Replaces the ad-hoc ``list[str] | int | None`` returns so that:
-# * Novel-discovery tasks can clearly mark which titles are new.
-# * Maintenance tasks can report a plain summary without polluting the
-#   ``new_novel_titles`` column.
-# * The notifier can decide *how* to format the message based on whether
-#   the task actually discovered novels.
-# ---------------------------------------------------------------------------
-
-
 class TaskResult(BaseModel):
-    """Structured result from a task execution.
-
-    Attributes:
-        summary: Human-readable one-line summary used in notifications and
-            log output.  Always populated.  **Never parse this** — it is UI
-            copy, and a wording change would silently break the caller.
-        new_novel_titles: Titles of novels that were **newly discovered and
-            persisted** during this task run.  Only populated by tasks that
-            actually fetch/download novels (e.g. ``novel_follow``,
-            ``author_fetch``).  Maintenance tasks leave this empty.
-        new_novel_count: Total count of newly persisted novels.  Always
-            mirrors ``len(new_novel_titles)`` (enforced by a validator), so
-            callers never need to set it explicitly.
-        failed_ids: IDs this task attempted and could **not** complete — the
-            machine-readable counterpart of "this one failed".  Callers that
-            need per-item outcomes must read this instead of pattern-matching
-            ``summary`` (``failed_retry`` tested ``"获取失败" not in summary``,
-            which broke on any wording change).
-    """
+    """Structured result returned by all background tasks."""
 
     summary: str = ""
     new_novel_titles: list[str] = Field(default_factory=list)
-    new_novel_count: int = 0
     failed_ids: list[int] = Field(default_factory=list)
 
-    @model_validator(mode="after")
-    def _sync_count(self) -> "TaskResult":
-        if self.new_novel_titles:
-            self.new_novel_count = len(self.new_novel_titles)
-        else:
-            self.new_novel_count = 0
-        return self
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def new_novel_count(self) -> int:
+        """Count of newly persisted novels derived from ``new_novel_titles``."""
+        return len(self.new_novel_titles)
 
 
-# ---------------------------------------------------------------------------
-# Token domain entity — Pixiv refresh token.
-# ---------------------------------------------------------------------------
+class BatchTaskResponse(BaseModel):
+    """A batch operation enqueued into the background task system."""
+
+    task_id: int
+    matched: int
+
+
+def positive_pixiv_id(raw: Any, label: str, hint: str) -> int:
+    """Validate a positive 64-bit integer Pixiv ID (author or series)."""
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ValidationError(f"{label} ID 必须是整数")
+    if raw <= 0:
+        raise ValidationError(f"{label} ID 必须是正整数（{hint}）")
+    if raw > 2**63 - 1:
+        raise ValidationError(f"{label} ID 超出取值范围")
+    return raw
+
+
+def author_id(raw: Any) -> int:
+    """Validate a positive Pixiv author ID."""
+    return positive_pixiv_id(raw, "作者", "pixiv 用户 ID")
+
+
+def series_id(raw: Any) -> int:
+    """Validate a positive Pixiv series ID."""
+    return positive_pixiv_id(raw, "系列", "pixiv 系列 ID")
 
 
 __all__ = [
-    "Novel",
+    "BatchTaskResponse",
     "EpubStatus",
-    "TaskResult",
+    "Novel",
+    "NovelSource",
     "SHUFFLE_KEY_MAX",
+    "SOURCE_LOCAL",
+    "SOURCE_PIXIV",
+    "TaskResult",
+    "UNKNOWN_AUTHOR",
+    "author_id",
     "new_shuffle_key",
+    "positive_pixiv_id",
+    "series_id",
 ]

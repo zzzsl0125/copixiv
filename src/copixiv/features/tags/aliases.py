@@ -1,17 +1,20 @@
 """Tag alias API endpoints."""
 
-from fastapi import APIRouter, Depends, Query
+from __future__ import annotations
+
+from typing import Annotated
+
+from fastapi import APIRouter, Query
 from pydantic import BaseModel, ConfigDict
 
 from copixiv.core.exceptions import NotFoundError, ValidationError
+from copixiv.db.tx import run_write_transaction_sync
 from copixiv.db.uow import SqlUnitOfWork
-from copixiv.db.write_lock import run_write_transaction_sync
-from copixiv.deps import get_uow
-from copixiv.features.tags.repo import SQLAlchemyTagRepository
+from copixiv.deps import UowDep
+from copixiv.features.tags.alias_repo import TagAliasRepository
+from copixiv.features.tags.apply_alias import create_and_apply_alias
+from copixiv.features.tags.suggest import suggest_tag_aliases as _suggest_tag_aliases
 
-# ---------------------------------------------------------------------------
-# Tag alias schemas — carried with the feature (S1).
-# ---------------------------------------------------------------------------
 
 class TagAliasBase(BaseModel):
     source: str
@@ -38,21 +41,22 @@ class TagAliasSuggestListResponse(BaseModel):
     items: list[TagAliasSuggestResponse]
     next_offset: int
 
+
 router = APIRouter()
 
 
-@router.get("/", response_model=list[TagAliasResponse])
-def get_tag_aliases(uow: SqlUnitOfWork = Depends(get_uow)):
+@router.get("", response_model=list[TagAliasResponse])
+def get_tag_aliases(uow: UowDep):
     with uow.begin():
-        return SQLAlchemyTagRepository(uow.session).get_aliases()
+        return TagAliasRepository(uow.session).get_aliases()
 
 
 @router.get("/suggest", response_model=TagAliasSuggestListResponse)
 def suggest_tag_aliases(
-    limit: int = Query(5, ge=1, le=50),
-    offset: int = Query(0, ge=0),
-    target_tag: str | None = Query(None),
-    uow: SqlUnitOfWork = Depends(get_uow),
+    uow: UowDep,
+    limit: Annotated[int, Query(ge=1, le=50)] = 5,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    target_tag: Annotated[str | None, Query()] = None,
 ):
     """相似标签建议。
 
@@ -62,30 +66,25 @@ def suggest_tag_aliases(
     没有「页」可续，因此忽略 ``offset`` 且 ``next_offset`` 恒为 0。
     """
     with uow.begin():
-        return SQLAlchemyTagRepository(uow.session).suggest_aliases(
-            limit=limit, offset=offset, target_tag=target_tag
-        )
+        return _suggest_tag_aliases(uow.session, limit=limit, offset=offset, target_tag=target_tag)
 
 
-@router.post("/", response_model=TagAliasResponse)
-def create_tag_alias(data: TagAliasBase, uow: SqlUnitOfWork = Depends(get_uow)):
+@router.post("", response_model=TagAliasResponse)
+def create_tag_alias(data: TagAliasBase, uow: UowDep):
     if data.source == data.target:
         raise ValidationError("原标签不能和目标标签相同")
 
     def _write(tx: SqlUnitOfWork):
-        repo = SQLAlchemyTagRepository(tx.session)
-        alias = repo.create_alias(data.model_dump())
-        repo.apply_alias_retroactively(data.source, data.target)
+        alias = create_and_apply_alias(tx.session, data.source, data.target)
         return TagAliasResponse.model_validate(alias)
 
     return run_write_transaction_sync(uow, _write)
 
 
-@router.delete("/{alias_id}")
-def delete_tag_alias(alias_id: int, uow: SqlUnitOfWork = Depends(get_uow)):
+@router.delete("/{alias_id}", status_code=204)
+def delete_tag_alias(alias_id: int, uow: UowDep):
     def _write(tx: SqlUnitOfWork):
-        if not SQLAlchemyTagRepository(tx.session).delete_alias(alias_id):
+        if not TagAliasRepository(tx.session).delete_alias(alias_id):
             raise NotFoundError(f"Tag alias {alias_id} not found")
-        return {"ok": True}
 
-    return run_write_transaction_sync(uow, _write)
+    run_write_transaction_sync(uow, _write)

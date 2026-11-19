@@ -31,15 +31,17 @@ from copixiv.db.backup import (
     backup_database as _dump_database,
 )
 from copixiv.db.backup import cleanup_old_backups
-
-from ..kernel import TaskContext, register
+from copixiv.tasks.executor import TaskContext
+from copixiv.tasks.registry import register
 
 
 class BackupDatabaseArgs(BaseModel):
     """Parameters for ``backup_database``."""
 
     keep_count: int = Field(
-        default=4, ge=1, le=52,
+        default=4,
+        ge=1,
+        le=52,
         description="保留最近多少份周备份（默认 4，约一个月）",
     )
 
@@ -64,9 +66,11 @@ def _database_url(ctx: TaskContext) -> str:
     "backup_database",
     description="备份数据库（pg_dump 自定义格式，按 ISO 周命名）",
     args=BackupDatabaseArgs,
+    lane="general",
 )
 async def backup_database(
-    args: BackupDatabaseArgs, ctx: TaskContext,
+    args: BackupDatabaseArgs,
+    ctx: TaskContext,
 ) -> TaskResult:
     """Run one ``pg_dump`` and prune older weekly backups."""
     url = _database_url(ctx)
@@ -77,7 +81,10 @@ async def backup_database(
     # Both halves block on a subprocess / filesystem; keep them off the loop.
     dest = await asyncio.to_thread(_dump_database, url, backup_dir)
     removed = await asyncio.to_thread(
-        cleanup_old_backups, url, args.keep_count, backup_dir,
+        cleanup_old_backups,
+        url,
+        args.keep_count,
+        backup_dir,
     )
 
     size = Path(dest).stat().st_size

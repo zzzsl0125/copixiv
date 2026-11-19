@@ -34,7 +34,7 @@ are live queue entries, not history.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from pydantic import BaseModel, Field
 from sqlalchemy import delete as _delete_stmt
@@ -43,10 +43,10 @@ from sqlalchemy import select as _select
 
 from copixiv.core.models import TaskResult
 from copixiv.db import models
-from copixiv.db.write_lock import read_transaction, run_write_transaction
+from copixiv.db.tx import read_transaction, run_write_transaction
 from copixiv.log import logger
-
-from ..kernel import TaskContext, register
+from copixiv.tasks.executor import TaskContext
+from copixiv.tasks.registry import register
 
 #: ``setting`` row holding the retention policy (JSON object).
 RETENTION_SETTING_KEY = "task_history.retention"
@@ -70,11 +70,13 @@ class PruneTaskHistoryArgs(BaseModel):
         description="真正删除。默认 false = 只统计（试运行）",
     )
     keep: int | None = Field(
-        default=None, ge=0,
+        default=None,
+        ge=0,
         description="至少保留最近 N 行（不论多老）",
     )
     max_age_days: int | None = Field(
-        default=None, ge=1,
+        default=None,
+        ge=1,
         description="同时保留最近 N 天内的行（不论多少）",
     )
 
@@ -82,11 +84,11 @@ class PruneTaskHistoryArgs(BaseModel):
 def _policy(args: PruneTaskHistoryArgs, stored: dict | None) -> tuple[int, int]:
     """Resolve ``(keep, max_age_days)``: args → setting row → module default."""
     stored = stored or {}
-    keep = args.keep if args.keep is not None else int(
-        stored.get("keep", DEFAULT_KEEP)
-    )
-    age = args.max_age_days if args.max_age_days is not None else int(
-        stored.get("max_age_days", DEFAULT_MAX_AGE_DAYS)
+    keep = args.keep if args.keep is not None else int(stored.get("keep", DEFAULT_KEEP))
+    age = (
+        args.max_age_days
+        if args.max_age_days is not None
+        else int(stored.get("max_age_days", DEFAULT_MAX_AGE_DAYS))
     )
     return keep, age
 
@@ -98,9 +100,7 @@ def _read_policy(session) -> dict | None:
     transaction (see ``prune_task_history``) rather than opening its own.
     """
     raw = session.execute(
-        _select(models.Setting.value).where(
-            models.Setting.key == RETENTION_SETTING_KEY
-        )
+        _select(models.Setting.value).where(models.Setting.key == RETENTION_SETTING_KEY)
     ).scalar()
     if not raw:
         return None
@@ -109,7 +109,8 @@ def _read_policy(session) -> dict | None:
     except (TypeError, ValueError):
         logger.warning(
             "{} 不是合法 JSON，按默认保留策略处理：{!r}",
-            RETENTION_SETTING_KEY, raw,
+            RETENTION_SETTING_KEY,
+            raw,
         )
         return None
     return parsed if isinstance(parsed, dict) else None
@@ -130,10 +131,7 @@ def _keep_boundary(session, keep: int) -> int | None:
     if keep <= 0:
         return None
     return session.execute(
-        _select(models.TaskHistory.id)
-        .order_by(models.TaskHistory.id.desc())
-        .offset(keep - 1)
-        .limit(1)
+        _select(models.TaskHistory.id).order_by(models.TaskHistory.id.desc()).offset(keep - 1).limit(1)
     ).scalar()
 
 
@@ -155,15 +153,15 @@ def _victim_condition(session, keep: int, cutoff: datetime) -> list:
         boundary = _keep_boundary(session, keep)
         if boundary is None:
             # Fewer rows than the floor: the count rule alone protects the table.
-            return [models.TaskHistory.id.is_(None)]   # matches nothing
+            return [models.TaskHistory.id.is_(None)]  # matches nothing
         conds.append(models.TaskHistory.id < boundary)
     return conds
 
 
 def _count_victims(session, keep: int, cutoff: datetime) -> int:
     """How many rows the two retention rules agree on deleting."""
-    stmt = _select(func.count()).select_from(models.TaskHistory).where(
-        *_victim_condition(session, keep, cutoff)
+    stmt = (
+        _select(func.count()).select_from(models.TaskHistory).where(*_victim_condition(session, keep, cutoff))
     )
     return int(session.execute(stmt).scalar() or 0)
 
@@ -172,14 +170,17 @@ def _count_victims(session, keep: int, cutoff: datetime) -> int:
     "prune_task_history",
     description="按「保留最近 N 行」+「保留最近 N 天」两条规则裁剪任务历史（默认只统计）",
     args=PruneTaskHistoryArgs,
+    lane="general",
 )
 async def prune_task_history(
-    args: PruneTaskHistoryArgs, ctx: TaskContext,
+    args: PruneTaskHistoryArgs,
+    ctx: TaskContext,
 ) -> TaskResult:
     """Trim ``task_history``: delete rows that are both old *and* beyond the top N.
 
     Pending/running rows are never candidates — they are the live queue.
     """
+
     def _read_counts(uw) -> tuple[int, int, int, int]:
         """Policy + totals in one read transaction (one hop for the loop).
 
@@ -189,32 +190,27 @@ async def prune_task_history(
         """
         session = uw.session
         keep, max_age_days = _policy(args, _read_policy(session))
-        cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
-        total = int(session.execute(
-            _select(func.count()).select_from(models.TaskHistory)
-        ).scalar() or 0)
+        cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
+        total = int(session.execute(_select(func.count()).select_from(models.TaskHistory)).scalar() or 0)
         return keep, max_age_days, total, _count_victims(session, keep, cutoff)
 
     keep, max_age_days, total, victims = await read_transaction(
-        ctx.uow, _read_counts,
+        ctx.uow,
+        _read_counts,
     )
-    cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+    cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
 
-    threshold = (
-        f"保留最近 {keep} 行 + 最近 {max_age_days} 天内的记录"
-    )
+    threshold = f"保留最近 {keep} 行 + 最近 {max_age_days} 天内的记录"
     if victims == 0:
         return TaskResult(
-            summary=(
-                f"任务历史清理: 无需裁剪（共 {total} 行；{threshold}，"
-                f"两条规则都不满足的行才删）"
-            )
+            summary=(f"任务历史清理: 无需裁剪（共 {total} 行；{threshold}，两条规则都不满足的行才删）")
         )
 
     if not args.apply:
         logger.info(
             "prune_task_history: 试运行，可删除 {} / {} 行（加 apply=true 才真正删除）",
-            victims, total,
+            victims,
+            total,
         )
         return TaskResult(
             summary=(
@@ -226,21 +222,17 @@ async def prune_task_history(
     def _delete(uw) -> int:
         session = uw.session
         conditions = _victim_condition(session, keep, cutoff)
-        result = session.execute(
-            _delete_stmt(models.TaskHistory).where(*conditions)
-        )
+        result = session.execute(_delete_stmt(models.TaskHistory).where(*conditions))
         return int(result.rowcount or 0)
 
     deleted = await run_write_transaction(ctx.uow, _delete)
     logger.info(
-        "prune_task_history: 删除 {}/{} 行（{}）", deleted, total, threshold,
+        "prune_task_history: 删除 {}/{} 行（{}）",
+        deleted,
+        total,
+        threshold,
     )
-    return TaskResult(
-        summary=(
-            f"任务历史清理: 删除 {deleted} 行，剩余 {total - deleted} 行"
-            f"（{threshold}）"
-        )
-    )
+    return TaskResult(summary=(f"任务历史清理: 删除 {deleted} 行，剩余 {total - deleted} 行（{threshold}）"))
 
 
 __all__ = [

@@ -12,16 +12,19 @@ from sqlalchemy.orm import Session
 from copixiv.core.draft import NovelDraft
 from copixiv.core.exceptions import NotFoundError
 from copixiv.core.models import EpubStatus, new_shuffle_key
-from copixiv.core.services import parse_pixiv_time
+from copixiv.core.time import parse_pixiv_time
 from copixiv.db import constants as C
 from copixiv.db import delta as engine_delta
 from copixiv.db import models
-from copixiv.db.base import BaseRepository, refresh_parent_summaries
+from copixiv.db.base import (
+    BaseRepository,
+    ensure_parent_rows,
+    finalize_parent_links,
+)
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
 from copixiv.log import logger
 
 from .read_repo import SQLAlchemyNovelReadRepository
-from .series_repo import SQLAlchemySeriesRepository
 
 # Passive metadata-only refreshes skip UPDATE when nothing meaningful changed
 # (pure view-count bumps or <5 like jitter with identical core fields/tags),
@@ -30,9 +33,15 @@ _MIN_PASSIVE_LIKE_DELTA = 5
 _NOISE_ONLY_FIELDS = frozenset({"view", "like"})
 
 # ``update_metadata_many`` allowed columns (author + series metadata edit).
-BATCH_METADATA_COLUMNS = frozenset({
-    "author_id", "author_name", "series_id", "series_name", "series_index",
-})
+BATCH_METADATA_COLUMNS = frozenset(
+    {
+        "author_id",
+        "author_name",
+        "series_id",
+        "series_name",
+        "series_index",
+    }
+)
 
 
 def _summary_ids(novel) -> tuple[set[int], set[int]]:
@@ -50,20 +59,21 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         super().__init__(session)
         self.VALID_NOVEL_FIELDS = {c.name for c in models.Novel.__table__.c}
         self.VALID_NOVEL_QUERY_FIELDS = self.VALID_NOVEL_FIELDS | {
-            C.FIELD_TAGS, C.FIELD_KEYWORD, C.FIELD_IS_FAVOURITE,
-            C.FIELD_IS_SPECIAL_FOLLOW, C.ORDER_BY_NONE, C.ORDER_BY_RANDOM,
+            C.FIELD_TAGS,
+            C.FIELD_KEYWORD,
+            C.FIELD_IS_FAVOURITE,
+            C.FIELD_IS_SPECIAL_FOLLOW,
+            C.ORDER_BY_NONE,
+            C.ORDER_BY_RANDOM,
         }
 
-    def upsert_novels(
-        self, novels: list[NovelDraft], force_update: list[str] | None = None
-    ) -> int:
+    def upsert_novels(self, novels: list[NovelDraft], force_update: list[str] | None = None) -> int:
         """Insert or update novels and sync their tags."""
         if not novels:
             return 0
 
         novel_dicts: list[dict[str, Any]] = [
-            dict(n) if isinstance(n, dict) else dict(n.__dict__)
-            for n in novels
+            dict(n) if isinstance(n, dict) else dict(n.__dict__) for n in novels
         ]
         force_update = force_update or []
 
@@ -71,25 +81,28 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         novel_tags_map = self._resolve_tag_aliases(novel_dicts)
         existing_map = self._fetch_existing_novels(novel_dicts)
         new_ids = self._upsert_rows(
-            novel_dicts, existing_map, force_update, novel_tags_map,
+            novel_dicts,
+            existing_map,
+            force_update,
+            novel_tags_map,
         )
         return len(new_ids)
 
     def _ensure_parent_rows(self, novels: list[dict]) -> None:
         """Ensure author + series placeholder rows exist before novel writes."""
-        from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
-
         author_ids = {n["author_id"] for n in novels if n.get("author_id")}
         series_ids = {n["series_id"] for n in novels if n.get("series_id")}
-        if author_ids:
-            SQLAlchemyAuthorRepository(self.session).ensure_exists(author_ids)
-        if series_ids:
-            SQLAlchemySeriesRepository(self.session).ensure_exists(series_ids)
+        ensure_parent_rows(
+            self.session,
+            author_ids=author_ids,
+            series_ids=series_ids,
+        )
 
     # ---- upsert helpers -----------------------------------------------------
 
     def _resolve_tag_aliases(
-        self, novels: list[dict],
+        self,
+        novels: list[dict],
     ) -> dict[int, set[str]]:
         tag_repo = SQLAlchemyTagRepository(self.session)
         alias_map = tag_repo.get_alias_map()
@@ -105,16 +118,14 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         return novel_tags_map
 
     def _fetch_existing_novels(
-        self, novels: list[dict],
+        self,
+        novels: list[dict],
     ) -> dict[int, Any]:
         all_ids = [int(n["id"]) for n in novels if n.get("id")]
         if not all_ids:
             return {}
         stmt = select(models.Novel).where(models.Novel.id.in_(all_ids))
-        return {
-            n.id: n
-            for n in self.session.execute(stmt).scalars().all()
-        }
+        return {n.id: n for n in self.session.execute(stmt).scalars().all()}
 
     def _upsert_rows(
         self,
@@ -124,26 +135,27 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         novel_tags_map: dict[int, set[str]] | None = None,
     ) -> list[int]:
         """Insert new or update existing novel rows with merged tags."""
-        update_fields_set = set([
-            "like", "view", "title", "text", "caption",
-            "series_name", "has_epub",
-        ] + force_update)
+        update_fields_set = set(
+            [
+                "like",
+                "view",
+                "title",
+                "text",
+                "caption",
+                "series_name",
+                "has_epub",
+            ]
+            + force_update
+        )
 
         new_ids: list[int] = []
 
         for novel in novels:
-            filtered = {
-                k: v for k, v in novel.items()
-                if k in self.VALID_NOVEL_FIELDS
-            }
+            filtered = {k: v for k, v in novel.items() if k in self.VALID_NOVEL_FIELDS}
             if filtered.get(C.COL_HAS_EPUB) is None:
                 filtered.pop(C.COL_HAS_EPUB, None)
-            if C.COL_CREATE_TIME in filtered and isinstance(
-                filtered[C.COL_CREATE_TIME], str
-            ):
-                filtered[C.COL_CREATE_TIME] = parse_pixiv_time(
-                    filtered[C.COL_CREATE_TIME]
-                )
+            if C.COL_CREATE_TIME in filtered and isinstance(filtered[C.COL_CREATE_TIME], str):
+                filtered[C.COL_CREATE_TIME] = parse_pixiv_time(filtered[C.COL_CREATE_TIME])
             nid = int(novel["id"]) if novel.get("id") is not None else None
             existing = existing_map.get(nid) if nid is not None else None
 
@@ -153,9 +165,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
 
             if existing:
                 incoming_tags = (
-                    novel_tags_map.get(nid, set())
-                    if novel_tags_map and nid is not None
-                    else set()
+                    novel_tags_map.get(nid, set()) if novel_tags_map and nid is not None else set()
                 )
                 current_tags = set(existing.tags or [])
                 tags_changed = bool(incoming_tags - current_tags)
@@ -163,17 +173,12 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
                 pending_changes = {
                     key: value
                     for key, value in filtered.items()
-                    if (
-                        (getattr(existing, key, None) is None and value)
-                        or key in update_fields_set
-                    )
+                    if ((getattr(existing, key, None) is None and value) or key in update_fields_set)
                     and getattr(existing, key, None) != value
                 }
 
                 if not force_update and not tags_changed and set(pending_changes) <= _NOISE_ONLY_FIELDS:
-                    like_delta = abs(
-                        int(pending_changes.get("like", existing.like)) - int(existing.like)
-                    )
+                    like_delta = abs(int(pending_changes.get("like", existing.like)) - int(existing.like))
                     if like_delta < _MIN_PASSIVE_LIKE_DELTA:
                         continue
 
@@ -197,8 +202,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
 
         all_ids = [int(n["id"]) for n in novels if n.get("id")]
         logger.info(
-            f"upsert_novels: {len(new_ids)} new "
-            f"(out of {len(novels)} total, {len(all_ids)} IDs queried)"
+            f"upsert_novels: {len(new_ids)} new (out of {len(novels)} total, {len(all_ids)} IDs queried)"
         )
 
         return new_ids
@@ -208,9 +212,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         if not novel_ids:
             return set(), set()
         rows = self.session.execute(
-            select(models.Novel.author_id, models.Novel.series_id).where(
-                models.Novel.id.in_(novel_ids)
-            )
+            select(models.Novel.author_id, models.Novel.series_id).where(models.Novel.id.in_(novel_ids))
         ).all()
         authors = {aid for aid, _ in rows if aid is not None}
         series = {sid for _, sid in rows if sid is not None}
@@ -219,7 +221,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
     def _refresh_summaries(self, parent_ids: tuple[set[int], set[int]]) -> None:
         """Recompute the author / series aggregates a novel write affected."""
         author_ids, series_ids = parent_ids
-        refresh_parent_summaries(
+        finalize_parent_links(
             self.session,
             author_ids=author_ids,
             series_ids=series_ids,
@@ -232,11 +234,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             return
         parent_ids = _summary_ids(novel)
         old_tags = list(novel.tags or [])
-        self.session.execute(
-            _delete(models.FailedNovel).where(
-                models.FailedNovel.novel_id == novel_id
-            )
-        )
+        self.session.execute(_delete(models.FailedNovel).where(models.FailedNovel.novel_id == novel_id))
         self.session.delete(novel)
         self.session.flush()
         if old_tags:
@@ -254,26 +252,11 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             raise NotFoundError(f"Novel {novel_id} not found")
         engine_delta.record_novel_upserts(self.session, [novel_id])
 
-    def toggle_special_follow(self, author_id: int) -> None:
-        result = self.session.execute(
-            update(models.Author)
-            .where(models.Author.author_id == author_id)
-            .values(is_special_follow=~models.Author.is_special_follow)
-            .returning(models.Author.is_special_follow)
-        ).scalar_one_or_none()
-        if result is None:
-            raise NotFoundError(f"Author {author_id} not found")
-        engine_delta.record_special_follow(self.session, author_id, bool(result))
-
-    def update_has_epub_status(
-        self, novel_ids: list[int], status: EpubStatus
-    ) -> None:
+    def update_has_epub_status(self, novel_ids: list[int], status: EpubStatus) -> None:
         if not novel_ids:
             return
         self.session.execute(
-            update(models.Novel)
-            .where(models.Novel.id.in_(novel_ids))
-            .values(has_epub=status)
+            update(models.Novel).where(models.Novel.id.in_(novel_ids)).values(has_epub=status)
         )
         engine_delta.record_novel_upserts(self.session, novel_ids)
 
@@ -282,11 +265,7 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         novel = self.session.get(models.Novel, novel_id)
         if novel is None:
             return
-        removed_tags = (
-            set(novel.tags or []) - set(values["tags"] or [])
-            if "tags" in values
-            else set()
-        )
+        removed_tags = set(novel.tags or []) - set(values["tags"] or []) if "tags" in values else set()
         for field, value in values.items():
             setattr(novel, field, value)
         self.session.flush()
@@ -305,33 +284,27 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
                 models.Novel.author_id,
                 models.Novel.series_id,
                 models.Novel.tags,
-            )
-            .where(models.Novel.id.in_(novel_ids))
+            ).where(models.Novel.id.in_(novel_ids))
         ).all()
         old_tags = {t for row in rows for t in (row.tags or [])}
-        self.session.execute(
-            _delete(models.FailedNovel).where(
-                models.FailedNovel.novel_id.in_(novel_ids)
+        self.session.execute(_delete(models.FailedNovel).where(models.FailedNovel.novel_id.in_(novel_ids)))
+        deleted_ids = list(
+            self.session.execute(
+                _delete(models.Novel).where(models.Novel.id.in_(novel_ids)).returning(models.Novel.id)
             )
+            .scalars()
+            .all()
         )
-        deleted_ids = list(self.session.execute(
-            _delete(models.Novel)
-            .where(models.Novel.id.in_(novel_ids))
-            .returning(models.Novel.id)
-        ).scalars().all())
         if deleted_ids:
             engine_delta.record_novel_deletes(self.session, deleted_ids)
         self.session.flush()
         if old_tags:
+            engine_delta.record_tags_dirty(self.session, old_tags)
             SQLAlchemyTagRepository(self.session).prune_unused_tags(old_tags)
-        self._refresh_summaries(
-            ({row.author_id for row in rows}, {row.series_id for row in rows})
-        )
+        self._refresh_summaries(({row.author_id for row in rows}, {row.series_id for row in rows}))
         return [row.path for row in rows if row.path]
 
-    def add_tags_to_novels(
-        self, novel_ids: list[int], tags: set[str]
-    ) -> int:
+    def add_tags_to_novels(self, novel_ids: list[int], tags: set[str]) -> int:
         """Add *tags* to every listed novel."""
         if not novel_ids or not tags:
             return 0
@@ -344,22 +317,25 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         expr: Any = models.Novel.tags
         for t in tag_names:
             expr = func.array_append(func.array_remove(expr, t), t)
-        changed = list(self.session.execute(
-            update(models.Novel)
-            .where(
-                models.Novel.id.in_(novel_ids),
-                ~models.Novel.tags.contains(tag_names),
+        changed = list(
+            self.session.execute(
+                update(models.Novel)
+                .where(
+                    models.Novel.id.in_(novel_ids),
+                    ~models.Novel.tags.contains(tag_names),
+                )
+                .values(tags=expr)
+                .returning(models.Novel.id)
             )
-            .values(tags=expr)
-            .returning(models.Novel.id)
-        ).scalars().all())
+            .scalars()
+            .all()
+        )
         if changed:
             engine_delta.record_novel_upserts(self.session, changed)
+        engine_delta.record_tags_dirty(self.session, tag_names)
         return len(changed)
 
-    def filter_ids_by_source(
-        self, novel_ids: list[int], sources: set[str]
-    ) -> list[int]:
+    def filter_ids_by_source(self, novel_ids: list[int], sources: set[str]) -> list[int]:
         """把 id 列表收窄到来源属于 *sources* 的那些（批量编辑只作用于本地书）。"""
         if not novel_ids or not sources:
             return []
@@ -387,39 +363,32 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
             if field not in BATCH_METADATA_COLUMNS:
                 raise ValueError(f"不支持的批量元数据字段: {field}")
         if only_where_null is not None and (
-            only_where_null not in BATCH_METADATA_COLUMNS
-            or only_where_null not in values
+            only_where_null not in BATCH_METADATA_COLUMNS or only_where_null not in values
         ):
-            raise ValueError(
-                f"only_where_null 必须是 values 里的批量元数据列: {only_where_null}"
-            )
+            raise ValueError(f"only_where_null 必须是 values 里的批量元数据列: {only_where_null}")
 
         changed_conditions = [
-            getattr(models.Novel, field).is_distinct_from(value)
-            for field, value in values.items()
+            getattr(models.Novel, field).is_distinct_from(value) for field, value in values.items()
         ]
         conditions = [
             models.Novel.id == any_(cast(Any, novel_ids)),
             or_(*changed_conditions),
         ]
         if only_where_null is not None:
-            conditions.append(
-                getattr(models.Novel, only_where_null).is_(None)
-            )
+            conditions.append(getattr(models.Novel, only_where_null).is_(None))
 
-        changed = list(self.session.execute(
-            update(models.Novel)
-            .where(*conditions)
-            .values(**values)
-            .returning(models.Novel.id)
-        ).scalars().all())
+        changed = list(
+            self.session.execute(
+                update(models.Novel).where(*conditions).values(**values).returning(models.Novel.id)
+            )
+            .scalars()
+            .all()
+        )
         if changed:
             engine_delta.record_novel_upserts(self.session, changed)
         return len(changed)
 
-    def remove_tags_from_novels(
-        self, novel_ids: list[int], tags: set[str]
-    ) -> int:
+    def remove_tags_from_novels(self, novel_ids: list[int], tags: set[str]) -> int:
         """Remove *tags* from every listed novel."""
         if not novel_ids or not tags:
             return 0
@@ -427,17 +396,22 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
         expr: Any = models.Novel.tags
         for t in tag_names:
             expr = func.array_remove(expr, t)
-        changed = list(self.session.execute(
-            update(models.Novel)
-            .where(
-                models.Novel.id.in_(novel_ids),
-                models.Novel.tags.overlap(tag_names),
+        changed = list(
+            self.session.execute(
+                update(models.Novel)
+                .where(
+                    models.Novel.id.in_(novel_ids),
+                    models.Novel.tags.overlap(tag_names),
+                )
+                .values(tags=expr)
+                .returning(models.Novel.id)
             )
-            .values(tags=expr)
-            .returning(models.Novel.id)
-        ).scalars().all())
+            .scalars()
+            .all()
+        )
         if changed:
             engine_delta.record_novel_upserts(self.session, changed)
+            engine_delta.record_tags_dirty(self.session, tag_names)
             SQLAlchemyTagRepository(self.session).prune_unused_tags(tag_names)
         return len(changed)
 

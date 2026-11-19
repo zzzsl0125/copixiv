@@ -2,35 +2,37 @@
 
 from __future__ import annotations
 
-import builtins
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import Any, cast
 
 from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.engine import CursorResult
+from sqlalchemy.orm import Session
 
 from copixiv.db import models
+from copixiv.db.base import BaseRepository
 
-_MAX_RETRIES = 3
+MAX_RETRIES = 3
+_MAX_RETRIES = MAX_RETRIES
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
-class FailedNovelRepository:
-    """Persistently record which novels failed and how many times.
+class FailedNovelRepository(BaseRepository):
+    """Persistently record which novels failed and how many times."""
 
-    A novel that fails *max_retries* times is skipped on subsequent runs
-    (avoiding wasted API calls for permanently-dead content).  When a
-    previously-failed novel is successfully downloaded, its record is
-    removed.
-    """
+    _NOT_FOUND_PATTERNS = (
+        "%webview_novel 返回空%",
+        "%Page not found%",
+        "%not found%",
+    )
 
-    def __init__(self, session):
-        self._session = session
-        self._max_retries = _MAX_RETRIES
-
-    # -- write ------------------------------------------------------------
+    def __init__(self, session: Session):
+        super().__init__(session)
+        self._max_retries = MAX_RETRIES
 
     def record(
         self,
@@ -39,21 +41,7 @@ class FailedNovelRepository:
         error_message: str,
         title: str | None = None,
     ) -> None:
-        """Record (or increment) a failure for *novel_id*.
-
-        Uses PostgreSQL ``ON CONFLICT DO UPDATE`` so the whole operation is
-        a single atomic statement — no read-then-write race.  *title* is
-        only overwritten when a non-empty value is provided (the ingest
-        pipeline knows the title; other callers may not), and
-        ``last_failed_at`` is always bumped to now (UTC).
-
-        ``failed_novel`` carries **no** FK on purpose: the ingest pipeline
-        downloads BEFORE persisting (plan → download → persist), so a
-        download failure can occur for a novel that has never been written
-        to ``novel`` — such records must still be captured in the ledger.
-        Deleting a novel cleans its ledger rows explicitly in the novel
-        repository (``delete`` / ``delete_many``).
-        """
+        """Record (or increment) a failure for *novel_id*."""
         now = _now()
         stmt = (
             pg_insert(models.FailedNovel)
@@ -76,51 +64,40 @@ class FailedNovelRepository:
                 },
             )
         )
-        self._session.execute(stmt)
+        self.session.execute(stmt)
 
-    def forget(self, novel_id: int) -> None:
-        """Remove failure record — called when a novel succeeds."""
-        stmt = delete(models.FailedNovel).where(
-            models.FailedNovel.novel_id == novel_id
-        )
-        self._session.execute(stmt)
+    def forget(self, novel_id: int) -> bool:
+        """Remove failure record; returns True if a record was deleted."""
+        stmt = delete(models.FailedNovel).where(models.FailedNovel.novel_id == novel_id)
+        result = cast(CursorResult[Any], self.session.execute(stmt))
+        return (result.rowcount or 0) > 0
 
     def forget_many(self, novel_ids: set[int]) -> None:
-        """Bulk-remove failure records for successfully-processed novels."""
+        """Bulk-remove failure records for successfully processed novels."""
         if not novel_ids:
             return
-        stmt = delete(models.FailedNovel).where(
-            models.FailedNovel.novel_id.in_(novel_ids)
-        )
-        self._session.execute(stmt)
+        stmt = delete(models.FailedNovel).where(models.FailedNovel.novel_id.in_(novel_ids))
+        self.session.execute(stmt)
 
     def reset_count(self, novel_id: int) -> None:
-        """Reset one record's failure count to 0 — the record stays.
-
-        Unblocks automatic retry (skip threshold is ``>= max_retries``)
-        while keeping the history row (title / error / first-seen info)
-        visible in the 「失败记录」 view.
-        """
-        self._session.execute(
-            update(models.FailedNovel)
-            .where(models.FailedNovel.novel_id == novel_id)
-            .values(failed_times=0)
+        """Reset one record's failure count to 0 — the record stays."""
+        self.session.execute(
+            update(models.FailedNovel).where(models.FailedNovel.novel_id == novel_id).values(failed_times=0)
         )
 
     def reset_all(self) -> int:
         """Reset every failure count to 0; returns the number of rows touched."""
-        result = self._session.execute(
-            update(models.FailedNovel).values(failed_times=0)
+        result = cast(
+            CursorResult[Any],
+            self.session.execute(update(models.FailedNovel).values(failed_times=0)),
         )
         return result.rowcount or 0
 
     def clear_all(self) -> int:
         """Remove every failure record; returns the number deleted."""
         stmt = delete(models.FailedNovel)
-        result = self._session.execute(stmt)
+        result = cast(CursorResult[Any], self.session.execute(stmt))
         return result.rowcount or 0
-
-    # -- read -------------------------------------------------------------
 
     def get_skip_ids(self, novel_ids: set[int]) -> set[int]:
         """Return the subset of *novel_ids* that have failed too many times."""
@@ -130,37 +107,16 @@ class FailedNovelRepository:
             models.FailedNovel.novel_id.in_(novel_ids),
             models.FailedNovel.failed_times >= self._max_retries,
         )
-        rows = self._session.execute(stmt).fetchall()
+        rows = self.session.execute(stmt).fetchall()
         return {row[0] for row in rows}
 
-    # "Page not found" 家族——作品已删除/不可获取，重试无意义。
-    # 单路径记录为 "webview_novel 返回空"，历史批量异常体含 "Page not found"。
-    _NOT_FOUND_PATTERNS = (
-        "%webview_novel 返回空%",
-        "%Page not found%",
-        "%not found%",
-    )
-
-    def list(
+    def list_failures(
         self,
         offset: int = 0,
         limit: int = 100,
     ) -> list[models.FailedNovel]:
-        """Return failure records — actionable first, not-found family last.
-
-        Sort order:
-        1. "Page not found" 家族（已删除/不可获取，重试无意义）排在最后；
-        2. 其余记录按最近失败时间倒序（newest first）；
-        3. 同时间按 novel_id 倒序。
-        Legacy rows without ``last_failed_at`` sort to the end of their
-        group (NULLs last in DESC).
-        """
-        not_found = or_(
-            *[
-                models.FailedNovel.error_message.like(p)
-                for p in self._NOT_FOUND_PATTERNS
-            ]
-        )
+        """Return failure records — actionable first, not-found family last."""
+        not_found = or_(*[models.FailedNovel.error_message.like(p) for p in self._NOT_FOUND_PATTERNS])
         stmt = (
             select(models.FailedNovel)
             .order_by(
@@ -171,18 +127,16 @@ class FailedNovelRepository:
             .offset(offset)
             .limit(limit)
         )
-        return list(self._session.execute(stmt).scalars())
+        return list(self.session.execute(stmt).scalars())
 
-    def count(self) -> int:
-        """Total number of failure records."""
+    def count(self, model_class: type | None = None) -> int:
+        """Total number of failure records (or *model_class* when delegated)."""
+        if model_class is not None:
+            return super().count(model_class)
         stmt = select(func.count()).select_from(models.FailedNovel)
-        return self._session.execute(stmt).scalar_one()
+        return int(self.session.execute(stmt).scalar_one())
 
-    def all_ids(self) -> builtins.list[int]:
-        """Every novel id in the ledger, in ledger order.
-
-        Used by ``POST /failed-novels/retry-all`` — the whole ledger is
-        the payload, so pagination state on the client never matters.
-        """
+    def all_ids(self) -> list[int]:
+        """Every novel id in the ledger, in ledger order."""
         stmt = select(models.FailedNovel.novel_id)
-        return list(self._session.execute(stmt).scalars())
+        return list(self.session.execute(stmt).scalars())

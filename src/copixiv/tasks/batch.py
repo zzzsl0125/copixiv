@@ -29,24 +29,30 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
+from collections.abc import Sequence
+from concurrent.futures import Future
+from contextlib import suppress
 from pathlib import Path
+from typing import Any, BinaryIO
 
 from pydantic import BaseModel
 
 from copixiv.core.exceptions import ValidationError
 from copixiv.core.models import TaskResult
-from copixiv.db.write_lock import read_transaction, run_write_transaction
-from copixiv.features.novels.batch_operations import (
+from copixiv.core.text import MAX_TAG_LENGTH, validate_tags
+from copixiv.db.tx import read_transaction, run_write_transaction
+from copixiv.features.novels.repo import SQLAlchemyNovelRepository
+from copixiv.features.novels.use_cases.batch_operations import (
     BATCH_ID_CHUNK_SIZE,
     BATCH_MAX_TAGS,
 )
-from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
 from copixiv.log import logger
+from copixiv.storage.orphan_cleanup import EXPORT_FILE_PREFIX
 from copixiv.storage.zip import build_batch_zip
-from copixiv.tasks.history_repo import SQLAlchemyTaskRepository
-
-from .kernel import TaskContext, register
+from copixiv.tasks.executor import TaskContext
+from copixiv.tasks.registry import register
 
 BATCH_TASK_NAME = "batch_operation"
 EXPORT_TASK_NAME = "batch_export"
@@ -81,13 +87,43 @@ class BatchExportArgs(BaseModel):
     naming_template: str | None = None
 
 
+async def _execute_batch_chunk(
+    ctx: TaskContext,
+    operation: str,
+    chunk: list[int],
+    tag_set: set[str],
+    file_storage: Any,
+) -> None:
+    """Apply one batch chunk inside its own transaction (plus post-commit cleanup)."""
+    if operation == "delete":
+        paths = await run_write_transaction(
+            ctx.uow,
+            lambda uw: SQLAlchemyNovelRepository(uw.session).delete_many(chunk),
+        )
+        # File cleanup AFTER the transaction — offload blocking unlinks
+        # off the event loop (DB-first, same as the sync path).
+        await asyncio.to_thread(_delete_novel_paths, file_storage, paths)
+    elif operation == "add_tags":
+        await run_write_transaction(
+            ctx.uow,
+            lambda uw: SQLAlchemyNovelRepository(uw.session).add_tags_to_novels(chunk, tag_set),
+        )
+    else:  # remove_tags
+        await run_write_transaction(
+            ctx.uow,
+            lambda uw: SQLAlchemyNovelRepository(uw.session).remove_tags_from_novels(chunk, tag_set),
+        )
+
+
 @register(
     BATCH_TASK_NAME,
     description="对选中小说批量执行删除或标签增删",
     args=BatchOperationArgs,
+    lane="general",
 )
 async def batch_operation(
-    args: BatchOperationArgs, ctx: TaskContext,
+    args: BatchOperationArgs,
+    ctx: TaskContext,
 ) -> TaskResult:
     """Execute a batch operation over an explicit ID list.
 
@@ -104,108 +140,66 @@ async def batch_operation(
         raise ValidationError("没有可处理的小说")
     total = len(ids)
 
-    # ---- tags: normalize + resolve aliases (same rules as the sync path)
-    # Empty for ``delete``; only the tag branches read it, and they always
-    # populate it (the repo treats an empty set as "nothing to do").
     tag_set: set[str] = set()
     if args.operation in ("add_tags", "remove_tags"):
-        raw = {t.strip() for t in (args.tags or []) if t and t.strip()}
-        if not raw:
-            raise ValidationError("请至少输入一个标签")
-        if len(raw) > BATCH_MAX_TAGS:
-            raise ValidationError(f"一次最多操作 {BATCH_MAX_TAGS} 个标签")
+        cleaned = validate_tags(
+            list(args.tags or []),
+            max_count=BATCH_MAX_TAGS,
+            max_length=MAX_TAG_LENGTH,
+            require_non_empty=True,
+        )
         alias_map = await read_transaction(
             ctx.uow,
             lambda uw: SQLAlchemyTagRepository(uw.session).get_alias_map(),
         )
-        tag_set = {alias_map.get(t, t) for t in raw}
+        tag_set = {alias_map.get(t, t) for t in cleaned}
 
-    chunks = [
-        ids[i:i + BATCH_TASK_SAFETY_CHUNK]
-        for i in range(0, total, BATCH_TASK_SAFETY_CHUNK)
-    ]
+    chunks = [ids[i : i + BATCH_TASK_SAFETY_CHUNK] for i in range(0, total, BATCH_TASK_SAFETY_CHUNK)]
     done = 0
     failed_chunks = 0
 
     file_storage = ctx.require_file_storage()
+    op_label = _OP_LABELS[args.operation]
 
-    async def report_progress(stage: str) -> None:
-        """Write live progress into the task-history row (best-effort).
-
-        ``status=None``: a progress write must never change the row's state.
-        The executor owns ``running`` → terminal; a late progress write that
-        carried ``"running"`` would resurrect a finished row (the call below
-        is fire-and-forget, so it can land after the final update).
-        """
-        task_id = ctx.task_id
-        if task_id is None:
-            return
-        try:
-            def _write(uw) -> None:
-                SQLAlchemyTaskRepository(uw.session).update_task(
-                    task_id,
-                    None,
-                    progress=f"{_OP_LABELS[args.operation]}进行中：{stage}",
-                )
-
-            await run_write_transaction(ctx.uow, _write)
-        except Exception:  # noqa: BLE001 — progress must never kill the task
-            logger.exception("批量任务进度更新失败（不影响执行）")
-
-    await report_progress(f"已开始，共 {total} 篇")
+    await ctx.report_progress(f"{op_label}进行中：已开始，共 {total} 篇")
 
     for idx, chunk in enumerate(chunks, start=1):
         try:
-            if args.operation == "delete":
-                paths = await run_write_transaction(
-                    ctx.uow,
-                    lambda uw: SQLAlchemyNovelRepository(uw.session).delete_many(chunk),
-                )
-                # File cleanup AFTER the transaction — unlink failures must
-                # not roll the chunk back (DB-first, same as the sync path).
-                for path in paths:
-                    if path:
-                        try:
-                            file_storage.delete_novel_files(path)
-                        except Exception:  # noqa: BLE001
-                            logger.exception("删除小说文件失败: %s", path)
-            elif args.operation == "add_tags":
-                await run_write_transaction(
-                    ctx.uow,
-                    lambda uw: SQLAlchemyNovelRepository(uw.session).add_tags_to_novels(
-                        chunk, tag_set,
-                    ),
-                )
-            else:  # remove_tags
-                await run_write_transaction(
-                    ctx.uow,
-                    lambda uw: SQLAlchemyNovelRepository(uw.session).remove_tags_from_novels(
-                        chunk, tag_set,
-                    ),
-                )
+            await _execute_batch_chunk(ctx, args.operation, chunk, tag_set, file_storage)
 
             done += len(chunk)
-            await report_progress(
-                f"第 {idx}/{len(chunks)} 批，已处理 {done}/{total} 篇"
+            await ctx.report_progress(
+                f"{op_label}进行中：第 {idx}/{len(chunks)} 批，已处理 {done}/{total} 篇"
             )
         except Exception:  # noqa: BLE001 — one bad chunk must not kill the rest
             failed_chunks += 1
             logger.exception(
-                "批量任务 %s 第 %d/%d 批失败",
-                _OP_LABELS[args.operation], idx, len(chunks),
+                "批量任务 {} 第 {}/{} 批失败",
+                op_label,
+                idx,
+                len(chunks),
             )
 
-    summary = f"{_OP_LABELS[args.operation]}完成：共处理 {done}/{total} 篇"
+    summary = f"{op_label}完成：共处理 {done}/{total} 篇"
     if failed_chunks:
         summary += f"，{failed_chunks} 批失败（详见任务日志，可重新提交）"
     return TaskResult(summary=summary)
+
+
+def _delete_novel_paths(file_storage, paths: Sequence[str | None]) -> None:
+    """Best-effort delete novel files off the event loop."""
+    for path in paths:
+        if path:
+            try:
+                file_storage.delete_novel_files(path)
+            except Exception:  # noqa: BLE001
+                logger.exception("删除小说文件失败: {}", path)
 
 
 # ---------------------------------------------------------------------------
 # Batch export — builds the ZIP in the background so the page can be closed.
 # ---------------------------------------------------------------------------
 
-EXPORT_FILE_PREFIX = "batch_export_"
 _EXPORT_MAX_AGE_SECONDS = 24 * 3600
 
 
@@ -213,6 +207,7 @@ _EXPORT_MAX_AGE_SECONDS = 24 * 3600
     EXPORT_TASK_NAME,
     description="把选中小说打包成 ZIP 导出",
     args=BatchExportArgs,
+    lane="general",
 )
 async def batch_export(args: BatchExportArgs, ctx: TaskContext) -> TaskResult:
     """Build the export ZIP as a background task.
@@ -234,31 +229,13 @@ async def batch_export(args: BatchExportArgs, ctx: TaskContext) -> TaskResult:
         raise ValidationError("导出任务缺少 task_id，无法生成可下载的文件")
 
     export_dir = Path(ctx.require_file_storage().download_dir)
-    export_dir.mkdir(parents=True, exist_ok=True)
-    _sweep_old_exports(export_dir)
+    await asyncio.to_thread(_prepare_export_dir, export_dir)
 
-    async def report_progress(stage: str) -> None:
-        """See the batch_operation counterpart: progress-only, no status."""
-        task_id = ctx.task_id
-        if task_id is None:
-            return
-        try:
-            def _write(uw) -> None:
-                SQLAlchemyTaskRepository(uw.session).update_task(
-                    task_id,
-                    None,
-                    progress=f"批量导出进行中：{stage}",
-                )
-
-            await run_write_transaction(ctx.uow, _write)
-        except Exception:  # noqa: BLE001
-            logger.exception("导出任务进度更新失败（不影响执行）")
-
-    await report_progress("收集小说信息…")
+    await ctx.report_progress("批量导出进行中：收集小说信息…")
 
     novels: list[dict] = []
     for i in range(0, total, BATCH_ID_CHUNK_SIZE):
-        chunk = ids[i:i + BATCH_ID_CHUNK_SIZE]
+        chunk = ids[i : i + BATCH_ID_CHUNK_SIZE]
 
         def _read_chunk(uw, chunk: list[int] = chunk) -> list:
             return SQLAlchemyNovelRepository(uw.session).get_novels_by_ids(chunk)
@@ -268,46 +245,75 @@ async def batch_export(args: BatchExportArgs, ctx: TaskContext) -> TaskResult:
     if not novels:
         raise ValidationError("所选小说均不存在")
 
-    await report_progress(f"打包中（共 {total} 篇）…")
+    await ctx.report_progress(f"批量导出进行中：打包中（共 {total} 篇）…")
 
     # Throttled progress: the zip builder (worker thread) fires every 500
-    # files — only write a history update at most every ~3 seconds.
+    # files — only write a history update at most every ~3 seconds, and never
+    # overlap two progress writes.
     loop = asyncio.get_running_loop()
     last_progress_at = 0.0
+    pending_progress: Future[None] | None = None
 
     def on_progress(processed: int, _total: int) -> None:
-        nonlocal last_progress_at
+        nonlocal last_progress_at, pending_progress
         now = time.monotonic()
         if now - last_progress_at < 3 or ctx.task_id is None:
             return
+        if pending_progress is not None and not pending_progress.done():
+            return
         last_progress_at = now
-        asyncio.run_coroutine_threadsafe(
-            report_progress(f"打包中 {processed}/{total} 篇"), loop,
+        pending_progress = asyncio.run_coroutine_threadsafe(
+            ctx.report_progress(f"批量导出进行中：打包中 {processed}/{total} 篇"),
+            loop,
         )
 
     try:
-        zip_buf, _titles, missing = await asyncio.to_thread(
-            build_batch_zip,
-            novels, args.format_mode, args.naming_template, on_progress,
-        )
-    except ValueError as exc:
-        raise ValidationError(str(exc)) from exc
+        try:
+            zip_buf, _titles, missing = await asyncio.to_thread(
+                build_batch_zip,
+                novels,
+                args.format_mode,
+                args.naming_template,
+                on_progress,
+                download_root=export_dir,
+            )
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+    finally:
+        if pending_progress is not None:
+            with suppress(Exception):
+                await asyncio.wrap_future(pending_progress)
 
     out_path = export_dir / f"{EXPORT_FILE_PREFIX}{ctx.task_id}.zip"
-    zip_buf.seek(0)
-    with open(out_path, "wb") as f:
-        while data := zip_buf.read(1 << 20):
-            f.write(data)
-    zip_buf.close()
+    size_bytes = await asyncio.to_thread(_write_export_zip, zip_buf, out_path)
 
-    size_mb = out_path.stat().st_size / 1024 / 1024
-    summary = (
-        f"批量导出完成：共 {total} 篇（{size_mb:.1f} MB），"
-        f"可在任务管理点击下载"
-    )
+    size_mb = size_bytes / 1024 / 1024
+    summary = f"批量导出完成：共 {total} 篇（{size_mb:.1f} MB），可在任务管理点击下载"
     if missing:
         summary += f"，缺失文件 {len(missing)} 篇"
     return TaskResult(summary=summary)
+
+
+def _prepare_export_dir(export_dir: Path) -> None:
+    export_dir.mkdir(parents=True, exist_ok=True)
+    _sweep_old_exports(export_dir)
+
+
+def _write_export_zip(zip_buf: BinaryIO, out_path: Path) -> int:
+    """Persist *zip_buf* to *out_path* off the event loop and return its size."""
+    tmp_path = out_path.with_name(f".{out_path.name}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        zip_buf.seek(0)
+        with open(tmp_path, "wb") as f:
+            while data := zip_buf.read(1 << 20):
+                f.write(data)
+        tmp_path.replace(out_path)
+        return out_path.stat().st_size
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    finally:
+        zip_buf.close()
 
 
 def _sweep_old_exports(export_dir: Path) -> None:
@@ -318,4 +324,4 @@ def _sweep_old_exports(export_dir: Path) -> None:
             if now - p.stat().st_mtime > _EXPORT_MAX_AGE_SECONDS:
                 p.unlink(missing_ok=True)
         except OSError:
-            logger.exception("清理旧导出文件失败: %s", p)
+            logger.exception("清理旧导出文件失败: {}", p)

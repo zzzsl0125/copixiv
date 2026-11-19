@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -23,7 +23,10 @@ def _parse_json_str(v: Any) -> Any:
 # Task Management
 # ---------------------------------------------------------------------------
 
-class ScheduledTaskCreate(BaseModel):
+
+class ScheduledTaskBase(BaseModel):
+    """Shared structural fields for scheduled task read/write models."""
+
     name: str
     task: str
     cron: str
@@ -31,6 +34,8 @@ class ScheduledTaskCreate(BaseModel):
     is_enabled: bool = False
     sort_index: int = 0
 
+
+class ScheduledTaskCreate(ScheduledTaskBase):
     @field_validator("cron")
     @classmethod
     def _validate_cron(cls, v: str) -> str:
@@ -38,12 +43,11 @@ class ScheduledTaskCreate(BaseModel):
 
         Keeps the previous 5-field crontab contract: exactly five
         whitespace-separated fields (minute hour day month weekday).
-        Validity itself is delegated to :func:`copixiv.tasks.kernel.next_occurrence`
+        Validity itself is delegated to :func:`copixiv.tasks.cron.next_occurrence`
         (croniter), whose ``ValueError`` becomes a Pydantic 422.
         """
-        from datetime import timezone
 
-        from copixiv.tasks.kernel import next_occurrence
+        from copixiv.tasks.cron import next_occurrence
 
         if len(v.split()) != 5:
             raise ValueError(
@@ -51,7 +55,7 @@ class ScheduledTaskCreate(BaseModel):
                 "(minute hour day-of-month month day-of-week)"
             )
         try:
-            next_occurrence(v, datetime.now(timezone.utc))
+            next_occurrence(v, datetime.now(UTC))
         except ValueError as exc:
             raise ValueError(f"Invalid cron expression: {exc}") from exc
         return v
@@ -73,7 +77,9 @@ class ScheduledTaskUpdate(BaseModel):
         return ScheduledTaskCreate._validate_cron(v)
 
 
-class ScheduledTaskResponse(ScheduledTaskCreate):
+# Read response deliberately omits write-boundary validators so one legacy row
+# with a malformed cron does not 500 the entire schedule list.
+class ScheduledTaskResponse(ScheduledTaskBase):
     id: int
     model_config = ConfigDict(from_attributes=True)
 
@@ -174,3 +180,10 @@ class TaskMethod(BaseModel):
     description: str | None = None
     # The task's Pydantic ``model_json_schema()``; ``None`` = no arguments.
     arguments: dict[str, Any] | None = None
+
+
+class TaskCancelResponse(BaseModel):
+    """Response for ``POST /api/tasks/history/{task_id}/cancel``."""
+
+    task_id: int
+    status: str

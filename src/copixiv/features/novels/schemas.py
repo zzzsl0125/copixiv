@@ -18,12 +18,15 @@ from pydantic import (
     field_validator,
 )
 
-from copixiv.core.models import EpubStatus
+from copixiv.core.models import BatchTaskResponse, EpubStatus, NovelSource
+from copixiv.core.naming import FormatMode
+from copixiv.core.search import OrderBy, OrderDirection, SortableOrderBy
 from copixiv.features.novels import field_policy
 
 # ---------------------------------------------------------------------------
 # Novels
 # ---------------------------------------------------------------------------
+
 
 class NovelBase(BaseModel):
     """小说列表 / 详情的响应模型。
@@ -54,7 +57,7 @@ class NovelBase(BaseModel):
     series_index: int | None = None
     # 行来源：``'pixiv'`` 抓取 / ``'local'`` 本地上传的 TXT / EPUB
     # （docs/LIBRARY_DESIGN.md §2）——前端据此在卡片上显示「本地」徽章。
-    source: str = "pixiv"
+    source: NovelSource = NovelSource.PIXIV
     model_config = ConfigDict(from_attributes=True)
 
     # Coerce int columns from DB into proper types
@@ -104,6 +107,7 @@ class NovelCountResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # 元数据编辑（PATCH /api/novels/{novel_id}）—— docs/NOVEL_EDIT_DESIGN.md §5
 # ---------------------------------------------------------------------------
+
 
 def _reject_bool_id(value):
     """JSON ``true`` 不能变成"1 号作者 / 1 号系列"。
@@ -167,53 +171,23 @@ class NovelUpdateRequest(BaseModel):
     @field_validator("author_id", "series_id", mode="before")
     @classmethod
     def _reject_bool_ids(cls, value):
-        """``true`` / ``false`` 不是 id —— 规则见 :func:`_reject_bool_id`。"""
+        """``true`` / ``false`` 不是 id —— 规则见 :func:`_reject_bool_id`."""
         return _reject_bool_id(value)
-
-
-class AuthorLookupResponse(BaseModel):
-    """作者 ID 预览（``GET /api/novels/author/{author_id}``）。
-
-    编辑器里填完 ID 就调它，好在保存*之前*告诉用户这个名字对不对；保存路径
-    （PATCH）用同一个解析函数，所以预览与实际落库结果一致。
-
-    ``source`` 是诚实性字段：``local`` = 库里已知（离线可用）、``pixiv`` =
-    本次现查（说明网络通、作者存在）、``unknown`` = 拿不到名字。它**不影响
-    可保存性**——id 才是身份，名字只是缓存，拿不到名字照样允许挂上去。
-    """
-
-    author_id: int
-    author_name: str | None = None
-    source: Literal["local", "pixiv", "unknown"] = "unknown"
-    # 库内已有多少本挂在这个 id 下（拼错 id 的直觉校验：0 本 + 没名字 ≈ 可疑）
-    novel_count: int = 0
-
-
-class SeriesLookupResponse(BaseModel):
-    """系列 ID 预览（``GET /api/novels/series/{series_id}``）—— 与作者那份同构。
-
-    差别只在名字的来源链：``series`` 行 → 同系列的 novel 行 → pixiv
-    ``novel_series``（前两步都是本地查询，见 ``resolve_series.py``）。
-    """
-
-    series_id: int
-    series_name: str | None = None
-    source: Literal["local", "pixiv", "unknown"] = "unknown"
-    novel_count: int = 0
 
 
 # ---------------------------------------------------------------------------
 # Batch Download
 # ---------------------------------------------------------------------------
 
+
 class BatchDownloadRequest(BaseModel):
     keyword: str | None = None
-    order_by: Literal["id", "like", "view", "text", "create_time", "random"] = "id"
-    order_direction: Literal["ASC", "DESC"] = "DESC"
+    order_by: OrderBy = OrderBy.ID
+    order_direction: OrderDirection = OrderDirection.DESC
     min_like: int | None = None
     min_text: int | None = None
     limit: int = Field(default=500, ge=1)
-    format_mode: Literal["txt", "prefer_epub"] = "txt"
+    format_mode: FormatMode = FormatMode.TXT
     zip_name: str | None = None
     naming_template: str | None = None
     # Batch-mode selection scope — when ``novel_ids`` is set, the download
@@ -223,9 +197,45 @@ class BatchDownloadRequest(BaseModel):
     excluded_ids: list[int] | None = None
 
 
+class NovelFilterParams(BaseModel):
+    """Shared filter query parameters across list / count / ids endpoints."""
+
+    keyword: str | None = None
+    min_like: int | None = None
+    min_text: int | None = None
+    exclude_blocked: bool | None = None
+
+
+class NovelListParams(NovelFilterParams):
+    """Query parameters for ``GET /api/novels``."""
+
+    order_by: OrderBy = OrderBy.RANDOM
+    order_direction: OrderDirection = OrderDirection.DESC
+    cursor: str | None = None
+    per_page: int = Field(default=20, ge=1, le=200)
+
+
+class NovelCountParams(NovelFilterParams):
+    """Query parameters for ``GET /api/novels/count``."""
+
+    excluded_ids: list[int] | None = None
+    with_excluded: bool = False
+
+
+class BlockedIdsParams(BaseModel):
+    """Query parameters for ``GET /api/novels/blocked-ids``."""
+
+    keyword: str | None = None
+    min_like: int | None = None
+    min_text: int | None = None
+    order_by: OrderBy | None = None
+    order_direction: OrderDirection = OrderDirection.DESC
+
+
 # ---------------------------------------------------------------------------
 # Batch operations (delete / add_tags / remove_tags)
 # ---------------------------------------------------------------------------
+
 
 class BatchScope(BaseModel):
     """Which novels a batch operation applies to.
@@ -309,6 +319,7 @@ class BatchMetadataResponse(BaseModel):
 # itself is an ID set independent of the current filters)
 # ---------------------------------------------------------------------------
 
+
 class NovelIdsResponse(BaseModel):
     """Matching novel IDs for the 「全选匹配」 bulk-add action.
 
@@ -343,8 +354,8 @@ class SortIdsRequest(BaseModel):
     """Order an explicit id list by a novel column — 「查看已选」排序."""
 
     novel_ids: list[int]
-    order_by: Literal["id", "like", "view", "text", "create_time"]
-    order_direction: Literal["ASC", "DESC"] = "DESC"
+    order_by: SortableOrderBy
+    order_direction: OrderDirection = OrderDirection.DESC
 
 
 class MatchIdsResponse(BaseModel):
@@ -352,18 +363,11 @@ class MatchIdsResponse(BaseModel):
     truncated: bool
 
 
-class BatchTaskResponse(BaseModel):
-    """A batch operation enqueued into the background task system."""
-
-    task_id: int
-    matched: int
-
-
 class BatchExportRequest(BaseModel):
     """Background-task export (large selections — the ZIP is built offline)."""
 
     novel_ids: list[int]
-    format_mode: Literal["txt", "prefer_epub"] = "txt"
+    format_mode: FormatMode = FormatMode.TXT
     zip_name: str | None = None
     naming_template: str | None = None
 
@@ -371,3 +375,29 @@ class BatchExportRequest(BaseModel):
 class BatchExportResponse(BaseModel):
     task_id: int
     matched: int
+
+
+__all__ = [
+    "BatchDownloadRequest",
+    "BatchExportRequest",
+    "BatchExportResponse",
+    "BatchMetadataRequest",
+    "BatchMetadataResponse",
+    "BatchOperationRequest",
+    "BatchOperationResponse",
+    "BatchScope",
+    "BatchTaskResponse",
+    "BlockedIdsParams",
+    "MatchIdsRequest",
+    "MatchIdsResponse",
+    "NovelBase",
+    "NovelCountParams",
+    "NovelCountResponse",
+    "NovelFilterParams",
+    "NovelIdsResponse",
+    "NovelListParams",
+    "NovelsByIdsRequest",
+    "NovelsByIdsResponse",
+    "NovelUpdateRequest",
+    "SortIdsRequest",
+]

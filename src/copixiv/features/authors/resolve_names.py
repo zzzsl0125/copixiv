@@ -26,9 +26,10 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
-from copixiv.core.services import safe_get
+from copixiv.core.draft import safe_get
+from copixiv.core.models import TaskResult
+from copixiv.db.tx import read_transaction, run_write_transaction
 from copixiv.db.uow import SqlUnitOfWork
-from copixiv.db.write_lock import read_transaction
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 from copixiv.log import logger
 from copixiv.pixiv.client import PixivClient
@@ -69,9 +70,7 @@ async def collect_author_names(
     # because of the network gather below, not because of the database).
     resolved = await read_transaction(
         uow,
-        lambda read_uow: SQLAlchemyAuthorRepository(
-            read_uow.session
-        ).get_names_by_ids(author_ids),
+        lambda read_uow: SQLAlchemyAuthorRepository(read_uow.session).get_names_by_ids(author_ids),
     )
 
     # -- remote ---------------------------------------------------------
@@ -87,7 +86,7 @@ async def collect_author_names(
         results = await asyncio.gather(
             *[fetch_author_name(client, aid) for aid in missing],
         )
-        for aid, name in zip(missing, results):
+        for aid, name in zip(missing, results, strict=True):
             if name:
                 api_names[aid] = name
 
@@ -152,9 +151,7 @@ async def lookup_author_profile(
     if uow is not None:
         known = await read_transaction(
             uow,
-            lambda tx: SQLAlchemyAuthorRepository(tx.session).get_names_by_ids(
-                {author_id}
-            ),
+            lambda tx: SQLAlchemyAuthorRepository(tx.session).get_names_by_ids({author_id}),
         )
     elif session is not None:
         known = SQLAlchemyAuthorRepository(session).get_names_by_ids({author_id})
@@ -173,22 +170,30 @@ def writeback_author_names(
     mapping: dict[int, str],
     uow: SqlUnitOfWork,
 ) -> None:
-    """Persist resolved author names to ``novel`` and ``author`` tables.
-
-    The caller must already be inside an open transaction (a
-    ``run_write_transaction`` callback, or ``with uow.begin()``); this
-    function performs no transaction management of its own.
-    ``update_author_name`` copies the name into both the author row and
-    every novel row for that author (backfilling new ``author_name=NULL``
-    novel rows from webview downloads).
-
-    **Plain ``def`` on purpose**: both of today's call sites use it as the
-    ``fn`` passed to :func:`copixiv.db.write_lock.run_write_transaction`
-    (``tasks/novels.py::author_fetch``, ``tasks/maintenance/search.py::
-    sync_empty_name``), and ``run_write_transaction`` does not await its
-    callback — an ``async def`` here would be returned as a coroutine and
-    the write would silently never happen.
-    """
+    """Persist resolved author names to ``novel`` and ``author`` tables."""
     author_repo = SQLAlchemyAuthorRepository(uow.session)
     for aid, name in mapping.items():
         author_repo.update_author_name(aid, name)
+
+
+async def sync_empty_author_names(
+    uow: SqlUnitOfWork,
+    client: PixivClient | None,
+) -> TaskResult:
+    """Backfill novels whose ``author_name`` is NULL from local cache or Pixiv."""
+
+    def _read_empty(tx: SqlUnitOfWork) -> tuple[int, set[int]]:
+        repo = SQLAlchemyAuthorRepository(tx.session)
+        return (
+            repo.count_novels_with_empty_author_name(),
+            set(repo.get_novel_author_ids_with_empty_name()),
+        )
+
+    novel_count, author_ids = await read_transaction(uow, _read_empty)
+    if novel_count == 0:
+        return TaskResult(summary="作者名同步: 无需修复")
+
+    mapping = await collect_author_names(author_ids, uow=uow, client=client)  # type: ignore[arg-type]
+    if mapping:
+        await run_write_transaction(uow, lambda uw: writeback_author_names(mapping, uw))
+    return TaskResult(summary=f"作者名同步: 处理 {novel_count} 本空名小说 ({len(mapping)} 位作者解析成功)")

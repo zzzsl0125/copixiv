@@ -50,20 +50,16 @@ bytes，而 ``storage.epub.reader`` 的容器上限只对「按 EPUB 处理」�
 from __future__ import annotations
 
 from dataclasses import asdict
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, File, Form, UploadFile
 
 from copixiv.core.exceptions import ValidationError
-
-# 正整数 pixiv author id 的校验与 400 文案**唯一所有者**是单本 PATCH 那个用例
-# （``0`` / 负数 / 非整数 / 布尔都拒）。这里直接调它，不抄第二份规则：两处文案
-# 一旦漂移，前端按 detail 提示的行为就会跟着分叉。
-from copixiv.core.ids import author_id as _author_id
-from copixiv.db.uow import SqlUnitOfWork
+from copixiv.core.models import author_id as _author_id
 from copixiv.deps import (
-    get_file_storage,
-    get_pixiv_client,
-    get_uow,
+    FileStorageDep,
+    OptionalPixivClientDep,
+    UowDep,
 )
 from copixiv.features.authors.resolve_names import lookup_author_profile
 from copixiv.features.library.ingest import (
@@ -73,7 +69,6 @@ from copixiv.features.library.ingest import (
     ingest_uploads,
 )
 from copixiv.features.library.schemas import UploadResponse, UploadResultItem
-from copixiv.pixiv.client import PixivClient
 
 router = APIRouter()
 
@@ -110,16 +105,16 @@ async def _read_capped(upload: UploadFile) -> bytes:
     response_model_exclude_none=True,
 )
 async def upload_novels(
-    files: list[UploadFile] | None = File(None),
+    file_storage: FileStorageDep,
+    uow: UowDep,
+    client: OptionalPixivClientDep = None,
+    files: Annotated[list[UploadFile] | None, File()] = None,
     # ``int | None``：multipart 送来的是字符串，由 FastAPI 转换 —— ``"abc"``
     # 在这一步就是 422（类型不是业务规则）；``0`` / ``-5`` 能转成 int，落到下面
     # ``_author_id`` 手里才是 400。字段不出现 = 不带预设，与旧行为逐字一致；
     # 空串（前端表单可能原样带上）由这一层的宽松转换当成"没给"（实测 200 +
     # 旧行为），不是我们写的规则，所以别在这里加校验去改它的形态。
-    author_id: int | None = Form(None),
-    file_storage=Depends(get_file_storage),
-    uow: SqlUnitOfWork = Depends(get_uow),
-    client: PixivClient | None = Depends(get_pixiv_client),
+    author_id: Annotated[int | None, Form()] = None,
 ) -> UploadResponse:
     """把本地 TXT / EPUB 收进库（「我的上传」）。
 
@@ -140,8 +135,7 @@ async def upload_novels(
     if not files:
         raise ValidationError("请选择要上传的 TXT / EPUB 文件")
 
-    payloads = [(upload.filename or "未命名.txt", await _read_capped(upload))
-                for upload in files]
+    payloads = [(upload.filename or "未命名.txt", await _read_capped(upload)) for upload in files]
 
     preset_author_id: int | None = None
     preset_author_name: str | None = None
@@ -150,12 +144,14 @@ async def upload_novels(
         preset_author_id = _author_id(author_id)
 
         profile = await lookup_author_profile(
-            preset_author_id, uow=uow, client=client,
+            preset_author_id,
+            uow=uow,
+            client=client,
         )
         preset_author_name = profile.author_name
 
     # ---- 落库：写事务（咨询锁在里面），无网络 ----
-    from copixiv.db.write_lock import run_write_transaction
+    from copixiv.db.tx import run_write_transaction
 
     results = await run_write_transaction(
         uow,
