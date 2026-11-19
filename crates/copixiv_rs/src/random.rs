@@ -33,11 +33,7 @@ pub fn hex16_decode(s: &str) -> Result<u64, String> {
 }
 
 #[inline]
-fn push_bounded(
-    heap: &mut BinaryHeap<(u64, i64, u32)>,
-    limit: usize,
-    item: (u64, i64, u32),
-) {
+fn push_bounded(heap: &mut BinaryHeap<(u64, i64, u32)>, limit: usize, item: (u64, i64, u32)) {
     if heap.len() <= limit {
         heap.push(item);
     } else if let Some(&worst) = heap.peek() {
@@ -87,7 +83,7 @@ where
             }
             let nid = doc_ids[doc as usize];
             let h = splitmix64((nid as u64) ^ seed);
-            if cursor.map_or(true, |(ch, cid)| (h, nid) > (ch, cid)) {
+            if cursor.is_none_or(|(ch, cid)| (h, nid) > (ch, cid)) {
                 return (Vec::new(), true);
             }
         }
@@ -134,6 +130,52 @@ where
             let end = (start + CHUNK).min(total_slots);
             let mut heap: BinaryHeap<(u64, i64, u32)> = BinaryHeap::with_capacity(limit + 1);
             for doc in start..end {
+                if !pred(doc) {
+                    continue;
+                }
+                eval_candidate(doc, doc_ids[doc as usize], seed, cursor, limit, &mut heap);
+            }
+            heap
+        })
+        .reduce(
+            || BinaryHeap::with_capacity(limit + 1),
+            |mut acc, other| {
+                for item in other {
+                    push_bounded(&mut acc, limit, item);
+                }
+                acc
+            },
+        );
+
+    let has_more = merged.len() > limit;
+    let mut sorted = merged.into_sorted_vec();
+    sorted.truncate(limit);
+    (sorted, has_more)
+}
+
+/// Parallel top-K over an arbitrary pre-extracted slice of candidate doc slots.
+/// Avoids scanning sparse `0..total_slots` when candidate count is medium/large
+/// but sparse relative to total slots.
+pub fn top_k_random_slice<F>(
+    docs: &[u32],
+    doc_ids: &[i64],
+    seed: u64,
+    cursor: Option<(u64, i64)>,
+    limit: usize,
+    pred: F,
+) -> (Vec<(u64, i64, u32)>, bool)
+where
+    F: Fn(u32) -> bool + Sync,
+{
+    const CHUNK: usize = 2048;
+    if limit == 0 || docs.is_empty() {
+        return (Vec::new(), false);
+    }
+    let merged = docs
+        .par_chunks(CHUNK)
+        .map(|chunk| {
+            let mut heap: BinaryHeap<(u64, i64, u32)> = BinaryHeap::with_capacity(limit + 1);
+            for &doc in chunk {
                 if !pred(doc) {
                     continue;
                 }

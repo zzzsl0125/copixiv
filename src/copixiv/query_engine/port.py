@@ -1,24 +1,45 @@
-"""Protocol and DTOs for the in-process novel query engine adapter."""
+"""Protocol and DTOs for the in-process novel and tag query engine adapter."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Any, Protocol
 
-from copixiv.core.search_text import SlimNovelTuple
-
-EngineMode = Literal["rust", "pg", "shadow"]
+from copixiv.core.snapshot_types import SlimNovelTuple, SlimTagTuple
 
 
 class PendingDeltaProtocol(Protocol):
-    upsert_novel_ids: set[int]
-    deleted_novel_ids: set[int]
-    special_follow_changes: dict[int, bool]
+    novel_ids: set[int]
+    author_ids: set[int]
+    tag_names: set[str]
+    tags_full_refresh: bool
+    aliases_dirty: bool
     blocked_tags_dirty: bool
     exclude_setting_dirty: bool
 
     def is_empty(self) -> bool: ...
+
+
+class SnapshotDeltaProtocol(Protocol):
+    @property
+    def delete_ids(self) -> list[int]: ...
+    @property
+    def upsert_rows(self) -> list[SlimNovelTuple]: ...
+    @property
+    def blocked_tags(self) -> list[str] | None: ...
+    @property
+    def exclude_blocked_default(self) -> bool | None: ...
+    @property
+    def special_follow_changes(self) -> list[tuple[int, bool]]: ...
+    @property
+    def replace_all_tags(self) -> list[SlimTagTuple] | None: ...
+    @property
+    def delete_tag_names(self) -> list[str] | None: ...
+    @property
+    def upsert_tags(self) -> list[SlimTagTuple] | None: ...
+    @property
+    def aliased_tag_ids(self) -> list[int] | None: ...
 
 
 class SnapshotStoreProtocol(Protocol):
@@ -28,21 +49,18 @@ class SnapshotStoreProtocol(Protocol):
         self,
         consume_total: Callable[[int], None],
         consume_batch: Callable[[list[SlimNovelTuple]], None],
-        batch_size: int = 25_000,
-    ) -> tuple[list[str], bool, list[int]]: ...
+        batch_size: int = 2_000,
+    ) -> tuple[list[str], bool, list[int], list[SlimTagTuple], list[int]]: ...
 
     def fetch_delta_payload(
         self,
-        *,
-        upsert_ids: Sequence[int],
-        fetch_blocked: bool,
-        fetch_exclude: bool,
-    ) -> tuple[list[SlimNovelTuple], list[str] | None, bool | None]: ...
+        pending: PendingDeltaProtocol,
+    ) -> SnapshotDeltaProtocol: ...
 
     def attach_runtime(
         self,
         engine: Any,
-        hook: Callable[[Any], None],
+        hook: Callable[[PendingDeltaProtocol], None],
     ) -> None: ...
 
     def detach_runtime(self) -> None: ...
@@ -114,13 +132,20 @@ class EngineNovelRecord(Protocol):
     def tags(self) -> list[str]: ...
 
 
-@dataclass(frozen=True, slots=True)
-class EnginePageResult:
-    """Result of ``query_novels``: ordered page IDs + pagination flags."""
+class TagCandidateProtocol(Protocol):
+    @property
+    def id(self) -> int: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def reference_count(self) -> int: ...
 
-    ids: list[int]
-    has_more: bool
-    random_cursor: dict[str, Any] | None = None
+
+class TagSuggestItemProtocol(Protocol):
+    @property
+    def target(self) -> TagCandidateProtocol: ...
+    @property
+    def candidates(self) -> list[TagCandidateProtocol]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,20 +168,35 @@ class EngineCountResult:
 class NovelQueryEnginePort(Protocol):
     """Port implemented by ``RustNovelQueryEngine``."""
 
-    @property
-    def mode(self) -> EngineMode: ...
-
     def ready(self) -> bool: ...
 
-    def query_novels(
+    def needs_rebuild(self) -> bool: ...
+
+    def mark_needs_rebuild(self) -> None: ...
+
+    def swap_from_staging(
         self,
-        query: EngineQuery,
+        staging: Any,
+        blocked_tags: list[str],
+        exclude_blocked_default: bool,
+        special_follow_authors: list[int],
+        tags: list[SlimTagTuple] | None = None,
+        aliased_tag_ids: list[int] | None = None,
+    ) -> None: ...
+
+    def apply_delta(
+        self,
         *,
-        order_by: str,
-        descending: bool,
-        limit: int,
-        cursor: EngineCursor | None = None,
-    ) -> EnginePageResult: ...
+        delete_ids: Sequence[int] = (),
+        upsert_rows: Iterable[SlimNovelTuple] = (),
+        blocked_tags: Sequence[str] | None = None,
+        exclude_blocked_default: bool | None = None,
+        special_follow_changes: Sequence[tuple[int, bool]] = (),
+        replace_all_tags: Sequence[SlimTagTuple] | None = None,
+        delete_tag_names: Sequence[str] | None = None,
+        upsert_tags: Sequence[SlimTagTuple] | None = None,
+        aliased_tag_ids: Sequence[int] | None = None,
+    ) -> None: ...
 
     def query_novel_rows(
         self,
@@ -185,3 +225,11 @@ class NovelQueryEnginePort(Protocol):
         order_by: str,
         descending: bool,
     ) -> list[int]: ...
+
+    def suggest_tag_aliases(
+        self,
+        *,
+        limit: int = 5,
+        offset: int = 0,
+        target_tag: str | None = None,
+    ) -> tuple[list[TagSuggestItemProtocol], int]: ...

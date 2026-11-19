@@ -6,15 +6,14 @@ from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING
 
 from copixiv.core.exceptions import ValidationError
-from copixiv.core.search_text import SlimNovelTuple
+from copixiv.core.snapshot_types import SlimNovelTuple, SlimTagTuple
 from copixiv.query_engine.port import (
     EngineCountResult,
     EngineCursor,
-    EngineMode,
     EngineNovelRecord,
-    EnginePageResult,
     EnginePageRowsResult,
     EngineQuery,
+    TagSuggestItemProtocol,
 )
 
 if TYPE_CHECKING:
@@ -27,8 +26,7 @@ def _rust_module():
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError(
             "copixiv_rs native extension is not installed. "
-            "Build it with `maturin develop --release --manifest-path crates/copixiv_rs/Cargo.toml` "
-            "or set query_engine='pg' (COPIXIV_QUERY_ENGINE=pg)."
+            "Build it with `maturin develop --release --manifest-path crates/copixiv_rs/Cargo.toml`."
         ) from exc
     return copixiv_rs
 
@@ -53,20 +51,24 @@ def _to_rust_filter(ext, q: EngineQuery) -> copixiv_rs.QueryFilter:
 class RustNovelQueryEngine:
     """Thread-safe wrapper around ``copixiv_rs.NovelQueryEngine``."""
 
-    def __init__(self, mode: EngineMode = "rust") -> None:
-        self._mode: EngineMode = mode
+    def __init__(self) -> None:
         self._ext = _rust_module()
         self._rs = self._ext.NovelQueryEngine()
-
-    @property
-    def mode(self) -> EngineMode:
-        return self._mode
 
     def ready(self) -> bool:
         return self._rs.ready()
 
-    def stats(self) -> tuple[int, int, int, bool]:
+    def needs_rebuild(self) -> bool:
+        return self._rs.needs_rebuild()
+
+    def mark_needs_rebuild(self) -> None:
+        self._rs.mark_needs_rebuild()
+
+    def stats(self) -> tuple[int, int, int, bool, int, bool]:
         return self._rs.stats()
+
+    def memory_breakdown(self) -> list[tuple[str, int, int]]:
+        return self._rs.memory_breakdown()
 
     def create_staging(self, capacity: int = 0) -> copixiv_rs.StagingEngine:
         return self._ext.StagingEngine(capacity=capacity)
@@ -77,12 +79,16 @@ class RustNovelQueryEngine:
         blocked_tags: list[str],
         exclude_blocked_default: bool,
         special_follow_authors: list[int],
+        tags: list[SlimTagTuple] | None = None,
+        aliased_tag_ids: list[int] | None = None,
     ) -> None:
         self._rs.swap_from_staging(
             staging,
             blocked_tags,
             exclude_blocked_default,
             special_follow_authors,
+            list(tags) if tags is not None else [],
+            list(aliased_tag_ids) if aliased_tag_ids is not None else [],
         )
 
     def upsert_batch(self, rows: Iterable[SlimNovelTuple]) -> None:
@@ -100,19 +106,42 @@ class RustNovelQueryEngine:
     def set_exclude_blocked_default(self, value: bool) -> None:
         self._rs.set_exclude_blocked_default(value)
 
-    def _call_paged(
+    def apply_delta(
         self,
-        method_name: str,
+        *,
+        delete_ids: Sequence[int] = (),
+        upsert_rows: Iterable[SlimNovelTuple] = (),
+        blocked_tags: Sequence[str] | None = None,
+        exclude_blocked_default: bool | None = None,
+        special_follow_changes: Sequence[tuple[int, bool]] = (),
+        replace_all_tags: Sequence[SlimTagTuple] | None = None,
+        delete_tag_names: Sequence[str] | None = None,
+        upsert_tags: Sequence[SlimTagTuple] | None = None,
+        aliased_tag_ids: Sequence[int] | None = None,
+    ) -> None:
+        self._rs.apply_delta(
+            delete_ids=list(delete_ids),
+            upsert_rows=list(upsert_rows),
+            blocked_tags=list(blocked_tags) if blocked_tags is not None else None,
+            exclude_blocked_default=exclude_blocked_default,
+            special_follow_changes=list(special_follow_changes),
+            replace_all_tags=list(replace_all_tags) if replace_all_tags is not None else None,
+            delete_tag_names=list(delete_tag_names) if delete_tag_names is not None else None,
+            upsert_tags=list(upsert_tags) if upsert_tags is not None else None,
+            aliased_tag_ids=list(aliased_tag_ids) if aliased_tag_ids is not None else None,
+        )
+
+    def query_novel_rows(
+        self,
         query: EngineQuery,
         *,
         order_by: str,
         descending: bool,
         limit: int,
-        cursor: EngineCursor | None,
-    ):
-        fn = getattr(self._rs, method_name)
+        cursor: EngineCursor | None = None,
+    ) -> EnginePageRowsResult:
         try:
-            items, has_more, rand_tuple = fn(
+            rows, has_more, rand_tuple = self._rs.query_novel_rows(
                 _to_rust_filter(self._ext, query),
                 order_by=order_by or "none",
                 descending=descending,
@@ -130,44 +159,6 @@ class RustNovelQueryEngine:
         if rand_tuple is not None:
             seed_hex, h_hex, last_id = rand_tuple
             rand_cursor = {"seed": seed_hex, "h": h_hex, "id": last_id}
-        return items, has_more, rand_cursor
-
-    def query_novels(
-        self,
-        query: EngineQuery,
-        *,
-        order_by: str,
-        descending: bool,
-        limit: int,
-        cursor: EngineCursor | None = None,
-    ) -> EnginePageResult:
-        ids, has_more, rand_cursor = self._call_paged(
-            "query_novels",
-            query,
-            order_by=order_by,
-            descending=descending,
-            limit=limit,
-            cursor=cursor,
-        )
-        return EnginePageResult(ids=ids, has_more=has_more, random_cursor=rand_cursor)
-
-    def query_novel_rows(
-        self,
-        query: EngineQuery,
-        *,
-        order_by: str,
-        descending: bool,
-        limit: int,
-        cursor: EngineCursor | None = None,
-    ) -> EnginePageRowsResult:
-        rows, has_more, rand_cursor = self._call_paged(
-            "query_novel_rows",
-            query,
-            order_by=order_by,
-            descending=descending,
-            limit=limit,
-            cursor=cursor,
-        )
         return EnginePageRowsResult(
             rows=list(rows),
             has_more=has_more,
@@ -201,3 +192,17 @@ class RustNovelQueryEngine:
             return self._rs.sort_ids(novel_ids, order_by=order_by, descending=descending)
         except ValueError as exc:
             raise ValidationError(str(exc)) from exc
+
+    def suggest_tag_aliases(
+        self,
+        *,
+        limit: int = 5,
+        offset: int = 0,
+        target_tag: str | None = None,
+    ) -> tuple[list[TagSuggestItemProtocol], int]:
+        items, next_offset = self._rs.suggest_tag_aliases(
+            limit=limit,
+            offset=offset,
+            target_tag=target_tag,
+        )
+        return list(items), int(next_offset)

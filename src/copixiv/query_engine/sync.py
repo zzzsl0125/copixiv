@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import threading
 import time
 from collections.abc import Callable
@@ -10,7 +11,6 @@ from typing import Any
 from copixiv.log import logger
 from copixiv.query_engine.adapter import RustNovelQueryEngine
 from copixiv.query_engine.port import (
-    EngineMode,
     PendingDeltaProtocol,
     SnapshotStoreProtocol,
 )
@@ -19,12 +19,11 @@ from copixiv.query_engine.port import (
 def build_engine_from_store(
     store: SnapshotStoreProtocol,
     *,
-    mode: EngineMode = "rust",
     engine: RustNovelQueryEngine | None = None,
 ) -> RustNovelQueryEngine:
     """Populate *engine* (or a new one) via a staged atomic swap."""
     t0 = time.perf_counter()
-    target = engine or RustNovelQueryEngine(mode=mode)
+    target = engine or RustNovelQueryEngine()
     staging_holder: list[Any] = []
     loaded = 0
 
@@ -36,16 +35,26 @@ def build_engine_from_store(
         staging_holder[0].push_batch(batch)
         loaded += len(batch)
 
-    blocked_tags, exclude_default, sf_authors = store.stream_snapshot(
-        _on_total, _on_batch, batch_size=25_000,
+    blocked_tags, exclude_default, sf_authors, all_tags, aliased_tag_ids = store.stream_snapshot(
+        _on_total,
+        _on_batch,
+        batch_size=2_000,
     )
-    target.swap_from_staging(staging_holder[0], blocked_tags, exclude_default, sf_authors)
+    target.swap_from_staging(
+        staging_holder.pop(),
+        blocked_tags,
+        exclude_default,
+        sf_authors,
+        all_tags,
+        aliased_tag_ids,
+    )
+    del blocked_tags, sf_authors, all_tags, aliased_tag_ids
+    gc.collect()
     elapsed_ms = (time.perf_counter() - t0) * 1_000
     logger.info(
-        "Rust query engine ready: mode={} docs={} blocked_tags={} exclude_default={} ({:.1f} ms)",
-        target.mode,
+        "Rust query engine ready: docs={} blocked_tags={} exclude_default={} ({:.1f} ms)",
         loaded,
-        len(blocked_tags),
+        target.stats()[2],
         exclude_default,
         elapsed_ms,
     )
@@ -61,9 +70,9 @@ def rebuild_engine(
     """Perform a full atomic rebuild of *engine* from *store*."""
     if sync_lock is not None:
         with sync_lock:
-            build_engine_from_store(store, mode=engine.mode, engine=engine)
+            build_engine_from_store(store, engine=engine)
     else:
-        build_engine_from_store(store, mode=engine.mode, engine=engine)
+        build_engine_from_store(store, engine=engine)
 
 
 def make_post_commit_hook(
@@ -75,37 +84,47 @@ def make_post_commit_hook(
     lock = sync_lock or threading.Lock()
 
     def _on_commit(delta: PendingDeltaProtocol) -> None:
-        if delta.is_empty():
-            return
         with lock:
-            if delta.deleted_novel_ids:
-                engine.delete_ids(list(delta.deleted_novel_ids))
+            if delta.is_empty() and not engine.needs_rebuild():
+                return
+            try:
+                if engine.needs_rebuild():
+                    build_engine_from_store(store, engine=engine)
+                    return
 
-            pending_upserts = set(delta.upsert_novel_ids) - set(delta.deleted_novel_ids)
-            if (
-                pending_upserts
-                or delta.blocked_tags_dirty
-                or delta.exclude_setting_dirty
-            ):
-                rows, blocked_tags, exclude_default = store.fetch_delta_payload(
-                    upsert_ids=list(pending_upserts),
-                    fetch_blocked=delta.blocked_tags_dirty,
-                    fetch_exclude=delta.exclude_setting_dirty,
+                payload = store.fetch_delta_payload(delta)
+                has_changes = bool(
+                    payload.delete_ids
+                    or payload.upsert_rows
+                    or payload.blocked_tags is not None
+                    or payload.exclude_blocked_default is not None
+                    or payload.special_follow_changes
+                    or payload.replace_all_tags is not None
+                    or payload.delete_tag_names is not None
+                    or payload.upsert_tags is not None
+                    or payload.aliased_tag_ids is not None
                 )
-                if pending_upserts:
-                    found_ids = {r[0] for r in rows}
-                    missing_ids = pending_upserts - found_ids
-                    if missing_ids:
-                        engine.delete_ids(list(missing_ids))
-                    if rows:
-                        engine.upsert_batch(rows)
-                if blocked_tags is not None:
-                    engine.set_blocked_tags(blocked_tags)
-                if exclude_default is not None:
-                    engine.set_exclude_blocked_default(exclude_default)
-
-            for author_id, flag in delta.special_follow_changes.items():
-                engine.toggle_special_follow(author_id, flag)
+                if has_changes:
+                    engine.apply_delta(
+                        delete_ids=payload.delete_ids,
+                        upsert_rows=payload.upsert_rows,
+                        blocked_tags=payload.blocked_tags,
+                        exclude_blocked_default=payload.exclude_blocked_default,
+                        special_follow_changes=payload.special_follow_changes,
+                        replace_all_tags=payload.replace_all_tags,
+                        delete_tag_names=payload.delete_tag_names,
+                        upsert_tags=payload.upsert_tags,
+                        aliased_tag_ids=payload.aliased_tag_ids,
+                    )
+            except Exception:
+                logger.exception("Post-commit delta sync failed; attempting full engine rebuild")
+                engine.mark_needs_rebuild()
+                try:
+                    build_engine_from_store(store, engine=engine)
+                except Exception:
+                    logger.exception(
+                        "Self-healing full engine rebuild also failed; engine marked needs_rebuild"
+                    )
 
     return _on_commit
 
@@ -113,14 +132,13 @@ def make_post_commit_hook(
 def attach_and_start_engine(
     store: SnapshotStoreProtocol,
     *,
-    mode: EngineMode = "rust",
     build_initial: bool = True,
 ) -> RustNovelQueryEngine:
     """Create, optionally build, and attach a query engine + hook onto *store*."""
     sync_lock = threading.Lock()
-    engine = RustNovelQueryEngine(mode=mode)
+    engine = RustNovelQueryEngine()
     if build_initial:
-        build_engine_from_store(store, mode=mode, engine=engine)
+        build_engine_from_store(store, engine=engine)
     hook = make_post_commit_hook(store, engine, sync_lock=sync_lock)
     store.attach_runtime(engine, hook)
     return engine

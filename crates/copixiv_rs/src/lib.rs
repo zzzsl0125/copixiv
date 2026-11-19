@@ -1,61 +1,31 @@
 mod arena;
+mod engine;
 mod filter;
-mod index;
+mod hydrate;
+mod interner;
+mod model;
+mod mutation;
+mod postings;
+mod query;
 mod random;
+mod staging;
+mod storage;
+mod tag_index;
+mod text_index;
+mod tracks;
 
 use parking_lot::Mutex;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
+use crate::engine::NovelIndex;
 use crate::filter::{IntFilterField, QueryFilter, SortAxis, StrFilterField, TrackCursor};
-use crate::index::{NovelIndex, NovelRow, StagingBuilder};
-
-#[pyclass(name = "NovelRecord", frozen, get_all)]
-pub struct PyNovelRecord {
-    pub id: i64,
-    pub title: String,
-    pub author_id: Option<i64>,
-    pub author_name: Option<String>,
-    pub series_id: Option<i64>,
-    pub series_name: Option<String>,
-    pub series_index: Option<i64>,
-    pub text: i64,
-    pub like: i64,
-    pub view: i64,
-    pub has_epub: i32,
-    pub create_time_us: Option<i64>,
-    pub source: String,
-    pub is_favourite: bool,
-    pub is_special_follow: bool,
-    pub tags: Vec<String>,
-}
-
-impl From<NovelRow> for PyNovelRecord {
-    fn from(r: NovelRow) -> Self {
-        Self {
-            id: r.id,
-            title: r.title,
-            author_id: r.author_id,
-            author_name: r.author_name,
-            series_id: r.series_id,
-            series_name: r.series_name,
-            series_index: r.series_index,
-            text: r.text,
-            like: r.like,
-            view: r.view,
-            has_epub: r.has_epub,
-            create_time_us: r.create_time_us,
-            source: r.source,
-            is_favourite: r.is_favourite,
-            is_special_follow: r.is_special_follow,
-            tags: r.tags,
-        }
-    }
-}
+use crate::model::{NovelRecord, QueryPage, TagCandidate, TagSuggestItem};
 use crate::random::hex16_decode;
+use crate::staging::StagingBuilder;
 
-fn extract_rows(rows: &Bound<'_, PyAny>) -> PyResult<Vec<NovelRow>> {
+fn extract_rows(rows: &Bound<'_, PyAny>) -> PyResult<Vec<NovelRecord>> {
     let cap = rows.len().unwrap_or(0);
     let mut out = Vec::with_capacity(cap);
     for item in rows.try_iter()? {
@@ -67,7 +37,7 @@ fn extract_rows(rows: &Bound<'_, PyAny>) -> PyResult<Vec<NovelRow>> {
                 tup.len()
             )));
         }
-        out.push(NovelRow {
+        out.push(NovelRecord {
             id: tup.get_borrowed_item(0)?.extract()?,
             title: tup.get_borrowed_item(1)?.extract()?,
             author_id: tup.get_borrowed_item(2)?.extract()?,
@@ -90,7 +60,6 @@ fn extract_rows(rows: &Bound<'_, PyAny>) -> PyResult<Vec<NovelRow>> {
 }
 
 #[pyclass(name = "QueryFilter", frozen)]
-#[derive(Clone)]
 pub struct PyQueryFilter {
     inner: QueryFilter,
 }
@@ -202,10 +171,31 @@ impl PyNovelQueryEngine {
         self.index.ready()
     }
 
-    fn stats(&self) -> (usize, usize, usize, bool) {
+    fn needs_rebuild(&self) -> bool {
+        self.index.needs_rebuild()
+    }
+
+    fn mark_needs_rebuild(&self) {
+        self.index.mark_needs_rebuild();
+    }
+
+    fn stats(&self) -> (usize, usize, usize, bool, usize, bool) {
         self.index.stats()
     }
 
+    fn memory_breakdown(&self) -> Vec<(String, usize, usize)> {
+        self.index.memory_breakdown()
+    }
+
+    #[pyo3(signature = (
+        staging,
+        blocked_tags = vec![],
+        exclude_blocked_default = true,
+        special_follow_authors = vec![],
+        tags = vec![],
+        aliased_tag_ids = vec![],
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn swap_from_staging(
         &self,
         py: Python<'_>,
@@ -213,6 +203,8 @@ impl PyNovelQueryEngine {
         blocked_tags: Vec<String>,
         exclude_blocked_default: bool,
         special_follow_authors: Vec<i64>,
+        tags: Vec<(i64, String, i32)>,
+        aliased_tag_ids: Vec<i64>,
     ) -> PyResult<()> {
         let builder = staging
             .builder
@@ -220,8 +212,13 @@ impl PyNovelQueryEngine {
             .take()
             .ok_or_else(|| PyValueError::new_err("StagingEngine already finalized"))?;
         py.allow_threads(|| {
-            let state =
-                builder.finalize(blocked_tags, exclude_blocked_default, special_follow_authors);
+            let state = builder.finalize(
+                blocked_tags,
+                exclude_blocked_default,
+                special_follow_authors,
+                tags,
+                aliased_tag_ids,
+            );
             self.index.swap_state(state);
         });
         Ok(())
@@ -243,7 +240,8 @@ impl PyNovelQueryEngine {
 
     fn toggle_special_follow(&self, py: Python<'_>, author_id: i64, is_special_follow: bool) {
         py.allow_threads(|| {
-            self.index.toggle_special_follow(author_id, is_special_follow);
+            self.index
+                .toggle_special_follow(author_id, is_special_follow);
         });
     }
 
@@ -260,46 +258,48 @@ impl PyNovelQueryEngine {
     }
 
     #[pyo3(signature = (
-        filter,
-        order_by = "id",
-        descending = true,
-        limit = 20,
-        cursor_int = None,
-        cursor_str = None,
-        cursor_id = None,
-        random_seed_hex = None,
-        random_h_hex = None,
+        delete_ids = vec![],
+        upsert_rows = None,
+        blocked_tags = None,
+        exclude_blocked_default = None,
+        special_follow_changes = vec![],
+        replace_all_tags = None,
+        delete_tag_names = None,
+        upsert_tags = None,
+        aliased_tag_ids = None,
     ))]
     #[allow(clippy::too_many_arguments)]
-    fn query_novels(
+    fn apply_delta(
         &self,
         py: Python<'_>,
-        filter: &PyQueryFilter,
-        order_by: &str,
-        descending: bool,
-        limit: usize,
-        cursor_int: Option<i64>,
-        cursor_str: Option<String>,
-        cursor_id: Option<i64>,
-        random_seed_hex: Option<String>,
-        random_h_hex: Option<String>,
-    ) -> PyResult<(Vec<i64>, bool, Option<(String, String, i64)>)> {
-        let axis = SortAxis::parse(order_by).map_err(PyValueError::new_err)?;
-        let cursor = build_cursor(
-            axis,
-            cursor_int,
-            cursor_str,
-            cursor_id,
-            random_seed_hex,
-            random_h_hex,
-        )
-        .map_err(PyValueError::new_err)?;
-        let filter_cloned = filter.inner.clone();
+        delete_ids: Vec<i64>,
+        upsert_rows: Option<&Bound<'_, PyAny>>,
+        blocked_tags: Option<Vec<String>>,
+        exclude_blocked_default: Option<bool>,
+        special_follow_changes: Vec<(i64, bool)>,
+        replace_all_tags: Option<Vec<(i64, String, i32)>>,
+        delete_tag_names: Option<Vec<String>>,
+        upsert_tags: Option<Vec<(i64, String, i32)>>,
+        aliased_tag_ids: Option<Vec<i64>>,
+    ) -> PyResult<()> {
+        let parsed_rows = match upsert_rows {
+            Some(rows) => extract_rows(rows)?,
+            None => Vec::new(),
+        };
         py.allow_threads(|| {
-            self.index
-                .query_novels(&filter_cloned, axis, descending, limit, cursor.as_ref())
-        })
-        .map_err(PyValueError::new_err)
+            self.index.apply_delta(
+                &delete_ids,
+                parsed_rows,
+                blocked_tags,
+                exclude_blocked_default,
+                &special_follow_changes,
+                replace_all_tags,
+                delete_tag_names,
+                upsert_tags,
+                aliased_tag_ids,
+            );
+        });
+        Ok(())
     }
 
     #[pyo3(signature = (
@@ -326,7 +326,7 @@ impl PyNovelQueryEngine {
         cursor_id: Option<i64>,
         random_seed_hex: Option<String>,
         random_h_hex: Option<String>,
-    ) -> PyResult<(Vec<PyNovelRecord>, bool, Option<(String, String, i64)>)> {
+    ) -> PyResult<QueryPage<NovelRecord>> {
         let axis = SortAxis::parse(order_by).map_err(PyValueError::new_err)?;
         let cursor = build_cursor(
             axis,
@@ -337,34 +337,31 @@ impl PyNovelQueryEngine {
             random_h_hex,
         )
         .map_err(PyValueError::new_err)?;
-        let filter_cloned = filter.inner.clone();
-        let (rows, has_more, rand_out) = py
-            .allow_threads(|| {
-                self.index
-                    .query_novel_rows(&filter_cloned, axis, descending, limit, cursor.as_ref())
-            })
-            .map_err(PyValueError::new_err)?;
-        Ok((rows.into_iter().map(PyNovelRecord::from).collect(), has_more, rand_out))
+        let filter_ref = &filter.inner;
+        py.allow_threads(|| {
+            self.index
+                .query_novel_rows(filter_ref, axis, descending, limit, cursor.as_ref())
+        })
+        .map_err(PyValueError::new_err)
     }
 
-    fn get_novel_rows_by_ids(&self, py: Python<'_>, novel_ids: Vec<i64>) -> Vec<PyNovelRecord> {
-        let rows = py.allow_threads(|| self.index.get_novel_rows_by_ids(&novel_ids));
-        rows.into_iter().map(PyNovelRecord::from).collect()
+    fn get_novel_rows_by_ids(&self, py: Python<'_>, novel_ids: Vec<i64>) -> Vec<NovelRecord> {
+        py.allow_threads(|| self.index.get_novel_rows_by_ids(&novel_ids))
     }
 
     fn count_novels(&self, py: Python<'_>, filter: &PyQueryFilter, cap: usize) -> (usize, bool) {
-        let filter_cloned = filter.inner.clone();
-        py.allow_threads(|| self.index.count_novels(&filter_cloned, cap))
+        let filter_ref = &filter.inner;
+        py.allow_threads(|| self.index.count_novels(filter_ref, cap))
     }
 
     fn has_match(&self, py: Python<'_>, filter: &PyQueryFilter) -> bool {
-        let filter_cloned = filter.inner.clone();
-        py.allow_threads(|| self.index.has_match(&filter_cloned))
+        let filter_ref = &filter.inner;
+        py.allow_threads(|| self.index.has_match(filter_ref))
     }
 
     fn list_matching_ids(&self, py: Python<'_>, filter: &PyQueryFilter) -> Vec<i64> {
-        let filter_cloned = filter.inner.clone();
-        py.allow_threads(|| self.index.list_matching_ids(&filter_cloned))
+        let filter_ref = &filter.inner;
+        py.allow_threads(|| self.index.list_matching_ids(filter_ref))
     }
 
     fn list_blocked_ids(&self, py: Python<'_>) -> Vec<i64> {
@@ -381,6 +378,20 @@ impl PyNovelQueryEngine {
     ) -> PyResult<Vec<i64>> {
         let axis = SortAxis::parse(order_by).map_err(PyValueError::new_err)?;
         Ok(py.allow_threads(|| self.index.sort_ids(&novel_ids, axis, descending)))
+    }
+
+    #[pyo3(signature = (limit = 5, offset = 0, target_tag = None))]
+    fn suggest_tag_aliases(
+        &self,
+        py: Python<'_>,
+        limit: usize,
+        offset: i64,
+        target_tag: Option<String>,
+    ) -> (Vec<TagSuggestItem>, i64) {
+        py.allow_threads(|| {
+            self.index
+                .suggest_tag_aliases(limit, offset, target_tag.as_deref())
+        })
     }
 }
 
@@ -429,6 +440,8 @@ fn copixiv_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyQueryFilter>()?;
     m.add_class::<PyStagingEngine>()?;
     m.add_class::<PyNovelQueryEngine>()?;
-    m.add_class::<PyNovelRecord>()?;
+    m.add_class::<NovelRecord>()?;
+    m.add_class::<TagCandidate>()?;
+    m.add_class::<TagSuggestItem>()?;
     Ok(())
 }
