@@ -128,9 +128,31 @@ export function useVirtualMasonry<T>(
   }))
 
   const virtualizer = useWindowVirtualizer<Element>(virtualizerOptions)
+  // In a multi-lane masonry grid, default single-lane delta adjustments apply
+  // `delta` once per card across all lanes (3x vertical drift) and can push
+  // `window.scrollY` downward toward the LoadMore sentinel.
+  virtualizer.value.shouldAdjustScrollPositionOnItemSizeChange = () => false
 
-  const virtualItems = computed(() => virtualizer.value.getVirtualItems())
-  const totalHeight = computed(() => virtualizer.value.getTotalSize())
+  function syncVirtualizerOptions() {
+    const opts = virtualizerOptions.value
+    const inst = virtualizer.value
+    inst.shouldAdjustScrollPositionOnItemSizeChange = () => false
+    if (
+      inst.options.count !== opts.count ||
+      inst.options.lanes !== opts.lanes ||
+      inst.options.scrollMargin !== opts.scrollMargin
+    ) {
+      inst.setOptions({
+        ...inst.options,
+        ...opts,
+      })
+      inst._willUpdate()
+    }
+    return inst
+  }
+
+  const virtualItems = computed(() => syncVirtualizerOptions().getVirtualItems())
+  const totalHeight = computed(() => syncVirtualizerOptions().getTotalSize())
 
   function measureElement(el: Element | ComponentPublicInstance | null) {
     if (el instanceof Element) {

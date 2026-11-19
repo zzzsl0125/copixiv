@@ -128,6 +128,15 @@ describe('useVirtualMasonry (@tanstack/vue-virtual)', () => {
     const style = api.itemStyle(firstItem)
     expect(style.transform).toBe(`translate3d(0, ${firstItem.start - 120}px, 0)`)
 
+    // Virtualizer disables automatic scroll adjustment on item size changes and
+    // updates totalHeight synchronously in the same render pass when items grow.
+    const shouldAdjust = api.virtualizer.value.shouldAdjustScrollPositionOnItemSizeChange
+    expect(shouldAdjust?.(firstItem, 80, api.virtualizer.value)).toBe(false)
+
+    const initialHeight = api.totalHeight.value
+    items.value = Array.from({ length: 30 }, (_, i) => ({ id: i + 1 }))
+    expect(api.totalHeight.value).toBeGreaterThan(initialHeight)
+
     const measureSpy = vi.spyOn(api.virtualizer.value, 'measureElement')
     const cardEl = document.createElement('div')
     cardEl.dataset.index = '0'

@@ -7,6 +7,7 @@ import TagChipInput from '../features/TagChipInput.vue'
 import PixivIdLookupField from '../features/PixivIdLookupField.vue'
 import NovelCard from '../features/NovelCard.vue'
 import LogViewer from '../features/LogViewer.vue'
+import LoadMore from '../features/LoadMore.vue'
 import { useConfirm } from '../../composables/useConfirm'
 import { formatCronZh } from '../../lib/cron'
 import type { Novel } from '../../types/novels'
@@ -37,6 +38,7 @@ function makeSampleNovel(overrides: Partial<Novel> = {}): Novel {
 describe('Phase 5 UI components', () => {
   afterEach(() => {
     vi.useRealTimers()
+    vi.unstubAllGlobals()
     const { resolveConfirm } = useConfirm()
     resolveConfirm(false)
   })
@@ -255,5 +257,58 @@ describe('Phase 5 UI components', () => {
     const renderedRows = scrollContainer.findAll('div.min-w-full > div')
     expect(renderedRows.length).toBeGreaterThan(0)
     expect(renderedRows.length).toBeLessThan(200)
+  })
+
+  it('LoadMore emits once per intersection visit and does not infinite-loop after loading finishes', async () => {
+    vi.useFakeTimers()
+
+    let observerCallback: IntersectionObserverCallback | null = null
+    class MockIntersectionObserver {
+      constructor(cb: IntersectionObserverCallback) {
+        observerCallback = cb
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+      takeRecords(): IntersectionObserverEntry[] {
+        return []
+      }
+    }
+    vi.stubGlobal('IntersectionObserver', MockIntersectionObserver)
+
+    const wrapper = mount(LoadMore, {
+      props: {
+        loading: false,
+        noMoreData: false,
+        hasData: true,
+      },
+    })
+    await nextTick()
+
+    const triggerIntersection = (isIntersecting: boolean) => {
+      observerCallback?.(
+        [{ isIntersecting } as IntersectionObserverEntry],
+        {} as IntersectionObserver,
+      )
+    }
+
+    // 1) First scroll to bottom triggers load-more once
+    triggerIntersection(true)
+    expect(wrapper.emitted('load-more')).toHaveLength(1)
+
+    // 2) Duplicate intersection while still in the same visit is ignored
+    triggerIntersection(true)
+    expect(wrapper.emitted('load-more')).toHaveLength(1)
+
+    // 3) Loading starts and finishes while sentinel stays in viewport -> does NOT loop
+    await wrapper.setProps({ loading: true })
+    await wrapper.setProps({ loading: false })
+    await vi.advanceTimersByTimeAsync(350)
+    expect(wrapper.emitted('load-more')).toHaveLength(1)
+
+    // 4) Once new content pushes sentinel out of viewport and user scrolls to bottom again, it fires
+    triggerIntersection(false)
+    triggerIntersection(true)
+    expect(wrapper.emitted('load-more')).toHaveLength(2)
   })
 })
