@@ -1,46 +1,43 @@
 <script setup lang="ts">
-import { computed, ref, toRef, nextTick, watch, onMounted, onUnmounted } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
+import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import NovelCard, { type NovelStateChange } from '../components/features/NovelCard.vue'
 import NovelHeader from '../components/features/NovelHeader.vue'
 import LoadMore from '../components/features/LoadMore.vue'
 import EmptyState from '../components/ui/EmptyState.vue'
 import CardSkeleton from '../components/ui/CardSkeleton.vue'
+import ErrorAlert from '../components/ui/ErrorAlert.vue'
 import BatchBar from '../components/features/BatchBar.vue'
 import UploadBar from '../components/features/UploadBar.vue'
-import UploadModal from '../components/features/UploadModal.vue'
-import BatchDeleteModal from '../components/features/BatchDeleteModal.vue'
-import BatchTagModal from '../components/features/BatchTagModal.vue'
-import BatchEditModal from '../components/features/BatchEditModal.vue'
-import BatchDownloadModal from '../components/features/BatchDownloadModal.vue'
-import EditNovelModal from '../components/features/EditNovelModal.vue'
 import ExclusionBar from '../components/features/ExclusionBar.vue'
+import NovelModalsHost from '../components/features/NovelModalsHost.vue'
 import {
-  useNovels,
-  useSystem,
   useBatchMode,
-  useMasonryLayout,
   useCollectionViews,
+  useNovels,
+  useNovelQueryState,
+  useNovelShellState,
   useToast,
-  useLoadMoreAnchor,
-  useNovelSidebarBridge,
+  useVirtualMasonry,
 } from '../composables'
-import { tagPreferenceApi, getApiErrorMessage } from '../api'
+import { getApiErrorMessage, novelApi, queryKeys, tagPreferenceApi } from '../api'
+import { downloadUrl } from '../lib/utils'
 import type {
+  BatchMetadataResult,
+  BatchOperationResult,
   Novel,
   NovelFilters,
   TagPreference,
-  BatchOperationResult,
-  BatchMetadataResult,
 } from '../types'
-import { SECTIONS, resolveSection, sectionFor, type SectionId } from '../config'
 
 const emit = defineEmits<{
   (e: 'toggle-sidebar'): void
 }>()
 
 const toast = useToast()
-const { systemConfig, fetchConfig } = useSystem()
-const bridge = useNovelSidebarBridge()
+const queryClient = useQueryClient()
+const shell = useNovelShellState()
+const { updateFilters, navigateToSection } = useNovelQueryState()
 
 const {
   novels,
@@ -48,12 +45,16 @@ const {
   error,
   noMoreData,
   filters,
+  activeSection,
   hasExcluded,
-  lastFetchedKeyword,
-  loadNovels,
   handleSearch,
   handleLoadMore: loadMoreNovels,
   handleCardSearch,
+  resetFilters,
+  invalidateNovels,
+  patchNovelInCache,
+  patchNovelStateInCache,
+  removeNovelFromCache,
 } = useNovels()
 
 const {
@@ -66,8 +67,6 @@ const {
   hasSelection,
   hasFilter,
   scope: batchScope,
-  enter: enterBatchMode,
-  exit: exitBatchMode,
   toggleCard: toggleBatchCard,
   removeCard: removeBatchCard,
   isCardSelected,
@@ -76,20 +75,37 @@ const {
   clearSelectionInScope,
 } = useBatchMode(filters)
 
-const activeSection = ref<SectionId | null>('novels')
-const configLoadedAndApplied = ref(false)
+const stickyHeaderRef = ref<HTMLElement | null>(null)
+const masonryContainerRef = ref<HTMLElement | null>(null)
 const isUploadModalOpen = ref(false)
 const activeCardId = ref<number | string | null>(null)
-const tagPreferences = ref<TagPreference[]>([])
 
-// ---- batch operation modal states ----
+const tagPrefsQuery = useQuery({
+  queryKey: queryKeys.tagPreferences(),
+  queryFn: ({ signal }) => tagPreferenceApi.getTagPreferences(signal),
+  staleTime: 60_000,
+})
+watch(
+  () => tagPrefsQuery.error.value,
+  (err) => {
+    if (err) toast.error(getApiErrorMessage(err, '标签偏好加载失败'))
+  },
+)
+
+const tagPreferenceMap = computed<ReadonlyMap<string, TagPreference['preference']>>(() => {
+  const map = new Map<string, TagPreference['preference']>()
+  for (const p of tagPrefsQuery.data.value ?? []) {
+    if (!map.has(p.tag)) map.set(p.tag, p.preference)
+  }
+  return map
+})
+
+// ---- Modal visibility states (hosted in NovelModalsHost) ----
 const deleteOpen = ref(false)
 const tagModalOpen = ref(false)
 const tagOperation = ref<'add_tags' | 'remove_tags'>('add_tags')
 const exportOpen = ref(false)
 const batchEditOpen = ref(false)
-
-// ---- 元数据编辑弹窗宿主（初值来自卡片完整对象，保存/同步/删除后原地更新）----
 const editingNovel = ref<Novel | null>(null)
 
 // ---- 「查看已选」/「查看被排除」集合视图编排 ----
@@ -110,161 +126,53 @@ const {
   patchNovelState,
   removeNovel,
 } = useCollectionViews({
-  filters: toRef(() => filters),
+  filters,
   batchScope,
   batchMode,
   hasSelection,
   novels,
   onActiveChange: (active) => {
-    bridge.isInCollectionView.value = active
+    shell.isInCollectionView.value = active
   },
-  afterLayout: () => relayout(),
+  afterLayout: () => measure(),
 })
 
 const {
-  containerRef: masonryContainerRef,
   columnCount,
+  virtualItems,
   totalHeight,
-  layoutRevision,
-  cardStyle,
-  setItemRef,
-  relayout,
-} = useMasonryLayout<Novel>(toRef(displayNovels))
-
-const { run: runLoadMore } = useLoadMoreAnchor({
-  container: masonryContainerRef,
-  firstItem: () => displayNovels.value[0]?.id,
-  layoutRevision,
+  measureElement,
+  itemStyle,
+  measure,
+} = useVirtualMasonry<Novel>(displayNovels, {
+  containerRef: masonryContainerRef,
+  headerRef: stickyHeaderRef,
+  getItemKey: (novel) => novel.id,
 })
-const handleLoadMore = () => runLoadMore(() => loadMoreNovels())
 
-// ---- Bridge sync: keep Sidebar reflective of current home state ----
+const handleLoadMore = () => {
+  void loadMoreNovels()
+}
+
 watch(
-  [
-    () => filters.keyword,
-    () => filters.order_by,
-    () => filters.order_direction,
-    () => filters.min_like,
-    () => filters.min_text,
-  ],
-  () => bridge.syncFilters(filters),
-  { immediate: true },
-)
-watch(activeSection, (val) => {
-  bridge.activeSection.value = val
-}, { immediate: true })
-watch(configLoadedAndApplied, (val) => {
-  bridge.configLoadedAndApplied.value = val
-}, { immediate: true })
-watch(batchMode, (val) => {
-  bridge.isBatchMode.value = val
-}, { immediate: true })
-
-// ---- Section & filter orchestration ----
-const syncActiveSection = () => {
-  activeSection.value = resolveSection(filters.keyword)
-}
-
-const applySectionOrdering = (id: SectionId) => {
-  const section = SECTIONS[id]
-  filters.order_by = section.order_by
-  filters.order_direction = section.order_direction
-}
-
-const applySection = (id: SectionId, rawKeyword?: string) => {
-  const section = SECTIONS[id]
-  filters.keyword = rawKeyword ?? section.keyword
-  activeSection.value = id
-  filters.min_like = section.min_like
-  filters.min_text = section.min_text
-  applySectionOrdering(id)
-  configLoadedAndApplied.value = true
-  handleSearch(undefined, { setOrdering: false })
-}
-
-const applyConfigAndLoad = () => {
-  if (configLoadedAndApplied.value) return
-
-  const initialSection = resolveSection(filters.keyword)
-  const config = systemConfig.value
-  if (config) {
-    const urlParams = new URLSearchParams(window.location.search)
-    const section = sectionFor(filters.keyword)
-    if (!urlParams.has('min_like')) {
-      filters.min_like = section.min_like
-    }
-    if (!urlParams.has('min_text')) {
-      filters.min_text = section.min_text
-    }
-  }
-  if (initialSection) applySectionOrdering(initialSection)
-
-  configLoadedAndApplied.value = true
-  syncActiveSection()
-  loadNovels()
-}
-
-// 全局「排除厌恶标签」开关在标签管理页变更后即时生效
-watch(
-  () => systemConfig.value?.exclude_blocked_tag_novels,
-  (val, old) => {
-    if (val !== undefined && old !== undefined && configLoadedAndApplied.value) {
-      handleSearch(undefined, { updateUrl: false })
-    }
+  () => filters.value,
+  () => {
+    window.scrollTo({ top: 0 })
   },
 )
 
-// Popstate / 搜索历史改写 filters.keyword 时反推 section
-watch(() => filters.keyword, (keyword) => {
-  if (!configLoadedAndApplied.value) return
-  const section = resolveSection(keyword)
-
-  if (lastFetchedKeyword.value === keyword) {
-    lastFetchedKeyword.value = null
-    if (section && section !== 'novels') {
-      const def = SECTIONS[section]
-      activeSection.value = section
-      filters.min_like = def.min_like
-      filters.min_text = def.min_text
-      applySectionOrdering(section)
-    } else {
-      activeSection.value = section
-    }
-    return
-  }
-
-  if (section && section !== 'novels') {
-    applySection(section)
-  } else {
-    activeSection.value = section
-  }
-})
-
-const handleSectionSearch = (_keyword: string | undefined, section: SectionId) => {
-  applySection(section)
-}
-
 const handleUpdateFilters = (patch: Partial<NovelFilters>) => {
-  Object.assign(filters, patch)
-  handleSearch()
-}
-
-const handleResetToDefaults = () => {
-  applySection('novels')
+  void updateFilters(patch)
 }
 
 const handleLogoClick = () => {
-  handleResetToDefaults()
-}
-
-const handleToggleBatchMode = () => {
-  if (batchMode.value) exitBatchMode()
-  else enterBatchMode()
+  void resetFilters()
 }
 
 const handleUploaded = () => {
+  void invalidateNovels()
   if (activeSection.value === 'uploads') {
-    applySection('uploads')
+    void navigateToSection('uploads')
   } else {
     toast.info('已入库，可在侧边栏「我的上传」查看')
   }
@@ -279,7 +187,7 @@ const handleBatchSelectAll = async () => {
   if (result.truncated) {
     toast.warning(
       `已全选匹配中的前 ${result.added} 篇（共匹配 ${result.total} 篇，` +
-      `超过单次操作上限）。可继续搜索细分后再次全选，已选不会丢失。`,
+        `超过单次操作上限）。可继续搜索细分后再次全选，已选不会丢失。`,
     )
   } else {
     toast.success(`已将 ${result.added} 篇匹配小说加入选择（当前已选 ${selectedCount.value} 篇）`)
@@ -290,17 +198,13 @@ const handleBatchClearScope = async () => {
   const result = await clearSelectionInScope()
   if (!result) return
   if (result.remaining === 0) {
-    toastInfoOrClear(result.removed)
+    toast.info(`已清空全部选择（${result.removed} 篇）`)
   } else {
     toast.info(
       `已清除当前范围勾选的 ${result.removed} 篇，` +
-      `另有 ${result.remaining} 篇来自其他搜索仍保留在已选中`,
+        `另有 ${result.remaining} 篇来自其他搜索仍保留在已选中`,
     )
   }
-}
-
-function toastInfoOrClear(removed: number) {
-  toast.info(`已清空全部选择（${removed} 篇）`)
 }
 
 function handleBarClear() {
@@ -317,12 +221,12 @@ function handleBatchToggleCard(id: number) {
     if (selectedView.novels.value.length === 0 && selectedView.hasMore.value) {
       void selectedView.loadMore()
     }
-    void nextTick().then(relayout)
+    void nextTick().then(measure)
   }
   toggleBatchCard(id)
 }
 
-const handleBatchOperationSuccess = (payload: {
+const handleBatchOperationSuccess = async (payload: {
   operation: string
   result: BatchOperationResult | BatchMetadataResult
 }) => {
@@ -337,11 +241,12 @@ const handleBatchOperationSuccess = (payload: {
     const skipped = 'skipped' in result ? result.skipped : 0
     toast.success(
       `已修改 ${result.affected} 篇的作者/系列` +
-      (skipped > 0 ? `（跳过 ${skipped} 篇 pixiv 书）` : ''),
+        (skipped > 0 ? `（跳过 ${skipped} 篇 pixiv 书）` : ''),
     )
   }
   clearBatchSelection()
-  handleSearch(undefined, { updateUrl: false })
+  await invalidateNovels()
+  void queryClient.invalidateQueries({ queryKey: ['novels', 'count'] })
 }
 
 const handleBatchTaskSubmitted = (payload: {
@@ -358,54 +263,65 @@ const handleBatchTaskSubmitted = (payload: {
   const isExport = payload.operation === 'export'
   toast.info(
     `${labels[payload.operation] ?? '批量操作'}已提交为后台任务 #${payload.task_id}` +
-    `（共 ${payload.matched} 篇）。可关闭页面，到「任务管理」查看进度` +
-    (isExport ? '，完成后在任务队列中点击下载。' : '。'),
+      `（共 ${payload.matched} 篇）。可关闭页面，到「任务管理」查看进度` +
+      (isExport ? '，完成后在任务队列中点击下载。' : '。'),
   )
   clearBatchSelection()
 }
 
 // ---- Card interaction handlers ----
-const fetchTagPreferences = async () => {
-  try {
-    tagPreferences.value = await tagPreferenceApi.getTagPreferences()
-  } catch (err: unknown) {
-    toast.error(getApiErrorMessage(err, '标签偏好加载失败'))
-  }
-}
-
 const handleToggleActive = (id: number | string) => {
   activeCardId.value = activeCardId.value === id ? null : id
 }
 
-const handleNovelStateChanged = (payload: NovelStateChange) => {
-  const sourceNovel =
-    novels.value.find(n => n.id === payload.id) ??
-    displayNovels.value.find(n => n.id === payload.id)
-  const authorId = sourceNovel?.author_id ?? undefined
-
-  for (const novel of novels.value) {
-    if (payload.field === 'is_special_follow' && authorId !== undefined) {
-      if (novel.author_id === authorId) {
-        novel.is_special_follow = payload.value
-      }
-    } else if (novel.id === payload.id) {
-      novel[payload.field] = payload.value
-    }
-  }
+const applyNovelStateChange = (payload: NovelStateChange, authorId?: number) => {
+  patchNovelStateInCache(payload, authorId)
   patchNovelState(payload, authorId)
+}
+
+const handleDownloadNovel = (novel: Novel) => {
+  downloadUrl(novelApi.downloadUrl(novel.id, novel.has_epub === 2 ? 'epub' : 'txt'))
+}
+
+const handleToggleFavourite = async (novel: Novel) => {
+  try {
+    await novelApi.toggleFavourite(novel.id)
+    applyNovelStateChange({
+      id: novel.id,
+      field: 'is_favourite',
+      value: novel.is_favourite ? 0 : 1,
+    })
+  } catch (err: unknown) {
+    toast.error(getApiErrorMessage(err, '收藏操作失败'))
+  }
+}
+
+const handleToggleFollow = async (novel: Novel) => {
+  if (!novel.author_id) return
+  try {
+    await novelApi.toggleSpecialFollow(novel.author_id)
+    applyNovelStateChange(
+      {
+        id: novel.id,
+        field: 'is_special_follow',
+        value: novel.is_special_follow ? 0 : 1,
+      },
+      novel.author_id,
+    )
+  } catch (err: unknown) {
+    toast.error(getApiErrorMessage(err, '追更操作失败'))
+  }
 }
 
 const handleNovelUpdated = (updated: Novel) => {
   if (editingNovel.value?.id === updated.id) editingNovel.value = updated
-  const target = novels.value.find(n => n.id === updated.id)
-  if (target) Object.assign(target, updated)
+  patchNovelInCache(updated)
   patchNovel(updated)
-  void nextTick().then(relayout)
+  void nextTick().then(measure)
 }
 
 const handleNovelDeleted = (novelId: number) => {
-  const idx = novels.value.findIndex(n => n.id === novelId)
-  if (idx >= 0) novels.value.splice(idx, 1)
+  removeNovelFromCache(novelId)
   removeNovel(novelId)
   removeBatchCard(novelId)
   if (activeCardId.value === novelId) activeCardId.value = null
@@ -413,42 +329,17 @@ const handleNovelDeleted = (novelId: number) => {
   if (viewingSelected.value && selectedView.novels.value.length === 0 && selectedView.hasMore.value) {
     void selectedView.loadMore()
   }
-  void nextTick().then(relayout)
+  void nextTick().then(measure)
   toast.success('已删除小说')
 }
-
-onMounted(() => {
-  void fetchTagPreferences()
-  bridge.register({
-    sectionSearch: handleSectionSearch,
-    updateFilters: handleUpdateFilters,
-    resetToDefaults: handleResetToDefaults,
-    toggleBatchMode: handleToggleBatchMode,
-  })
-
-  const pendingSection = bridge.consumePendingSection()
-  const wantBatch = bridge.consumePendingBatchMode()
-  void fetchConfig().then(() => {
-    if (pendingSection) {
-      applySection(pendingSection.section, pendingSection.keyword)
-    } else if (!configLoadedAndApplied.value) {
-      applyConfigAndLoad()
-    }
-    if (wantBatch && !batchMode.value) enterBatchMode()
-  })
-})
-
-onUnmounted(() => {
-  bridge.unregister()
-})
 </script>
 
 <template>
   <div class="flex-1 flex flex-col min-w-0 h-full" @click="activeCardId = null">
-    <div class="sticky top-0 z-20">
+    <div ref="stickyHeaderRef" class="sticky top-0 z-20">
       <NovelHeader
         :filters="filters"
-        @search="(keyword?: string) => handleSearch(keyword, { setOrdering: true })"
+        @search="(keyword?: string) => void handleSearch(keyword, { setOrdering: true })"
         @update:filters="handleUpdateFilters"
         @toggle-sidebar="emit('toggle-sidebar')"
         @logo-click="handleLogoClick"
@@ -485,21 +376,12 @@ onUnmounted(() => {
     </div>
 
     <main class="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 flex-grow">
-      <div v-if="error" class="bg-red-50 border-l-4 border-red-400 p-4 mb-6 rounded-md">
-        <div class="flex">
-          <div class="flex-shrink-0">
-            <svg class="h-5 w-5 text-red-400" viewBox="0 0 20 20" fill="currentColor">
-              <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" />
-            </svg>
-          </div>
-          <div class="ml-3">
-            <p class="text-sm text-red-700">{{ error }}</p>
-          </div>
-        </div>
-      </div>
+      <ErrorAlert :message="error" />
 
-      <!-- 查看已选时的视图提示 -->
-      <div v-if="viewingSelected" class="mb-4 text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded-md px-3 py-2">
+      <div
+        v-if="viewingSelected"
+        class="mb-4 text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded-md px-3 py-2"
+      >
         <template v-if="viewLoading">正在加载已选小说…</template>
         <template v-else>
           正在查看已选的小说（已展示 {{ viewShownCount }} / 共 {{ viewTotalCount }} 篇）。
@@ -507,8 +389,10 @@ onUnmounted(() => {
         </template>
       </div>
 
-      <!-- 查看被排除时的视图提示 -->
-      <div v-if="viewingExcluded" class="mb-4 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+      <div
+        v-if="viewingExcluded"
+        class="mb-4 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2"
+      >
         <template v-if="viewLoading">正在加载被排除的小说…</template>
         <template v-else>
           正在查看本次搜索中被排除的小说（已展示 {{ viewShownCount }} / 共 {{ viewTotalCount }} 篇）。
@@ -519,27 +403,33 @@ onUnmounted(() => {
       <div
         v-if="displayNovels.length > 0"
         ref="masonryContainerRef"
-        class="relative w-full"
-        :style="{ height: totalHeight + 'px', visibility: totalHeight ? 'visible' : 'hidden' }"
+        class="relative w-full [overflow-anchor:none]"
+        :style="{ height: `${totalHeight}px` }"
         data-testid="masonry-grid"
       >
-        <NovelCard
-          v-for="(novel, index) in displayNovels"
-          :key="novel.id"
-          :style="cardStyle()"
-          :data-anchor-id="String(novel.id)"
-          :novel="novel"
-          :is-active="activeCardId === novel.id"
-          :tag-preferences="tagPreferences"
-          :batch-mode="batchMode"
-          :batch-selected="isCardSelected(novel.id)"
-          :ref="el => setItemRef(index, el)"
-          @toggle-active="handleToggleActive"
-          @toggle-batch-select="handleBatchToggleCard"
-          @search="handleCardSearch"
-          @state-changed="handleNovelStateChanged"
-          @edit="editingNovel = $event"
-        />
+        <div
+          v-for="vItem in virtualItems"
+          :key="String(vItem.key)"
+          :data-index="vItem.index"
+          :ref="measureElement"
+          :style="itemStyle(vItem)"
+        >
+          <NovelCard
+            v-if="displayNovels[vItem.index]"
+            :novel="displayNovels[vItem.index]!"
+            :is-active="activeCardId === displayNovels[vItem.index]!.id"
+            :tag-preference-map="tagPreferenceMap"
+            :batch-mode="batchMode"
+            :batch-selected="isCardSelected(displayNovels[vItem.index]!.id)"
+            @toggle-active="handleToggleActive"
+            @toggle-batch-select="handleBatchToggleCard"
+            @search="(type: string, value: string | number) => void handleCardSearch(type, value)"
+            @toggle-favourite="(n) => void handleToggleFavourite(n)"
+            @toggle-follow="(n) => void handleToggleFollow(n)"
+            @download="handleDownloadNovel"
+            @edit="editingNovel = $event"
+          />
+        </div>
       </div>
 
       <div
@@ -569,59 +459,28 @@ onUnmounted(() => {
       />
     </main>
 
-    <BatchDeleteModal
-      :is-open="deleteOpen"
-      :scope="batchScope"
+    <NovelModalsHost
+      :delete-open="deleteOpen"
+      :tag-modal-open="tagModalOpen"
+      :tag-operation="tagOperation"
+      :batch-edit-open="batchEditOpen"
+      :export-open="exportOpen"
+      :editing-novel="editingNovel"
+      :upload-open="isUploadModalOpen"
+      :batch-scope="batchScope"
       :scope-label="scopeLabel"
-      @close="deleteOpen = false"
-      @success="(payload) => handleBatchOperationSuccess({ operation: 'delete', result: payload })"
-      @task-submitted="(payload) => handleBatchTaskSubmitted({ operation: 'delete', ...payload })"
-      @error="toast.error"
-    />
-    <BatchTagModal
-      :is-open="tagModalOpen"
-      :operation="tagOperation"
-      :scope="batchScope"
-      :scope-label="scopeLabel"
-      @close="tagModalOpen = false"
-      @success="(payload) => handleBatchOperationSuccess({ operation: tagOperation, result: payload })"
-      @task-submitted="(payload) => handleBatchTaskSubmitted({ operation: tagOperation, ...payload })"
-      @error="toast.error"
-    />
-    <BatchEditModal
-      :is-open="batchEditOpen"
-      :scope="batchScope"
-      :scope-label="scopeLabel"
-      @close="batchEditOpen = false"
-      @success="(payload) => handleBatchOperationSuccess({ operation: 'update_metadata', result: payload })"
-      @error="toast.error"
-    />
-    <BatchDownloadModal
-      :is-open="exportOpen"
-      :keyword="filters.keyword"
-      :order_by="filters.order_by"
-      :order_direction="filters.order_direction"
-      :min_like="filters.min_like"
-      :min_text="filters.min_text"
-      :novel-ids="batchScope?.novel_ids"
-      @close="exportOpen = false"
+      :filters="filters"
+      @close-delete="deleteOpen = false"
+      @close-tag="tagModalOpen = false"
+      @close-batch-edit="batchEditOpen = false"
+      @close-export="exportOpen = false"
+      @close-edit="editingNovel = null"
+      @close-upload="isUploadModalOpen = false"
+      @batch-success="(payload) => void handleBatchOperationSuccess(payload)"
+      @batch-task-submitted="handleBatchTaskSubmitted"
       @download-success="toast.success(`已开始下载：${$event}`)"
-      @download-error="toast.error"
-      @task-submitted="(payload) => handleBatchTaskSubmitted({ operation: 'export', ...payload })"
-    />
-
-    <EditNovelModal
-      :is-open="editingNovel !== null"
-      :novel="editingNovel"
-      @close="editingNovel = null"
-      @updated="handleNovelUpdated"
-      @deleted="handleNovelDeleted"
-      @error="toast.error"
-    />
-
-    <UploadModal
-      :is-open="isUploadModalOpen"
-      @close="isUploadModalOpen = false"
+      @novel-updated="handleNovelUpdated"
+      @novel-deleted="handleNovelDeleted"
       @uploaded="handleUploaded"
       @error="toast.error"
     />

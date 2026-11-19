@@ -20,7 +20,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, useId } from 'vue'
 import { CheckboxIndicator, CheckboxRoot, Label } from 'reka-ui'
 import { Check } from '@lucide/vue'
 
@@ -34,6 +34,6 @@ const emit = defineEmits<{
   (e: 'update:modelValue', value: boolean): void
 }>()
 
-const generatedId = computed(() => `app-checkbox-${Math.random().toString(36).substring(2, 9)}`)
-const id = computed(() => props.id || generatedId.value)
+const generatedId = useId()
+const id = computed(() => props.id || generatedId)
 </script>

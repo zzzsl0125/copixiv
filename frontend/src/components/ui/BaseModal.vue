@@ -30,9 +30,9 @@
           </div>
           <div class="bg-gray-50 px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse">
             <button type="submit" :disabled="loading || confirmDisabled" class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-blue-600 text-base font-medium text-white hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 sm:ml-3 sm:w-auto sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
-              {{ loading ? confirmText.replace(/保存/g, '保存中').replace(/确认/g, '确认中') : confirmText }}
+              {{ loading ? (loadingText || `${confirmText}中…`) : confirmText }}
             </button>
-            <button type="button" @click="close" class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 sm:mt-0 sm:ml-3 sm:w-auto sm:text-sm transition-colors">
+            <button type="button" :disabled="loading" @click="close" class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 sm:mt-0 sm:ml-3 sm:w-auto sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
               {{ cancelText }}
             </button>
             <!-- 次要动作（#extra-buttons）放 DOM 末位：footer 是 row-reverse，末位才渲染在
@@ -55,12 +55,14 @@ const props = withDefaults(defineProps<{
   title: string
   loading?: boolean
   confirmText?: string
+  loadingText?: string
   cancelText?: string
   /** Extra disable condition for the confirm button (e.g. validation). */
   confirmDisabled?: boolean
 }>(), {
   loading: false,
   confirmText: '保存',
+  loadingText: undefined,
   cancelText: '取消',
   confirmDisabled: false,
 })

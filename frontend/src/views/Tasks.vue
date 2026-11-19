@@ -1,45 +1,78 @@
 <script setup lang="ts">
-import { ref, watch, onMounted } from 'vue'
-import { taskApi, getApiErrorMessage } from '../api'
+import { computed, ref } from 'vue'
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/vue-query'
+import { getApiErrorMessage, queryKeys, taskApi } from '../api'
 import type { ScheduledTask } from '../types'
-import { usePagination, useToast, useTaskStatus } from '../composables'
+import { useConfirm, useTaskStatus, useToast } from '../composables'
 import ScheduledTaskList from '../components/features/ScheduledTaskList.vue'
 import TaskHistoryList from '../components/features/TaskHistoryList.vue'
 import TaskEditModal from '../components/features/TaskEditModal.vue'
 import PageHeader from '../components/features/PageHeader.vue'
 import SectionHeader from '../components/features/SectionHeader.vue'
+import ErrorAlert from '../components/ui/ErrorAlert.vue'
 
 defineOptions({ inheritAttrs: false })
 defineEmits<{ (e: 'toggle-sidebar'): void }>()
 
 const toast = useToast()
-// 全局任务状态单例：唯一轮询器。运行入队后立即置灰同函数的「运行」按钮。
-const { busyFuncNames, tick, notifyTaskEnqueued } = useTaskStatus()
+const { confirm } = useConfirm()
+const queryClient = useQueryClient()
+const { busyFuncNames, notifyTaskEnqueued } = useTaskStatus()
 const activeTab = ref<'scheduled' | 'history'>('scheduled')
+const cancellingIds = ref<Set<number>>(new Set())
 
-const {
-  items: tasks,
-  loading: loadingTasks,
-  loadData: loadTasks,
-} = usePagination(async () => taskApi.getScheduledTasks())
+const scheduledQuery = useQuery({
+  queryKey: queryKeys.tasksScheduled(),
+  queryFn: ({ signal }) => taskApi.getScheduledTasks(signal),
+})
+
+const historyPageSize = 50
+const historyQuery = useInfiniteQuery({
+  queryKey: queryKeys.tasksHistory(),
+  queryFn: ({ pageParam, signal }) => taskApi.getTaskHistory(historyPageSize, pageParam, signal),
+  initialPageParam: 0,
+  getNextPageParam: (lastPage, allPages) => {
+    const loaded = allPages.reduce((sum, p) => sum + p.items.length, 0)
+    return loaded < lastPage.total ? loaded : undefined
+  },
+  // Refresh history progress on the same 5s rhythm only while active tab is history and a task is busy.
+  refetchInterval: () =>
+    activeTab.value === 'history' && busyFuncNames.value.length > 0 ? 5000 : false,
+  refetchIntervalInBackground: false,
+})
+
+const tasks = computed(() => scheduledQuery.data.value ?? [])
+const loadingTasks = computed(() => scheduledQuery.isPending.value)
+const tasksError = computed(() =>
+  scheduledQuery.error.value ? getApiErrorMessage(scheduledQuery.error.value, '加载失败') : null,
+)
+
+const history = computed(() => historyQuery.data.value?.pages.flatMap((p) => p.items) ?? [])
+const loadingHistory = computed(
+  () => historyQuery.isPending.value || historyQuery.isFetchingNextPage.value,
+)
+const historyError = computed(() =>
+  historyQuery.error.value ? getApiErrorMessage(historyQuery.error.value, '加载失败') : null,
+)
+const hasMoreHistory = computed(() => historyQuery.hasNextPage.value)
 
 const isModalOpen = ref(false)
 const editingTask = ref<ScheduledTask | null>(null)
 const savingTask = ref(false)
 
-const {
-  items: history,
-  loading: loadingHistory,
-  loadData: loadHistory,
-  refresh: refreshHistory,
-  hasMore: hasMoreHistory,
-} = usePagination((offset, limit) => taskApi.getTaskHistory(limit, offset))
+const activeError = computed(() =>
+  activeTab.value === 'scheduled' ? tasksError.value : historyError.value,
+)
 
-// 单例每次成功轮询都会 +1 tick：历史页借用同一个 5s 节拍静默刷新，
-// 这样 running 行的 progress 仍然实时更新，而应用里依旧只有一个轮询器。
-watch(tick, () => {
-  if (activeTab.value === 'history') void refreshHistory({ silent: true })
-})
+const headerLoading = computed(() =>
+  activeTab.value === 'scheduled'
+    ? scheduledQuery.isFetching.value
+    : historyQuery.isFetching.value,
+)
+
+const loadTasks = () => scheduledQuery.refetch()
+const loadHistory = (loadMore = false) =>
+  loadMore ? historyQuery.fetchNextPage() : historyQuery.refetch()
 
 const openModal = (task?: ScheduledTask) => {
   editingTask.value = task || null
@@ -61,13 +94,17 @@ const saveTask = async (payload: Record<string, unknown>) => {
   savingTask.value = true
   try {
     if (editingTask.value) {
-      await taskApi.updateScheduledTask(editingTask.value.id, payload as unknown as Parameters<typeof taskApi.updateScheduledTask>[1])
+      await taskApi.updateScheduledTask(
+        editingTask.value.id,
+        payload as unknown as Parameters<typeof taskApi.updateScheduledTask>[1],
+      )
     } else {
-      await taskApi.createScheduledTask(payload as unknown as Parameters<typeof taskApi.createScheduledTask>[0])
+      await taskApi.createScheduledTask(
+        payload as unknown as Parameters<typeof taskApi.createScheduledTask>[0],
+      )
     }
-    // 保存成功后直接关闭（closeModal 在 savingTask=true 期间会被守卫拦截）
     dismissModal()
-    loadTasks()
+    await queryClient.invalidateQueries({ queryKey: queryKeys.tasksScheduled() })
   } catch (err: unknown) {
     toast.error(getApiErrorMessage(err, '保存失败，请检查网络或后端状态'))
   } finally {
@@ -78,17 +115,23 @@ const saveTask = async (payload: Record<string, unknown>) => {
 const toggleTask = async (task: ScheduledTask) => {
   try {
     await taskApi.updateScheduledTask(task.id, { is_enabled: !task.is_enabled })
-    loadTasks()
+    await queryClient.invalidateQueries({ queryKey: queryKeys.tasksScheduled() })
   } catch (err: unknown) {
     toast.error(getApiErrorMessage(err, '切换状态失败'))
   }
 }
 
 const deleteTask = async (id: number) => {
-  if (!confirm('确定要删除这个计划任务吗？')) return
+  const confirmed = await confirm({
+    title: '删除计划任务',
+    description: '确定要删除这个计划任务吗？',
+    confirmText: '确认删除',
+    variant: 'danger',
+  })
+  if (!confirmed) return
   try {
     await taskApi.deleteScheduledTask(id)
-    loadTasks()
+    await queryClient.invalidateQueries({ queryKey: queryKeys.tasksScheduled() })
   } catch (err: unknown) {
     toast.error(getApiErrorMessage(err, '删除失败'))
   }
@@ -104,17 +147,37 @@ const runTask = async (task: ScheduledTask) => {
   }
 }
 
-const reorderTasks = async (newTasks: ScheduledTask[]) => {
+const cancelTask = async (taskId: number) => {
+  if (cancellingIds.value.has(taskId)) return
+  const next = new Set(cancellingIds.value)
+  next.add(taskId)
+  cancellingIds.value = next
   try {
-    await taskApi.reorderScheduledTasks(newTasks.map(t => t.id))
-    loadTasks()
+    const res = await taskApi.cancelTask(taskId)
+    toast.info(res.status === 'cancelled' ? '已取消任务' : '已发送取消请求')
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: queryKeys.tasksHistory() }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.tasksBusy() }),
+    ])
   } catch (err: unknown) {
-    toast.error(getApiErrorMessage(err, '排序失败'))
-    loadTasks()
+    toast.error(getApiErrorMessage(err, '取消任务失败'))
+  } finally {
+    const remaining = new Set(cancellingIds.value)
+    remaining.delete(taskId)
+    cancellingIds.value = remaining
   }
 }
 
-onMounted(() => { loadTasks(); loadHistory() })
+const reorderTasks = async (newTasks: ScheduledTask[]) => {
+  queryClient.setQueryData(queryKeys.tasksScheduled(), newTasks)
+  try {
+    await taskApi.reorderScheduledTasks(newTasks.map((t) => t.id))
+  } catch (err: unknown) {
+    toast.error(getApiErrorMessage(err, '排序失败'))
+  } finally {
+    await queryClient.invalidateQueries({ queryKey: queryKeys.tasksScheduled() })
+  }
+}
 </script>
 
 <template>
@@ -128,20 +191,48 @@ onMounted(() => { loadTasks(); loadHistory() })
         @update:active-tab="activeTab = $event as 'scheduled' | 'history'"
         :add-button-text="activeTab === 'scheduled' ? '新增计划任务' : undefined"
         :show-refresh="true"
-        :loading="activeTab === 'scheduled' ? loadingTasks : loadingHistory"
+        :loading="headerLoading"
         @add="openModal()"
-        @refresh="activeTab === 'scheduled' ? loadTasks() : loadHistory()"
+        @refresh="activeTab === 'scheduled' ? void loadTasks() : void loadHistory()"
+      />
+
+      <ErrorAlert
+        :message="activeError"
+        :retryable="true"
+        @retry="activeTab === 'scheduled' ? void loadTasks() : void loadHistory()"
       />
 
       <div v-if="activeTab === 'scheduled'">
-        <ScheduledTaskList :tasks="tasks" :loading="loadingTasks" :busy-task-names="busyFuncNames" @edit="openModal" @delete="deleteTask" @toggle="toggleTask" @run="runTask" @reorder="reorderTasks" />
+        <ScheduledTaskList
+          :tasks="tasks"
+          :loading="loadingTasks"
+          :busy-task-names="busyFuncNames"
+          @edit="openModal"
+          @delete="deleteTask"
+          @toggle="toggleTask"
+          @run="runTask"
+          @reorder="reorderTasks"
+        />
       </div>
 
       <div v-if="activeTab === 'history'">
-        <TaskHistoryList :history="history" :loading="loadingHistory" :has-more="hasMoreHistory" @load-more="() => loadHistory(true)" />
+        <TaskHistoryList
+          :history="history"
+          :loading="loadingHistory"
+          :has-more="hasMoreHistory"
+          :cancelling-ids="cancellingIds"
+          @load-more="() => void loadHistory(true)"
+          @cancel="cancelTask"
+        />
       </div>
     </main>
 
-    <TaskEditModal :is-open="isModalOpen" :task="editingTask" :loading="savingTask" @close="closeModal" @save="saveTask" />
+    <TaskEditModal
+      :is-open="isModalOpen"
+      :task="editingTask"
+      :loading="savingTask"
+      @close="closeModal"
+      @save="saveTask"
+    />
   </div>
 </template>

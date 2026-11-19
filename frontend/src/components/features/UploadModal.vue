@@ -1,83 +1,45 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { X, FileUp as FileUpIcon, CheckCircle2, AlertCircle } from '@lucide/vue'
+import { CollapsibleContent, CollapsibleRoot, CollapsibleTrigger } from 'reka-ui'
+import { AlertCircle, CheckCircle2, FileUp as FileUpIcon, X } from '@lucide/vue'
 import BaseModal from '../ui/BaseModal.vue'
-import { libraryApi, novelApi, getApiErrorMessage } from '../../api'
-import { formatIdLookupHint, useIdLookup, useToast } from '../../composables'
+import FormField from '../ui/FormField.vue'
+import PixivIdLookupField from './PixivIdLookupField.vue'
+import { getApiErrorMessage, libraryApi, novelApi } from '../../api'
+import { useToast } from '../../composables'
 import { UPLOAD_STATUS_LABEL, formatFileSize } from '../../types'
-import type { AuthorLookup, UploadItemResult } from '../../types'
+import type { UploadItemResult } from '../../types'
 
 const props = defineProps<{
   isOpen: boolean
 }>()
 
 const emit = defineEmits<{
-  (e: 'close'): void
-  /** 入库成功（至少一条 created）或补挂了 EPUB —— 调用方刷新列表 / 重新加载当前 section。 */
-  (e: 'uploaded', summary: { created: number; duplicate: number; failed: number }): void
-  (e: 'error', message: string): void
+  close: []
+  uploaded: [summary: { created: number; duplicate: number; failed: number }]
+  error: [message: string]
 }>()
 
 const toast = useToast()
 
 const fileInputRef = ref<HTMLInputElement | null>(null)
-/** 待上传文件（跨多次选择累积；同名同大小的重复选择被忽略）。 */
 const files = ref<File[]>([])
-/** 后端逐条结果，按 filename 归并（重名文件合并为一条，与后端行为一致）。 */
 const results = ref<UploadItemResult[]>([])
 const uploading = ref(false)
-/** 上传进度：0-100，取浏览器 onUploadProgress 的字节比例。 */
 const progress = ref(0)
 const hasUploaded = ref(false)
-/** 本次提交的文件数（进度分母；提交后 files 会被结果批清空，故单独记）。 */
 const batchTotal = ref(0)
 
-/** 「预设作者」折叠区：默认收起——多数上传按文件名解析作者就够了。 */
 const presetOpen = ref(false)
-/** 整批共用的作者 ID（输入框原文）；提交后**保留**，同一批书可以分多次传。 */
 const presetAuthorId = ref('')
+const presetIdNumber = ref<number | null | undefined>(null)
+const presetFieldRef = ref<InstanceType<typeof PixivIdLookupField> | null>(null)
 
-/**
- * 预设作者与编辑 / 批量编辑弹窗共用 `useIdLookup`（防抖 / 过期响应丢弃 /
- * 失败不拦上传）。`currentId` 恒 `null`：上传是**新建**，没有"这本书当前挂的值"，
- * hint 因此自然走"将按此 ID 关联 / 未查到 / ✓ 名字"那几档。
- */
-const authorLookup = useIdLookup<AuthorLookup>({
-  input: presetAuthorId,
-  currentId: () => null,
-  fetch: (id) => novelApi.lookupAuthor(id),
-})
+const presetInvalid = computed(() => presetIdNumber.value === undefined)
+const presetAuthor = computed(() =>
+  typeof presetIdNumber.value === 'number' ? presetIdNumber.value : null,
+)
 
-/** 解析 hint：绿＝确认、灰＝无需动作、黄＝能传但名字待补、红＝拦住上传。 */
-const authorHint = computed(() => formatIdLookupHint({
-  entity: '作者',
-  idNumber: authorLookup.idNumber.value,
-  currentId: null,
-  // currentId 恒 null 时它只用于"当前就是它"那一档，这里到不了；给空串即可。
-  currentName: '',
-  loading: authorLookup.loading.value,
-  failed: authorLookup.failed.value,
-  found: authorLookup.result.value
-    ? {
-        name: authorLookup.result.value.author_name,
-        novelCount: authorLookup.result.value.novel_count,
-      }
-    : null,
-  emptyNote: '留空 = 按文件名解析作者',
-  // 「解绑」那一档到不了（currentId 恒 null——上传是新建，没有解绑这回事），
-  // 但共享函数要求给一句：这里给与留空同一句承诺，两档在上传里本来就是一件事。
-  unlinkNote: '留空 = 按文件名解析作者',
-}))
-
-/** 非法 ID（非数字 / `0` / 负数 / 小数）拦上传：服务端 400 / 422，本地先给红字。 */
-const presetInvalid = computed(() => authorLookup.idNumber.value === undefined)
-
-/** 交给后端的预设作者：只认合法正整数，其余（含非法）一律当"不预设"。 */
-const presetAuthor = computed(() => (
-  typeof authorLookup.idNumber.value === 'number' ? authorLookup.idNumber.value : null
-))
-
-/** 折叠按钮文案：收起时若已有预设要看得见，否则一个被收起的预设会悄悄生效。 */
 const presetToggleLabel = computed(() => {
   if (presetOpen.value) return '− 预设作者'
   const preset = presetAuthorId.value.trim()
@@ -90,7 +52,6 @@ const summary = computed(() => ({
   failed: results.value.filter((r) => r.status === 'failed').length,
 }))
 
-/** 上传中「已完成/总数」：已回结果的条数 / 本次提交的文件数。 */
 const progressLabel = computed(() => `${results.value.length}/${batchTotal.value}`)
 
 const reset = (options: { keepPreset?: boolean } = {}) => {
@@ -101,25 +62,25 @@ const reset = (options: { keepPreset?: boolean } = {}) => {
   hasUploaded.value = false
   batchTotal.value = 0
   if (fileInputRef.value) fileInputRef.value.value = ''
-  // 预设作者跨「继续上传其他文件」保留（同一批书分多次传，不必重填）；
-  // 重新打开弹窗则是新的一批：连同折叠态一起回到默认（要清空也由用户自己动手）。
   if (!options.keepPreset) {
     presetOpen.value = false
     presetAuthorId.value = ''
-    authorLookup.schedule()
+    presetFieldRef.value?.schedule()
   }
 }
 
-watch(() => props.isOpen, (open) => {
-  if (open) reset()
-})
+watch(
+  () => props.isOpen,
+  (open) => {
+    if (open) reset()
+  },
+)
 
 const openPicker = () => fileInputRef.value?.click()
 
 const handleFilePick = (event: Event) => {
   const input = event.target as HTMLInputElement
   const picked = Array.from(input.files || [])
-  // 同一次选择里也可能带重复（大小相同即视为同一份），按 (name, size) 去重。
   const known = new Set(files.value.map((f) => `${f.name}:${f.size}`))
   for (const file of picked) {
     const key = `${file.name}:${file.size}`
@@ -127,7 +88,6 @@ const handleFilePick = (event: Event) => {
     known.add(key)
     files.value.push(file)
   }
-  // 清空 input.value：否则再次选择同一文件不会触发 change。
   input.value = ''
 }
 
@@ -137,19 +97,21 @@ const removeFile = (index: number) => {
 }
 
 const handleUpload = async () => {
-  // 非法预设作者不发请求（服务端 400 / 422）：按钮已禁用，这里是第二道闸。
   if (uploading.value || files.value.length === 0 || presetInvalid.value) return
   const pending = [...files.value]
   uploading.value = true
   progress.value = 0
   batchTotal.value = pending.length
   try {
-    const res = await libraryApi.uploadFiles(pending, (percent) => {
-      progress.value = percent
-    }, presetAuthor.value)
+    const res = await libraryApi.uploadFiles(
+      pending,
+      (percent) => {
+        progress.value = percent
+      },
+      presetAuthor.value,
+    )
     const batch = res.results || []
     results.value = [...results.value, ...batch]
-    // 后端按 filename 归并；重名文件不重复排队，未回结果的继续留在待上传列表。
     const answered = new Set(batch.map((r) => r.filename))
     files.value = pending.filter((f) => !answered.has(f.name))
     hasUploaded.value = true
@@ -159,37 +121,31 @@ const handleUpload = async () => {
       duplicate: batch.filter((r) => r.status === 'duplicate').length,
       failed: batch.filter((r) => r.status === 'failed').length,
     }
-    // 重复件补挂 EPUB（§4.1）：书本来就在库里，只是这次把原件补了上去——
-    // 列表里的 EPUB 徽章会变，所以它也是一种"改了库"的信号。不算进 emit 的
-    // 三态计数（那是契约字段），只用来决定文案与要不要刷新。
     const attached = batch.filter((r) => r.epub_attached).length
     if (counts.created > 0) {
       toast.success(`已入库 ${counts.created} 本`)
     }
     if (counts.duplicate > 0) {
-      toast.info(attached > 0
-        ? `${counts.duplicate} 个文件已在库中，其中 ${attached} 个补挂了 EPUB`
-        : `${counts.duplicate} 个文件已在库中（同一份正文）`)
+      toast.info(
+        attached > 0
+          ? `${counts.duplicate} 个文件已在库中，其中 ${attached} 个补挂了 EPUB`
+          : `${counts.duplicate} 个文件已在库中（同一份正文）`,
+      )
     }
     if (counts.failed > 0) toast.warning(`${counts.failed} 个文件上传失败，详见结果列表`)
-    // 有入库、或补挂了 EPUB，都要让调用方刷新列表（否则 EPUB 徽章要等手动刷新）。
     if (counts.created > 0 || attached > 0) {
       emit('uploaded', counts)
     }
-    // 部分成功也要能刷新列表：只要有一本入库就足够。
     if (counts.created === 0 && counts.duplicate === 0 && counts.failed === 0) {
       toast.warning('后端没有返回任何上传结果')
     }
   } catch (err: unknown) {
-    // 网络/整包错误（无文件 400、后端异常）：逐条结果不可用，整体报错。
     emit('error', getApiErrorMessage(err, '上传失败'))
   } finally {
     uploading.value = false
   }
 }
 
-/** 「继续上传」：清掉结果与待上传列表，回到选择态（已入库的书已在列表里）。
- *  预设作者**不清**：同一批书分多次传是很常见的走法，不必重填。 */
 const uploadMore = () => {
   reset({ keepPreset: true })
   openPicker()
@@ -227,7 +183,7 @@ const uploadMore = () => {
       <div class="flex gap-2">
         <button
           type="button"
-          class="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-700 bg-gray-50 hover:bg-gray-100 rounded-md transition-colors"
+          class="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-700 bg-gray-50 hover:bg-gray-100 rounded-md transition-colors cursor-pointer"
           :disabled="uploading"
           data-testid="upload-pick-button"
           @click="openPicker"
@@ -239,67 +195,58 @@ const uploadMore = () => {
         </span>
       </div>
 
-      <!-- 预设作者（整批共用，可选）：默认收起——多数上传按文件名解析作者就够了。
-           展开后两个字段并排，与批量编辑弹窗同构（label + input + 一行 hint）；
-           作者是正整数 pixiv ID，解析 hint 走共享函数（与编辑弹窗同一套语气）。
-           系列**先不管**：只留一个置灰占位行，不给任何输入逻辑。 -->
-      <div>
-        <button
+      <CollapsibleRoot v-model:open="presetOpen" :unmount-on-hide="true">
+        <CollapsibleTrigger
           type="button"
-          class="text-xs text-blue-600 hover:text-blue-800"
-          :aria-expanded="presetOpen"
+          class="text-xs text-blue-600 hover:text-blue-800 cursor-pointer"
           data-testid="upload-preset-toggle"
-          @click="presetOpen = !presetOpen"
         >
           {{ presetToggleLabel }}
-        </button>
+        </CollapsibleTrigger>
 
-        <div v-if="presetOpen" class="mt-2 grid gap-x-3 gap-y-2 sm:grid-cols-2">
-          <div class="min-w-0">
-            <label class="block text-sm font-medium text-gray-700" for="upload-preset-author">作者 ID</label>
-            <input
-              id="upload-preset-author"
+        <CollapsibleContent class="mt-2 grid gap-x-3 gap-y-2 sm:grid-cols-2">
+          <div>
+            <PixivIdLookupField
+              ref="presetFieldRef"
               v-model="presetAuthorId"
-              type="text"
-              inputmode="numeric"
-              autocomplete="off"
+              entity="作者"
+              label="作者 ID"
+              :fetch="novelApi.lookupAuthor"
               placeholder="如 1234567"
-              data-testid="upload-preset-author-input"
-              class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+              empty-note="留空 = 按文件名解析作者"
+              unlink-note="留空 = 按文件名解析作者"
+              input-test-id="upload-preset-author-input"
+              hint-test-id="upload-preset-author-hint"
+              @update:id-number="presetIdNumber = $event"
             />
             <p
-              class="mt-0.5 text-xs"
-              :class="{
-                'text-gray-400': authorHint.tone === 'muted',
-                'text-green-600': authorHint.tone === 'ok',
-                'text-amber-600': authorHint.tone === 'warn',
-                'text-red-600': authorHint.tone === 'error',
-              }"
-              data-testid="upload-preset-author-hint"
+              v-if="presetInvalid"
+              class="mt-0.5 text-xs text-red-600"
+              data-testid="upload-preset-author-error"
             >
-              {{ authorHint.text }}
-            </p>
-            <p v-if="presetInvalid" class="mt-0.5 text-xs text-red-600" data-testid="upload-preset-author-error">
               作者 ID 必须是正整数
             </p>
           </div>
 
-          <!-- 系列：后续版本支持（占位；无 v-model、无校验，就是不接逻辑） -->
-          <div class="min-w-0" data-testid="upload-preset-series-disabled">
-            <label class="block text-sm font-medium text-gray-400" for="upload-preset-series">系列 ID</label>
-            <input
-              id="upload-preset-series"
-              type="text"
-              disabled
-              placeholder="—"
-              class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm sm:text-sm disabled:bg-gray-100 disabled:text-gray-500 disabled:cursor-not-allowed"
-            />
-            <p class="mt-0.5 text-xs text-gray-400">系列：后续版本支持</p>
-          </div>
-        </div>
-      </div>
+          <FormField
+            label="系列 ID"
+            :disabled="true"
+            hint="系列：后续版本支持"
+            data-testid="upload-preset-series-disabled"
+          >
+            <template #default="{ id }">
+              <input
+                :id="id"
+                type="text"
+                disabled
+                placeholder="—"
+                class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm sm:text-sm disabled:bg-gray-100 disabled:text-gray-500 disabled:cursor-not-allowed"
+              />
+            </template>
+          </FormField>
+        </CollapsibleContent>
+      </CollapsibleRoot>
 
-      <!-- 上传中：进度 + 待上传列表 -->
       <div v-if="uploading" data-testid="upload-progress">
         <div class="flex justify-between text-xs text-gray-600 mb-1">
           <span>上传中…</span>
@@ -310,15 +257,22 @@ const uploadMore = () => {
         </div>
       </div>
 
-      <!-- 待上传列表（文件名 + 大小，可移除） -->
-      <ul v-if="files.length > 0" class="divide-y divide-gray-100 border border-gray-200 rounded-md" data-testid="upload-file-list">
-        <li v-for="(file, index) in files" :key="`${file.name}:${file.size}`" class="flex items-center justify-between px-3 py-2">
+      <ul
+        v-if="files.length > 0"
+        class="divide-y divide-gray-100 border border-gray-200 rounded-md"
+        data-testid="upload-file-list"
+      >
+        <li
+          v-for="(file, index) in files"
+          :key="`${file.name}:${file.size}`"
+          class="flex items-center justify-between px-3 py-2"
+        >
           <span class="truncate mr-2" :title="file.name">{{ file.name }}</span>
           <span class="flex items-center gap-2 shrink-0">
             <span class="text-xs text-gray-400">{{ formatFileSize(file.size) }}</span>
             <button
               type="button"
-              class="text-gray-400 hover:text-red-500 disabled:opacity-40 disabled:cursor-not-allowed"
+              class="text-gray-400 hover:text-red-500 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
               :disabled="uploading"
               :aria-label="`移除 ${file.name}`"
               data-testid="upload-remove-file"
@@ -330,7 +284,6 @@ const uploadMore = () => {
         </li>
       </ul>
 
-      <!-- 逐条结果 -->
       <div v-if="results.length > 0" data-testid="upload-result-list">
         <div class="flex items-center justify-between mb-1">
           <span class="font-medium text-gray-700">上传结果</span>
@@ -339,12 +292,22 @@ const uploadMore = () => {
           </span>
         </div>
         <ul class="divide-y divide-gray-100 border border-gray-200 rounded-md max-h-56 overflow-y-auto">
-          <li v-for="(item, index) in results" :key="`${item.filename}:${index}`" class="px-3 py-2">
+          <li
+            v-for="(item, index) in results"
+            :key="`${item.filename}:${index}`"
+            class="px-3 py-2"
+          >
             <div class="flex items-start justify-between gap-2">
               <span class="truncate" :title="item.filename">{{ item.filename }}</span>
               <span
                 class="shrink-0 inline-flex items-center gap-1 text-xs font-medium"
-                :class="item.status === 'created' ? 'text-green-600' : item.status === 'duplicate' ? 'text-amber-600' : 'text-red-600'"
+                :class="
+                  item.status === 'created'
+                    ? 'text-green-600'
+                    : item.status === 'duplicate'
+                      ? 'text-amber-600'
+                      : 'text-red-600'
+                "
               >
                 <CheckCircle2 v-if="item.status === 'created'" class="h-3.5 w-3.5" />
                 <AlertCircle v-else class="h-3.5 w-3.5" />
@@ -357,9 +320,6 @@ const uploadMore = () => {
               <template v-if="typeof item.text === 'number'"> · {{ item.text }} 字</template>
               <template v-if="typeof item.novel_id === 'number'"> · id {{ item.novel_id }}</template>
             </p>
-            <!-- 重复：指出已有那本（标题 + id），便于过去查看；若这次预设了作者，
-                 响应会把写进去的作者名回显出来（重复件也被应用了作者）；若这次
-                 传的是 EPUB 且补挂成功，再补一句（原件已进库，徽章会亮）。 -->
             <p v-else-if="item.status === 'duplicate'" class="mt-0.5 text-xs text-gray-500">
               已在库中：《{{ item.title || '未知标题' }}》
               <template v-if="typeof item.novel_id === 'number'"> · id {{ item.novel_id }}</template>
@@ -371,7 +331,7 @@ const uploadMore = () => {
         </ul>
         <button
           type="button"
-          class="mt-2 text-xs text-blue-600 hover:text-blue-800"
+          class="mt-2 text-xs text-blue-600 hover:text-blue-800 cursor-pointer"
           data-testid="upload-more"
           @click="uploadMore"
         >

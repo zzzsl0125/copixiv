@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { Search, Menu } from '@lucide/vue'
 import AppLogo from '../ui/AppLogo.vue'
 import SearchHistoryPopup from './SearchHistoryPopup.vue'
-import { searchHistoryApi, getApiErrorMessage } from '../../api'
+import { getApiErrorMessage, queryKeys, searchHistoryApi } from '../../api'
 import { useToast } from '../../composables'
-import type { SearchHistory, NovelFilters } from '../../types'
+import type { NovelFilters, SearchHistory } from '../../types'
 
 const props = defineProps<{
   filters: Pick<NovelFilters, 'keyword' | 'order_by' | 'order_direction'>
@@ -19,42 +20,41 @@ const emit = defineEmits<{
 }>()
 
 const toast = useToast()
+const queryClient = useQueryClient()
 const localKeyword = ref(props.filters.keyword)
 
-watch(() => props.filters.keyword, (newKeyword) => {
-  localKeyword.value = newKeyword
-})
+watch(
+  () => props.filters.keyword,
+  (newKeyword) => {
+    localKeyword.value = newKeyword
+  },
+)
 
 const performSearch = () => {
   showHistory.value = false
   emit('search', localKeyword.value)
 }
 
-const history = ref<SearchHistory[]>([])
 const showHistory = ref(false)
 const searchContainer = ref<HTMLElement | null>(null)
 
-// Focus-refetch throttle: repeated focus/unfocus cycles must not hit the
-// API every time.  Deletes/clears pass force=true to refresh immediately.
-let lastHistoryFetch = 0
-const HISTORY_CACHE_MS = 30_000
+const historyQuery = useQuery({
+  queryKey: queryKeys.searchHistory(),
+  queryFn: ({ signal }) => searchHistoryApi.getSearchHistory(signal),
+  staleTime: 30_000,
+  enabled: showHistory,
+})
 
-const fetchHistory = async (force = false) => {
-  const now = Date.now()
-  if (!force && history.value.length > 0 && now - lastHistoryFetch < HISTORY_CACHE_MS) {
-    return
-  }
-  lastHistoryFetch = now
-  try {
-    history.value = await searchHistoryApi.getSearchHistory()
-  } catch (err: unknown) {
-    toast.error(getApiErrorMessage(err, '搜索历史加载失败'))
-    history.value = []
-  }
-}
+watch(
+  () => historyQuery.error.value,
+  (err) => {
+    if (err) toast.error(getApiErrorMessage(err, '搜索历史加载失败'))
+  },
+)
+
+const history = computed<SearchHistory[]>(() => historyQuery.data.value ?? [])
 
 const handleFocus = () => {
-  fetchHistory()
   showHistory.value = true
 }
 
@@ -71,7 +71,7 @@ const handleSelectItem = (item: SearchHistory) => {
 const handleDeleteItem = async (id: number) => {
   try {
     await searchHistoryApi.deleteSearchHistoryItem(id)
-    fetchHistory(true)
+    await queryClient.invalidateQueries({ queryKey: queryKeys.searchHistory() })
   } catch (err: unknown) {
     toast.error(getApiErrorMessage(err, '删除搜索历史失败'))
   }
@@ -80,7 +80,7 @@ const handleDeleteItem = async (id: number) => {
 const handleClearAll = async () => {
   try {
     await searchHistoryApi.clearSearchHistory()
-    history.value = []
+    queryClient.setQueryData(queryKeys.searchHistory(), [])
     showHistory.value = false
   } catch (err: unknown) {
     toast.error(getApiErrorMessage(err, '清空搜索历史失败'))
@@ -108,7 +108,11 @@ onBeforeUnmount(() => {
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
       <div class="flex flex-row gap-4 items-center justify-between">
         <div class="flex items-center gap-3">
-          <button @click="$emit('toggle-sidebar')" class="md:hidden p-1 -ml-1 text-gray-500 hover:text-gray-700 focus:outline-none flex-shrink-0" aria-label="打开菜单">
+          <button
+            @click="$emit('toggle-sidebar')"
+            class="md:hidden p-1 -ml-1 text-gray-500 hover:text-gray-700 focus:outline-none flex-shrink-0"
+            aria-label="打开菜单"
+          >
             <Menu class="h-6 w-6" aria-hidden="true" />
           </button>
           <AppLogo className="flex-shrink-0" @click="$emit('logo-click')" />
@@ -116,7 +120,10 @@ onBeforeUnmount(() => {
 
         <div class="flex flex-row gap-4 items-center justify-end flex-grow min-w-0">
           <div ref="searchContainer" class="relative w-full max-w-md min-w-0">
-            <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none" aria-hidden="true">
+            <div
+              class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"
+              aria-hidden="true"
+            >
               <Search class="h-5 w-5 text-gray-400" />
             </div>
             <input

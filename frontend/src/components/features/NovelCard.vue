@@ -1,8 +1,6 @@
 <script setup lang="ts">
-import { computed, type PropType } from 'vue'
-import { novelApi, getApiErrorMessage } from '../../api'
-import { downloadUrl, formatNumber } from '../../lib/utils'
-import { useToast } from '../../composables'
+import { computed } from 'vue'
+import { formatNumber } from '../../lib/utils'
 import type { Novel, TagPreference } from '../../types'
 
 export interface NovelStateChange {
@@ -11,36 +9,29 @@ export interface NovelStateChange {
   value: number
 }
 
-const props = defineProps({
-  novel: { type: Object as PropType<Novel>, required: true },
-  isActive: { type: Boolean, required: true },
-  tagPreferences: { type: Array as PropType<TagPreference[]>, default: () => [] },
-  batchMode: { type: Boolean, default: false },
-  batchSelected: { type: Boolean, default: false },
-})
-
-const emit = defineEmits<{
-  (e: 'search', type: 'author' | 'series' | 'tag', value: string | number): void
-  (e: 'toggle-active', id: number | string): void
-  (e: 'state-changed', payload: NovelStateChange): void
-  (e: 'toggle-batch-select', id: number): void
-  /** 打开元数据编辑弹窗。带上**完整**对象：卡片手里就是初值，弹窗不必再请求。 */
-  (e: 'edit', novel: Novel): void
+const props = defineProps<{
+  novel: Novel
+  isActive: boolean
+  tagPreferenceMap?: ReadonlyMap<string, TagPreference['preference']>
+  batchMode?: boolean
+  batchSelected?: boolean
 }>()
 
-const toast = useToast()
+const emit = defineEmits<{
+  search: [type: 'author' | 'series' | 'tag', value: string | number]
+  'toggle-active': [id: number | string]
+  'toggle-batch-select': [id: number]
+  'toggle-favourite': [novel: Novel]
+  'toggle-follow': [novel: Novel]
+  download: [novel: Novel]
+  edit: [novel: Novel]
+}>()
+
 const showMobileActions = computed(() => props.isActive)
 const hasEpubReady = computed(() => props.novel.has_epub === 2)
-/** 源文件丢失（4）：本地没有正文，只能重新下载，别再假装"待处理"。 */
 const isMissingSource = computed(() => props.novel.has_epub === 4)
-/** 本地上传的书（novel.source === 'local'，TXT / EPUB 都是）。 */
 const isLocal = computed(() => props.novel.source === 'local')
 
-/** 卡片小标签：全部渲染在同一个区域（`novel-badges`）。
- *
- * 这里是标签的**单源**——新增一种标签只需往数组里加一项（label + 配色 + 悬浮说明），
- * 几何样式（尺寸/圆角/字号）在模板里共用一份，不必再往模板里插 span。
- */
 const badges = computed(() => {
   const list: { key: string; label: string; class: string; title: string }[] = []
   if (isLocal.value) {
@@ -71,9 +62,6 @@ const badges = computed(() => {
 })
 
 const handleCardClick = (e: Event) => {
-  // 必须阻止冒泡：父容器用 @click="activeCardId = null" 实现「点外部收起」，
-  // 若不拦截，本次点击会在设置 active 后立刻把它复位 → 移动端抽屉永远打不开
-  // （桌面端被 hover 路径掩盖，所以此前一直没暴露）。
   e.stopPropagation()
   if (props.batchMode) {
     emit('toggle-batch-select', props.novel.id)
@@ -82,7 +70,9 @@ const handleCardClick = (e: Event) => {
   emit('toggle-active', props.novel.id)
 }
 
-const stopPropagation = (e: Event) => { e.stopPropagation() }
+const stopPropagation = (e: Event) => {
+  e.stopPropagation()
+}
 
 const handleTitleClick = (e: Event) => {
   if (props.batchMode) {
@@ -106,52 +96,7 @@ const handleAuthorClick = (e: Event) => {
   emit('search', 'author', props.novel.author_id)
 }
 
-const handleToggleFavourite = async (e: Event) => {
-  e.stopPropagation()
-  try {
-    await novelApi.toggleFavourite(props.novel.id)
-    emit('state-changed', {
-      id: props.novel.id,
-      field: 'is_favourite',
-      value: props.novel.is_favourite ? 0 : 1,
-    })
-  } catch (err: unknown) {
-    toast.error(getApiErrorMessage(err, '收藏操作失败'))
-  }
-}
-
-const handleToggleFollow = async (e: Event) => {
-  e.stopPropagation()
-  if (!props.novel.author_id) return
-  try {
-    await novelApi.toggleSpecialFollow(props.novel.author_id)
-    emit('state-changed', {
-      id: props.novel.id,
-      field: 'is_special_follow',
-      value: props.novel.is_special_follow ? 0 : 1,
-    })
-  } catch (err: unknown) {
-    toast.error(getApiErrorMessage(err, '追更操作失败'))
-  }
-}
-
-const handleDownload = (e: Event) => {
-  e.stopPropagation()
-  // Navigate straight to the attachment URL: the server's
-  // Content-Disposition drives the download and suggested filename, so it
-  // works in in-app browsers / WebViews that don't support blob: downloads.
-  downloadUrl(novelApi.downloadUrl(props.novel.id, hasEpubReady.value ? 'epub' : 'txt'))
-}
-
-/** 打开元数据编辑弹窗 —— 把完整对象交给父组件（它负责模态宿主与列表回写）。 */
-const handleEdit = (e: Event) => {
-  e.stopPropagation()
-  emit('edit', props.novel)
-}
-
 const likeBorderClass = computed(() => {
-  // Batch mode: the blue ring OVERRIDES the like-tier ring only while the
-  // card is selected — unselected cards keep their like-colored border.
   if (props.batchMode && props.batchSelected) {
     return 'ring-2 ring-blue-400 border-transparent shadow-[0_0_15px_rgba(59,130,246,0.25)]'
   }
@@ -162,22 +107,8 @@ const likeBorderClass = computed(() => {
   return 'border-gray-100'
 })
 
-/** 标签偏好预索引：tag → preference。
- *
- * 原先每个标签各做一次 `props.tagPreferences.find(...)`（13 标签 × 19 条偏好 ≈ 247 次比较/卡），
- * 现在是每张卡只遍历偏好数组一次。`computed` 依赖 props.tagPreferences，父组件换数组即重建。
- * 重复 tag 取第一条，与原来 `find()` 的「先到先得」语义一致。
- */
-const tagPreferenceMap = computed(() => {
-  const map = new Map<string, TagPreference['preference']>()
-  for (const p of props.tagPreferences) {
-    if (!map.has(p.tag)) map.set(p.tag, p.preference)
-  }
-  return map
-})
-
 const getTagClass = (tag: string) => {
-  const preference = tagPreferenceMap.value.get(tag)
+  const preference = props.tagPreferenceMap?.get(tag)
   if (preference === 'favourite') return 'bg-blue-100 text-blue-800 font-bold'
   if (preference === 'blocked') return 'line-through text-red-400 bg-gray-50'
   return 'bg-gray-100 text-gray-800'
@@ -240,7 +171,9 @@ const getTagClass = (tag: string) => {
       </div>
 
       <div class="flex flex-wrap gap-1">
-        <span v-for="(tag, idx) in novel.tags || []" :key="idx"
+        <span
+          v-for="(tag, idx) in novel.tags || []"
+          :key="idx"
           class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium cursor-pointer hover:bg-gray-200 hover:text-blue-600 transition-colors"
           :class="getTagClass(tag)"
           @click="stopPropagation($event); emit('search', 'tag', tag)"
@@ -251,15 +184,17 @@ const getTagClass = (tag: string) => {
     </div>
 
     <div class="px-5 py-4 bg-gray-50 border-t border-gray-100 flex flex-col gap-3 relative overflow-hidden">
-      <div class="flex justify-between items-center text-xs text-gray-500 transition-opacity duration-300"
-           :class="[batchMode ? 'opacity-100' : (showMobileActions ? 'opacity-0' : 'opacity-100 group-hover:opacity-0')]">
+      <div
+        class="flex justify-between items-center text-xs text-gray-500 transition-opacity duration-300"
+        :class="[batchMode ? 'opacity-100' : (showMobileActions ? 'opacity-0' : 'opacity-100 group-hover:opacity-0')]"
+      >
         <div class="flex items-center gap-3">
           <span class="flex items-center gap-1" title="喜爱">❤️ {{ formatNumber(novel.like) }}</span>
           <span class="flex items-center gap-1" title="字数">📝 {{ formatNumber(novel.text) }}</span>
-          <span class="flex items-center gap-1" title="日期">📝 {{ (novel.create_time || '2016-01-01').substring(0, 10) }}</span>
+          <span class="flex items-center gap-1" title="日期">
+            📅 {{ novel.create_time ? novel.create_time.substring(0, 10) : '—' }}
+          </span>
         </div>
-        <!-- 小标签区：本地 / EPUB …… 同一区域排布（数据源见 script 的 badges）；
-             位置与既有的 EPUB 徽章一致（页脚行右端），随该行一起在 hover 时让位给操作条。 -->
         <div v-if="badges.length" class="flex items-center gap-1 shrink-0" data-testid="novel-badges">
           <span
             v-for="badge in badges"
@@ -281,8 +216,6 @@ const getTagClass = (tag: string) => {
           'translate-y-full',
           'group-hover:translate-y-0',
           showMobileActions ? 'translate-y-0!' : '',
-          // 磨砂只在展开时生效：常驻 backdrop-blur 会给每张卡建一个合成层
-          // （300 张卡 = 300 个 backdrop-filter 图层，即使抽屉已移出可视区）。
           showMobileActions ? 'backdrop-blur-sm' : 'group-hover:backdrop-blur-sm',
         ]"
         @click="stopPropagation"
@@ -290,28 +223,31 @@ const getTagClass = (tag: string) => {
         <div class="flex-1 flex gap-2 h-full">
           <button
             class="flex-1 flex items-center justify-center text-xs font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors cursor-pointer"
-            @click="handleDownload"
+            data-testid="novel-download"
+            @click="stopPropagation($event); emit('download', novel)"
           >
             下载
           </button>
           <button
             class="flex-1 flex items-center justify-center text-xs font-medium rounded-lg transition-colors cursor-pointer"
             :class="novel.is_favourite ? 'text-white bg-red-500 hover:bg-red-600' : 'text-gray-700 bg-gray-100 hover:bg-gray-200'"
-            @click="handleToggleFavourite"
+            data-testid="novel-favourite"
+            @click="stopPropagation($event); emit('toggle-favourite', novel)"
           >
             {{ novel.is_favourite ? '已收藏' : '收藏' }}
           </button>
           <button
             class="flex-1 flex items-center justify-center text-xs font-medium rounded-lg transition-colors cursor-pointer"
             :class="novel.is_special_follow ? 'text-white bg-purple-500 hover:bg-purple-600' : 'text-gray-700 bg-gray-100 hover:bg-gray-200'"
-            @click="handleToggleFollow"
+            data-testid="novel-follow"
+            @click="stopPropagation($event); emit('toggle-follow', novel)"
           >
             {{ novel.is_special_follow ? '已追更' : '追更' }}
           </button>
           <button
             class="flex-1 flex items-center justify-center text-xs font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors cursor-pointer"
             data-testid="novel-edit"
-            @click="handleEdit"
+            @click="stopPropagation($event); emit('edit', novel)"
           >
             编辑
           </button>

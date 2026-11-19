@@ -1,64 +1,45 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Search, Settings, ListChecks, AlertTriangle, Upload } from '@lucide/vue'
-import { SECTIONS, type SectionId } from '../config'
+import type { SectionId } from '../config'
 import type { NovelFilters } from '../types'
+import { useNovelQueryState, useNovelShellState } from '../composables'
 
-const route = useRoute()
-const router = useRouter()
-
-const props = defineProps<{
+defineProps<{
   isOpen: boolean
-  showFilters?: boolean
-  activeSection: SectionId | null
-  configLoadedAndApplied?: boolean
-  filters: NovelFilters
-  isBatchMode: boolean
-  /** 集合视图（查看已选/查看被排除）活跃时禁用「随机」排序 */
-  randomDisabled?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'close'): void
-  (e: 'search', keyword: string | undefined, section: SectionId): void
-  (e: 'update:filters', filters: NovelFilters): void
-  (e: 'reset-to-defaults'): void
-  (e: 'toggle-batch-mode'): void
 }>()
 
-/**
- * 「阅览」一栏的按钮 = 一次特殊搜索，与「我的收藏」完全同构：
- * 不在小说页时先跳回 '/'，再 emit(search)，最后 close。
- * keyword 从 SECTIONS 表取（config.ts）——与 App.vue 的反推/阈值同源。
- * `novels` 走 reset-to-defaults：它是「回到初始状态」，不是一次带关键词的搜索。
- *
- * 「我的上传」的上传动作**不在这里**：侧边栏只留导航入口（行内塞按钮不美观，
- * 且与批量模式无关的模式栏应由列表页承担），上传入口在列表顶部的 UploadBar。
- */
+const route = useRoute()
+const router = useRouter()
+const { filters, activeSection, navigateToSection, updateFilters } = useNovelQueryState()
+const { isBatchMode, isInCollectionView, enterBatchMode, toggleBatchMode } = useNovelShellState()
+
+const isNovelsRoute = computed(() => route.path === '/')
+
 const handleSectionClick = (section: SectionId) => {
-  if (route.path !== '/') router.push('/')
-  if (section === 'novels') emit('reset-to-defaults')
-  else emit('search', SECTIONS[section].keyword, section)
+  void navigateToSection(section)
   emit('close')
 }
 
-const updateFilter = (key: keyof typeof props.filters, value: unknown) => {
-  const newFilters = { ...props.filters, [key]: value }
-  emit('update:filters', newFilters)
+const updateFilter = <K extends keyof NovelFilters>(key: K, value: NovelFilters[K]) => {
+  void updateFilters({ [key]: value })
 }
 
 /**
  * 批量操作：与「阅览」一栏按钮一致——不在小说页时先跳回 '/'。
- * 区别在于离页点击只进不退：若批量模式已开启（带着已选切到别的页面），
- * 点回来只是跳回小说页继续挑选，绝不退出批量模式/清空已选。
- * 留在小说页时维持原有开/关切换语义。
+ * 离页点击只进不退，留在小说页时切换开关。
  */
 const handleBatchClick = () => {
   if (route.path !== '/') {
-    router.push('/')
-    if (!props.isBatchMode) emit('toggle-batch-mode')
+    void router.push('/')
+    if (!isBatchMode.value) enterBatchMode()
   } else {
-    emit('toggle-batch-mode')
+    toggleBatchMode()
   }
   emit('close')
 }
@@ -92,21 +73,33 @@ const navIconClass = 'mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500'
       <nav class="space-y-2 mb-8">
         <!-- 阅览 -->
         <h3 class="pt-1 text-sm font-semibold text-gray-500 uppercase tracking-wider mb-1">阅览</h3>
-        <button type="button" :class="[navItemClass(activeSection === 'novels'), 'w-full']" data-testid="nav-novels" @click="handleSectionClick('novels')">
-          <Search :class="navIconClass" /> 小说列表
-        </button>
-        <button type="button" :class="[navItemClass(activeSection === 'favourites'), 'w-full']" data-testid="nav-favourites" @click="handleSectionClick('favourites')">
-          <Search :class="navIconClass" /> 我的收藏
-        </button>
-        <button type="button" :class="[navItemClass(activeSection === 'special_follow'), 'w-full']" data-testid="nav-special-follow" @click="handleSectionClick('special_follow')">
-          <Search :class="navIconClass" /> 特别关注
-        </button>
-        <!-- 「我的上传」：与「我的收藏」完全同构的一次特殊搜索（source:local;）。
-             上传动作不在这里——侧边栏只留导航入口，上传按钮在列表顶部的 UploadBar
-             （行内塞按钮不美观；且上传栏与批量栏的关系属于列表页的模式问题）。 -->
         <button
           type="button"
-          :class="[navItemClass(activeSection === 'uploads'), 'w-full']"
+          :class="[navItemClass(isNovelsRoute && activeSection === 'novels'), 'w-full']"
+          data-testid="nav-novels"
+          @click="handleSectionClick('novels')"
+        >
+          <Search :class="navIconClass" /> 小说列表
+        </button>
+        <button
+          type="button"
+          :class="[navItemClass(isNovelsRoute && activeSection === 'favourites'), 'w-full']"
+          data-testid="nav-favourites"
+          @click="handleSectionClick('favourites')"
+        >
+          <Search :class="navIconClass" /> 我的收藏
+        </button>
+        <button
+          type="button"
+          :class="[navItemClass(isNovelsRoute && activeSection === 'special_follow'), 'w-full']"
+          data-testid="nav-special-follow"
+          @click="handleSectionClick('special_follow')"
+        >
+          <Search :class="navIconClass" /> 特别关注
+        </button>
+        <button
+          type="button"
+          :class="[navItemClass(isNovelsRoute && activeSection === 'uploads'), 'w-full']"
           data-testid="nav-uploads"
           @click="handleSectionClick('uploads')"
         >
@@ -125,8 +118,7 @@ const navIconClass = 'mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500'
           <Settings :class="navIconClass" /> 账号管理
         </router-link>
 
-        <!-- 其他：常驻渲染。「失败记录」是全局台账页入口；「批量操作」
-             在小说页直接开关，在其他页面点击则先跳回小说页再进入批量模式 -->
+        <!-- 其他 -->
         <h3 class="pt-4 text-sm font-semibold text-gray-500 uppercase tracking-wider mb-1">其他</h3>
         <router-link
           to="/failed-novels"
@@ -140,27 +132,27 @@ const navIconClass = 'mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500'
           @click="handleBatchClick"
           data-testid="nav-batch-mode"
           class="group w-full flex items-center justify-center px-3 py-2 text-sm font-medium rounded-md transition-colors"
-          :class="isBatchMode ? 'bg-blue-500 text-white' : 'text-gray-700 hover:text-gray-900 hover:bg-gray-50'"
+          :class="isNovelsRoute && isBatchMode ? 'bg-blue-500 text-white' : 'text-gray-700 hover:text-gray-900 hover:bg-gray-50'"
         >
-          <ListChecks class="mr-3 h-5 w-5" :class="isBatchMode ? 'text-white' : 'text-gray-400 group-hover:text-gray-500'" />
+          <ListChecks class="mr-3 h-5 w-5" :class="isNovelsRoute && isBatchMode ? 'text-white' : 'text-gray-400 group-hover:text-gray-500'" />
           批量操作
         </button>
       </nav>
 
       <!-- Filters -->
-      <template v-if="showFilters !== false && configLoadedAndApplied">
+      <template v-if="isNovelsRoute">
         <div class="my-6 border-t border-gray-200"></div>
         <h3 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">排序</h3>
         <div class="space-y-3 mb-8">
           <div class="grid grid-cols-3 gap-2">
             <button @click="updateFilter('order_by', 'like')" :class="btnClass(filters.order_by === 'like')">点赞</button>
             <button @click="updateFilter('order_by', 'id')" :class="btnClass(filters.order_by === 'create_time' || filters.order_by === 'id')">时间</button>
-            <button @click="updateFilter('order_by', 'random')" :class="btnClass(filters.order_by === 'random')" :disabled="randomDisabled" :style="randomDisabled ? 'opacity: 0.5; cursor: not-allowed;' : ''">随机</button>
+            <button @click="updateFilter('order_by', 'random')" :class="btnClass(filters.order_by === 'random')" :disabled="isInCollectionView" :style="isInCollectionView ? 'opacity: 0.5; cursor: not-allowed;' : ''">随机</button>
           </div>
           <div class="grid grid-cols-3 gap-2">
             <button @click="updateFilter('order_direction', 'ASC')" :class="btnClass(filters.order_direction === 'ASC')" :disabled="filters.order_by === 'random'" :style="filters.order_by === 'random' ? 'opacity: 0.5; cursor: not-allowed;' : ''">升序</button>
             <button @click="updateFilter('order_direction', 'DESC')" :class="btnClass(filters.order_direction === 'DESC')" :disabled="filters.order_by === 'random'" :style="filters.order_by === 'random' ? 'opacity: 0.5; cursor: not-allowed;' : ''">降序</button>
-            <button @click="$emit('reset-to-defaults')" :class="btnClass(false)">重置</button>
+            <button @click="handleSectionClick('novels')" :class="btnClass(false)">重置</button>
           </div>
         </div>
 

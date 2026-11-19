@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Play, Square, Edit, Trash2, Zap } from '@lucide/vue'
 import DraggableTable, { type TableColumn } from './DraggableTable.vue'
+import { formatCronZh } from '../../lib/cron'
 import type { ScheduledTask } from '../../types'
 
 const props = withDefaults(defineProps<{
@@ -13,32 +14,12 @@ const props = withDefaults(defineProps<{
 })
 
 const emit = defineEmits<{
-  (e: 'edit', task: ScheduledTask): void
-  (e: 'delete', id: number): void
-  (e: 'toggle', task: ScheduledTask): void
-  (e: 'run', task: ScheduledTask): void
-  (e: 'reorder', tasks: ScheduledTask[]): void
+  edit: [task: ScheduledTask]
+  delete: [id: number]
+  toggle: [task: ScheduledTask]
+  run: [task: ScheduledTask]
+  reorder: [tasks: ScheduledTask[]]
 }>()
-
-const formatCron = (cron: string) => {
-  if (!cron) return ''
-  const parts = cron.split(' ')
-  if (parts.length !== 5) return cron
-
-  const [minute, hour, dayOfMonth, month, dayOfWeek] = parts
-  if (dayOfMonth === '*' && month === '*' && dayOfWeek === '*') {
-    return `每天 ${hour}:${minute.padStart(2, '0')}`
-  }
-  if (dayOfMonth === '*' && month === '*' && dayOfWeek !== '*') {
-    const days = ['日', '一', '二', '三', '四', '五', '六', '日']
-    const dayStr = days[parseInt(dayOfWeek)]
-    if (dayStr) return `每周${dayStr} ${hour}:${minute.padStart(2, '0')}`
-  }
-  if (dayOfMonth !== '*' && month === '*' && dayOfWeek === '*') {
-    return `每月${dayOfMonth}日 ${hour}:${minute.padStart(2, '0')}`
-  }
-  return cron
-}
 
 const columns: TableColumn[] = [
   { key: 'name', label: '名称' },
@@ -46,10 +27,6 @@ const columns: TableColumn[] = [
   { key: 'status', label: '状态' },
   { key: 'actions', label: '操作', align: 'right' },
 ]
-
-const onDragEnd = (reorderedTasks: unknown[]) => {
-  emit('reorder', reorderedTasks as ScheduledTask[])
-}
 
 /** 同函数已有 pending/running 行时禁止再次入队（去 409 后唯一防护）。 */
 const isTaskBusy = (task: ScheduledTask) => props.busyTaskNames.includes(task.task)
@@ -60,33 +37,54 @@ const runTitle = (task: ScheduledTask) =>
 
 <template>
   <div>
-    <DraggableTable :items="tasks" :columns="columns" :loading="loading" empty-text="暂无计划任务" @reorder="onDragEnd">
+    <DraggableTable
+      :items="tasks"
+      :columns="columns"
+      :loading="loading"
+      empty-text="暂无计划任务"
+      @reorder="emit('reorder', $event)"
+    >
       <template #name="{ item: task }">
-        <div class="text-sm font-medium text-gray-900">{{ (task as ScheduledTask).name }}</div>
-        <div class="text-xs text-gray-500 font-mono mt-1">{{ (task as ScheduledTask).task }}</div>
+        <div class="text-sm font-medium text-gray-900">{{ task.name }}</div>
+        <div class="text-xs text-gray-500 font-mono mt-1">{{ task.task }}</div>
       </template>
       <template #cron="{ item: task }">
-        <div class="text-sm font-medium text-gray-900">{{ formatCron((task as ScheduledTask).cron) }}</div>
+        <div class="text-sm font-medium text-gray-900" :title="task.cron">
+          {{ formatCronZh(task.cron) }}
+        </div>
       </template>
       <template #status="{ item: task }">
         <button
-          @click="emit('toggle', task as ScheduledTask)"
-          :class="(task as ScheduledTask).is_enabled ? 'bg-green-100 text-green-800 border-green-200' : 'bg-gray-100 text-gray-800 border-gray-200'"
-          class="px-3 py-1 inline-flex items-center text-xs leading-5 font-semibold rounded-full border transition-colors hover:shadow-sm"
+          @click="emit('toggle', task)"
+          :class="task.is_enabled ? 'bg-green-100 text-green-800 border-green-200' : 'bg-gray-100 text-gray-800 border-gray-200'"
+          class="px-3 py-1 inline-flex items-center text-xs leading-5 font-semibold rounded-full border transition-colors hover:shadow-sm cursor-pointer"
         >
-          <span v-if="(task as ScheduledTask).is_enabled" class="flex items-center"><Play class="w-3 h-3 mr-1" /> 已启用</span>
+          <span v-if="task.is_enabled" class="flex items-center"><Play class="w-3 h-3 mr-1" /> 已启用</span>
           <span v-else class="flex items-center"><Square class="w-3 h-3 mr-1" /> 已停用</span>
         </button>
       </template>
       <template #actions="{ item: task }">
         <div class="flex items-center justify-end space-x-2">
-          <button @click="emit('run', task as ScheduledTask)" :disabled="isTaskBusy(task as ScheduledTask)" :title="runTitle(task as ScheduledTask)" class="inline-flex items-center px-2.5 py-1.5 border border-orange-200 shadow-sm text-xs font-medium rounded text-orange-700 bg-orange-50 hover:bg-orange-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+          <button
+            @click="emit('run', task)"
+            :disabled="isTaskBusy(task)"
+            :title="runTitle(task)"
+            class="inline-flex items-center px-2.5 py-1.5 border border-orange-200 shadow-sm text-xs font-medium rounded text-orange-700 bg-orange-50 hover:bg-orange-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+          >
             <Zap class="w-4 h-4 mr-1" /> 运行
           </button>
-          <button @click="emit('edit', task as ScheduledTask)" class="inline-flex items-center px-2.5 py-1.5 border border-blue-200 shadow-sm text-xs font-medium rounded text-blue-700 bg-blue-50 hover:bg-blue-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors" title="编辑">
+          <button
+            @click="emit('edit', task)"
+            class="inline-flex items-center px-2.5 py-1.5 border border-blue-200 shadow-sm text-xs font-medium rounded text-blue-700 bg-blue-50 hover:bg-blue-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors cursor-pointer"
+            title="编辑"
+          >
             <Edit class="w-4 h-4 mr-1" /> 编辑
           </button>
-          <button @click="emit('delete', (task as ScheduledTask).id)" class="inline-flex items-center px-2.5 py-1.5 border border-red-200 shadow-sm text-xs font-medium rounded text-red-700 bg-red-50 hover:bg-red-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 transition-colors" title="删除">
+          <button
+            @click="emit('delete', task.id)"
+            class="inline-flex items-center px-2.5 py-1.5 border border-red-200 shadow-sm text-xs font-medium rounded text-red-700 bg-red-50 hover:bg-red-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 transition-colors cursor-pointer"
+            title="删除"
+          >
             <Trash2 class="w-4 h-4 mr-1" /> 删除
           </button>
         </div>

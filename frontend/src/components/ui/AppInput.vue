@@ -30,7 +30,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, useId } from 'vue'
 import { Label } from 'reka-ui'
 
 const props = withDefaults(defineProps<{
@@ -51,8 +51,8 @@ const emit = defineEmits<{
   (e: 'update:modelValue', value: string): void
 }>()
 
-const generatedId = computed(() => `app-input-${Math.random().toString(36).substring(2, 9)}`)
-const id = computed(() => props.id || generatedId.value)
+const generatedId = useId()
+const id = computed(() => props.id || generatedId)
 
 const updateValue = (event: Event) => {
   const target = event.target as HTMLInputElement | HTMLTextAreaElement
