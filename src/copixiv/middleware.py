@@ -1,11 +1,10 @@
-"""Pure-ASGI HTTP middlewares for access logging, Host check, and API key auth."""
+"""Pure-ASGI HTTP middlewares for access logging and Host header validation."""
 
 from __future__ import annotations
 
 import ipaddress
 import json
 import time
-from urllib.parse import parse_qs
 
 from starlette.types import Receive, Scope, Send
 
@@ -38,16 +37,15 @@ class AccessLogMiddleware:
             elapsed_ms = (time.monotonic() - start) * 1000
             with logger.contextualize(name="http_access"):
                 logger.info(
-                    f"{scope['method']} {scope['path']} → "
-                    f"{status_code} {elapsed_ms:.1f}ms",
+                    f"{scope['method']} {scope['path']} → {status_code} {elapsed_ms:.1f}ms",
                 )
 
 
-def _extract_host_header(scope: Scope) -> str:
-    for name, value in scope.get("headers", []):
-        if name == b"host":
-            return value.decode("latin-1")
-    return ""
+def _extract_single_host_header(scope: Scope) -> str | None:
+    values = [value.decode("latin-1") for name, value in scope.get("headers", []) if name.lower() == b"host"]
+    if len(values) != 1:
+        return None
+    return values[0]
 
 
 def _normalize_host(raw: str) -> str:
@@ -79,13 +77,20 @@ class HostValidationMiddleware:
         self._allowed_hosts_lower = frozenset(h.lower() for h in self.allowed_hosts)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send):
-        if scope["type"] != "http":
+        scope_type = scope["type"]
+        if scope_type not in ("http", "websocket"):
             await self.app(scope, receive, send)
             return
 
-        host = _normalize_host(_extract_host_header(scope))
-        if self._is_allowed(host):
-            await self.app(scope, receive, send)
+        raw_host = _extract_single_host_header(scope)
+        if raw_host is not None:
+            host = _normalize_host(raw_host)
+            if self._is_allowed(host):
+                await self.app(scope, receive, send)
+                return
+
+        if scope_type == "websocket":
+            await send({"type": "websocket.close", "code": 1008})
             return
 
         await _send_json_error(send, 400, "Invalid Host header")
@@ -99,52 +104,16 @@ class HostValidationMiddleware:
         return lowered in self._allowed_hosts_lower
 
 
-class APIAuthMiddleware:
-    """Require ``X-API-Key`` on ``/api/`` requests when a key is configured."""
-
-    def __init__(self, app, api_key: str = ""):
-        self.app = app
-        self.api_key = api_key
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send):
-        if not self.api_key:
-            await self.app(scope, receive, send)
-            return
-
-        if (
-            scope["type"] == "http"
-            and scope["path"].startswith("/api/")
-            and scope["method"] != "OPTIONS"
-        ):
-            if self._extract_api_key(scope) != self.api_key:
-                await _send_json_error(send, 401, "Invalid or missing API key")
-                return
-
-        await self.app(scope, receive, send)
-
-    @staticmethod
-    def _extract_api_key(scope: Scope) -> str | None:
-        for name, value in scope.get("headers", []):
-            if name.lower() == b"x-api-key":
-                return value.decode("latin-1")
-
-        query = scope.get("query_string", b"")
-        if query:
-            params = parse_qs(query.decode("latin-1"))
-            values = params.get("api_key")
-            if values:
-                return values[0]
-        return None
-
-
 async def _send_json_error(send: Send, status: int, detail: str) -> None:
     body = json.dumps({"detail": detail}).encode("utf-8")
-    await send({
-        "type": "http.response.start",
-        "status": status,
-        "headers": [
-            (b"content-type", b"application/json"),
-            (b"content-length", str(len(body)).encode("ascii")),
-        ],
-    })
+    await send(
+        {
+            "type": "http.response.start",
+            "status": status,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode("ascii")),
+            ],
+        }
+    )
     await send({"type": "http.response.body", "body": body})

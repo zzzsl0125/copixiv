@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from copixiv.core import formats
+from copixiv.core import naming as formats
 from copixiv.core.naming import build_path, safe_filename
 from copixiv.log import logger
 from copixiv.storage import assets
@@ -54,31 +54,36 @@ class FileStorage:
             return None
         if not resolved.is_relative_to(Path(self.download_dir).resolve()):
             logger.warning(
-                "忽略 download 根之外的 path，按标题重新计算：%s", anchor,
+                "忽略 download 根之外的 path，按标题重新计算：{}",
+                anchor,
             )
             return None
         if not self._fits_name_max(resolved.name):
             logger.warning(
-                "stored path 加上原子写的 .tmp 会超过 NAME_MAX，"
-                "按标题重新计算：%s", anchor,
+                "stored path 加上原子写的 .tmp 会超过 NAME_MAX，按标题重新计算：{}",
+                anchor,
             )
             return None
         return anchor
 
     @staticmethod
     def _fits_name_max(basename: str, limit: int = 255) -> bool:
-        """Whether ``basename`` still fits *limit* bytes with ``.tmp`` appended.
+        """Whether ``basename`` and its sibling ``.epub`` fit *limit* bytes.
 
         ``NAME_MAX`` counts **bytes**, not characters — a Chinese title is
         three bytes per glyph, so a 90-character name is already ~270 bytes.
-        ``atomic_write`` appends ``.tmp`` to the *whole* suffix chain
-        (``x.txt`` → ``x.txt.tmp``), so the budget has to include those four
-        extra bytes.
+        ``atomic_write`` uses a short random temp filename, so only the final
+        ``.txt`` / ``.epub`` names need to fit within *limit*.
         """
-        return len(basename.encode("utf-8")) + len(".tmp") <= limit
+        epub_name = Path(basename).with_suffix(formats.suffix_for(formats.EPUB)).name
+        worst = max(len(basename.encode("utf-8")), len(epub_name.encode("utf-8")))
+        return worst <= limit
 
     def local_novel_path(
-        self, novel_id: int, title: str, kind: str = formats.TEXT,
+        self,
+        novel_id: int,
+        title: str,
+        kind: str = formats.TEXT,
     ) -> Path:
         """``{download_dir}/local/{安全标题}_{id}{后缀}``（§3.2）。
 
@@ -86,14 +91,11 @@ class FileStorage:
         而契约要的是 ``local/``。这里是那条第二约定的**唯一**所有者 ——
         上传管线只调用它，不再自己拼路径。
 
-        标题按 ``NAME_MAX`` 截断，并把最长的临时后缀
-        （``_{id}.epub.tmp``）算进余量，所以正文与 EPUB 原件两份都在限额内。
+        标题按 ``NAME_MAX`` 截断，并把最长的后缀（``_{id}.epub``）算进余量，
+        所以正文与 EPUB 原件两份都在限额内。
         """
-        reserved = len(f"_{novel_id}{formats.SUFFIXES[formats.EPUB]}.tmp") + 1
-        filename = (
-            f"{safe_filename(title, max_length=254 - reserved)}"
-            f"_{novel_id}{formats.suffix_for(kind)}"
-        )
+        reserved = len(f"_{novel_id}{formats.SUFFIXES[formats.EPUB]}") + 1
+        filename = f"{safe_filename(title, max_length=254 - reserved)}_{novel_id}{formats.suffix_for(kind)}"
         return Path(self.download_dir) / self.LOCAL_SUBDIR / filename
 
     def save_novel_text(
@@ -117,16 +119,19 @@ class FileStorage:
         """
         path = Path(anchor) if anchor else self.novel_text_path(novel_id, title)
         if path.exists() and not force and path.stat().st_size > 0:
-            logger.debug(f"下载: #{novel_id} \"{title}\" 已存在，跳过")
+            logger.debug(f'下载: #{novel_id} "{title}" 已存在，跳过')
             return path
         write_text_atomic(path, content, root=Path(self.download_dir))
         logger.info(
-            f"下载: #{novel_id} \"{title}\" → {path} ({len(content)} 字符)",
+            f'下载: #{novel_id} "{title}" → {path} ({len(content)} 字符)',
         )
         return path
 
     def read_novel_text(
-        self, novel_id: int, title: str, anchor: str | Path | None = None,
+        self,
+        novel_id: int,
+        title: str,
+        anchor: str | Path | None = None,
     ) -> str | None:
         """Read the stored text — ``None`` when there is no usable local copy.
 
@@ -168,9 +173,10 @@ class FileStorage:
             resolved = path.resolve()
         except OSError:
             return
-        if not resolved.is_relative_to(root):
+        if resolved == root or not resolved.is_relative_to(root):
             logger.warning(
-                "Refusing to delete files outside download dir: {}", novel_path,
+                "Refusing to delete files outside download dir: {}",
+                novel_path,
             )
             return
 
@@ -185,11 +191,12 @@ class FileStorage:
         # Remove the parent directory when this was the last novel in it.
         # Assets are gone by now, so an "empty directory" really means empty.
         parent = resolved.parent
-        try:
-            if not any(parent.iterdir()):
-                parent.rmdir()
-        except OSError:
-            pass
+        if parent != root and parent.is_relative_to(root):
+            try:
+                if not any(parent.iterdir()):
+                    parent.rmdir()
+            except OSError:
+                pass
 
 
 def _unlink(path: Path) -> None:

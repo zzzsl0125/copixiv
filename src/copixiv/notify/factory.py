@@ -1,28 +1,19 @@
-"""Notifier assembly — plain config-driven mapping, no registry.
-
-Telegram is the only notification backend.  ``config.notifications`` keeps
-its list shape for future channels, but only the first entry is used: this
-module maps it to its implementation (docs/MODULARITY.md §M6).  It is
-deliberately a plain function and not a plugin registry: no third-party
-channel has ever existed.  If one ever does, revisit this decision then
-(MODULARITY.md §6).
-"""
+"""Notifier assembly — plain config-driven mapping, no registry."""
 
 from __future__ import annotations
+
+import httpx
 
 from copixiv.log import logger
 
 from .telegram import TelegramNotifier
 
 
-def build_notifier(config) -> TelegramNotifier | None:
-    """Build the notification backend from *config*.
-
-    Returns ``None`` when ``config.notifications`` is empty (notifications
-    disabled).  Otherwise the first entry is mapped to a
-    :class:`TelegramNotifier`; any additional entries are ignored with a
-    warning, since there is no fan-out anymore.
-    """
+def build_notifier(
+    config,
+    http_client: httpx.AsyncClient | None = None,
+) -> TelegramNotifier | None:
+    """Build the notification backend from *config*."""
     entries = config.notifications
     if not entries:
         return None
@@ -39,5 +30,6 @@ def build_notifier(config) -> TelegramNotifier | None:
     return TelegramNotifier(
         token=entry.token,
         chat_id=entry.chat_id,
-        proxy_http=config.proxy.url or None,
+        proxy_url=config.proxy.url or None,
+        http_client=http_client,
     )

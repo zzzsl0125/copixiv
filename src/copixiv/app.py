@@ -10,16 +10,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from copixiv.error_handlers import register_exception_handlers
-from copixiv.lifespan import (  # noqa: F401
-    _build,
-    _load_accounts,
-    attach_app_state,
-    create_lifespan,
-)
+from copixiv.lifespan import create_lifespan, resolve_config
 from copixiv.log import InterceptHandler, logger, setup_logging
 from copixiv.middleware import (
     AccessLogMiddleware,
-    APIAuthMiddleware,
     HostValidationMiddleware,
 )
 
@@ -49,36 +43,86 @@ _INDEX_CACHE = {"Cache-Control": "no-cache"}
 
 def mount_routers(app: FastAPI) -> None:
     """Mount every API router on *app*."""
+    from fastapi import Depends
+
+    from copixiv.deps import require_api_key
     from copixiv.features.accounts import api as tokens
+    from copixiv.features.authors import api as authors
     from copixiv.features.failures import api as failed_novels
     from copixiv.features.library import api as library
-    from copixiv.features.novels import api as novels
-    from copixiv.features.novels import history_api as search_history
+    from copixiv.features.novels import routes as novels
+    from copixiv.features.search_history import api as search_history
+    from copixiv.features.series import api as series
     from copixiv.features.system import api as system
     from copixiv.features.tags import aliases as tag_aliases
     from copixiv.features.tags import preferences as tag_preferences
     from copixiv.tasks import api as tasks
 
-    app.include_router(novels.router, prefix="/api/novels", tags=["novels"])
-    app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
-    app.include_router(system.router, prefix="/api/system", tags=["system"])
+    auth = [Depends(require_api_key)]
+
     app.include_router(
-        tag_preferences.router, prefix="/api/tag-preferences",
+        authors.router,
+        prefix="/api/novels/author",
+        tags=["novels"],
+        dependencies=auth,
+    )
+    app.include_router(
+        series.router,
+        prefix="/api/novels/series",
+        tags=["novels"],
+        dependencies=auth,
+    )
+    # Each novels sub-router applies require_api_key or require_download_api_key;
+    # mount individually so ``@router.get("")`` gets a non-empty prefix.
+    for sub_router in novels.ROUTERS:
+        app.include_router(sub_router, prefix="/api/novels", tags=["novels"])
+    app.include_router(
+        tasks.router,
+        prefix="/api/tasks",
+        tags=["tasks"],
+        dependencies=auth,
+    )
+    app.include_router(
+        system.router,
+        prefix="/api/system",
+        tags=["system"],
+        dependencies=auth,
+    )
+    app.include_router(
+        tag_preferences.router,
+        prefix="/api/tag-preferences",
         tags=["tag_preferences"],
+        dependencies=auth,
     )
     app.include_router(
-        tag_aliases.router, prefix="/api/tag-aliases", tags=["tag_aliases"],
+        tag_aliases.router,
+        prefix="/api/tag-aliases",
+        tags=["tag_aliases"],
+        dependencies=auth,
     )
     app.include_router(
-        search_history.router, prefix="/api/search-history",
+        search_history.router,
+        prefix="/api/search-history",
         tags=["search_history"],
-    )
-    app.include_router(tokens.router, prefix="/api/tokens", tags=["tokens"])
-    app.include_router(
-        failed_novels.router, prefix="/api/failed-novels", tags=["failed-novels"],
+        dependencies=auth,
     )
     app.include_router(
-        library.router, prefix="/api/library", tags=["library"],
+        tokens.router,
+        prefix="/api/tokens",
+        tags=["tokens"],
+        dependencies=auth,
+    )
+    app.include_router(
+        failed_novels.router,
+        prefix="/api/failed-novels",
+        tags=["failed-novels"],
+        dependencies=auth,
+    )
+    app.include_router(
+        library.router,
+        prefix="/api/library",
+        tags=["library"],
+        dependencies=auth,
     )
 
 
@@ -91,8 +135,7 @@ def mount_frontend(app: FastAPI, dist: Path | None = None) -> bool:
     index = root / "index.html"
     if not index.is_file():
         logger.warning(
-            f"Frontend bundle not found at {root} — API only. "
-            "Build it with: cd frontend && npm run build"
+            f"Frontend bundle not found at {root} — API only. Build it with: cd frontend && npm run build"
         )
         return False
 
@@ -130,55 +173,57 @@ def create_app(
     mount_spa: bool = True,
     run_background_tasks: bool = True,
 ):
-    """Build the container and return a fully configured FastAPI app."""
+    """Build the FastAPI app; DB/HTTP/Rust singletons start inside lifespan."""
     setup_logging(log_dir)
-    resolved_config = config if config is not None else config_path
-    s = _build(
-        resolved_config,
-        session_factory=session_factory,
-        skip_init_db=skip_init_db,
-        skip_auto_backup=skip_auto_backup,
-    )
+    resolved_config = resolve_config(config if config is not None else config_path)
 
     from fastapi import FastAPI
     from fastapi.middleware.cors import CORSMiddleware
+    from starlette.middleware import Middleware
     from starlette.middleware.gzip import (
         DEFAULT_EXCLUDED_CONTENT_TYPES,
         GZipMiddleware,
     )
 
+    # Order (outermost -> innermost): Host -> AccessLog -> CORS -> GZip
+    middlewares = [
+        Middleware(
+            HostValidationMiddleware,
+            allowed_hosts=resolved_config.security.allowed_hosts,
+        ),
+        Middleware(AccessLogMiddleware),
+        Middleware(
+            CORSMiddleware,
+            allow_origins=resolved_config.security.allowed_origins or [],
+            allow_credentials=False,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        ),
+        Middleware(
+            GZipMiddleware,
+            minimum_size=1024,
+            compresslevel=5,
+            exclude_content_types=DEFAULT_EXCLUDED_CONTENT_TYPES
+            + (
+                "application/epub+zip",
+                "application/zip",
+            ),
+        ),
+    ]
+
     app = FastAPI(
         title="Novel Database API",
-        lifespan=create_lifespan(s, run_background_tasks=run_background_tasks),
-    )
-    attach_app_state(app, s)
-    register_exception_handlers(app)
-
-    # Order (outermost -> innermost): Host -> API key -> AccessLog -> CORS -> GZip
-    app.add_middleware(
-        HostValidationMiddleware,
-        allowed_hosts=s.config.security.allowed_hosts,
-    )
-    app.add_middleware(
-        APIAuthMiddleware, api_key=s.config.security.api_key,
-    )
-    app.add_middleware(AccessLogMiddleware)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=s.config.security.allowed_origins,
-        allow_credentials=False,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-    app.add_middleware(
-        GZipMiddleware,
-        minimum_size=1024,
-        compresslevel=5,
-        exclude_content_types=DEFAULT_EXCLUDED_CONTENT_TYPES + (
-            "application/epub+zip",
-            "application/zip",
+        lifespan=create_lifespan(
+            resolved_config,
+            session_factory=session_factory,
+            skip_init_db=skip_init_db,
+            skip_auto_backup=skip_auto_backup,
+            run_background_tasks=run_background_tasks,
         ),
+        middleware=middlewares,
     )
+    app.state.config = resolved_config
+    register_exception_handlers(app)
 
     mount_routers(app)
     if mount_spa:
@@ -191,7 +236,10 @@ def ensure_port_free(port: int) -> None:
     port_re = re.compile(rf":{port}(?!\d)")
     try:
         result = subprocess.run(
-            ["ss", "-tlnp"], capture_output=True, text=True, timeout=5,
+            ["ss", "-tlnp"],
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         for line in result.stdout.splitlines():
             if not port_re.search(line):

@@ -1,12 +1,22 @@
-"""Single Pixiv account — wraps pixivpy3 AppPixivAPI with auth and rate-limiting."""
+"""Single Pixiv account — native async ``httpx`` client with OAuth and rate-limiting."""
+
+from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
+import json
+import re
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import Enum
+from typing import Any
+from urllib.parse import urlparse
 
-from pixivpy3 import AppPixivAPI, PixivError
+import httpx
 
+from copixiv.core.exceptions import NovelNotFoundError
 from copixiv.log import logger
 
 from .errors import (
@@ -15,14 +25,37 @@ from .errors import (
     PixivHttpError,
     RateLimitError,
 )
+from .http import (
+    PIXIV_API_HEADERS,
+    normalize_proxy_url,
+    parse_retry_after,
+)
+from .models import (
+    NovelListResponse,
+    UserDetailResponse,
+    WebviewNovel,
+)
 
 # Re-exported for callers that historically imported them from here.
 __all__ = [
     "AccountInvalidError",
+    "AccountStatus",
+    "AccountStrategy",
+    "PixivAccount",
     "PixivApiError",
     "PixivHttpError",
     "RateLimitError",
+    "TokenInfo",
 ]
+
+PIXIV_APP_HOSTS = "https://app-api.pixiv.net"
+PIXIV_AUTH_URL = "https://oauth.secure.pixiv.net/auth/token"
+PIXIV_CLIENT_ID = "MOBrBDS8blbauoSck0ZfDbtuzpyT"
+PIXIV_CLIENT_SECRET = "lsACyCD94FhDUtGTXi3QzcFE2uU1hqtDaKeqrdwj"
+PIXIV_HASH_SECRET = "28c1fdd170a5204386cb1313c7077b34f83e4aaf4aa829ce78c231e05b0bae2c"
+
+_WEBVIEW_NOVEL_RE = re.compile(r"novel:\s({.+}),\s+isOwnWork")
+_ALLOWED_NEXT_HOST = "app-api.pixiv.net"
 
 
 @dataclass
@@ -59,25 +92,32 @@ def _fmt_args(args: tuple, kwargs: dict) -> str:
     return joined if len(joined) <= 120 else joined[:117] + "..."
 
 
-class PixivAccount:
-    """A single Pixiv account with authentication and rate limiting.
+def _format_date(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d")
+    return str(value)
 
-    Wraps pixivpy3's ``AppPixivAPI``, managing auth state and cooldown
-    after rate-limit hits.
-    """
+
+class PixivAccount:
+    """A single Pixiv account with OAuth state, pacing, and cooldown handling."""
 
     def __init__(
         self,
         token_info: TokenInfo,
-        proxy_http: str = "",
-        proxy_https: str = "",
+        proxy_url: str = "",
         min_interval: float = 2.0,
         cooling_duration: float = 120.0,
+        http_client: httpx.AsyncClient | None = None,
     ):
         self.token_info = token_info
-        self.api = self._create_api(proxy_http, proxy_https)
+        self._proxy_url = normalize_proxy_url(proxy_url)
+        self._http_client = http_client
+        self._owns_client = http_client is None
+
         self.status = AccountStatus.INACTIVE
         self.username = token_info.username
+        self._access_token: str | None = None
+        self._user_id: int = 0
 
         # last_req_time is for LRU account selection — set by select()
         # to mark the account as "reserved" so concurrent callers skip it.
@@ -102,11 +142,6 @@ class PixivAccount:
     # to avoid using an expired token.
     _AUTH_TTL: float = 50 * 60  # 50 minutes
 
-    # An ACTIVE account that hasn't been selected for this long is
-    # treated as idle again (status → INACTIVE) so it re-enters the
-    # auth + LRU path instead of being considered perpetually fresh.
-    _IDLE_TIMEOUT: float = 3500  # seconds (~58 min)
-
     def __str__(self) -> str:
         return f"[{self.username[:6]}]"
 
@@ -127,114 +162,413 @@ class PixivAccount:
     # -- actions -------------------------------------------------------------
 
     def start_cooldown(self, duration: float | None = None) -> None:
-        self._cooldown_until = time.monotonic() + (
-            self.cooling_duration if duration is None else duration
-        )
+        self._cooldown_until = time.monotonic() + (self.cooling_duration if duration is None else duration)
 
-    def _create_api(self, proxy_http: str, proxy_https: str) -> AppPixivAPI:
-        proxies = {"http": proxy_http, "https": proxy_https}
-        return AppPixivAPI(proxies=proxies, timeout=30)
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(
+                proxy=self._proxy_url,
+                timeout=30.0,
+            )
+            self._owns_client = True
+        return self._http_client
+
+    async def aclose(self) -> None:
+        """Close the underlying HTTP client when owned by this account."""
+        if self._http_client is not None and self._owns_client:
+            await self._http_client.aclose()
+            self._http_client = None
 
     async def authenticate(self) -> None:
         if self.status == AccountStatus.INVALID:
             raise AccountInvalidError(str(self))
 
-        # If we authenticated recently the access token is still valid;
-        # skip re-auth to avoid unnecessary OAuth round-trips.
         if (
             self.status == AccountStatus.ACTIVE
+            and self._access_token is not None
             and time.monotonic() - self._last_auth_time < self._AUTH_TTL
         ):
             return
 
         async with self._auth_lock:
-            # Double-checked locking: another coroutine may have
-            # refreshed the token while we were waiting for the lock.
             if (
                 self.status == AccountStatus.ACTIVE
+                and self._access_token is not None
                 and time.monotonic() - self._last_auth_time < self._AUTH_TTL
             ):
                 return
 
-            try:
-                await asyncio.to_thread(
-                    self.api.auth, refresh_token=self.token_info.token
+            local_time = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+            client_hash = hashlib.md5((local_time + PIXIV_HASH_SECRET).encode("utf-8")).hexdigest()
+            headers = {
+                **PIXIV_API_HEADERS,
+                "x-client-time": local_time,
+                "x-client-hash": client_hash,
+            }
+            data = {
+                "get_secure_url": "1",
+                "client_id": PIXIV_CLIENT_ID,
+                "client_secret": PIXIV_CLIENT_SECRET,
+                "grant_type": "refresh_token",
+                "refresh_token": self.token_info.token,
+            }
+
+            client = self._get_client()
+            resp = await client.post(
+                PIXIV_AUTH_URL,
+                headers=headers,
+                data=data,
+                timeout=30.0,
+            )
+
+            if resp.status_code in (400, 401):
+                self.status = AccountStatus.INVALID
+                self._access_token = None
+                raise AccountInvalidError(str(self))
+            if resp.status_code == 429:
+                wait = parse_retry_after(
+                    resp.headers.get("retry-after"),
+                    default=self.cooling_duration,
                 )
-                self.status = AccountStatus.ACTIVE
-                self._last_auth_time = time.monotonic()
-                logger.info(f"{self} 认证成功")
-            except PixivHttpError as e:
-                # Status-based: 400/401 = the refresh token itself is bad.
-                # Anything else (429, 403, 5xx) is transient — retryable.
-                if e.status_code in (400, 401):
-                    self.status = AccountStatus.INVALID
-                    raise AccountInvalidError(str(self)) from e
+                self.start_cooldown(wait)
+                raise RateLimitError(
+                    str(self),
+                    retry_after=wait,
+                    header=resp.headers,
+                    body=resp.text,
+                )
+            if resp.status_code not in (200, 301, 302):
                 raise PixivApiError(
-                    str(e), status_code=e.status_code,
-                ) from e
-            except PixivError as e:
-                if "auth() failed" in str(e).lower():
-                    self.status = AccountStatus.INVALID
-                    raise AccountInvalidError(str(self)) from e
-                raise PixivApiError(str(e)) from e
+                    f"Auth HTTP {resp.status_code}: {resp.text}",
+                    status_code=resp.status_code,
+                    header=resp.headers,
+                    body=resp.text,
+                )
+
+            try:
+                payload = resp.json()
+            except ValueError as exc:
+                raise PixivApiError(
+                    f"{self} invalid auth JSON response",
+                    status_code=resp.status_code,
+                    header=resp.headers,
+                    body=resp.text,
+                ) from exc
+
+            if isinstance(payload, dict) and "error" in payload:
+                self._raise_for_error_body(payload)
+
+            token_block = (
+                payload["response"]
+                if isinstance(payload, dict) and isinstance(payload.get("response"), dict)
+                else payload
+            )
+            access_token = token_block.get("access_token") if isinstance(token_block, dict) else None
+            if not access_token:
+                self.status = AccountStatus.INVALID
+                self._access_token = None
+                raise AccountInvalidError(str(self))
+
+            user_block = token_block.get("user") if isinstance(token_block, dict) else None
+            if isinstance(user_block, dict) and user_block.get("id"):
+                with contextlib.suppress(TypeError, ValueError):
+                    self._user_id = int(user_block["id"])
+
+            self._access_token = str(access_token)
+            self.status = AccountStatus.ACTIVE
+            self._last_auth_time = time.monotonic()
+            logger.info(f"{self} 认证成功")
 
     # -- error-body classification helpers ------------------------------------
 
     @staticmethod
-    def _error_body_message(result) -> str:
+    def _error_body_message(result: dict[str, Any]) -> str:
         """Extract the lower-cased ``error.message`` from an error body dict."""
         error_data = result["error"]
-        return (
-            error_data.get("message", "")
-            if isinstance(error_data, dict)
-            else str(error_data)
-        ).lower()
+        return (error_data.get("message", "") if isinstance(error_data, dict) else str(error_data)).lower()
 
     @staticmethod
     def _is_rate_limit_message(msg: str) -> bool:
-        return any(
-            kw in msg for kw in ("rate limit", "currently restricted")
-        )
+        return any(kw in msg for kw in ("rate limit", "currently restricted"))
 
     @staticmethod
     def _is_auth_message(msg: str) -> bool:
-        return any(
-            kw in msg for kw in ("oauth", "invalid_grant", "access token")
-        )
+        return any(kw in msg for kw in ("oauth", "invalid_grant", "access token"))
 
-    def _raise_for_error_body(self, result) -> None:
-        """Classify an ``{"error": {...}}`` response body and raise.
-
-        Used both for the first response and for the post-re-auth retry.
-        """
+    def _raise_for_error_body(self, result: dict[str, Any]) -> None:
+        """Classify an ``{"error": {...}}`` response body and raise."""
         msg = self._error_body_message(result)
         if self._is_rate_limit_message(msg):
             self.start_cooldown()
             raise RateLimitError(str(self)) from None
         if self._is_auth_message(msg):
-            # A fresh auth did not help (or no re-auth was attempted) —
-            # the refresh token itself is bad.
             self.status = AccountStatus.INVALID
+            self._access_token = None
             raise AccountInvalidError(str(self)) from None
         raise PixivApiError(f"{self} API error in body: {msg}") from None
 
-    async def execute(self, method: str, *args, **kwargs):
-        """Call an API method on this account, handling auth and rate limits."""
+    # -- request dispatch ----------------------------------------------------
+
+    def _build_request(
+        self, method: str, *args: Any, **kwargs: Any
+    ) -> tuple[str, str, dict[str, Any] | None, dict[str, Any] | None, str, Any]:
+        """Translate a high-level Pixiv method call into HTTP parameters."""
+        if method == "webview_novel":
+            novel_id = args[0] if args else kwargs["novel_id"]
+            return (
+                "GET",
+                f"{PIXIV_APP_HOSTS}/webview/v2/novel",
+                {"id": novel_id, "viewer_version": "20221031_ai"},
+                None,
+                "webview",
+                novel_id,
+            )
+
+        if method == "user_novels":
+            user_id = args[0] if args else kwargs["user_id"]
+            params: dict[str, Any] = {
+                "user_id": user_id,
+                "filter": kwargs.get("filter", "for_ios"),
+            }
+            if kwargs.get("offset"):
+                params["offset"] = kwargs["offset"]
+            return (
+                "GET",
+                f"{PIXIV_APP_HOSTS}/v1/user/novels",
+                params,
+                None,
+                "novel_list",
+                user_id,
+            )
+
+        if method == "user_detail":
+            user_id = args[0] if args else kwargs["user_id"]
+            return (
+                "GET",
+                f"{PIXIV_APP_HOSTS}/v1/user/detail",
+                {"user_id": user_id, "filter": kwargs.get("filter", "for_ios")},
+                None,
+                "user_detail",
+                user_id,
+            )
+
+        if method == "user_follow_add":
+            user_id = args[0] if args else kwargs["user_id"]
+            return (
+                "POST",
+                f"{PIXIV_APP_HOSTS}/v1/user/follow/add",
+                None,
+                {"user_id": user_id, "restrict": kwargs.get("restrict", "public")},
+                "json",
+                user_id,
+            )
+
+        if method == "user_follow_delete":
+            user_id = args[0] if args else kwargs["user_id"]
+            return (
+                "POST",
+                f"{PIXIV_APP_HOSTS}/v1/user/follow/delete",
+                None,
+                {"user_id": user_id},
+                "json",
+                user_id,
+            )
+
+        if method == "novel_follow":
+            params = {"restrict": kwargs.get("restrict", "public")}
+            if kwargs.get("offset") is not None:
+                params["offset"] = kwargs["offset"]
+            return (
+                "GET",
+                f"{PIXIV_APP_HOSTS}/v1/novel/follow",
+                params,
+                None,
+                "novel_list",
+                None,
+            )
+
+        if method == "novel_ranking":
+            params = {
+                "mode": kwargs.get("mode", "day_r18"),
+                "filter": kwargs.get("filter", "for_ios"),
+            }
+            if kwargs.get("date"):
+                params["date"] = _format_date(kwargs["date"])
+            if kwargs.get("offset"):
+                params["offset"] = kwargs["offset"]
+            return (
+                "GET",
+                f"{PIXIV_APP_HOSTS}/v1/novel/ranking",
+                params,
+                None,
+                "novel_list",
+                None,
+            )
+
+        if method == "search_novel":
+            word = args[0] if args else kwargs["word"]
+            params = {
+                "word": word,
+                "search_target": kwargs.get("search_target", "partial_match_for_tags"),
+                "sort": kwargs.get("sort", "date_desc"),
+                "merge_plain_keyword_results": kwargs.get("merge_plain_keyword_results", "true"),
+                "include_translated_tag_results": kwargs.get("include_translated_tag_results", "true"),
+            }
+            if kwargs.get("filter") is not None:
+                params["filter"] = kwargs["filter"]
+            if kwargs.get("start_date"):
+                params["start_date"] = _format_date(kwargs["start_date"])
+            if kwargs.get("end_date"):
+                params["end_date"] = _format_date(kwargs["end_date"])
+            if kwargs.get("search_ai_type") is not None:
+                params["search_ai_type"] = kwargs["search_ai_type"]
+            if kwargs.get("offset"):
+                params["offset"] = kwargs["offset"]
+            return (
+                "GET",
+                f"{PIXIV_APP_HOSTS}/v1/search/novel",
+                params,
+                None,
+                "novel_list",
+                word,
+            )
+
+        if method == "novel_series":
+            series_id = args[0] if args else kwargs["series_id"]
+            params = {
+                "series_id": series_id,
+                "filter": kwargs.get("filter", "for_ios"),
+            }
+            if kwargs.get("last_order"):
+                params["last_order"] = kwargs["last_order"]
+            return (
+                "GET",
+                f"{PIXIV_APP_HOSTS}/v2/novel/series",
+                params,
+                None,
+                "novel_list",
+                series_id,
+            )
+
+        if method == "get_next_page":
+            next_url = str(args[0] if args else kwargs["url"])
+            parsed = urlparse(next_url)
+            if parsed.scheme != "https" or parsed.netloc != _ALLOWED_NEXT_HOST:
+                raise PixivApiError(
+                    f"Refusing unexpected next_url origin: {next_url}",
+                    status_code=400,
+                )
+            return ("GET", next_url, None, None, "novel_list", next_url)
+
+        raise AttributeError(f"Unsupported Pixiv API method: {method}")
+
+    async def _send_once(
+        self,
+        http_method: str,
+        url: str,
+        params: dict[str, Any] | None,
+        data: dict[str, Any] | None,
+        kind: str,
+        target_id: Any,
+    ) -> tuple[bool, Any]:
+        """Issue one authenticated HTTP call and decode/validate its response.
+
+        Returns ``(needs_reauth, parsed_payload_or_model)``.
+        """
+        client = self._get_client()
+        headers = {
+            **PIXIV_API_HEADERS,
+            "Authorization": f"Bearer {self._access_token}",
+        }
+        resp = await client.request(
+            http_method,
+            url,
+            headers=headers,
+            params=params,
+            data=data,
+            timeout=30.0,
+        )
+        self._last_call_end = time.monotonic()
+
+        if kind == "webview" and resp.status_code == 404:
+            raise NovelNotFoundError(f"novel #{target_id} not found (HTTP 404)")
+        if resp.status_code == 429:
+            wait = parse_retry_after(
+                resp.headers.get("retry-after"),
+                default=self.cooling_duration,
+            )
+            self.start_cooldown(wait)
+            raise RateLimitError(
+                str(self),
+                retry_after=wait,
+                header=resp.headers,
+                body=resp.text,
+            )
+        if resp.status_code == 401:
+            self.status = AccountStatus.INACTIVE
+            self._last_auth_time = 0.0
+            self._access_token = None
+            raise PixivApiError(
+                f"HTTP 401 for {http_method} {url}",
+                status_code=401,
+                header=resp.headers,
+                body=resp.text,
+            )
+        if resp.status_code not in (200, 301, 302):
+            raise PixivApiError(
+                f"HTTP {resp.status_code} for {http_method} {url}",
+                status_code=resp.status_code,
+                header=resp.headers,
+                body=resp.text,
+            )
+
+        if kind == "webview":
+            match = _WEBVIEW_NOVEL_RE.search(resp.text)
+            if not match:
+                logger.error(f"Failed to fetch novel#{target_id}: extract novel content failed")
+                raise NovelNotFoundError(f"novel #{target_id} content extraction failed")
+            try:
+                payload = json.loads(match.group(1))
+            except ValueError as exc:
+                logger.error(f"Failed to parse novel#{target_id} JSON: {exc}")
+                raise NovelNotFoundError(f"novel #{target_id} content extraction failed") from exc
+            if isinstance(payload, dict) and "error" in payload:
+                if self._is_auth_message(self._error_body_message(payload)):
+                    return True, payload
+                self._raise_for_error_body(payload)
+            return False, WebviewNovel.model_validate(payload)
+
+        try:
+            payload = resp.json()
+        except ValueError as exc:
+            raise PixivApiError(
+                f"{self} invalid JSON response for {http_method} {url}",
+                status_code=resp.status_code,
+                header=resp.headers,
+                body=resp.text,
+            ) from exc
+
+        if isinstance(payload, dict) and "error" in payload:
+            if self._is_auth_message(self._error_body_message(payload)):
+                return True, payload
+            self._raise_for_error_body(payload)
+
+        if kind == "novel_list":
+            return False, NovelListResponse.model_validate(payload)
+        if kind == "user_detail":
+            return False, UserDetailResponse.model_validate(payload)
+        return False, payload
+
+    async def execute(self, method: str, *args: Any, **kwargs: Any) -> Any:
+        """Call a Pixiv API method on this account with auth and rate limits."""
         await self.authenticate()
 
-        # Honor any active cooldown before touching the request lock, so a
-        # cooling account returned by select() (including the force_account
-        # path) is made to actually wait before issuing its next request.
         if self.in_cooldown:
             wait = self.cooldown_remaining
             logger.warning(f"{self} 处于冷却中，等待 {wait:.0f} 秒")
             await asyncio.sleep(wait)
 
-        # Per-account rate limiting: ensure min_interval since the
-        # *last completed* API call on this account (not since select).
         async with self._req_lock:
-            # Re-check cooldown inside the lock in case another coroutine hit
-            # a 429 while we were queued on _req_lock.
             if self.in_cooldown:
                 wait = self.cooldown_remaining
                 logger.warning(f"{self} 处于冷却中，等待 {wait:.0f} 秒")
@@ -244,60 +578,26 @@ class PixivAccount:
             if elapsed < self.min_interval:
                 await asyncio.sleep(self.min_interval - elapsed)
 
-            try:
-                func = getattr(self.api, method)
-                logger.info(f"{self} API → {method}({_fmt_args(args, kwargs)})")
-                result = await asyncio.to_thread(func, *args, **kwargs)
-                self._last_call_end = time.monotonic()
+            http_method, url, params, data, kind, target_id = self._build_request(method, *args, **kwargs)
+            logger.info(f"{self} API → {method}({_fmt_args(args, kwargs)})")
 
-                # -- Error body fallback: pixivpy3's requests_call does not
-                # raise on non-200, and ``patch.py``'s tolerant
-                # parse_result/model fallbacks may hand us an error dict
-                # (``{"error": {...}}``) instead of an exception.  Classify
-                # by message so rate limits never masquerade as success.
-                if isinstance(result, dict) and "error" in result:
-                    if self._is_auth_message(self._error_body_message(result)):
-                        logger.warning(
-                            f"{self} API returned auth error in body, "
-                            f"re-authenticating: {self._error_body_message(result)}",
-                        )
-                        # Force re-auth and retry once with a fresh token.
-                        self.status = AccountStatus.INACTIVE
-                        await self.authenticate()
-                        result = await asyncio.to_thread(func, *args, **kwargs)
-                        self._last_call_end = time.monotonic()
-                        if isinstance(result, dict) and "error" in result:
-                            self._raise_for_error_body(result)
-                        logger.debug(f"{self} {method} completed (after re-auth).")
-                        return result
-                    self._raise_for_error_body(result)
+            needs_reauth, result = await self._send_once(http_method, url, params, data, kind, target_id)
+            if needs_reauth:
+                logger.warning(
+                    f"{self} API returned auth error in body, "
+                    f"re-authenticating: {self._error_body_message(result)}",
+                )
+                self.status = AccountStatus.INACTIVE
+                self._last_auth_time = 0.0
+                self._access_token = None
+                await self.authenticate()
+                still_reauth, retry_result = await self._send_once(
+                    http_method, url, params, data, kind, target_id
+                )
+                if still_reauth:
+                    self._raise_for_error_body(retry_result)
+                logger.debug(f"{self} {method} completed (after re-auth).")
+                return retry_result
 
-                logger.debug(f"{self} {method} completed.")
-                return result
-            except PixivHttpError as e:
-                if e.status_code == 429:
-                    self.start_cooldown()
-                    raise RateLimitError(str(self)) from e
-                if e.status_code == 401:
-                    # Access token died early — force a fresh auth on the
-                    # next attempt instead of retrying with the dead token.
-                    self.status = AccountStatus.INACTIVE
-                    self._last_auth_time = 0.0
-                # Keep the status code on the translated error: the client's
-                # retry loop needs it to tell a permanent 404 from a
-                # transient 5xx (``_is_permanent``).  Dropping it here made
-                # every 4xx look retryable.
-                raise PixivApiError(str(e), status_code=e.status_code) from e
-            except (RateLimitError, AccountInvalidError, PixivApiError):
-                # Already classified (raised by the error-body fallback
-                # inside the try) — never re-classify.
-                raise
-            except PixivError as e:
-                error_msg = str(e).lower()
-                if "invalid_grant" in error_msg:
-                    self.status = AccountStatus.INVALID
-                    raise AccountInvalidError(str(self)) from e
-                if "rate limit" in error_msg or "currently restricted" in error_msg:
-                    self.start_cooldown()
-                    raise RateLimitError(str(self)) from e
-                raise PixivApiError(str(e)) from e
+            logger.debug(f"{self} {method} completed.")
+            return result

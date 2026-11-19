@@ -40,7 +40,10 @@ _COVER_STEM_RE = re.compile(r"^(?P<novel_id>\d+)_c_cover$")
 
 
 def asset_path(
-    directory: Path, novel_id: int | str, kind: str, asset_id: str | int = "",
+    directory: Path,
+    novel_id: int | str,
+    kind: str,
+    asset_id: str | int = "",
     suffix: str = ".jpg",
 ) -> Path:
     """一本小说的某个资产在 *directory* 里的路径。
@@ -54,16 +57,26 @@ def asset_path(
 
 def asset_suffix(url: str, default: str = ".jpg") -> str:
     """图片 URL 的后缀（取不到就用 *default*）。"""
-    return Path(url.split("?", 1)[0]).suffix or default
+    return Path(url.split("?", 1)[0]).suffix.lower() or default
+
+
+def _find_case_insensitive(directory: Path, stem: str) -> Path | None:
+    """Fallback scan when an asset on disk carries an uppercase suffix (e.g. ``.JPG``)."""
+    if not directory.is_dir():
+        return None
+    for path in directory.glob(f"{stem}.*"):
+        if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES:
+            return path
+    return None
 
 
 def find_cover(directory: Path, novel_id: int | str) -> Path | None:
     """已有的封面文件（按 :data:`IMAGE_SUFFIXES` 顺序找第一个存在的）。"""
     for suffix in IMAGE_SUFFIXES:
         candidate = asset_path(directory, novel_id, COVER, suffix=suffix)
-        if candidate.exists():
+        if candidate.is_file():
             return candidate
-    return None
+    return _find_case_insensitive(directory, f"{novel_id}_c_cover")
 
 
 def iter_assets(directory: Path, novel_id: int | str, asset_ids) -> dict[str, Path]:
@@ -73,14 +86,20 @@ def iter_assets(directory: Path, novel_id: int | str, asset_ids) -> dict[str, Pa
     同一 asset id 出现两次（既是内嵌图又是关联插图）时先到先得。
     """
     found: dict[str, Path] = {}
-    for kind, asset_id in asset_ids:
+    for kind, raw_id in asset_ids:
+        asset_id = str(raw_id)
         if asset_id in found:
             continue
+        matched: Path | None = None
         for suffix in IMAGE_SUFFIXES:
             candidate = asset_path(directory, novel_id, kind, asset_id, suffix)
-            if candidate.exists():
-                found[str(asset_id)] = candidate
+            if candidate.is_file():
+                matched = candidate
                 break
+        if matched is None:
+            matched = _find_case_insensitive(directory, f"{novel_id}_{kind}_{asset_id}")
+        if matched is not None:
+            found[asset_id] = matched
     return found
 
 
@@ -122,6 +141,8 @@ def has_illustration_assets(directory: Path, novel_id: int | str) -> bool:
     """
     prefix = f"{novel_id}_"
     for path in directory.glob(f"{prefix}*"):
+        if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES:
+            continue
         match = _ASSET_STEM_RE.match(path.stem)
         if match and match["kind"] in (UPLOADED, ILLUSTRATION):
             return True
@@ -135,6 +156,8 @@ def iter_novel_asset_files(directory: Path, novel_id: int | str) -> list[Path]:
         return []
     matched: list[Path] = []
     for path in directory.glob(f"{nid_str}_*"):
+        if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES:
+            continue
         if _ASSET_STEM_RE.match(path.stem) or _COVER_STEM_RE.match(path.stem):
             matched.append(path)
     return matched

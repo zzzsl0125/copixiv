@@ -1,83 +1,98 @@
-"""FastAPI dependencies — session factory, unit of work, query parsing,
-and typed access to the application services on ``app.state``.
+"""FastAPI dependencies — session factory, unit of work, API key auth, and
+typed access to application services stored on ``app.state``.
 
-The ``app.state`` bag is populated by the container's lifespan; it is
-read ONLY here, so endpoints depend on typed functions instead of
-string-keyed state attributes.
+``app.state`` is populated by the container's lifespan; it is read ONLY here,
+so endpoints depend on typed ``Annotated`` aliases instead of string-keyed
+state lookups.
 """
 
-import json
+from __future__ import annotations
+
+import secrets
+from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException, Request
+from fastapi.security import APIKeyHeader, APIKeyQuery
+from sqlalchemy.orm import Session, sessionmaker
 
+from copixiv.config import AppConfig
 from copixiv.db.uow import SqlUnitOfWork
+from copixiv.pixiv.accounts import AccountPool
+from copixiv.pixiv.client import PixivClient
+from copixiv.storage.file_storage import FileStorage
+
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+api_key_query = APIKeyQuery(name="api_key", auto_error=False)
 
 
-def get_session_factory(request: Request):
+def get_session_factory(request: Request) -> sessionmaker[Session]:
     """The process-wide SQLAlchemy session factory (app.state)."""
     return request.app.state.session_factory
 
 
-def get_app_config(request: Request):
+def get_app_config(request: Request) -> AppConfig:
     """The application config object (app.state)."""
     return request.app.state.config
 
 
-def get_account_pool(request: Request):
+def get_account_pool(request: Request) -> AccountPool:
     """The process-wide Pixiv account pool (app.state)."""
     return request.app.state.account_pool
 
 
-def get_file_storage(request: Request):
+def get_file_storage(request: Request) -> FileStorage:
     """The file-storage service (app.state)."""
     return request.app.state.file_storage
 
 
-def get_pixiv_client(request: Request):
-    """The shared Pixiv client (app.state).
-
-    Endpoints that must ask Pixiv for something the local DB cannot answer
-    use this: today only the **author-id lookup** behind the metadata editor
-    (``features/authors/resolve_names.py::lookup_author_profile``).  Callers
-    must treat failure as *not fatal* — the client raises on rate limits /
-    cooling / network errors, and every caller so far degrades to "name
-    unknown" instead of failing the request.
-    """
+def get_pixiv_client(request: Request) -> PixivClient:
+    """The shared Pixiv client (app.state)."""
     return request.app.state.client
 
 
-def get_task_manager(request: Request):
+def get_task_manager(request: Request) -> Any:
     """The task-manager facade (app.state)."""
     return request.app.state.task_manager
 
 
-def get_uow(
-    session_factory=Depends(get_session_factory),
-) -> SqlUnitOfWork:
-    """Return an unopened request-scoped unit of work.
+SessionFactoryDep = Annotated[sessionmaker[Session], Depends(get_session_factory)]
+AppConfigDep = Annotated[AppConfig, Depends(get_app_config)]
+AccountPoolDep = Annotated[AccountPool, Depends(get_account_pool)]
+FileStorageDep = Annotated[FileStorage, Depends(get_file_storage)]
+PixivClientDep = Annotated[PixivClient, Depends(get_pixiv_client)]
+OptionalPixivClientDep = Annotated[PixivClient | None, Depends(get_pixiv_client)]
+TaskManagerDep = Annotated[Any, Depends(get_task_manager)]
 
-    Callers open explicit transaction scopes around each DB unit:
-    ``with uow.begin():`` (or ``run_write_transaction`` / ``read_transaction``
-    in async endpoints and background tasks).
-    """
+
+def get_uow(session_factory: SessionFactoryDep) -> SqlUnitOfWork:
+    """Return an unopened request-scoped unit of work."""
     return SqlUnitOfWork(session_factory)
 
 
-def parse_json_param(value: str | None, name: str) -> dict | None:
-    """Parse a JSON string request parameter into a dict.
+UowDep = Annotated[SqlUnitOfWork, Depends(get_uow)]
 
-    Args:
-        value: The raw query/cursor string (``None`` → ``None``).
-        name: Parameter name, used in the 400 error message.
 
-    Raises:
-        HTTPException: 400 when the string is not valid JSON.
-    """
-    if not value:
-        return None
-    try:
-        return json.loads(value)
-    except json.JSONDecodeError:
-        raise HTTPException(
-            status_code=400, detail=f"Invalid {name} JSON format"
-        )
+def require_api_key(
+    request: Request,
+    header_key: Annotated[str | None, Depends(api_key_header)] = None,
+) -> None:
+    """Verify ``X-API-Key`` header when ``security.api_key`` is configured."""
+    expected: str = request.app.state.config.security.api_key
+    if not expected:
+        return
+    if header_key is None or not secrets.compare_digest(header_key, expected):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+def require_download_api_key(
+    request: Request,
+    header_key: Annotated[str | None, Depends(api_key_header)] = None,
+    query_key: Annotated[str | None, Depends(api_key_query)] = None,
+) -> None:
+    """Verify ``X-API-Key`` header or ``?api_key=`` query param for downloads."""
+    expected: str = request.app.state.config.security.api_key
+    if not expected:
+        return
+    provided = header_key if header_key is not None else query_key
+    if provided is None or not secrets.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")

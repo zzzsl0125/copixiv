@@ -1,58 +1,74 @@
-"""Shared Pixiv HTTP helpers — anonymous (no-auth) image fetching.
+"""Shared Pixiv HTTP constants, proxy normalization, and Retry-After parsing."""
 
-Pixiv's image CDN (``i.pximg.net``) serves images with just a browser-like
-``Referer`` + UA — no OAuth token.  The API layer (per-account
-``AppPixivAPI``) and the image layer therefore share these constants and
-helpers while keeping auth strictly on the API side.
-"""
+from __future__ import annotations
 
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+from typing import Any
 
-# The same mobile UA pixivpy3 sends for API calls.
+# Mobile iOS headers expected by Pixiv App API and image CDN.
 PIXIV_IOS_USER_AGENT = "PixivIOSApp/7.13.3 (iOS 14.6; iPhone13,2)"
-# Referer required by i.pximg.net for anonymous image access.
 PIXIV_REFERER = "https://www.pixiv.net/"
 
-_RETRYABLE_STATUS = [500, 502, 503, 504]
+PIXIV_API_HEADERS: dict[str, str] = {
+    "app-os": "ios",
+    "app-os-version": "14.6",
+    "user-agent": PIXIV_IOS_USER_AGENT,
+}
+
+PIXIV_IMAGE_HEADERS: dict[str, str] = {
+    "Referer": PIXIV_REFERER,
+    "User-Agent": PIXIV_IOS_USER_AGENT,
+}
 
 
-def create_image_session(
-    proxy_http: str = "",
-    proxy_https: str = "",
-    max_retries: int = 3,
-) -> requests.Session:
-    """Build a requests session for anonymous image downloads.
-
-    One session per download batch (not per image): connection pooling
-    keeps the CDN handshakes down while ``Retry`` absorbs transient 5xx.
-    """
-    session = requests.Session()
-    retries = Retry(
-        total=max_retries,
-        backoff_factor=0.5,
-        status_forcelist=_RETRYABLE_STATUS,
-    )
-    session.mount("http://", HTTPAdapter(max_retries=retries))
-    session.mount("https://", HTTPAdapter(max_retries=retries))
-    session.headers.update({
-        "Referer": PIXIV_REFERER,
-        "User-Agent": PIXIV_IOS_USER_AGENT,
-    })
-    proxies = {"http": proxy_http, "https": proxy_https}
-    if proxy_http or proxy_https:
-        session.proxies.update(proxies)
-    return session
+def normalize_proxy_url(proxy_url: str | None) -> str | None:
+    """Normalise a proxy string (``127.0.0.1:20172`` → ``http://127.0.0.1:20172``)."""
+    if not proxy_url:
+        return None
+    cleaned = proxy_url.strip()
+    if not cleaned:
+        return None
+    if "://" not in cleaned:
+        return f"http://{cleaned}"
+    return cleaned
 
 
-def pick_image_url(urls, order=("original", "large", "medium", "small")) -> str | None:
+def parse_retry_after(
+    header_value: str | None,
+    *,
+    default: float,
+    max_wait: float = 600.0,
+) -> float:
+    """Parse an HTTP ``Retry-After`` header (integer seconds or HTTP-date)."""
+    if not header_value:
+        return default
+    raw = header_value.strip()
+    if not raw:
+        return default
+    try:
+        seconds = float(raw)
+        return min(max(seconds, 0.0), max_wait)
+    except ValueError:
+        pass
+    try:
+        dt = parsedate_to_datetime(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        delta = (dt - datetime.now(UTC)).total_seconds()
+        return min(max(delta, 0.0), max_wait)
+    except (TypeError, ValueError):
+        return default
+
+
+def pick_image_url(
+    urls: Any,
+    order: tuple[str, ...] = ("original", "large", "medium", "small"),
+) -> str | None:
     """Pick the best available image URL by preference order.
 
     Tolerates ``None`` and dicts missing some sizes (the webview API
-    omits sizes it does not carry).  Default order is
-    original > large > medium > small; callers whose payload lacks a size
-    (e.g. linked illustrations without ``large``) pass a narrower order.
+    omits sizes it does not carry).
     """
     if not isinstance(urls, dict):
         return None

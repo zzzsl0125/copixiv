@@ -1,22 +1,37 @@
 """Application configuration — Pydantic Settings with YAML + env support.
 
-Load order: defaults → YAML file → environment variables (prefix ``COPIXIV_``).
-The config is accessed via :func:`get_config`, which lazily loads and caches
-the ``AppConfig`` singleton on first call.
+Load order (highest precedence first):
+  1. Explicit init kwargs (``AppConfig(...)``)
+  2. Environment variables (prefix ``COPIXIV_``, nested delimiter ``__``)
+  3. YAML file (loaded explicitly by :func:`load_config`, never implicitly
+     on direct ``AppConfig()`` instantiation)
+  4. Model defaults
 """
 
+from __future__ import annotations
+
 import os
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    ValidationError,
     field_validator,
     model_validator,
 )
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+    YamlConfigSettingsSource,
+)
+
+from copixiv.core.naming import DEFAULT_NAMING_TEMPLATE
 
 # ---------------------------------------------------------------------------
 # Config models
@@ -26,11 +41,15 @@ from pydantic import (
 class PathConfig(BaseModel):
     """Filesystem paths for stored novel data."""
 
+    model_config = ConfigDict(extra="forbid")
+
     download: str = "download"
 
 
 class PixivClientConfig(BaseModel):
     """Rate-limiting and concurrency settings for the Pixiv client."""
+
+    model_config = ConfigDict(extra="forbid")
 
     min_interval: int = 2  # seconds between requests
     cooling_duration: int = 120  # seconds after rate-limit hit
@@ -38,67 +57,42 @@ class PixivClientConfig(BaseModel):
 
 
 class ProxyConfig(BaseModel):
-    """Proxy URL applied to both HTTP and HTTPS traffic.
+    """Proxy URL applied to both HTTP and HTTPS traffic."""
 
-    A single ``url`` replaces the old ``http``/``https`` pair: pixivpy3's
-    per-account API and the anonymous image session both accept one proxy
-    for both schemes.
-    """
+    model_config = ConfigDict(extra="forbid")
 
     url: str = ""
 
 
 class BatchDownloadConfig(BaseModel):
-    """Naming template for batch-download ZIP internal paths.
+    """Naming template for batch-download ZIP internal paths."""
 
-    Available tokens:
-        ``{id}`` (required), ``{title}``, ``{author_name}``, ``{author_id}``,
-        ``{like}``, ``{view}``, ``{text}``, ``{date}``, ``{series_name}``,
-        ``{series_index}``.
-    """
+    model_config = ConfigDict(extra="forbid")
 
-    naming: str = "{author_name}/{series_name}/#{series_index}_{title}_{id}"
+    naming: str = DEFAULT_NAMING_TEMPLATE
 
 
 class BackupConfig(BaseModel):
-    """Weekly database backup location and retention.
+    """Weekly database backup location and retention."""
 
-    ``keep_count`` weekly backups are retained (default 4).  Keeping a
-    single copy gives no protection against accidental corruption being
-    vacuumed into the only backup; N copies preserve a recovery window.
-
-    ``dir`` is project-relative (the systemd unit's WorkingDirectory is the
-    repo root).  It is configurable mainly so tests can point it at a temp
-    directory — a test app must never write a dump into the production
-    ``backups/`` (a same-week file there would suppress the real backup).
-    """
+    model_config = ConfigDict(extra="forbid")
 
     dir: str = "backups"
     keep_count: int = 4
 
 
 class SecurityConfig(BaseModel):
-    """Security hardening settings for the web API.
+    """Security hardening settings for the web API."""
 
-    The server still listens on ``0.0.0.0`` (LAN access), so the trust
-    boundary is pushed into these three layers instead:
-    - ``api_key``: optional shared secret required on every ``/api/`` call
-      (empty string disables it).
-    - ``allowed_hosts``: extra Host-header values allowed past the
-      Host-validation middleware (``localhost`` and IP literals always pass).
-    - ``allowed_origins``: CORS origin whitelist (no wildcard).  When it is
-      not set explicitly it is derived from ``allowed_hosts`` — each host is
-      allow-listed on the dev ports 5173/4173 — and with no hosts it falls
-      back to the local dev origins.
-    """
+    model_config = ConfigDict(extra="forbid")
 
     api_key: str = ""  # 空=关闭 API key 校验
     allowed_hosts: list[str] = Field(default_factory=list)  # 额外放行的域名/IP
-    allowed_origins: list[str] | None = None  # 空=由 allowed_hosts 推导
+    allowed_origins: list[str] | None = None  # None=由 allowed_hosts 推导；[]=禁用跨域
 
     @model_validator(mode="after")
-    def _derive_allowed_origins(self) -> "SecurityConfig":
-        if self.allowed_origins:
+    def _derive_allowed_origins(self) -> SecurityConfig:
+        if self.allowed_origins is not None:
             return self
         if self.allowed_hosts:
             origins: list[str] = []
@@ -109,23 +103,18 @@ class SecurityConfig(BaseModel):
             self.allowed_origins = origins
         else:
             self.allowed_origins = [
-                "http://localhost:9000", "http://127.0.0.1:9000",
-                "http://localhost:5173", "http://127.0.0.1:5173",
-                "http://localhost:4173", "http://127.0.0.1:4173",
+                "http://localhost:9000",
+                "http://127.0.0.1:9000",
+                "http://localhost:5173",
+                "http://127.0.0.1:5173",
+                "http://localhost:4173",
+                "http://127.0.0.1:4173",
             ]
         return self
 
 
 class NotificationBackendConfig(BaseModel):
-    """A single notification backend.
-
-    Telegram is the only supported backend: a ``telegram`` entry fills
-    ``token`` and ``chat_id``.  The ``notifications`` list shape is kept
-    for future channels, but the factory only builds the first entry.  An
-    old ``webhook`` entry fails fast at validation with a migration
-    message (never silently skipped), and unknown fields (such as the
-    removed ``url``) are rejected by ``extra="forbid"``.
-    """
+    """A single notification backend (currently Telegram only)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -144,89 +133,12 @@ class NotificationBackendConfig(BaseModel):
         return value
 
 
-class AppConfig(BaseModel):
-    """Root configuration object."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    # PostgreSQL connection string.  Default targets the local dev instance on
-    # port 5433 (see scripts/pg_dev.py); deployments override it via
-    # ``config.yaml`` ``database_url`` or ``COPIXIV_DATABASE_URL``.
-    database_url: str = "postgresql+psycopg2://postgres@127.0.0.1:5433/copixiv"
-    # Novel list/count/id/sort execution backend:
-    # "rust" (default, in-process copixiv_rs index), "pg" (PostgreSQL only),
-    # or "shadow" (runs both and checks parity). Overridable via COPIXIV_QUERY_ENGINE.
-    query_engine: Literal["rust", "pg", "shadow"] = "rust"
-
-    path: PathConfig = Field(default_factory=PathConfig)
-    pixiv_client: PixivClientConfig = Field(default_factory=PixivClientConfig)
-    proxy: ProxyConfig = Field(default_factory=ProxyConfig)
-    batch_download: BatchDownloadConfig = Field(
-        default_factory=BatchDownloadConfig
-    )
-    backup: BackupConfig = Field(default_factory=BackupConfig)
-    security: SecurityConfig = Field(default_factory=SecurityConfig)
-    notifications: list[NotificationBackendConfig] = Field(default_factory=list)
-
-
-# ---------------------------------------------------------------------------
-# Loading
-# ---------------------------------------------------------------------------
-
 _DEFAULT_CONFIG_PATH = Path("config.yaml")
 
+# Scoped YAML path bound only inside load_config() so direct AppConfig(...)
+# instantiation never touches CWD config.yaml.
+_yaml_path_ctx: ContextVar[Path | None] = ContextVar("_yaml_path_ctx", default=None)
 
-def _env_overrides() -> dict:
-    """Read COPIXIV_-prefixed env vars and nest them into the config shape.
-
-    Nested keys use a double underscore::
-
-        COPIXIV_PROXY__URL=http://…   →  {"proxy": {"url": "…"}}
-        COPIXIV_BACKUP__DIR=/tmp/bk   →  {"backup": {"dir": "/tmp/bk"}}
-
-    Top-level keys have no separator::
-
-        COPIXIV_DATABASE_URL=…        →  {"database_url": "…"}
-
-    Top-level support matters in practice: it is the only way to point a
-    second process at a different database without editing ``config.yaml``
-    (verification instances, one-off migrations).  Without it the override
-    was silently dropped, so a process that *looked* isolated wrote to the
-    production database.
-    """
-    prefix = "COPIXIV_"
-    overrides: dict = {}
-    # Only fields AppConfig actually declares may be overridden at the top
-    # level.  Otherwise an unrelated COPIXIV_* var (e.g. ``COPIXIV_LOG_DIR``,
-    # which ``log.py`` reads directly) would be injected into the config dict
-    # and rejected by ``extra="forbid"`` — turning a working startup into a
-    # hard failure.
-    top_level_fields = set(AppConfig.model_fields)
-    for key, value in os.environ.items():
-        if not key.startswith(prefix):
-            continue
-        parts = key[len(prefix):].lower().split("__", 1)
-        if len(parts) == 2:
-            section, field = parts
-            overrides.setdefault(section, {})[field] = value
-        elif len(parts) == 1 and parts[0] in top_level_fields:
-            # A bare top-level config field (database_url, …).  Values stay
-            # strings; Pydantic coerces them against the declared types.
-            overrides[parts[0]] = value
-    return overrides
-
-
-def _deep_merge(base: dict, overrides: dict) -> dict:
-    """Recursively merge *overrides* into *base*."""
-    for k, v in overrides.items():
-        if isinstance(v, dict) and isinstance(base.get(k), dict):
-            base[k] = _deep_merge(base[k], v)
-        else:
-            base[k] = v
-    return base
-
-
-# Old config keys → the migration hint shown when one is still present.
 _LEGACY_REMAPPING = {
     "telegram": "合并为 notifications 列表（示例见 config.example.yaml）",
     "notifiers": "合并为 notifications 列表（示例见 config.example.yaml）",
@@ -235,15 +147,20 @@ _LEGACY_REMAPPING = {
 }
 
 
-def _fail_fast_on_legacy_config(raw: dict) -> None:
-    """Refuse to load configs still using the pre-K8 (config-cleanup) keys.
+def _check_legacy_env() -> None:
+    """Reject removed environment variables early with clear hints."""
+    if "COPIXIV_QUERY_ENGINE" in os.environ:
+        raise ValueError("环境变量 COPIXIV_QUERY_ENGINE 已移除，系统固定使用 Rust 单检索引擎，请取消设置")
+    if os.environ.get("COPIXIV_PROXY_HTTP") or os.environ.get("COPIXIV_PROXY_HTTPS"):
+        raise SystemExit(
+            "配置已迁移（配置格式在 2026-08 收尾中变更）：\n"
+            "- COPIXIV_PROXY_HTTP/HTTPS → COPIXIV_PROXY__URL\n"
+            "请按新格式更新环境变量或 config.yaml；示例见 config.example.yaml。"
+        )
 
-    The config format was consolidated in K8: notifications became a list,
-    proxy collapsed to a single ``url``, and the frontend defaults moved
-    into the client bundle.  Any residual old key now fails fast — with an
-    actionable migration hint instead of a generic validation error —
-    rather than being silently ignored.
-    """
+
+def _fail_fast_on_legacy_yaml(raw: dict[str, Any]) -> None:
+    """Refuse to load YAML configs still using pre-K8 keys."""
     reasons: list[str] = []
 
     for old_key, instruction in _LEGACY_REMAPPING.items():
@@ -253,9 +170,6 @@ def _fail_fast_on_legacy_config(raw: dict) -> None:
     proxy = raw.get("proxy")
     if isinstance(proxy, dict) and ("http" in proxy or "https" in proxy):
         reasons.append("- 旧 proxy 的 http/https 双键 → 单键 proxy.url（env: COPIXIV_PROXY__URL）")
-
-    if os.environ.get("COPIXIV_PROXY_HTTP") or os.environ.get("COPIXIV_PROXY_HTTPS"):
-        reasons.append("- COPIXIV_PROXY_HTTP/HTTPS → COPIXIV_PROXY__URL")
 
     if not reasons:
         return
@@ -267,62 +181,91 @@ def _fail_fast_on_legacy_config(raw: dict) -> None:
     )
 
 
-def load_config(config_path: str | None = None) -> AppConfig:
-    """Load configuration from YAML file (if present), then apply env overrides.
+class _CheckedYamlSettingsSource(YamlConfigSettingsSource):
+    """YAML source that converts parse errors and legacy keys to SystemExit."""
 
-    Raises:
-        SystemExit: If the YAML file uses a legacy key, or is malformed.
-    """
-    path = Path(config_path or _DEFAULT_CONFIG_PATH)
-
-    raw: dict = {}
-    if path.exists():
+    def __init__(
+        self,
+        settings_cls: type[BaseSettings],
+        yaml_file: Path,
+        yaml_file_encoding: str = "utf-8",
+    ) -> None:
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                raw = yaml.safe_load(f) or {}
-        except yaml.YAMLError as e:
-            raise SystemExit(f"Failed to parse {path}: {e}") from e
+            super().__init__(
+                settings_cls,
+                yaml_file=yaml_file,
+                yaml_file_encoding=yaml_file_encoding,
+            )
+        except yaml.YAMLError as exc:
+            raise SystemExit(f"Failed to parse {yaml_file}: {exc}") from exc
 
-    raw = _deep_merge(raw, _env_overrides())
+        if not isinstance(self.yaml_data, dict):
+            raise SystemExit(f"Failed to parse {yaml_file}: expected mapping at root")
+        _fail_fast_on_legacy_yaml(self.yaml_data)
 
-    # Fail fast on the pre-K8 config keys BEFORE model validation, so the
-    # migration hint (not a generic "unexpected field" error) is shown.
-    _fail_fast_on_legacy_config(raw)
 
+class AppConfig(BaseSettings):
+    """Root configuration object backed by ``pydantic-settings``."""
+
+    model_config = SettingsConfigDict(
+        extra="forbid",
+        env_prefix="COPIXIV_",
+        env_nested_delimiter="__",
+    )
+
+    database_url: str = "postgresql+psycopg2://postgres@127.0.0.1:5433/copixiv"
+
+    path: PathConfig = Field(default_factory=PathConfig)
+    pixiv_client: PixivClientConfig = Field(default_factory=PixivClientConfig)
+    proxy: ProxyConfig = Field(default_factory=ProxyConfig)
+    batch_download: BatchDownloadConfig = Field(default_factory=BatchDownloadConfig)
+    backup: BackupConfig = Field(default_factory=BackupConfig)
+    security: SecurityConfig = Field(default_factory=SecurityConfig)
+    notifications: list[NotificationBackendConfig] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_removed_query_engine(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "query_engine" in data:
+            raise ValueError(
+                "配置项 'query_engine' 已移除，系统固定使用 Rust 单检索引擎，请从 config.yaml 删除该键"
+            )
+        return data
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        del dotenv_settings, file_secret_settings
+        yaml_path = _yaml_path_ctx.get()
+        if yaml_path is not None and yaml_path.exists():
+            return (
+                init_settings,
+                env_settings,
+                _CheckedYamlSettingsSource(
+                    settings_cls,
+                    yaml_file=yaml_path,
+                    yaml_file_encoding="utf-8",
+                ),
+            )
+        return (init_settings, env_settings)
+
+
+def load_config(config_path: str | Path | None = None) -> AppConfig:
+    """Load configuration from YAML file (if present) merged with ``COPIXIV_`` env vars."""
+    _check_legacy_env()
+    path = Path(config_path or _DEFAULT_CONFIG_PATH)
+    token = _yaml_path_ctx.set(path)
     try:
-        return AppConfig(**raw)
-    except Exception as e:
+        return AppConfig()
+    except ValidationError as exc:
         raise SystemExit(
-            f"Failed to construct AppConfig: {e}\n"
-            f"Please check that all required fields are present."
-        ) from e
-
-
-# Lazy singleton — loaded on first access instead of at import time.
-# This allows tests to import the module without a config.yaml file.
-_config: AppConfig | None = None
-
-
-def get_config(config_path: str | None = None) -> AppConfig:
-    """Return the cached ``AppConfig`` singleton, loading it lazily.
-
-    The first call triggers the YAML read; subsequent calls return the
-    cached instance.  Pass *config_path* to load a non-default file.
-    """
-    global _config
-    if _config is None:
-        _config = load_config(config_path)
-    return _config
-
-
-def __getattr__(name: str):
-    """Lazy module-level ``config`` alias for backwards compatibility.
-
-    Allows ``from copixiv.config import config`` to work without
-    triggering the YAML load at import time (which would raise
-    ``SystemExit`` if ``config.yaml`` is missing, breaking test imports).
-    The load is deferred until the first actual access of ``config``.
-    """
-    if name == "config":
-        return get_config()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+            f"Failed to construct AppConfig: {exc}\nPlease check that all required fields are present."
+        ) from exc
+    finally:
+        _yaml_path_ctx.reset(token)

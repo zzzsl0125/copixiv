@@ -1,20 +1,15 @@
-"""Pixiv access module — the project's module-quality benchmark.
+"""Pixiv access module — native async ``httpx`` client and account pool.
 
-Public API (docs/MODULARITY.md §M2).  Anything not listed here is an
-implementation detail; other modules must not import it:
+Public API:
 
 - ``PixivClient`` (``client.py``) — explicit async API methods, concurrency
-  limit, pagination and retry.
+  limit, pagination and ``tenacity`` retry.
 - ``AccountPool`` (``accounts.py``) — LRU account selection with
   ContextVar-propagated strategy.
 - ``PixivAccount`` / ``AccountStrategy`` / ``TokenInfo`` (``account.py``)
-  — single-account state machine and strategy dataclasses.
-- Exceptions: ``RateLimitError``, ``AccountInvalidError``, ``PixivApiError``
-  (``account.py``).
-
-Vendor boundary (docs/MODULARITY.md §2.2): ``import pixivpy3`` is only
-allowed in ``patch.py`` (monkey patches) and ``account.py`` (the single
-adapter that owns an ``AppPixivAPI`` instance).  Everything else in this
-package — and the rest of the project — sees only the :class:`.PixivClient`
-public API and the exceptions above.
+  — single-account OAuth state machine and rate-limiting.
+- Typed response DTOs in ``models.py`` (``WebviewNovel``, ``PixivNovelInfo``,
+  ``NovelListResponse``, ``UserDetailResponse``).
+- Exceptions: ``RateLimitError``, ``AccountInvalidError``, ``PixivApiError``,
+  ``PixivHttpError``, ``PremiumRequiredError`` (``errors.py``).
 """

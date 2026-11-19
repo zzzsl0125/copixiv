@@ -31,9 +31,10 @@ decision (when is a book finished for the reader), not a file fact.
 from __future__ import annotations
 
 import zipfile
+import zlib
 from pathlib import Path
 
-from copixiv.core.services import (
+from copixiv.core.text import (
     has_image_placeholders,
     has_image_placeholders_bytes,
 )
@@ -70,7 +71,7 @@ def has_raw_markers(path: Path) -> bool:
     try:
         with zipfile.ZipFile(path) as archive:
             return _archive_has_raw_markers(archive)
-    except (OSError, zipfile.BadZipFile):
+    except (OSError, KeyError, zipfile.BadZipFile, zlib.error, RuntimeError):
         return False
 
 
@@ -104,11 +105,8 @@ def is_complete(path: Path) -> bool:
     """
     try:
         with zipfile.ZipFile(path) as archive:
-            return (
-                _archive_has_images(archive)
-                and not _archive_has_raw_markers(archive)
-            )
-    except (OSError, zipfile.BadZipFile):
+            return _archive_has_images(archive) and not _archive_has_raw_markers(archive)
+    except (OSError, KeyError, zipfile.BadZipFile, zlib.error, RuntimeError):
         return False
 
 
@@ -118,22 +116,19 @@ def is_complete(path: Path) -> bool:
 # archive while the individual predicates stay cheap to call on their own.
 # ---------------------------------------------------------------------------
 
+
 def _archive_has_raw_markers(archive: zipfile.ZipFile) -> bool:
     """Scan *archive*'s XHTML members for an unresolved marker.
 
-    A member that cannot be read (KeyError) means the container is damaged;
-    the marker question then has no reliable answer, so it is reported as
-    "no markers" — the same conservative result the old per-call version
-    produced, and ``is_complete`` still guards the file via the images check.
+    Read/decompression errors (CRC mismatch, truncated stream, missing member)
+    propagate so callers like :func:`is_complete` treat a damaged archive as
+    incomplete rather than clean.
     """
-    try:
-        for name in archive.namelist():
-            if not name.lower().endswith(_TEXT_SUFFIXES):
-                continue
-            if has_image_placeholders_bytes(archive.read(name)):
-                return True
-    except (OSError, KeyError):
-        return False
+    for name in archive.namelist():
+        if not name.lower().endswith(_TEXT_SUFFIXES):
+            continue
+        if has_image_placeholders_bytes(archive.read(name)):
+            return True
     return False
 
 
@@ -141,10 +136,7 @@ def _archive_has_images(archive: zipfile.ZipFile) -> bool:
     """True when *archive* carries a real file entry under ``images/``."""
     # A real file entry, not the "images/" directory entry itself — an empty
     # EPUB can carry the directory and nothing in it.
-    return any(
-        _IMAGES_PREFIX in info.filename and not info.is_dir()
-        for info in archive.infolist()
-    )
+    return any(_IMAGES_PREFIX in info.filename and not info.is_dir() for info in archive.infolist())
 
 
 def needs_epub(body: str | None) -> bool | None:
