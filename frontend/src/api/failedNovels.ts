@@ -1,46 +1,52 @@
-import { apiClient } from './client'
-import type { FailedNovelListResponse, FailedNovelCountResponse } from '../types'
+import { apiClient, unwrap } from './client'
+import type { FailedNovelListResponse } from '../types'
 
 /** 分页大小，与后端默认 limit 一致。 */
 export const FAILED_NOVELS_PAGE_SIZE = 100
 
 export const failedNovelApi = {
-  async list(offset: number, limit = FAILED_NOVELS_PAGE_SIZE) {
-    const response = await apiClient.get<FailedNovelListResponse>('/failed-novels/', {
-      params: { offset, limit },
+  async list(
+    offset: number,
+    limit = FAILED_NOVELS_PAGE_SIZE,
+    signal?: AbortSignal,
+  ): Promise<FailedNovelListResponse> {
+    const res = await apiClient.GET('/api/failed-novels', {
+      params: { query: { offset, limit } },
+      signal,
     })
-    return response.data
+    return unwrap(res, '加载失败记录失败')
   },
 
-  async count() {
-    const response = await apiClient.get<FailedNovelCountResponse>('/failed-novels/count')
-    return response.data.count
+  async count(signal?: AbortSignal): Promise<number> {
+    const res = await apiClient.GET('/api/failed-novels/count', { signal })
+    return unwrap(res, '统计失败记录失败').count
   },
 
   /** 重置单条失败记录计数（记录保留，解封后下次批量任务自动重试）。 */
-  async resetCount(novelId: number) {
-    await apiClient.post(`/failed-novels/${novelId}/reset-count`)
+  async resetCount(novelId: number): Promise<void> {
+    const res = await apiClient.POST('/api/failed-novels/{novel_id}/reset-count', {
+      params: { path: { novel_id: novelId } },
+    })
+    unwrap(res, '重置失败')
   },
 
   /** 重置全部失败计数（记录保留）。 */
-  async resetAll() {
-    await apiClient.post('/failed-novels/reset-count')
+  async resetAll(): Promise<void> {
+    const res = await apiClient.POST('/api/failed-novels/reset-count')
+    unwrap(res, '重置失败')
   },
 
   /** 入队后台重试任务（任务管理页可见进度）。 */
-  async retry(novelIds: number[]) {
-    const response = await apiClient.post<{ task_id: number; matched: number }>(
-      '/failed-novels/retry',
-      { novel_ids: novelIds },
-    )
-    return response.data
+  async retry(novelIds: number[]): Promise<{ task_id: number; matched: number }> {
+    const res = await apiClient.POST('/api/failed-novels/retry', {
+      body: { novel_ids: novelIds },
+    })
+    return unwrap(res, '入队重试失败') as { task_id: number; matched: number }
   },
 
   /** 入队后台重试任务：重试全部失败记录（服务端取全量台账，与当前加载页无关）。 */
-  async retryAll() {
-    const response = await apiClient.post<{ task_id: number; matched: number }>(
-      '/failed-novels/retry-all',
-    )
-    return response.data
+  async retryAll(): Promise<{ task_id: number; matched: number }> {
+    const res = await apiClient.POST('/api/failed-novels/retry-all')
+    return unwrap(res, '入队重试失败') as { task_id: number; matched: number }
   },
 }

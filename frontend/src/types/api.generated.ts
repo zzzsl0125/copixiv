@@ -186,7 +186,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/novels/": {
+    "/api/novels": {
         parameters: {
             query?: never;
             header?: never;
@@ -194,7 +194,7 @@ export interface paths {
             cookie?: never;
         };
         /** Get Novels */
-        get: operations["get_novels_api_novels__get"];
+        get: operations["get_novels_api_novels_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -404,8 +404,8 @@ export interface paths {
          *
          *     Powers the 「查看被排除」view.  Follows the global exclusion setting:
          *     empty when exclusion is off.  The blocked-id list is filtered through
-         *     the same scope logic as ``filter_ids_in_scope`` (chunked to stay under
-         *     SQLite's variable limit); exclusion itself is not re-applied (the ids
+         *     the same scope logic as ``filter_ids_in_scope`` (chunked to keep each
+         *     PostgreSQL query bounded); exclusion itself is not re-applied (the ids
          *     are already the excluded set).
          *
          *     ``order_by`` (id/like/text) orders the result set; ``random`` or
@@ -683,10 +683,8 @@ export interface paths {
          *     ``NovelBase``），前端同样原地替换卡片。本地书 → 400（没有来源可恢复）；
          *     pixiv 上已不存在 / 受限（webview 返回空）→ 404。
          *
-         *     依赖用 ``Depends(get_uow)`` 而**不是** ``get_write_uow``：抓取必须在写事务
-         *     之外，写事务由用例里的 ``run_write_transaction`` 自己开（与
-         *     ``tasks/maintenance.py`` 同一种用法）——依赖注入阶段开不出"稍后再写"的
-         *     事务边界。
+         *     依赖用 ``UowDep`` 而**不是** ``get_write_uow``：抓取必须在写事务
+         *     之外，写事务由用例里的 ``run_write_transaction`` 自己开。
          */
         post: operations["sync_novel_api_novels__novel_id__sync_post"];
         delete?: never;
@@ -695,7 +693,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/search-history/": {
+    "/api/search-history": {
         parameters: {
             query?: never;
             header?: never;
@@ -703,14 +701,14 @@ export interface paths {
             cookie?: never;
         };
         /** Get Search History */
-        get: operations["get_search_history_api_search_history__get"];
+        get: operations["get_search_history_api_search_history_get"];
         put?: never;
         post?: never;
         /**
          * Clear Search History
          * @description Delete all search-history entries (frontend "全部清除" button).
          */
-        delete: operations["clear_search_history_api_search_history__delete"];
+        delete: operations["clear_search_history_api_search_history_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -751,7 +749,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/tag-aliases/": {
+    "/api/tag-aliases": {
         parameters: {
             query?: never;
             header?: never;
@@ -759,10 +757,10 @@ export interface paths {
             cookie?: never;
         };
         /** Get Tag Aliases */
-        get: operations["get_tag_aliases_api_tag_aliases__get"];
+        get: operations["get_tag_aliases_api_tag_aliases_get"];
         put?: never;
         /** Create Tag Alias */
-        post: operations["create_tag_alias_api_tag_aliases__post"];
+        post: operations["create_tag_alias_api_tag_aliases_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -811,7 +809,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/tag-preferences/": {
+    "/api/tag-preferences": {
         parameters: {
             query?: never;
             header?: never;
@@ -819,10 +817,10 @@ export interface paths {
             cookie?: never;
         };
         /** Get Tag Preferences */
-        get: operations["get_tag_preferences_api_tag_preferences__get"];
+        get: operations["get_tag_preferences_api_tag_preferences_get"];
         put?: never;
         /** Create Tag Preference */
-        post: operations["create_tag_preference_api_tag_preferences__post"];
+        post: operations["create_tag_preference_api_tag_preferences_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -874,9 +872,6 @@ export interface paths {
         /**
          * Get Busy Tasks
          * @description Task functions with a pending/running row — the front-end busy set.
-         *
-         *     Tiny on purpose: the task-status poller hits this every 5 s while a task
-         *     runs, and it used to read a full history page instead.
          */
         get: operations["get_busy_tasks_api_tasks_busy_get"];
         put?: never;
@@ -897,14 +892,30 @@ export interface paths {
         /**
          * Get Task History
          * @description List task-history rows **without** their log payload.
-         *
-         *     The log is fetched on demand via ``GET /history/{id}/log``.  Returning it
-         *     inline made one page ~7.4 MB (96 % log text) while the front-end poller
-         *     re-read it every 5 s whenever a task was running.
          */
         get: operations["get_task_history_api_tasks_history_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/tasks/history/{task_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cancel Task History
+         * @description Request cancellation of a pending or running background task.
+         */
+        post: operations["cancel_task_history_api_tasks_history__task_id__cancel_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1018,7 +1029,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/tokens/": {
+    "/api/tokens": {
         parameters: {
             query?: never;
             header?: never;
@@ -1026,17 +1037,17 @@ export interface paths {
             cookie?: never;
         };
         /** Get Tokens */
-        get: operations["get_tokens_api_tokens__get"];
+        get: operations["get_tokens_api_tokens_get"];
         put?: never;
         /** Create Token */
-        post: operations["create_token_api_tokens__post"];
+        post: operations["create_token_api_tokens_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/tokens/reorder/": {
+    "/api/tokens/reorder": {
         parameters: {
             query?: never;
             header?: never;
@@ -1046,7 +1057,7 @@ export interface paths {
         get?: never;
         put?: never;
         /** Reorder Tokens */
-        post: operations["reorder_tokens_api_tokens_reorder__post"];
+        post: operations["reorder_tokens_api_tokens_reorder_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1107,12 +1118,8 @@ export interface components {
         BatchDownloadRequest: {
             /** Excluded Ids */
             excluded_ids?: number[] | null;
-            /**
-             * Format Mode
-             * @default txt
-             * @enum {string}
-             */
-            format_mode: "txt" | "prefer_epub";
+            /** @default txt */
+            format_mode: components["schemas"]["FormatMode"];
             /** Keyword */
             keyword?: string | null;
             /**
@@ -1128,18 +1135,10 @@ export interface components {
             naming_template?: string | null;
             /** Novel Ids */
             novel_ids?: number[] | null;
-            /**
-             * Order By
-             * @default id
-             * @enum {string}
-             */
-            order_by: "id" | "like" | "view" | "text" | "create_time" | "random";
-            /**
-             * Order Direction
-             * @default DESC
-             * @enum {string}
-             */
-            order_direction: "ASC" | "DESC";
+            /** @default id */
+            order_by: components["schemas"]["OrderBy"];
+            /** @default DESC */
+            order_direction: components["schemas"]["OrderDirection"];
             /** Zip Name */
             zip_name?: string | null;
         };
@@ -1148,12 +1147,8 @@ export interface components {
          * @description Background-task export (large selections — the ZIP is built offline).
          */
         BatchExportRequest: {
-            /**
-             * Format Mode
-             * @default txt
-             * @enum {string}
-             */
-            format_mode: "txt" | "prefer_epub";
+            /** @default txt */
+            format_mode: components["schemas"]["FormatMode"];
             /** Naming Template */
             naming_template?: string | null;
             /** Novel Ids */
@@ -1372,6 +1367,12 @@ export interface components {
             /** Novel Ids */
             novel_ids: number[];
         };
+        /**
+         * FormatMode
+         * @description Supported export/download format modes.
+         * @enum {string}
+         */
+        FormatMode: "txt" | "prefer_epub";
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -1455,11 +1456,8 @@ export interface components {
             series_index?: number | null;
             /** Series Name */
             series_name?: string | null;
-            /**
-             * Source
-             * @default pixiv
-             */
-            source: string;
+            /** @default pixiv */
+            source: components["schemas"]["NovelSource"];
             /**
              * Tags
              * @default []
@@ -1532,6 +1530,12 @@ export interface components {
             novels: components["schemas"]["NovelBase"][];
         };
         /**
+         * NovelSource
+         * @description Origin of a novel row in ``novel.source``.
+         * @enum {string}
+         */
+        NovelSource: "pixiv" | "local";
+        /**
          * NovelUpdateRequest
          * @description 单本元数据编辑的部分更新体。
          *
@@ -1593,6 +1597,18 @@ export interface components {
             /** Truncated */
             truncated: boolean;
         };
+        /**
+         * OrderBy
+         * @description Supported novel ordering axes.
+         * @enum {string}
+         */
+        OrderBy: "id" | "like" | "view" | "text" | "create_time" | "random" | "none";
+        /**
+         * OrderDirection
+         * @description Sort direction (case-insensitive normalization).
+         * @enum {string}
+         */
+        OrderDirection: "ASC" | "DESC";
         /** ScheduledTaskCreate */
         ScheduledTaskCreate: {
             /** Cron */
@@ -1705,18 +1721,16 @@ export interface components {
         SortIdsRequest: {
             /** Novel Ids */
             novel_ids: number[];
-            /**
-             * Order By
-             * @enum {string}
-             */
-            order_by: "id" | "like" | "view" | "text" | "create_time";
-            /**
-             * Order Direction
-             * @default DESC
-             * @enum {string}
-             */
-            order_direction: "ASC" | "DESC";
+            order_by: components["schemas"]["SortableOrderBy"];
+            /** @default DESC */
+            order_direction: components["schemas"]["OrderDirection"];
         };
+        /**
+         * SortableOrderBy
+         * @description Deterministic novel ordering axes for explicit ID lists.
+         * @enum {string}
+         */
+        SortableOrderBy: "id" | "like" | "view" | "text" | "create_time";
         /** SystemConfigResponse */
         SystemConfigResponse: {
             /** Batch Download Naming */
@@ -1819,6 +1833,16 @@ export interface components {
         TaskBusyResponse: {
             /** Funcs */
             funcs: string[];
+        };
+        /**
+         * TaskCancelResponse
+         * @description Response for ``POST /api/tasks/history/{task_id}/cancel``.
+         */
+        TaskCancelResponse: {
+            /** Status */
+            status: string;
+            /** Task Id */
+            task_id: number;
         };
         /** TaskHistoryListResponse */
         TaskHistoryListResponse: {
@@ -2255,17 +2279,17 @@ export interface operations {
             };
         };
     };
-    get_novels_api_novels__get: {
+    get_novels_api_novels_get: {
         parameters: {
             query?: {
                 keyword?: string | null;
-                order_by?: string;
-                order_direction?: string;
-                cursor?: string | null;
-                per_page?: number;
                 min_like?: number | null;
                 min_text?: number | null;
                 exclude_blocked?: boolean | null;
+                order_by?: components["schemas"]["OrderBy"];
+                order_direction?: components["schemas"]["OrderDirection"];
+                cursor?: string | null;
+                per_page?: number;
             };
             header?: never;
             path?: never;
@@ -2557,8 +2581,8 @@ export interface operations {
                 keyword?: string | null;
                 min_like?: number | null;
                 min_text?: number | null;
-                order_by?: string | null;
-                order_direction?: string;
+                order_by?: components["schemas"]["OrderBy"] | null;
+                order_direction?: components["schemas"]["OrderDirection"];
             };
             header?: never;
             path?: never;
@@ -2625,8 +2649,8 @@ export interface operations {
                 keyword?: string | null;
                 min_like?: number | null;
                 min_text?: number | null;
-                excluded_ids?: number[] | null;
                 exclude_blocked?: boolean | null;
+                excluded_ids?: number[] | null;
                 with_excluded?: boolean;
             };
             header?: never;
@@ -2886,7 +2910,7 @@ export interface operations {
     download_novel_api_novels__novel_id__download_get: {
         parameters: {
             query?: {
-                format?: "txt" | "epub";
+                format?: components["schemas"]["FormatMode"];
             };
             header?: never;
             path: {
@@ -2976,7 +3000,7 @@ export interface operations {
             };
         };
     };
-    get_search_history_api_search_history__get: {
+    get_search_history_api_search_history_get: {
         parameters: {
             query?: {
                 limit?: number;
@@ -3008,7 +3032,7 @@ export interface operations {
             };
         };
     };
-    clear_search_history_api_search_history__delete: {
+    clear_search_history_api_search_history_delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -3018,13 +3042,11 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description Successful Response */
-            200: {
+            204: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content: {
-                    "application/json": unknown;
-                };
+                content?: never;
             };
         };
     };
@@ -3040,13 +3062,11 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description Successful Response */
-            200: {
+            204: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content: {
-                    "application/json": unknown;
-                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
@@ -3112,7 +3132,7 @@ export interface operations {
             };
         };
     };
-    get_tag_aliases_api_tag_aliases__get: {
+    get_tag_aliases_api_tag_aliases_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -3132,7 +3152,7 @@ export interface operations {
             };
         };
     };
-    create_tag_alias_api_tag_aliases__post: {
+    create_tag_alias_api_tag_aliases_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -3210,13 +3230,11 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description Successful Response */
-            200: {
+            204: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content: {
-                    "application/json": unknown;
-                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
@@ -3229,7 +3247,7 @@ export interface operations {
             };
         };
     };
-    get_tag_preferences_api_tag_preferences__get: {
+    get_tag_preferences_api_tag_preferences_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -3249,7 +3267,7 @@ export interface operations {
             };
         };
     };
-    create_tag_preference_api_tag_preferences__post: {
+    create_tag_preference_api_tag_preferences_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -3362,13 +3380,11 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description Successful Response */
-            200: {
+            204: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content: {
-                    "application/json": unknown;
-                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
@@ -3420,6 +3436,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TaskHistoryListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_task_history_api_tasks_history__task_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskCancelResponse"];
                 };
             };
             /** @description Validation Error */
@@ -3617,13 +3664,11 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description Successful Response */
-            200: {
+            204: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content: {
-                    "application/json": unknown;
-                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
@@ -3667,7 +3712,7 @@ export interface operations {
             };
         };
     };
-    get_tokens_api_tokens__get: {
+    get_tokens_api_tokens_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -3687,7 +3732,7 @@ export interface operations {
             };
         };
     };
-    create_token_api_tokens__post: {
+    create_token_api_tokens_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -3720,7 +3765,7 @@ export interface operations {
             };
         };
     };
-    reorder_tokens_api_tokens_reorder__post: {
+    reorder_tokens_api_tokens_reorder_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -3800,13 +3845,11 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description Successful Response */
-            200: {
+            204: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content: {
-                    "application/json": unknown;
-                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

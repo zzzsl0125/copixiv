@@ -1,39 +1,45 @@
-import { ref, onMounted } from 'vue'
-import { systemApi } from '../api'
+import { computed } from 'vue'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/vue-query'
+import { queryKeys, systemApi } from '../api'
 import type { SystemConfig } from '../types'
 
-const systemConfig = ref<SystemConfig | null>(null)
-const loading = ref(false)
-const error = ref<unknown>(null)
-
-// Dedupe concurrent callers (App + BatchDownloadModal both call useSystem()):
-// they share one in-flight request instead of firing duplicate GETs.
-let inflight: Promise<SystemConfig | null> | null = null
-
 export function useSystem() {
-  const fetchConfig = (): Promise<SystemConfig | null> => {
-    if (systemConfig.value) return Promise.resolve(systemConfig.value)
-    if (inflight) return inflight
+  const queryClient = useQueryClient()
 
-    loading.value = true
-    error.value = null
-    inflight = (async () => {
-      try {
-        systemConfig.value = await systemApi.getConfig()
-        return systemConfig.value
-      } catch (e) {
-        error.value = e
-        return null
-      } finally {
-        loading.value = false
-        inflight = null
-      }
-    })()
+  const query = useQuery({
+    queryKey: queryKeys.systemConfig(),
+    queryFn: ({ signal }) => systemApi.getConfig(signal),
+    staleTime: 5 * 60_000,
+  })
 
-    return inflight
+  const systemConfig = computed<SystemConfig | null>(() => query.data.value ?? null)
+  const loading = computed(() => query.isPending.value)
+  const error = computed(() => query.error.value ?? null)
+  const isConfigReady = computed(() => !query.isPending.value)
+
+  const updateConfigMutation = useMutation({
+    mutationFn: (patch: Partial<SystemConfig>) => systemApi.updateConfig(patch),
+    onSuccess: (updated) => {
+      queryClient.setQueryData(queryKeys.systemConfig(), updated)
+      void queryClient.invalidateQueries({ queryKey: queryKeys.novelsAll() })
+    },
+  })
+
+  const fetchConfig = async (): Promise<SystemConfig | null> => {
+    if (query.data.value) return query.data.value
+    const result = await query.refetch()
+    return result.data ?? null
   }
 
-  onMounted(fetchConfig)
+  const updateConfig = (patch: Partial<SystemConfig>) => updateConfigMutation.mutateAsync(patch)
 
-  return { systemConfig, loading, error, fetchConfig }
+  return {
+    systemConfig,
+    loading,
+    error,
+    isConfigReady,
+    fetchConfig,
+    updateConfig,
+    isUpdatingConfig: computed(() => updateConfigMutation.isPending.value),
+  }
 }

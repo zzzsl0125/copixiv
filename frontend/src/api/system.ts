@@ -1,29 +1,33 @@
-import { apiClient } from './client'
-import type { SystemConfig, SearchHistory } from '../types'
+import { apiClient, unwrap, unwrapVoid } from './client'
+import type { SearchHistory, SystemConfig } from '../types'
 
 export const systemApi = {
-  async getConfig() {
-    const response = await apiClient.get('/system/config')
-    return response.data as SystemConfig
+  async getConfig(signal?: AbortSignal): Promise<SystemConfig> {
+    const res = await apiClient.GET('/api/system/config', { signal })
+    return unwrap(res, '获取系统配置失败')
   },
 
-  async updateConfig(patch: Partial<SystemConfig>) {
-    const response = await apiClient.put('/system/config', patch)
-    return response.data as SystemConfig
+  async updateConfig(patch: Partial<SystemConfig>): Promise<SystemConfig> {
+    const res = await apiClient.PUT('/api/system/config', { body: patch })
+    return unwrap(res, '保存系统配置失败')
   },
 }
 
 export const searchHistoryApi = {
-  async getSearchHistory() {
-    const response = await apiClient.get('/search-history/')
-    return response.data as SearchHistory[]
+  async getSearchHistory(signal?: AbortSignal): Promise<SearchHistory[]> {
+    const res = await apiClient.GET('/api/search-history', { signal })
+    return unwrap(res, '加载搜索历史失败')
   },
 
-  async deleteSearchHistoryItem(historyId: number) {
-    await apiClient.delete(`/search-history/${historyId}`)
+  async deleteSearchHistoryItem(historyId: number): Promise<void> {
+    const res = await apiClient.DELETE('/api/search-history/{history_id}', {
+      params: { path: { history_id: historyId } },
+    })
+    unwrapVoid(res, '删除搜索历史失败')
   },
 
-  async clearSearchHistory() {
-    await apiClient.delete('/search-history/')
+  async clearSearchHistory(): Promise<void> {
+    const res = await apiClient.DELETE('/api/search-history')
+    unwrapVoid(res, '清空搜索历史失败')
   },
 }

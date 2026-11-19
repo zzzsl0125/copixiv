@@ -3,7 +3,7 @@ export type {
   BatchOperationResult, NovelIdsResponse, NovelsByIdsResponse,
   MatchIdsResult, NovelCountResult, NovelListResult, NovelUpdatePayload,
   AuthorLookup, SeriesLookup, BatchMetadataRequest, BatchMetadataResult,
-  OrderBy, OrderDirection,
+  OrderBy, SortableOrderBy, OrderDirection, FormatMode,
 } from './novels'
 // 运行时函数（不是类型）：查询参数解析要过它才能进 filters，见 novels.ts 的注释。
 export { parseOrderBy, parseOrderDirection, isOrderBy, isOrderDirection } from './novels'

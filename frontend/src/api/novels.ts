@@ -1,252 +1,335 @@
-import { apiClient, buildApiUrl } from './client'
+import { apiClient, buildApiUrl, unwrap, unwrapVoid } from './client'
+import { ApiError, extractFastApiDetail } from './errors'
 import type {
-  Novel, NovelUpdatePayload, AuthorLookup, SeriesLookup,
-  GetNovelsParams, OrderBy, OrderDirection,
-  BatchScope, BatchOperation, BatchOperationResult,
-  NovelIdsResponse, NovelsByIdsResponse, MatchIdsResult, NovelCountResult,
-  NovelListResult, BatchMetadataRequest, BatchMetadataResult,
+  AuthorLookup,
+  BatchMetadataRequest,
+  BatchMetadataResult,
+  BatchOperation,
+  BatchOperationResult,
+  BatchScope,
+  FormatMode,
+  GetNovelsParams,
+  MatchIdsResult,
+  Novel,
+  NovelCountResult,
+  NovelIdsResponse,
+  NovelListResult,
+  NovelsByIdsResponse,
+  NovelUpdatePayload,
+  OrderBy,
+  OrderDirection,
+  SeriesLookup,
+  SortableOrderBy,
 } from '../types'
 
 /** 同步批量操作上限（与后端 BATCH_MAX_NOVELS 一致）；超过走后台任务。 */
 export const BATCH_MAX_NOVELS = 5000
 
 export const novelApi = {
-  async getNovels(params: GetNovelsParams) {
-    const queryParams: Record<string, unknown> = { ...params }
-    if (params.cursor) {
-      queryParams.cursor = JSON.stringify(params.cursor)
-    }
-    const response = await apiClient.get('/novels/', { params: queryParams })
-    return response.data as NovelListResult
+  async getNovels(params: GetNovelsParams, signal?: AbortSignal): Promise<NovelListResult> {
+    const res = await apiClient.GET('/api/novels', {
+      params: {
+        query: {
+          keyword: params.keyword,
+          min_like: params.min_like,
+          min_text: params.min_text,
+          exclude_blocked: params.exclude_blocked,
+          order_by: params.order_by,
+          order_direction: params.order_direction,
+          cursor: params.cursor ? JSON.stringify(params.cursor) : undefined,
+          per_page: params.per_page,
+        },
+      },
+      signal,
+    })
+    return unwrap(res, '获取小说列表失败')
   },
 
-  async toggleFavourite(novelId: number) {
-    await apiClient.post(`/novels/${novelId}/favourite`)
+  async toggleFavourite(novelId: number): Promise<void> {
+    const res = await apiClient.POST('/api/novels/{novel_id}/favourite', {
+      params: { path: { novel_id: novelId } },
+    })
+    unwrapVoid(res, '操作收藏失败')
   },
 
-  async toggleSpecialFollow(authorId: number) {
-    await apiClient.post(`/novels/author/${authorId}/follow`)
+  async toggleSpecialFollow(authorId: number): Promise<void> {
+    const res = await apiClient.POST('/api/novels/author/{author_id}/follow', {
+      params: { path: { author_id: authorId } },
+    })
+    unwrapVoid(res, '操作特别关注失败')
   },
 
   /**
    * 编辑单本元数据（卡片「编辑」）——只提交发生变化的字段。
-   *
-   * 返回**更新后的完整对象**，调用方据此原地替换列表里的那一本（不整页重取）。
-   * 服务端两道拒绝（调用方按错误提示呈现即可）：
-   * - 400：pixiv 书提交 `title` / `author_id` / `series_id`（仅本地书
-   *   可编辑，理由与文案见 `field_policy.py`——title / series_id 是
-   *   "来源会覆盖"，author_id 是"作者身份以来源为准"）；
-   * - 422：`series_name` / `author_name` 以及 `source` 等结构性字段压根不在
-   *   可提交集合里，`extra="forbid"` 直接拒掉。
+   * 返回更新后的完整对象，调用方原地更新缓存。
    */
-  async updateNovel(novelId: number, payload: NovelUpdatePayload) {
-    const response = await apiClient.patch(`/novels/${novelId}`, payload)
-    return response.data as Novel
+  async updateNovel(novelId: number, payload: NovelUpdatePayload): Promise<Novel> {
+    const res = await apiClient.PATCH('/api/novels/{novel_id}', {
+      params: { path: { novel_id: novelId } },
+      body: payload,
+    })
+    return unwrap(res, '保存小说信息失败')
   },
 
-  /**
-   * 按 pixiv id 重新抓取这本小说的元数据（编辑器左下角「同步」，无请求体）。
-   *
-   * 返回与 PATCH 同形状的**完整对象**（含 `editable_fields`），调用方据此原地
-   * 替换卡片并重装弹窗初值。失败语义由服务端给：本地书 → 400（没有来源可同步）、
-   * pixiv 上已不存在 / 受限 → 404；调用方一律按错误提示呈现。
-   */
-  async syncNovel(novelId: number) {
-    const response = await apiClient.post(`/novels/${novelId}/sync`)
-    return response.data as Novel
+  /** 按 pixiv id 重新抓取单本小说元数据（无请求体）。 */
+  async syncNovel(novelId: number): Promise<Novel> {
+    const res = await apiClient.POST('/api/novels/{novel_id}/sync', {
+      params: { path: { novel_id: novelId } },
+    })
+    return unwrap(res, '同步小说元数据失败')
   },
 
   /** 删除单本小说及其本地文件（DELETE /api/novels/{novelId}）。 */
-  async deleteNovel(novelId: number) {
-    await apiClient.delete(`/novels/${novelId}`)
+  async deleteNovel(novelId: number): Promise<void> {
+    const res = await apiClient.DELETE('/api/novels/{novel_id}', {
+      params: { path: { novel_id: novelId } },
+    })
+    unwrapVoid(res, '删除小说失败')
   },
 
-  /**
-   * 作者 ID 预览（编辑器「作者」一栏的即时反馈）。
-   *
-   * 只读、不落库：库内已知就直接返回（离线可用），否则服务端问一次 pixiv。
-   * 返回 `source: 'unknown'` **不是错误**——id 才是身份，拿不到名字照样能保存。
-   * 调用方要能接受失败（网络抖动不该让一个提示框变成报错弹窗）。
-   */
-  async lookupAuthor(authorId: number) {
-    const response = await apiClient.get(`/novels/author/${authorId}`)
-    return response.data as AuthorLookup
+  async lookupAuthor(authorId: number, signal?: AbortSignal): Promise<AuthorLookup> {
+    const res = await apiClient.GET('/api/novels/author/{author_id}', {
+      params: { path: { author_id: authorId } },
+      signal,
+    })
+    return unwrap(res, '查询作者信息失败')
   },
 
-  /**
-   * 系列 ID 预览（编辑器「系列」一栏的即时反馈）—— 与 `lookupAuthor` 同构。
-   *
-   * 名字来源链：`series` 行 → 同系列 novel 行 → pixiv；前两步都在本地库完成，
-   * 所以大多数情况下这个请求是**离线可用**的。
-   */
-  async lookupSeries(seriesId: number) {
-    const response = await apiClient.get(`/novels/series/${seriesId}`)
-    return response.data as SeriesLookup
+  async lookupSeries(seriesId: number, signal?: AbortSignal): Promise<SeriesLookup> {
+    const res = await apiClient.GET('/api/novels/series/{series_id}', {
+      params: { path: { series_id: seriesId } },
+      signal,
+    })
+    return unwrap(res, '查询系列信息失败')
   },
 
-  /**
-   * Browser-navigable download URL for a single novel. The endpoint serves
-   * the file with `Content-Disposition: attachment`, so a plain navigation
-   * triggers the browser/WebView's native download (works where blob: object
-   * URLs are unsupported) and the suggested filename is the novel title.
-   */
-  downloadUrl(novelId: number, format: 'txt' | 'epub' = 'txt') {
+  downloadUrl(novelId: number, format: 'txt' | 'epub' = 'txt'): string {
     return buildApiUrl(`/novels/${novelId}/download?format=${format}`)
   },
 
-  async countNovels(params: GetNovelsParams) {
-    const queryParams: Record<string, unknown> = { ...params }
-    const response = await apiClient.get('/novels/count', {
-      params: queryParams,
-      // Serialize excluded_ids as repeated keys (excluded_ids=1&excluded_ids=2)
-      // — FastAPI binds repeated params to list[int]; the axios default
-      // (excluded_ids[]=...) would produce a differently-named key.
-      paramsSerializer: { indexes: null },
+  async countNovels(params: GetNovelsParams, signal?: AbortSignal): Promise<NovelCountResult> {
+    const res = await apiClient.GET('/api/novels/count', {
+      params: {
+        query: {
+          keyword: params.keyword,
+          min_like: params.min_like,
+          min_text: params.min_text,
+          exclude_blocked: params.exclude_blocked,
+          excluded_ids: params.excluded_ids,
+        },
+      },
+      signal,
     })
-    return response.data as NovelCountResult
+    return unwrap(res, '统计小说数量失败')
   },
 
   async batchDownload(params: {
     keyword?: string
-    order_by?: string
-    order_direction?: string
+    order_by?: OrderBy
+    order_direction?: OrderDirection
     min_like?: number
     min_text?: number
     limit?: number
-    format_mode?: string
+    format_mode?: FormatMode
     zip_name?: string
     naming_template?: string
     novel_ids?: number[]
     excluded_ids?: number[]
-  }) {
-    const response = await apiClient.post('/novels/batch-download', params, {
-      responseType: 'blob',
-      // ZIP 打包耗时随篇数增长——不用全局 30s 超时（大导出走任务端点）。
-      timeout: 0,
+  }): Promise<{ blob: Blob; contentDisposition?: string }> {
+    const { data, error, response } = await apiClient.POST('/api/novels/batch-download', {
+      body: {
+        keyword: params.keyword,
+        order_by: params.order_by ?? 'id',
+        order_direction: params.order_direction ?? 'DESC',
+        min_like: params.min_like,
+        min_text: params.min_text,
+        limit: params.limit ?? 500,
+        format_mode: params.format_mode ?? 'txt',
+        zip_name: params.zip_name,
+        naming_template: params.naming_template,
+        novel_ids: params.novel_ids,
+        excluded_ids: params.excluded_ids,
+      },
+      parseAs: 'blob',
     })
-    return response
+    if (error !== undefined || !response.ok || !(data instanceof Blob)) {
+      let body: unknown = error
+      if (error instanceof Blob) {
+        try {
+          body = JSON.parse(await error.text())
+        } catch {
+          body = null
+        }
+      }
+      throw new ApiError(response.status, body, extractFastApiDetail(body) || '下载失败')
+    }
+    return {
+      blob: data,
+      contentDisposition: response.headers.get('content-disposition') ?? undefined,
+    }
   },
 
   async batchDownloadPreview(
     params: {
       keyword?: string
-      order_by?: string
-      order_direction?: string
+      order_by?: OrderBy
+      order_direction?: OrderDirection
       min_like?: number
       min_text?: number
-      format_mode?: string
+      format_mode?: FormatMode
       naming_template?: string
       novel_ids?: number[]
       excluded_ids?: number[]
     },
     signal?: AbortSignal,
-  ) {
-    const response = await apiClient.post('/novels/batch-download/preview', params, {
+  ): Promise<{ path: string | null }> {
+    const res = await apiClient.POST('/api/novels/batch-download/preview', {
+      body: {
+        keyword: params.keyword,
+        order_by: params.order_by ?? 'id',
+        order_direction: params.order_direction ?? 'DESC',
+        min_like: params.min_like,
+        min_text: params.min_text,
+        limit: 500,
+        format_mode: params.format_mode ?? 'txt',
+        naming_template: params.naming_template,
+        novel_ids: params.novel_ids,
+        excluded_ids: params.excluded_ids,
+      },
       signal,
     })
-    return response.data as { path: string | null }
+    return unwrap(res, '预览失败') as { path: string | null }
   },
 
-  /** Batch delete / add_tags / remove_tags against a resolved scope. */
   async batchOperation(params: {
     operation: BatchOperation
     scope: BatchScope
     tags?: string[]
-  }) {
-    const response = await apiClient.post('/novels/batch', params)
-    return response.data as BatchOperationResult
-  },
-
-  /**
-   * 批量编辑「作者」/「系列」（批量栏「编辑」）——`apply: false` 先预演报数，
-   * `apply: true` 才落库；两次的响应形状相同（预演时 `affected = 0`）。
-   *
-   * 只作用于**本地书**：pixiv 书的这两列是"身份以来源为准"，服务端一律跳过，
-   * `skipped` 就是那个数（单本 PATCH 对它们硬拒 400，批量这里改成预先报数）。
-   * 请求体里**键不出现 = 不修改**，所以"留空"不能靠空串表达，解除关联必须由
-   * 调用方显式给 `null`。
-   */
-  async batchMetadata(params: BatchMetadataRequest) {
-    const response = await apiClient.post('/novels/batch-metadata', params)
-    return response.data as BatchMetadataResult
-  },
-
-  /** All IDs matching the filters — powers the 「全选匹配」bulk-add action. */
-  async getNovelIds(params: GetNovelsParams) {
-    const queryParams: Record<string, unknown> = { ...params }
-    const response = await apiClient.get('/novels/ids', { params: queryParams })
-    return response.data as NovelIdsResponse
-  },
-
-  /** Blocked-tag novel IDs within the current scope — 「查看被排除」view. */
-  async getBlockedNovelIds(params: GetNovelsParams) {
-    const queryParams: Record<string, unknown> = { ...params }
-    const response = await apiClient.get('/novels/blocked-ids', {
-      params: queryParams,
+  }): Promise<BatchOperationResult> {
+    const res = await apiClient.POST('/api/novels/batch', {
+      body: {
+        operation: params.operation,
+        scope: params.scope,
+        tags: params.tags ?? [],
+      },
     })
-    return response.data as NovelIdsResponse
+    return unwrap(res, '批量操作失败')
   },
 
-  /** Order an explicit id list by a novel column — 「查看已选」排序. */
+  async batchMetadata(params: BatchMetadataRequest): Promise<BatchMetadataResult> {
+    const res = await apiClient.POST('/api/novels/batch-metadata', { body: params })
+    return unwrap(res, '批量修改元数据失败')
+  },
+
+  async getNovelIds(params: GetNovelsParams, signal?: AbortSignal): Promise<NovelIdsResponse> {
+    const res = await apiClient.GET('/api/novels/ids', {
+      params: {
+        query: {
+          keyword: params.keyword,
+          min_like: params.min_like,
+          min_text: params.min_text,
+          exclude_blocked: params.exclude_blocked,
+        },
+      },
+      signal,
+    })
+    return unwrap(res, '获取匹配 ID 列表失败')
+  },
+
+  async getBlockedNovelIds(
+    params: GetNovelsParams,
+    signal?: AbortSignal,
+  ): Promise<NovelIdsResponse> {
+    const res = await apiClient.GET('/api/novels/blocked-ids', {
+      params: {
+        query: {
+          keyword: params.keyword,
+          min_like: params.min_like,
+          min_text: params.min_text,
+          order_by: params.order_by,
+          order_direction: params.order_direction,
+        },
+      },
+      signal,
+    })
+    return unwrap(res, '获取被排除小说列表失败')
+  },
+
   async sortNovelIds(
     novelIds: number[],
-    orderBy: Exclude<OrderBy, 'random'>,
+    orderBy: SortableOrderBy,
     orderDirection: OrderDirection,
-  ) {
-    const response = await apiClient.post('/novels/sort-ids', {
-      novel_ids: novelIds,
-      order_by: orderBy,
-      order_direction: orderDirection,
+    signal?: AbortSignal,
+  ): Promise<NovelIdsResponse> {
+    const res = await apiClient.POST('/api/novels/sort-ids', {
+      body: {
+        novel_ids: novelIds,
+        order_by: orderBy,
+        order_direction: orderDirection,
+      },
+      signal,
     })
-    return response.data as NovelIdsResponse
+    return unwrap(res, '排序失败')
   },
 
-  /** Novel details by explicit ID list — powers the 「查看已选」view. */
-  async getNovelsByIds(novelIds: number[]) {
-    const response = await apiClient.post('/novels/by-ids', {
-      novel_ids: novelIds,
+  async getNovelsByIds(novelIds: number[], signal?: AbortSignal): Promise<NovelsByIdsResponse> {
+    const res = await apiClient.POST('/api/novels/by-ids', {
+      body: { novel_ids: novelIds },
+      signal,
     })
-    return response.data as NovelsByIdsResponse
+    return unwrap(res, '获取小说详情失败')
   },
 
-  /** Subset of the selection matching the current scope — scoped clear. */
   async matchNovelIds(params: {
     novel_ids: number[]
     keyword?: string
     min_like?: number
     min_text?: number
     exclude_blocked?: boolean
-  }) {
+  }): Promise<MatchIdsResult> {
     const { exclude_blocked, ...body } = params
-    const response = await apiClient.post('/novels/match-ids', body, {
-      params: exclude_blocked === undefined ? undefined : { exclude_blocked },
+    const res = await apiClient.POST('/api/novels/match-ids', {
+      params: {
+        query: exclude_blocked === undefined ? undefined : { exclude_blocked },
+      },
+      body,
     })
-    return response.data as MatchIdsResult
+    return unwrap(res, '匹配选中范围失败')
   },
 
-  /** Enqueue a batch operation into the background task system (any size). */
   async submitBatchTask(params: {
     operation: BatchOperation
     scope: BatchScope
     tags?: string[]
-  }) {
-    const response = await apiClient.post('/novels/batch-task', params)
-    return response.data as { task_id: number; matched: number }
+  }): Promise<{ task_id: number; matched: number }> {
+    const res = await apiClient.POST('/api/novels/batch-task', {
+      body: {
+        operation: params.operation,
+        scope: params.scope,
+        tags: params.tags ?? [],
+      },
+    })
+    return unwrap(res, '提交批量任务失败')
   },
 
-  /** Enqueue a batch export into the background task system (large ZIPs). */
   async submitBatchExport(params: {
     novel_ids: number[]
-    format_mode?: string
+    format_mode?: FormatMode
     zip_name?: string
     naming_template?: string
-  }) {
-    const response = await apiClient.post('/novels/batch-export', params)
-    return response.data as { task_id: number; matched: number }
+  }): Promise<{ task_id: number; matched: number }> {
+    const res = await apiClient.POST('/api/novels/batch-export', {
+      body: {
+        novel_ids: params.novel_ids,
+        format_mode: params.format_mode ?? 'txt',
+        zip_name: params.zip_name,
+        naming_template: params.naming_template,
+      },
+    })
+    return unwrap(res, '提交导出任务失败')
   },
 
-  /** Browser-navigable download URL for a completed background export ZIP. */
-  exportDownloadUrl(taskId: number) {
+  exportDownloadUrl(taskId: number): string {
     return buildApiUrl(`/novels/export/${taskId}/download`)
   },
 }

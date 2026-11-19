@@ -53,6 +53,9 @@ export type OrderBy = 'id' | 'like' | 'view' | 'text' | 'create_time' | 'random'
 /** 排序方向。同样是后端 `Literal["ASC","DESC"]` 的镜像。 */
 export type OrderDirection = 'ASC' | 'DESC'
 
+export type SortableOrderBy = S['SortableOrderBy']
+export type FormatMode = S['FormatMode']
+
 /** 运行时校验：URL 查询参数是不可信输入，必须过这一道才能进 `NovelFilters`。 */
 const ORDER_BY_VALUES: readonly OrderBy[] = ['id', 'like', 'view', 'text', 'create_time', 'random']
 export function isOrderBy(value: string): value is OrderBy {

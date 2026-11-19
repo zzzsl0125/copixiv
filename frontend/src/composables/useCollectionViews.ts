@@ -5,8 +5,8 @@ import { usePagedNovelIdView } from './usePagedNovelIdView'
 import { useToast } from './useToast'
 
 export interface UseCollectionViewsOptions {
-  /** 当前筛选条件（来自 App 的 useNovels 状态，经页面 props 透传）。 */
-  filters: Ref<NovelFilters>
+  /** 当前筛选条件（经 vue-router query 派生）。 */
+  filters: Readonly<Ref<NovelFilters>>
   /** 批量范围（selected 视图的 id 集来源）。 */
   batchScope: Ref<BatchScope | null>
   /** 批量模式开关（离开批量模式 → 关闭已选视图；进入 → 关闭被排除视图）。 */
@@ -17,7 +17,7 @@ export interface UseCollectionViewsOptions {
   novels: Ref<Novel[]>
   /** 视图活跃状态上报（页面转发为 emit('collection-view')）。 */
   onActiveChange: (active: boolean) => void
-  /** 布局重排（页面传入 useMasonryLayout 的 relayout）。 */
+  /** 布局重测（页面传入 useVirtualMasonry 的 measure）。 */
   afterLayout: () => void
 }
 

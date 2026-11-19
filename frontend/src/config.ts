@@ -117,24 +117,3 @@ export function shouldExcludeBlocked(
 /** 分页页大小：浏览列表（useNovels per_page）与「查看已选/被排除」集合视图
  * （usePagedNovelIdView 每页切片）共用，改页大小只改这一处。 */
 export const DEFAULT_PAGE_SIZE = 30
-
-/**
- * 浏览列表在内存里**最多保留多少条**（超过就从最老的头部裁掉）。
- *
- * 为什么要有这个上限：`LoadMore.vue` 是哨兵式自动加载（`rootMargin: 100px`，
- * 滚到底就自动再取），所以"一直往下滚"能把列表堆到上千条。实测（真实
- * Firefox + WebDriver BiDi，「特别关注」书架 4,469 本）：
- *
- * | 条数 | DOM 节点 | 跨 1000px 断点重排时主线程单帧 |
- * |---|---|---|
- * | 300  | 9,565  | 407 ms |
- * | 600  | 21,497 | 1,289 ms |
- *
- * 300 条 = 10 页：load-more 稳定在 ~110ms，重排单帧 407ms（明显但可忍）。
- * 20 页起单帧就过 1 秒，那已经是"以为浏览器死了"的量级。
- *
- * 代价（明码标价）：cursor 是**单向向后**的，裁掉的部分不会自动回来——
- * 往回滚到顶时只能重新取（一页 ~55 KiB / 30ms，很便宜）。这是"有界 DOM"
- * 换"恒定开销"，不是缺陷。
- */
-export const DEFAULT_MAX_ITEMS = 10 * DEFAULT_PAGE_SIZE

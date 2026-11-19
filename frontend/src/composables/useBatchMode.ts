@@ -1,40 +1,48 @@
-import { computed, ref, watch } from 'vue'
-import { novelApi, getApiErrorMessage } from '../api'
+import { computed, ref, toValue, type MaybeRefOrGetter } from 'vue'
+import { useQuery } from '@tanstack/vue-query'
+import { getApiErrorMessage, novelApi, queryKeys } from '../api'
 import { shouldExcludeBlocked } from '../config'
-import type { NovelFilters, BatchScope } from '../types'
+import type { BatchScope, NovelFilters } from '../types'
+import { useNovelShellState } from './useNovelShellState'
 import { useSystem } from './useSystem'
 import { useToast } from './useToast'
 
 /**
- * Batch-mode state machine.
- *
- * Selection model (per the user's design):
- * - The search list is only a *picking surface*: searching, filtering and
- *   paging never touch the selection.
- * - The selection is a plain ID set that lives across filter changes —
- *   pick some A-novels, switch to search B, pick more; all accumulate.
- * - 「全选匹配」is a bulk-ADD convenience: it snapshots the currently
- *   matched IDs (server-resolved, so pages beyond what is loaded are
- *   included) into the selection as a union.
- * - Operations act on the ID set; nothing selected ⇒ operation buttons
- *   are disabled and the bar prompts the user to narrow the scope first.
+ * Batch-mode state machine backed by shared shell UI state + Vue Query count.
  */
-export function useBatchMode(filters: NovelFilters) {
+export function useBatchMode(filtersInput: MaybeRefOrGetter<NovelFilters>) {
   const { systemConfig } = useSystem()
+  const shell = useNovelShellState()
   const toast = useToast()
-  const excludeBlocked = () => shouldExcludeBlocked(filters.keyword, systemConfig.value)
 
-  const isBatchMode = ref(false)
-  const selectedIds = ref<Set<number>>(new Set())
-  const matchedCount = ref(0)
-  /** matchedCount 是不是下界（服务端计数有界，见 NovelCountResult）。 */
-  const matchedTruncated = ref(false)
-  const countLoading = ref(false)
+  const filters = computed(() => toValue(filtersInput))
+  const isBatchMode = shell.isBatchMode
+  const selectedIds = shell.selectedIds
   const selectAllLoading = ref(false)
+
+  const excludeBlocked = () => shouldExcludeBlocked(filters.value.keyword, systemConfig.value)
+
+  const countParams = computed(() => ({
+    keyword: filters.value.keyword.trim() || undefined,
+    min_like: filters.value.min_like,
+    min_text: filters.value.min_text,
+    exclude_blocked: excludeBlocked(),
+  }))
+
+  const countQuery = useQuery({
+    queryKey: computed(() => queryKeys.novelsCount(countParams.value)),
+    queryFn: ({ signal }) => novelApi.countNovels(countParams.value, signal),
+    enabled: isBatchMode,
+    staleTime: 10_000,
+  })
+
+  const matchedCount = computed(() => countQuery.data.value?.total ?? 0)
+  const matchedTruncated = computed(() => countQuery.data.value?.truncated ?? false)
+  const countLoading = computed(() => countQuery.isFetching.value)
 
   /** Current filters actively narrow the list (vs. browsing the whole library). */
   const hasFilter = computed(
-    () => !!(filters.keyword.trim() || filters.min_like || filters.min_text),
+    () => !!(filters.value.keyword.trim() || filters.value.min_like || filters.value.min_text),
   )
 
   const selectedCount = computed(() => selectedIds.value.size)
@@ -50,64 +58,22 @@ export function useBatchMode(filters: NovelFilters) {
     }
   })
 
-  let countSeq = 0
-
-  async function refreshMatchedCount() {
-    const seq = ++countSeq
-    countLoading.value = true
-    try {
-      const result = await novelApi.countNovels({
-        keyword: filters.keyword.trim() || undefined,
-        min_like: filters.min_like,
-        min_text: filters.min_text,
-        exclude_blocked: excludeBlocked(),
-      })
-      if (seq !== countSeq) return
-      matchedCount.value = result.total
-      matchedTruncated.value = result.truncated ?? false
-    } catch {
-      if (seq === countSeq) {
-        matchedCount.value = 0
-        matchedTruncated.value = false
-      }
-    } finally {
-      if (seq === countSeq) countLoading.value = false
-    }
+  function refreshMatchedCount() {
+    return countQuery.refetch()
   }
 
-  watch(
-    [
-      isBatchMode,
-      () => filters.keyword,
-      () => filters.min_like,
-      () => filters.min_text,
-    ],
-    () => {
-      if (isBatchMode.value) void refreshMatchedCount()
-    },
-  )
-
   function enter() {
-    isBatchMode.value = true
+    shell.enterBatchMode()
   }
 
   function exit() {
-    isBatchMode.value = false
-    clearSelection()
+    shell.exitBatchMode()
   }
 
   function clearSelection() {
-    selectedIds.value = new Set()
+    shell.clearSelection()
   }
 
-  /**
-   * Scoped clear: remove only the selected IDs that belong to the CURRENT
-   * search scope.  Picks accumulated from other searches survive — the
-   * global clear lives in the 「查看已选」view.  No active filter means
-   * the scope is the whole library, so everything goes.
-   *
-   * Returns ``{ removed, remaining }`` (or null when nothing was selected).
-   */
   async function clearSelectionInScope() {
     const ids = [...selectedIds.value]
     if (ids.length === 0) return null
@@ -119,9 +85,9 @@ export function useBatchMode(filters: NovelFilters) {
     try {
       const result = await novelApi.matchNovelIds({
         novel_ids: ids,
-        keyword: filters.keyword.trim() || undefined,
-        min_like: filters.min_like,
-        min_text: filters.min_text,
+        keyword: filters.value.keyword.trim() || undefined,
+        min_like: filters.value.min_like,
+        min_text: filters.value.min_text,
         exclude_blocked: excludeBlocked(),
       })
       const toRemove = new Set(result.matching_ids)
@@ -138,15 +104,14 @@ export function useBatchMode(filters: NovelFilters) {
     }
   }
 
-  /** Bulk-add the currently matched IDs into the selection (union). */
   async function selectAllMatched() {
     if (selectAllLoading.value) return null
     selectAllLoading.value = true
     try {
       const result = await novelApi.getNovelIds({
-        keyword: filters.keyword.trim() || undefined,
-        min_like: filters.min_like,
-        min_text: filters.min_text,
+        keyword: filters.value.keyword.trim() || undefined,
+        min_like: filters.value.min_like,
+        min_text: filters.value.min_text,
         exclude_blocked: excludeBlocked(),
       })
       const next = new Set(selectedIds.value)
