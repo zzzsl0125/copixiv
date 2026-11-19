@@ -1,0 +1,23 @@
+# copixiv 本地托管 PostgreSQL 16 独立服务单元（由 systemd 原生监管）。
+#
+# 安装（需要 sudo）：
+#   sudo cp /home/invocation/project/copixiv/deploy/copixiv-pg.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now copixiv-pg.service
+
+[Unit]
+Description=Copixiv PostgreSQL 16 (local pgserver instance)
+After=network.target
+
+[Service]
+Type=simple
+User=invocation
+Group=invocation
+WorkingDirectory=/home/invocation/project/copixiv
+ExecStart=/home/invocation/project/copixiv/.venv/bin/python /home/invocation/project/copixiv/scripts/pg_dev.py run
+Restart=always
+RestartSec=5s
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

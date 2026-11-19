@@ -3,8 +3,8 @@ name: CI
 # 触发时机：push 到任意分支 + 任何 Pull Request。
 # 同一分支上多次快速 push 时取消仍在运行的旧任务（节省额度）。
 #
-# 后端门禁：Rust 单测 + ruff + mypy + import-linter + 纯单元测试（tests/unit）+ OpenAPI 一致性；
-# tests/db 与 tests/integration 依赖带 pg_bigm 扩展的 PostgreSQL，在本地验证。
+# 后端门禁：Rust fmt/clippy/test + ruff + mypy + import-linter + tests(unit+db+integration) +
+# alembic check (PG16 services，无 pg_bigm 依赖) + OpenAPI 一致性。
 on:
   push:
   pull_request:
@@ -15,18 +15,36 @@ concurrency:
 
 jobs:
   backend:
-    name: Backend (Rust + ruff + mypy + import-linter + unit)
+    name: Backend (Rust + ruff + mypy + import-linter + pytest + alembic)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: copixiv_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      COPIXIV_TEST_DATABASE_URL: postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/copixiv_test
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v7
+      - uses: astral-sh/setup-uv@v5
         with:
+          enable-cache: true
           python-version: "3.12"
-          cache: pip
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -34,33 +52,47 @@ jobs:
 
       - name: Install dependencies and build Rust extension
         run: |
-          pip install ".[dev]" ruff mypy import-linter maturin
-          pip install --no-build-isolation ./crates/copixiv_rs
+          uv sync --locked --extra dev
+          uv pip install --no-build-isolation ./crates/copixiv_rs
+
+      - name: Rust format check (cargo fmt)
+        run: cargo fmt --manifest-path crates/copixiv_rs/Cargo.toml --check
+
+      - name: Rust lint (cargo clippy)
+        run: PYO3_PYTHON="$PWD/.venv/bin/python" cargo clippy --manifest-path crates/copixiv_rs/Cargo.toml --all-targets -- -D warnings
 
       - name: Rust unit tests (cargo test)
-        run: PYO3_PYTHON="$(command -v python)" cargo test --manifest-path crates/copixiv_rs/Cargo.toml
+        run: PYO3_PYTHON="$PWD/.venv/bin/python" cargo test --manifest-path crates/copixiv_rs/Cargo.toml
 
-      - name: Lint (ruff)
-        run: ruff check src tests scripts
+      - name: Lint and format check (ruff)
+        run: |
+          uv run --no-sync ruff check src tests scripts
+          uv run --no-sync ruff format --check src tests scripts
 
       - name: Type-check (mypy)
-        run: mypy src/copixiv
+        run: uv run --no-sync mypy src/copixiv
 
       - name: Layer contracts (import-linter)
-        run: lint-imports
+        run: uv run --no-sync lint-imports
 
-      - name: Unit tests (pytest)
-        run: pytest tests/unit -v
+      - name: Apply Alembic baseline on empty PG16 and verify metadata parity
+        run: |
+          uv run --no-sync alembic -x "url=$COPIXIV_TEST_DATABASE_URL" upgrade head
+          uv run --no-sync alembic -x "url=$COPIXIV_TEST_DATABASE_URL" check
 
-      # 前端类型的唯一真相是后端导出的 OpenAPI：提交的 frontend/openapi.json
-      # 必须与当前路由/模型一致，否则 openapi-typescript 生成的就是过期类型。
+      - name: Full backend tests and coverage (pytest)
+        run: uv run --no-sync pytest tests -v --cov=copixiv
+
+      - name: Verify ORM/Alembic metadata parity (alembic check)
+        run: uv run --no-sync alembic -x "url=$COPIXIV_TEST_DATABASE_URL" check
+
       - name: Check OpenAPI schema is up to date
         run: |
-          python -m copixiv.export_openapi > /tmp/openapi.json
+          uv run --no-sync python -m copixiv.export_openapi > /tmp/openapi.json
           diff -u frontend/openapi.json /tmp/openapi.json
 
   frontend:
-    name: Frontend (codegen + build)
+    name: Frontend (codegen + lint + test + build)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
@@ -78,13 +110,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # 生成文件是提交进仓库的：openapi-typescript 的产物若与 openapi.json
-      # 不同步（比如手改了 src/types/api.generated.ts），这里直接失败。
       - name: Check generated API types are up to date
         run: |
           npm run codegen
           git diff --exit-code -- src/types/api.generated.ts
 
-      # 前端测试套件也已整体移除（2026-11-09）；构建含 vue-tsc 严格类型检查。
+      - name: Lint (oxlint)
+        run: npm run lint
+
+      - name: Unit tests (vitest)
+        run: npm run test
+
       - name: Type-check and build
         run: npm run build

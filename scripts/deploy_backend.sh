@@ -1,34 +1,46 @@
 #!/usr/bin/env bash
-# deploy_backend.sh — 把当前仓库代码部署到 copixiv 服务。
+# deploy_backend.sh — 构建后端/Rust 扩展并重启 copixiv systemd 服务。
 #
-# 后端没有 build 步骤；需要的是「重装 venv 包 + 清理孤儿 pyc + 重启服务」。
-# 参考事故：venv 里装着旧版 copixiv（8-17 03:17），src/ 已更新但没重装/重启，
-# 定时任务触发时旧 scheduler 查不到任务函数 → "Unknown task function"。
+# 以普通用户执行（构建与清理阶段不碰 root，避免污染 .venv 文件属主），
+# 仅在重启服务时通过 sudo 调用 systemctl。
 #
-# 用法（需要 root/sudo，因为要 systemctl restart）：
-#   sudo ./scripts/deploy_backend.sh          # 默认 editable：以后 src/ 改动只需重启
-#   sudo ./scripts/deploy_backend.sh --plain  # 退化为普通重装（与 README 的 pip install . 一致）
-#
-# 依赖：repo 根目录下有 .venv（装好 copixiv 依赖）。
+# 用法：
+#   ./scripts/deploy_backend.sh          # 默认 editable：以后 src/ 改动只需重启
+#   ./scripts/deploy_backend.sh --plain  # 普通安装（与 pip install . 一致）
 
 set -euo pipefail
 
+if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+  echo "!! 请勿以 root/sudo 运行整个脚本（会导致 .venv 产生 root 属主文件）。请以普通用户运行。" >&2
+  exit 1
+fi
+
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VENV_PY="$REPO/.venv/bin/python"
+VENV_BIN="$REPO/.venv/bin"
+VENV_PY="$VENV_BIN/python"
 UNIT_NAME="copixiv.service"
 EDITABLE=1
 if [[ "${1:-}" == "--plain" ]]; then
   EDITABLE=0
 fi
 
-echo "==> [1/4] 重装 copixiv 包到 venv"
+export PATH="$HOME/.cargo/bin:$PATH"
+
+echo "==> [1/5] 安装/刷新 copixiv Python 包到 .venv"
 if (( EDITABLE )); then
-  "$VENV_PY" -m pip install -e "$REPO"
+  "$VENV_PY" -m pip install --no-deps -e "$REPO"
 else
-  "$VENV_PY" -m pip install "$REPO"
+  "$VENV_PY" -m pip install --no-deps "$REPO"
 fi
 
-echo "==> [2/4] 清理孤儿 .pyc（源码已删除、仅剩字节码的模块会被 Python 误加载）"
+echo "==> [2/5] 编译并安装 Rust 检索引擎 (copixiv_rs --release)"
+if [[ ! -x "$VENV_BIN/maturin" ]]; then
+  echo "!! 找不到 $VENV_BIN/maturin，请先安装开发依赖（pip install -e '.[dev]'）。" >&2
+  exit 1
+fi
+"$VENV_BIN/maturin" develop --release --manifest-path "$REPO/crates/copixiv_rs/Cargo.toml"
+
+echo "==> [3/5] 清理孤儿 .pyc"
 find "$REPO/src" "$REPO/.venv/lib" \
   -type d -name __pycache__ -path "*copixiv*" 2>/dev/null | while IFS= read -r dir; do
     shopt -s nullglob
@@ -42,24 +54,26 @@ find "$REPO/src" "$REPO/.venv/lib" \
     done
   done
 
-echo "==> [3/4] 重启后端服务 ($UNIT_NAME)"
-systemctl restart "$UNIT_NAME"
+echo "==> [4/5] 重启后端服务 ($UNIT_NAME)"
+START_TS="$(date '+%Y-%m-%d %H:%M:%S')"
+sudo systemctl restart "$UNIT_NAME"
 
-echo "==> [4/4] 自检（重启后应出现 TaskManagerSystem started / Registered cron job）"
-for i in $(seq 1 15); do
+echo "==> [5/5] 等待服务就绪（检查 $START_TS 之后的启动日志）"
+READY=0
+for _ in $(seq 1 30); do
   if systemctl is-active --quiet "$UNIT_NAME" && \
-     journalctl -u "$UNIT_NAME" --since "30 seconds ago" --no-pager 2>/dev/null | grep -q "TaskManagerSystem started"; then
+     journalctl -u "$UNIT_NAME" --since "$START_TS" --no-pager 2>/dev/null | grep -q "TaskManagerSystem started"; then
+    READY=1
     break
   fi
   sleep 1
 done
 
-if journalctl -u "$UNIT_NAME" --since "1 minute ago" --no-pager 2>/dev/null | grep -q "copixiv.tasks.scheduler"; then
-  echo "!! 警告：启动日志仍出现旧的 copixiv.tasks.scheduler —— 部署可能未生效！"
+if (( ! READY )); then
+  echo "!! 超时：服务未在 30 秒内打印 TaskManagerSystem started，请查看 journalctl -xeu $UNIT_NAME" >&2
   exit 1
 fi
-echo "OK: 后端已重启，调度器为新 TaskManagerSystem（$(journalctl -u "$UNIT_NAME" --since '1 minute ago' --no-pager | grep -c 'TaskManagerSystem started') 次启动记录）"
 
-# 查看最近注册的 cron 任务，确认三个启用任务都在
-journalctl -u "$UNIT_NAME" --since "1 minute ago" --no-pager 2>/dev/null \
+echo "OK: 后端与 Rust 扩展已就绪。"
+journalctl -u "$UNIT_NAME" --since "$START_TS" --no-pager 2>/dev/null \
   | grep "Registered cron job" | tail -10 || true

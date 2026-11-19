@@ -1,43 +1,27 @@
-# copixiv 单单元部署：**一个进程同时提供 API 与前端**（:9000）。
-#
-# 2026-11-02 之前的前端由第二个进程伺服：`node vite preview` 监听 :5173 并把
-# /api 反代到 9000。实测那个 Node 进程 141 MiB RSS / 118 MiB PSS，只为 716 KB
-# 的静态文件；而且每次 unit 启动都要先跑 `npm run build`（vue-tsc + vite），
-# 让 unit 的内存峰值从稳态 301 MiB 冲到 893 MiB，还平白多花一分钟 CPU。
-#
-# 现在后端自己伺服 `frontend/dist`（`copixiv.app.mount_frontend`）：
-#   * 一个 systemd 主进程，没有 supervisor 脚本，没有 Node；
-#   * 只有 :9000 一个端口（浏览器直接访问 http://<host>:9000）；
-#   * `frontend/dist` 必须在启动前构建好——见下面第 2 步。
+# copixiv 应用部署单元：**一个进程同时提供 API 与前端**（:9000）。
+# 数据库由独立的 copixiv-pg.service 托管监管（Requires=copixiv-pg.service）。
 #
 # 安装（需要 sudo）：
-#   # 1) 构建一次前端（之后只在改前端源码时重建；不要再让它进 ExecStartPre）
+#   # 1) 安装依赖（含 local-pg extra）、编译 Rust 扩展与构建前端
+#   #    （详见 README；前端产物不要放进 ExecStartPre）
 #   cd /home/invocation/project/copixiv/frontend && npm run build
-#   # 2) 安装 unit
+#   # 2) 安装双单元
+#   sudo cp /home/invocation/project/copixiv/deploy/copixiv-pg.service /etc/systemd/system/
 #   sudo cp /home/invocation/project/copixiv/deploy/copixiv.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
-#   # 3) 停掉旧的拆分单元（如果装过），再重启
-#   sudo systemctl disable --now copixiv-backend copixiv-frontend 2>/dev/null
-#   sudo systemctl restart copixiv
+#   # 3) 若此前曾由旧版 copixiv.service 拉起过后台 pg_ctl，先 stop 一次释放端口/PID：
+#   #    .venv/bin/python scripts/pg_dev.py stop
+#   sudo systemctl enable --now copixiv-pg.service
+#   sudo systemctl restart copixiv.service
 #
 # 前端源码改动后：`cd frontend && npm run build` 即可，**不需要**重启服务
 # （后端每次请求都从磁盘读 dist；index.html 带 no-cache，哈希资源带 immutable）。
-#
-# 本文件的路径是按 **新机 192.168.196.2** 写的（仓库在 /home/invocation/project/copixiv）。
-# 换机器/换路径时只需替换前缀：
-#   sed -e 's#/home/invocation/project/copixiv#<新仓库绝对路径>#g' deploy/copixiv.service \
-#     | sudo tee /etc/systemd/system/copixiv.service
-#
-# 调试：
-#   journalctl -xeu copixiv.service -n 80 --no-pager
-#   .venv/bin/python scripts/pg_dev.py status     # 数据库健康
-#   ss -tlnp | grep :9000                         # 唯一的监听端口
 
 [Unit]
 Description=Copixiv (API + frontend, single process)
-After=network-online.target
+Requires=copixiv-pg.service
+After=network-online.target copixiv-pg.service
 Wants=network-online.target
-# 重启限流：60 秒内最多 3 次，超过则停止尝试并标记 failed。
 StartLimitIntervalSec=60
 StartLimitBurst=3
 
@@ -46,22 +30,10 @@ Type=simple
 User=invocation
 Group=invocation
 WorkingDirectory=/home/invocation/project/copixiv
-
-# 先确保自带的 PostgreSQL 实例在跑（幂等：已在运行则立即返回 0）。
-# 前端产物不在这里构建：构建是部署步骤（见文件头），不该占用每次启动。
-ExecStartPre=/home/invocation/project/copixiv/.venv/bin/python /home/invocation/project/copixiv/scripts/pg_dev.py start
-
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/home/invocation/project/copixiv/.venv/bin/python -u main.py
-
-# 覆盖一切退出，**包括被外部 SIGTERM 打死的"干净退出"**——systemd 对 Type=simple
-# 把 SIGHUP/SIGINT/SIGTERM/SIGPIPE 视为 clean exit，而 Restart=on-failure 明确
-# 排除这四种信号，于是被杀一次后单元会永远躺着不重启。
 Restart=always
 RestartSec=5s
-
-# 仅杀死主进程（Python）：ExecStartPre 拉起的 PostgreSQL 保留在 cgroup 中，
-# 服务重启时不必冷启数据库。
-KillMode=process
 TimeoutStopSec=30
 
 [Install]

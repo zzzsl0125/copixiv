@@ -37,18 +37,37 @@ forbidden_modules =
     copixiv.tasks
     copixiv.app
 
-[importlinter:contract:pixivpy3-whitelist]
-name = pixivpy3 只允许被 pixiv/ 直接 import
+[importlinter:contract:no-removed-vendors]
+name = 禁止引入已淘汰的第三方依赖（pixivpy3/requests/ebooklib/lxml）
+type = forbidden
+source_modules =
+    copixiv
+forbidden_modules =
+    pixivpy3
+    requests
+    ebooklib
+    lxml
+allow_indirect_imports = false
+
+[importlinter:contract:storage-isolated-from-pixiv]
+name = storage 层不得反向依赖 pixiv 协议层
+type = forbidden
+source_modules =
+    copixiv.storage
+forbidden_modules =
+    copixiv.pixiv
+
+[importlinter:contract:httpx-in-transport-only]
+name = httpx 仅允许被传输适配层（pixiv/storage/notify）及 lifespan 直接 import
 type = forbidden
 source_modules =
     copixiv.core
     copixiv.db
     copixiv.features
     copixiv.tasks
-    copixiv.storage
-    copixiv.notify
+    copixiv.query_engine
 forbidden_modules =
-    pixivpy3
+    httpx
 allow_indirect_imports = true
 
 [importlinter:contract:db-is-the-only-sql-layer]
@@ -62,3 +81,75 @@ source_modules =
     copixiv.query_engine
 forbidden_modules =
     sqlalchemy
+
+[importlinter:contract:tasks-no-fastapi]
+name = tasks/ 运行时与任务适配器不依赖 FastAPI（仅 tasks.api 可用）
+type = forbidden
+source_modules =
+    copixiv.tasks.registry
+    copixiv.tasks.manager
+    copixiv.tasks.executor
+    copixiv.tasks.cron
+    copixiv.tasks.history_repo
+    copixiv.tasks.schemas
+    copixiv.tasks.novels
+    copixiv.tasks.batch
+    copixiv.tasks.maintenance
+forbidden_modules =
+    fastapi
+
+[importlinter:contract:tasks-no-feature-apis]
+name = tasks/ 不依赖 features/*/api 或 routes
+type = forbidden
+source_modules =
+    copixiv.tasks
+forbidden_modules =
+    copixiv.features.accounts.api
+    copixiv.features.authors.api
+    copixiv.features.failures.api
+    copixiv.features.library.api
+    copixiv.features.novels.routes
+    copixiv.features.search_history.api
+    copixiv.features.series.api
+    copixiv.features.system.api
+    copixiv.features.tags.aliases
+    copixiv.features.tags.preferences
+
+[importlinter:contract:features-no-tasks]
+name = features/ 不反向依赖 tasks/
+type = forbidden
+source_modules =
+    copixiv.features
+forbidden_modules =
+    copixiv.tasks
+
+[importlinter:contract:leaf-features-no-novels]
+name = 叶子 feature 切片不反向依赖 features.novels
+type = forbidden
+source_modules =
+    copixiv.features.accounts
+    copixiv.features.authors
+    copixiv.features.failures
+    copixiv.features.library
+    copixiv.features.search_history
+    copixiv.features.series
+    copixiv.features.system
+    copixiv.features.tags
+forbidden_modules =
+    copixiv.features.novels
+
+[importlinter:contract:novels-isolated-from-library]
+name = features.novels 与 features.library 保持隔离
+type = forbidden
+source_modules =
+    copixiv.features.novels
+forbidden_modules =
+    copixiv.features.library
+
+[importlinter:contract:library-isolated-from-failures]
+name = features.library 不依赖 features.failures
+type = forbidden
+source_modules =
+    copixiv.features.library
+forbidden_modules =
+    copixiv.features.failures
