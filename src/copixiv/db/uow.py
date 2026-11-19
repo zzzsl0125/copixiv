@@ -12,8 +12,8 @@ The rule this module encodes:
 * the data layer is **plain synchronous Python**;
 * the async world (FastAPI endpoints, task coroutines) uses it through
   ``get_uow`` for requests (endpoints open explicit ``with uow.begin():`` or
-  use :func:`copixiv.db.write_lock.read_transaction` / ``run_write_transaction``) and
-  :func:`copixiv.db.write_lock.run_write_transaction` for tasks
+  use :func:`copixiv.db.tx.read_transaction` / ``run_write_transaction``) and
+  :func:`copixiv.db.tx.run_write_transaction` for tasks
   (``asyncio.to_thread`` once around the whole transaction).
 
 Nothing in ``features/**`` / ``tasks/**`` should call ``asyncio.to_thread``
@@ -27,8 +27,6 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from sqlalchemy.orm import Session
-
-from copixiv.db import delta as engine_delta
 
 
 class SqlUnitOfWork:
@@ -65,21 +63,15 @@ class SqlUnitOfWork:
             raise RuntimeError("Session accessed outside uow.begin()")
         if self._session is None:
             self._session = self._session_factory()
-            engine = engine_delta.get_attached_engine(self._session_factory)
-            if engine is not None:
-                self._session.info[engine_delta.SESSION_ENGINE_KEY] = engine
         return self._session
 
     @contextmanager
-    def begin(self) -> Iterator[None]:
-        """Enter a transactional scope.  Commits on clean exit, rolls back on exception.
+    def begin(self, *, read_only: bool = False) -> Iterator[None]:
+        """Enter a transactional scope.
 
-        The exit path already commits — callers must NOT call ``commit()``
-        explicitly inside the block.
-
-        ``BaseException`` (not just ``Exception``) is caught so that a
-        KeyboardInterrupt or a generator shutdown on the way out still
-        rolls back explicitly instead of leaving the transaction open.
+        Commits on clean exit unless *read_only* is True (in which case any
+        transaction is rolled back instead of committed), and rolls back on
+        any exception.
         """
         if self._in_tx or self._session is not None:
             raise RuntimeError("Nested SqlUnitOfWork.begin() is not allowed")
@@ -96,22 +88,19 @@ class SqlUnitOfWork:
                 logger.exception("Rollback failed")
             raise
         else:
-            self.commit()
+            if read_only:
+                self.rollback()
+            else:
+                self.commit()
         finally:
             self._in_tx = False
             if self._session is not None:
-                engine_delta.clear_pending_delta(self._session)
                 self._session.close()
                 self._session = None
 
     def commit(self) -> None:
         if self._session is not None:
             self._session.commit()
-            pending = engine_delta.pop_pending_delta(self._session)
-            if pending is not None and not pending.is_empty():
-                hook = engine_delta.get_post_commit_hook(self._session_factory)
-                if hook is not None:
-                    hook(pending)
 
     def flush(self) -> None:
         """Force pending changes into the database, inside the current transaction.
@@ -127,5 +116,4 @@ class SqlUnitOfWork:
 
     def rollback(self) -> None:
         if self._session is not None:
-            engine_delta.clear_pending_delta(self._session)
             self._session.rollback()

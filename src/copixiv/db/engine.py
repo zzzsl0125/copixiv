@@ -40,6 +40,8 @@ def create_database_engine(
         poolclass=QueuePool,
         pool_size=6,
         max_overflow=12,
+        pool_pre_ping=True,
+        pool_recycle=1800,
     )
 
     @event.listens_for(engine, "connect")
@@ -67,7 +69,12 @@ def create_session_factory(engine: Engine) -> sessionmaker[Session]:
     When a code path needs "write then read the same table", call
     ``await uow.flush()`` explicitly (see :class:`SqlUnitOfWork`).
     """
-    return sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    return sessionmaker(
+        autocommit=False,
+        autoflush=False,
+        expire_on_commit=True,
+        bind=engine,
+    )
 
 
 def run_migrations(database_url: str, project_root: str | None = None) -> None:
@@ -91,7 +98,7 @@ def run_migrations(database_url: str, project_root: str | None = None) -> None:
         project_root = str(p)
 
     alembic_cfg = Config(str(Path(project_root) / "alembic.ini"))
-    alembic_cfg.set_main_option("sqlalchemy.url", database_url)
+    alembic_cfg.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 
     command.upgrade(alembic_cfg, "head")
 

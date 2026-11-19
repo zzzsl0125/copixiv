@@ -1,112 +1,131 @@
-"""Transaction-scoped pending delta collection & post-commit hook dispatch.
+"""SQLAlchemy session-event delta tracker and post-commit runtime sync.
 
-Stays purely within ``copixiv.db`` so no reverse dependency on
-``copixiv.query_engine`` or ``copixiv.features`` exists.
+Stays inside ``copixiv.db`` so no runtime dependency on ``copixiv.query_engine``
+or ``copixiv.features`` exists.
 """
 
 from __future__ import annotations
 
-import weakref
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import event, inspect
-from sqlalchemy.orm import Session
+from sqlalchemy import event
+from sqlalchemy import inspect as sa_inspect
+from sqlalchemy.orm import Session, sessionmaker
 
+from copixiv.core.search import EXCLUDE_BLOCKED_SETTING_KEY
 from copixiv.db import models
 
 SESSION_ENGINE_KEY = "query_engine"
 SESSION_DELTA_KEY = "pending_engine_delta"
-_EXCLUDE_BLOCKED_SETTING_KEY = "exclude_blocked_tag_novels"
+_SESSION_COMMITTED_KEY = "_engine_tx_committed"
+
+_REGISTERED_RUNTIME: dict[
+    int, tuple[Callable[[PendingEngineDelta], None], list[tuple[str, Callable[..., Any]]]]
+] = {}
 
 
 @dataclass
 class PendingEngineDelta:
-    """In-flight writes accumulated inside a single UoW transaction."""
+    """Dirty entity identifiers / invalidation flags accumulated in one transaction."""
 
-    upsert_novel_ids: set[int] = field(default_factory=set)
-    deleted_novel_ids: set[int] = field(default_factory=set)
-    special_follow_changes: dict[int, bool] = field(default_factory=dict)
+    novel_ids: set[int] = field(default_factory=set)
+    author_ids: set[int] = field(default_factory=set)
+    tag_names: set[str] = field(default_factory=set)
+    tags_full_refresh: bool = False
+    aliases_dirty: bool = False
     blocked_tags_dirty: bool = False
     exclude_setting_dirty: bool = False
 
     def is_empty(self) -> bool:
         return (
-            not self.upsert_novel_ids
-            and not self.deleted_novel_ids
-            and not self.special_follow_changes
+            not self.novel_ids
+            and not self.author_ids
+            and not self.tag_names
+            and not self.tags_full_refresh
+            and not self.aliases_dirty
             and not self.blocked_tags_dirty
             and not self.exclude_setting_dirty
         )
 
-    def clear(self) -> None:
-        self.upsert_novel_ids.clear()
-        self.deleted_novel_ids.clear()
-        self.special_follow_changes.clear()
-        self.blocked_tags_dirty = False
-        self.exclude_setting_dirty = False
-
-
-PostCommitHook = Callable[[PendingEngineDelta], None]
-
-_ENGINE_BY_FACTORY: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
-_HOOK_BY_FACTORY: weakref.WeakKeyDictionary[Any, PostCommitHook] = weakref.WeakKeyDictionary()
-# Fallback for non-weakrefable custom factory callables in tests.
-_FALLBACK_RUNTIME: dict[int, tuple[Any, PostCommitHook | None]] = {}
-
 
 def attach_engine_runtime(
-    session_factory: Any,
+    session_factory: sessionmaker,
     engine: Any,
-    post_commit_hook: PostCommitHook | None = None,
+    post_commit_hook: Callable[[PendingEngineDelta], None],
 ) -> None:
-    """Associate a query engine and optional post-commit hook with *session_factory*."""
-    try:
-        _ENGINE_BY_FACTORY[session_factory] = engine
-        if post_commit_hook is not None:
-            _HOOK_BY_FACTORY[session_factory] = post_commit_hook
-        else:
-            _HOOK_BY_FACTORY.pop(session_factory, None)
-    except TypeError:
-        _FALLBACK_RUNTIME[id(session_factory)] = (engine, post_commit_hook)
+    """Bind ``engine`` and four transaction lifecycle listeners to ``session_factory``."""
+    detach_engine_runtime(session_factory)
+
+    existing_info = dict(session_factory.kw.get("info") or {})
+    existing_info[SESSION_ENGINE_KEY] = engine
+    session_factory.configure(info=existing_info)
+
+    def _on_after_flush(session: Session, _flush_context: Any) -> None:
+        _collect_flushed_orm_deltas(session)
+
+    def _on_after_commit(session: Session) -> None:
+        if session.in_nested_transaction():
+            return
+        if SESSION_ENGINE_KEY not in session.info:
+            return
+        session.info[_SESSION_COMMITTED_KEY] = True
+
+    def _on_after_rollback(session: Session) -> None:
+        if session.in_nested_transaction():
+            return
+        session.info.pop(_SESSION_COMMITTED_KEY, None)
+        clear_pending_delta(session)
+
+    def _on_after_transaction_end(session: Session, transaction: Any) -> None:
+        if getattr(transaction, "nested", False) or getattr(transaction, "parent", None) is not None:
+            return
+        committed = bool(session.info.pop(_SESSION_COMMITTED_KEY, False))
+        pending = pop_pending_delta(session)
+        if not committed or pending is None or pending.is_empty():
+            return
+        post_commit_hook(pending)
+
+    listeners: list[tuple[str, Callable[..., Any]]] = [
+        ("after_flush", _on_after_flush),
+        ("after_commit", _on_after_commit),
+        ("after_rollback", _on_after_rollback),
+        ("after_transaction_end", _on_after_transaction_end),
+    ]
+    for event_name, fn in listeners:
+        event.listen(session_factory, event_name, fn)
+    _REGISTERED_RUNTIME[id(session_factory)] = (post_commit_hook, listeners)
 
 
-def detach_engine_runtime(session_factory: Any) -> None:
-    """Remove any query engine association from *session_factory*."""
-    try:
-        _ENGINE_BY_FACTORY.pop(session_factory, None)
-        _HOOK_BY_FACTORY.pop(session_factory, None)
-    except TypeError:
-        pass
-    _FALLBACK_RUNTIME.pop(id(session_factory), None)
+def detach_engine_runtime(session_factory: sessionmaker) -> None:
+    """Remove lifecycle listeners and ``SESSION_ENGINE_KEY`` from ``session_factory``."""
+    existing_info = dict(session_factory.kw.get("info") or {})
+    if SESSION_ENGINE_KEY in existing_info:
+        existing_info.pop(SESSION_ENGINE_KEY, None)
+        session_factory.configure(info=existing_info)
+    registered = _REGISTERED_RUNTIME.pop(id(session_factory), None)
+    if registered is not None:
+        _, listeners = registered
+        for event_name, fn in listeners:
+            if event.contains(session_factory, event_name, fn):
+                event.remove(session_factory, event_name, fn)
 
 
-def get_attached_engine(session_factory: Any) -> Any:
-    """Return the query engine attached to *session_factory*, or ``None``."""
-    try:
-        eng = _ENGINE_BY_FACTORY.get(session_factory)
-        if eng is not None:
-            return eng
-    except TypeError:
-        pass
-    pair = _FALLBACK_RUNTIME.get(id(session_factory))
-    return pair[0] if pair is not None else None
+def get_attached_engine(session_factory: sessionmaker) -> Any | None:
+    info = session_factory.kw.get("info") or {}
+    return info.get(SESSION_ENGINE_KEY)
 
 
-def get_post_commit_hook(session_factory: Any) -> PostCommitHook | None:
-    """Return the post-commit delta hook for *session_factory*, or ``None``."""
-    try:
-        hook = _HOOK_BY_FACTORY.get(session_factory)
-        if hook is not None:
-            return hook
-    except TypeError:
-        pass
-    pair = _FALLBACK_RUNTIME.get(id(session_factory))
-    return pair[1] if pair is not None else None
+def get_post_commit_hook(
+    session_factory: sessionmaker,
+) -> Callable[[PendingEngineDelta], None] | None:
+    registered = _REGISTERED_RUNTIME.get(id(session_factory))
+    return registered[0] if registered is not None else None
 
 
-def _get_delta_if_active(session: Session | None) -> PendingEngineDelta | None:
+def get_or_create_pending_delta(session: Session | None) -> PendingEngineDelta | None:
+    """Return per-session pending delta buffer when an engine is attached."""
     if session is None or SESSION_ENGINE_KEY not in session.info:
         return None
     if session.info.get(SESSION_ENGINE_KEY) is None:
@@ -118,100 +137,130 @@ def _get_delta_if_active(session: Session | None) -> PendingEngineDelta | None:
     return delta
 
 
-def clear_pending_delta(session: Session | None) -> None:
-    """Discard any accumulated delta (called on rollback)."""
-    if session is None:
-        return
-    delta = session.info.pop(SESSION_DELTA_KEY, None)
-    if delta is not None:
-        delta.clear()
-
-
 def pop_pending_delta(session: Session | None) -> PendingEngineDelta | None:
-    """Remove and return accumulated delta after commit."""
     if session is None:
         return None
     return session.info.pop(SESSION_DELTA_KEY, None)
 
 
-def record_novel_upserts(session: Session, novel_ids: Iterable[int]) -> None:
-    delta = _get_delta_if_active(session)
-    if delta is None:
-        return
-    for nid in novel_ids:
-        delta.deleted_novel_ids.discard(nid)
-        delta.upsert_novel_ids.add(nid)
+def clear_pending_delta(session: Session | None) -> None:
+    if session is not None:
+        session.info.pop(SESSION_DELTA_KEY, None)
 
 
-def record_novel_deletes(session: Session, novel_ids: Iterable[int]) -> None:
-    delta = _get_delta_if_active(session)
-    if delta is None:
-        return
-    for nid in novel_ids:
-        delta.upsert_novel_ids.discard(nid)
-        delta.deleted_novel_ids.add(nid)
-
-
-def record_special_follow(
-    session: Session, author_id: int, is_special_follow: bool,
-) -> None:
-    delta = _get_delta_if_active(session)
-    if delta is None:
-        return
-    delta.special_follow_changes[author_id] = bool(is_special_follow)
-
-
-def record_blocked_tags_dirty(session: Session) -> None:
-    delta = _get_delta_if_active(session)
-    if delta is not None:
-        delta.blocked_tags_dirty = True
-
-
-def record_exclude_setting_dirty(session: Session) -> None:
-    delta = _get_delta_if_active(session)
-    if delta is not None:
-        delta.exclude_setting_dirty = True
-
-
-@event.listens_for(Session, "after_flush")
-def _collect_orm_delta_after_flush(
-    session: Session, _flush_context: Any,
-) -> None:
-    """Capture ORM-level mutations (insert/update/delete) before commit clears flags."""
-    delta = _get_delta_if_active(session)
-    if delta is None:
+def _collect_flushed_orm_deltas(session: Session) -> None:
+    pending = get_or_create_pending_delta(session)
+    if pending is None:
         return
 
-    for obj in session.deleted:
-        if isinstance(obj, models.Novel):
-            delta.upsert_novel_ids.discard(obj.id)
-            delta.deleted_novel_ids.add(obj.id)
-        elif isinstance(obj, models.TagPreference):
-            delta.blocked_tags_dirty = True
-        elif isinstance(obj, models.Setting) and obj.key == _EXCLUDE_BLOCKED_SETTING_KEY:
-            delta.exclude_setting_dirty = True
+    for bucket_name, objs in (
+        ("new", session.new),
+        ("dirty", session.dirty),
+        ("deleted", session.deleted),
+    ):
+        for obj in objs:
+            if isinstance(obj, models.Novel):
+                if obj.id is not None:
+                    pending.novel_ids.add(int(obj.id))
+                if bucket_name in ("new", "deleted"):
+                    if obj.tags:
+                        pending.tag_names.update(str(t) for t in obj.tags if t)
+                else:
+                    hist = sa_inspect(obj).attrs.tags.history
+                    if hist.has_changes():
+                        for seq in (*hist.added, *hist.deleted):
+                            if seq:
+                                pending.tag_names.update(str(t) for t in seq if t)
+            elif isinstance(obj, models.Author):
+                if obj.author_id is not None:
+                    if bucket_name in ("new", "deleted"):
+                        pending.author_ids.add(int(obj.author_id))
+                    else:
+                        hist = sa_inspect(obj).attrs.is_special_follow.history
+                        if hist.has_changes():
+                            pending.author_ids.add(int(obj.author_id))
+            elif isinstance(obj, models.Tag):
+                if obj.name:
+                    pending.tag_names.add(str(obj.name))
+                if bucket_name == "dirty":
+                    hist = sa_inspect(obj).attrs.name.history
+                    if hist.has_changes():
+                        for val in (*hist.added, *hist.deleted):
+                            if val:
+                                pending.tag_names.add(str(val))
+            elif isinstance(obj, models.TagAlias):
+                pending.aliases_dirty = True
+            elif isinstance(obj, models.TagPreference):
+                pending.blocked_tags_dirty = True
+            elif isinstance(obj, models.Setting) and obj.key == EXCLUDE_BLOCKED_SETTING_KEY:
+                pending.exclude_setting_dirty = True
 
-    for obj in session.new:
-        if isinstance(obj, models.Novel):
-            delta.deleted_novel_ids.discard(obj.id)
-            delta.upsert_novel_ids.add(obj.id)
-        elif isinstance(obj, models.Author) and obj.is_special_follow:
-            delta.special_follow_changes[obj.author_id] = True
-        elif isinstance(obj, models.TagPreference):
-            delta.blocked_tags_dirty = True
-        elif isinstance(obj, models.Setting) and obj.key == _EXCLUDE_BLOCKED_SETTING_KEY:
-            delta.exclude_setting_dirty = True
 
-    for obj in session.dirty:
-        if isinstance(obj, models.Novel):
-            if session.is_modified(obj, include_collections=False):
-                delta.deleted_novel_ids.discard(obj.id)
-                delta.upsert_novel_ids.add(obj.id)
-        elif isinstance(obj, models.Author):
-            state = inspect(obj)
-            if state.attrs.is_special_follow.history.has_changes():
-                delta.special_follow_changes[obj.author_id] = bool(obj.is_special_follow)
-        elif isinstance(obj, models.TagPreference):
-            delta.blocked_tags_dirty = True
-        elif isinstance(obj, models.Setting) and obj.key == _EXCLUDE_BLOCKED_SETTING_KEY:
-            delta.exclude_setting_dirty = True
+def record_novel_upserts(session: Session | None, novel_ids: Iterable[int]) -> None:
+    pending = get_or_create_pending_delta(session)
+    if pending is not None:
+        pending.novel_ids.update(int(nid) for nid in novel_ids)
+
+
+def record_novel_deletes(session: Session | None, novel_ids: Iterable[int]) -> None:
+    pending = get_or_create_pending_delta(session)
+    if pending is not None:
+        pending.novel_ids.update(int(nid) for nid in novel_ids)
+
+
+def record_authors_dirty(session: Session | None, author_ids: Iterable[int]) -> None:
+    pending = get_or_create_pending_delta(session)
+    if pending is not None:
+        pending.author_ids.update(int(aid) for aid in author_ids)
+
+
+def record_tags_dirty(session: Session | None, tag_names: Iterable[str]) -> None:
+    pending = get_or_create_pending_delta(session)
+    if pending is not None:
+        pending.tag_names.update(str(name) for name in tag_names if name)
+
+
+def record_tags_full_refresh(session: Session | None) -> None:
+    pending = get_or_create_pending_delta(session)
+    if pending is not None:
+        pending.tags_full_refresh = True
+
+
+def record_aliases_dirty(session: Session | None) -> None:
+    pending = get_or_create_pending_delta(session)
+    if pending is not None:
+        pending.aliases_dirty = True
+
+
+def record_blocked_tags_dirty(session: Session | None) -> None:
+    pending = get_or_create_pending_delta(session)
+    if pending is not None:
+        pending.blocked_tags_dirty = True
+
+
+def record_exclude_setting_dirty(session: Session | None) -> None:
+    pending = get_or_create_pending_delta(session)
+    if pending is not None:
+        pending.exclude_setting_dirty = True
+
+
+__all__ = [
+    "PendingEngineDelta",
+    "SESSION_DELTA_KEY",
+    "SESSION_ENGINE_KEY",
+    "attach_engine_runtime",
+    "clear_pending_delta",
+    "detach_engine_runtime",
+    "get_attached_engine",
+    "get_or_create_pending_delta",
+    "get_post_commit_hook",
+    "pop_pending_delta",
+    "record_aliases_dirty",
+    "record_authors_dirty",
+    "record_blocked_tags_dirty",
+    "record_exclude_setting_dirty",
+    "record_novel_deletes",
+    "record_novel_upserts",
+    "record_tags_dirty",
+    "record_tags_full_refresh",
+]

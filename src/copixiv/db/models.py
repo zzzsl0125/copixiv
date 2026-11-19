@@ -1,25 +1,18 @@
 """SQLAlchemy ORM models for the copixiv database.
 
-postgres-migration: these models mirror the PostgreSQL-only greenfield
-target schema (``db_greenfield_design.md`` §4).  SQLite-era constructs are
-gone:
-
-- ``novel.tags TEXT[]`` (+ GIN) replaces the ``novel_tag`` join table.
-- ``novel.is_favourite`` / ``author.is_special_follow`` booleans replace the
-  ``favourite`` / ``special_follow`` join tables.
-- ID columns are ``BIGINT``; counter columns are ``INTEGER``; timestamp
-  columns are ``timestamptz``; ``task_history.result`` / ``progress`` and
-  ``scheduled_task.params`` are ``JSONB``.
-
-The ``NovelTag``, ``Favourite`` and ``SpecialFollow`` model classes are
-**removed** — repository code still references them inside function bodies
-(phase 2 rewrites those call sites), so removing them here does not break
-module import.
+- ``novel.tags TEXT[]`` stores tags directly; full-text/substring and tag
+  similarity search run exclusively in the in-process Rust engine
+  (``copixiv_rs``), so PG keeps only constraint / maintenance indexes.
+- ID columns are ``BIGINT``; aggregate counters on ``author`` / ``series``
+  are ``BIGINT``; timestamp columns are ``timestamptz``;
+  ``task_history.result`` / ``progress`` and ``scheduled_task.params`` use
+  :class:`JsonObjectType` over ``JSONB``.
 """
 
 from __future__ import annotations
 
 import enum
+import json
 from datetime import datetime
 from typing import Any
 
@@ -27,7 +20,6 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
-    Computed,
     DateTime,
     Float,
     ForeignKey,
@@ -35,6 +27,7 @@ from sqlalchemy import (
     Index,
     Integer,
     Text,
+    TypeDecorator,
     UniqueConstraint,
 )
 from sqlalchemy import (
@@ -47,6 +40,30 @@ from sqlalchemy.sql.elements import quoted_name
 from . import constants as C
 
 
+class JsonObjectType(TypeDecorator[Any]):
+    """JSONB column wrapper that safely unwraps legacy double-encoded JSON strings."""
+
+    impl = JSONB
+    cache_ok = True
+
+    @staticmethod
+    def _unwrap(value: Any) -> Any:
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, (dict, list)):
+                    return parsed
+            except (ValueError, TypeError):
+                pass
+        return value
+
+    def process_bind_param(self, value: Any, dialect: Any) -> Any:
+        return self._unwrap(value)
+
+    def process_result_value(self, value: Any, dialect: Any) -> Any:
+        return self._unwrap(value)
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -56,7 +73,8 @@ class Base(DeclarativeBase):
 # plain string values, matching the design's TEXT + CHECK constraint).
 # ---------------------------------------------------------------------------
 
-class TagPreferenceORM(str, enum.Enum):
+
+class TagPreferenceORM(enum.StrEnum):
     favourite = "favourite"
     blocked = "blocked"
 
@@ -74,17 +92,26 @@ TEXT_COL = quoted_name(C.COL_TEXTS, True)
 # ORM Models
 # ---------------------------------------------------------------------------
 
+
 class Author(Base):
     __tablename__ = C.TABLE_AUTHOR
 
     author_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     author_name: Mapped[str | None] = mapped_column(Text)
-    novel_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    like: Mapped[int] = mapped_column(LIKE_COL, Integer, default=0, nullable=False)
-    view: Mapped[int] = mapped_column(VIEW_COL, Integer, default=0, nullable=False)
-    text: Mapped[int] = mapped_column(TEXT_COL, Integer, default=0, nullable=False)
+    novel_count: Mapped[int] = mapped_column(Integer, default=0, server_default=sa_text("0"), nullable=False)
+    like: Mapped[int] = mapped_column(
+        LIKE_COL, BigInteger, default=0, server_default=sa_text("0"), nullable=False
+    )
+    view: Mapped[int] = mapped_column(
+        VIEW_COL, BigInteger, default=0, server_default=sa_text("0"), nullable=False
+    )
+    text: Mapped[int] = mapped_column(
+        TEXT_COL, BigInteger, default=0, server_default=sa_text("0"), nullable=False
+    )
     last_update: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    is_special_follow: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_special_follow: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=sa_text("false"), nullable=False
+    )
 
     novels: Mapped[list[Novel]] = relationship("Novel", back_populates="author_rel")
     series: Mapped[list[Series]] = relationship("Series", back_populates="author_rel")
@@ -107,20 +134,24 @@ class Series(Base):
 
     series_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     series_name: Mapped[str | None] = mapped_column(Text)
-    novel_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    novel_count: Mapped[int] = mapped_column(Integer, default=0, server_default=sa_text("0"), nullable=False)
     author_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey(f"{C.TABLE_AUTHOR}.author_id", ondelete="SET NULL")
     )
-    like: Mapped[int] = mapped_column(LIKE_COL, Integer, default=0, nullable=False)
-    view: Mapped[int] = mapped_column(VIEW_COL, Integer, default=0, nullable=False)
-    text: Mapped[int] = mapped_column(TEXT_COL, Integer, default=0, nullable=False)
+    like: Mapped[int] = mapped_column(
+        LIKE_COL, BigInteger, default=0, server_default=sa_text("0"), nullable=False
+    )
+    view: Mapped[int] = mapped_column(
+        VIEW_COL, BigInteger, default=0, server_default=sa_text("0"), nullable=False
+    )
+    text: Mapped[int] = mapped_column(
+        TEXT_COL, BigInteger, default=0, server_default=sa_text("0"), nullable=False
+    )
 
     author_rel: Mapped[Author | None] = relationship("Author", back_populates="series")
     novels: Mapped[list[Novel]] = relationship("Novel", back_populates="series_rel")
 
-    __table_args__ = (
-        Index("ix_series_author_id", "author_id"),
-    )
+    __table_args__ = (Index("ix_series_author_id", "author_id"),)
 
     def __repr__(self) -> str:
         return f"<Series(id={self.series_id}, name='{self.series_name}')>"
@@ -134,9 +165,15 @@ class Novel(Base):
     author_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey(f"{C.TABLE_AUTHOR}.author_id"))
     author_name: Mapped[str | None] = mapped_column(Text)
     path: Mapped[str | None] = mapped_column(Text, unique=True)
-    like: Mapped[int] = mapped_column(LIKE_COL, Integer, default=0, nullable=False)
-    view: Mapped[int] = mapped_column(VIEW_COL, Integer, default=0, nullable=False)
-    text: Mapped[int] = mapped_column(TEXT_COL, Integer, default=0, nullable=False)
+    like: Mapped[int] = mapped_column(
+        LIKE_COL, Integer, default=0, server_default=sa_text("0"), nullable=False
+    )
+    view: Mapped[int] = mapped_column(
+        VIEW_COL, Integer, default=0, server_default=sa_text("0"), nullable=False
+    )
+    text: Mapped[int] = mapped_column(
+        TEXT_COL, Integer, default=0, server_default=sa_text("0"), nullable=False
+    )
     caption: Mapped[str | None] = mapped_column(Text)
     series_id: Mapped[int | None] = mapped_column(
         BigInteger,
@@ -152,61 +189,28 @@ class Novel(Base):
     # 归属：**产出该 EPUB 的路径**置位（抓取流水线、上传路径写出成品后），
     # 对账任务（check_epub）负责降级；元数据刷新**永不**写它。
     # （2026-09 追溯：元数据刷新曾无条件写 0，把 22 万行"已完成"冲掉。）
-    has_epub: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    shuffle: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    tags: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default=sa_text("'{}'"))
-    is_favourite: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    # Where the row came from — migration 0005, docs/LIBRARY_DESIGN.md §2:
-    # ``'pixiv'`` for everything the scraper wrote, ``'local'`` for a TXT the
-    # user uploaded.  A column and not a tag: tags are user assets, and a
-    # retroactive alias rewrite could merge 「本地」 away and empty the shelf.
+    has_epub: Mapped[int] = mapped_column(Integer, default=0, server_default=sa_text("0"), nullable=False)
+    shuffle: Mapped[int] = mapped_column(Integer, default=0, server_default=sa_text("0"), nullable=False)
+    tags: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=sa_text("'{}'::text[]")
+    )
+    is_favourite: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=sa_text("false"), nullable=False
+    )
     source: Mapped[str] = mapped_column(
         Text,
         nullable=False,
         default="pixiv",
-        server_default=sa_text("'pixiv'"),
+        server_default=sa_text("'pixiv'::text"),
     )
-    # Local books: sha256 of the normalised body (the dedup key).  NULL for
-    # Pixiv rows — hence the *partial* unique index below.
     source_key: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Keyword search text — the four searchable fields assembled exactly like
-    # the old ``copixiv_novel_text(title, author_name, series_name, tags)``
-    # (space-joined, empty fields skipped via ``nullif``), then lowercased.
-    # PostgreSQL generates it from the row being written (migration 0007), so
-    # the ``pg_bigm`` GIN index below cannot drift from the data; the query
-    # side (``features/novels/search.py``) matches it with one ``LIKE`` per
-    # whitespace-separated keyword segment.  Case folding on the query side
-    # must use SQL ``lower()`` too — the database runs with the ``C`` locale,
-    # where Python's ``str.lower()`` folds characters this does not.
-    #
-    # The assembly lives in the IMMUTABLE SQL function ``copixiv_search_text``
-    # (created by migration 0007) rather than inline: a STORED generated column
-    # requires an immutable expression, and ``concat_ws`` /
-    # ``array_to_string`` are catalogued ``STABLE``.  Keep this metadata
-    # expression in step with that function.
-    search_lower: Mapped[str | None] = mapped_column(
-        Text,
-        Computed(
-            "copixiv_search_text(title, author_name, series_name, tags)",
-            persisted=True,
-        ),
-    )
 
     author_rel: Mapped[Author | None] = relationship("Author", back_populates="novels")
     series_rel: Mapped[Series | None] = relationship("Series", back_populates="novels")
 
     __table_args__ = (
-        Index("ix_novel_like_text_id", "like", "text", "id"),
-        Index("ix_novel_like_id", "like", "id"),
-        Index("ix_novel_shuffle_id", "shuffle", "id"),
-        Index("ix_novel_shuffle_like_text", "shuffle", "like", "text"),
         Index("ix_novel_author_id", "author_id", "id"),
         Index("ix_novel_series_id", "series_id", "id"),
-        Index("ix_novel_author_like", "author_id", "like"),
-        Index("ix_novel_series_like", "series_id", "like"),
-        Index("ix_novel_create_time", "create_time"),
-        Index("ix_novel_tags_gin", "tags", postgresql_using="gin"),
-        Index("ix_novel_source", "source"),
         Index(
             "ux_novel_source_key",
             "source",
@@ -219,22 +223,25 @@ class Novel(Base):
             "id",
             postgresql_where=sa_text("is_favourite"),
         ),
-        # 时间轴排序键（迁移 0006，docs/LIBRARY_DESIGN.md §3.1）：pixiv 行的 id
-        # 就是作品号，本地行的 id 是**负的**坐标（上传时刻的作品号位置），所以
-        # 「按时间」= ``ORDER BY abs(id)``。``abs(id)`` 不是主键，必须自带一条
-        # 表达式索引，否则每次列表排序都要全表 top-N Sort（实测 1.3ms → 35ms）。
-        Index("ix_novel_abs_id", sa_text("abs(id)"), sa_text("id")),
-        # Keyword search: a ``pg_bigm`` bigram GIN index over the generated
-        # ``search_lower`` column (migration 0007).  The column is generated
-        # by PostgreSQL from the row being written, so the index cannot drift
-        # from the data, and the query side builds real substring predicates
-        # (one ``LIKE`` per keyword segment) — see
-        # ``features/novels/search.py``.
         Index(
-            "novel_search_bigm",
-            "search_lower",
-            postgresql_using="gin",
-            postgresql_ops={"search_lower": "gin_bigm_ops"},
+            "ix_novel_local_id",
+            "id",
+            postgresql_where=sa_text("id < 0"),
+        ),
+        Index(
+            "ix_novel_missing_source",
+            "id",
+            postgresql_where=sa_text("source = ''"),
+        ),
+        Index(
+            "ix_novel_series_missing_index",
+            "series_id",
+            postgresql_where=sa_text("series_id IS NOT NULL AND series_index IS NULL"),
+        ),
+        Index(
+            "ix_novel_empty_author_name",
+            "author_id",
+            postgresql_where=sa_text("author_id IS NOT NULL AND (author_name IS NULL OR author_name = '')"),
         ),
     )
 
@@ -247,28 +254,11 @@ class Tag(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
-    reference_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-
-    # ``lower(name)`` is catalogued IMMUTABLE, so — unlike ``novel.search_lower``
-    # (which needs the ``copixiv_search_text`` wrapper for the STABLE
-    # ``concat_ws`` / ``array_to_string``) — the generated column is inlined.
-    # Keep this expression in step with migration 0008.
-    search_lower: Mapped[str | None] = mapped_column(
-        Text,
-        Computed("lower(name)", persisted=True),
+    reference_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=sa_text("0")
     )
 
     __table_args__ = (
-        # 标签别名建议的两条索引（迁移 0008）：pg_bigm GIN 回答「哪些标签名字
-        # 相似」（真子串语义），``(reference_count DESC, id DESC)`` btree 回答
-        # 「取最热的 N 个」与 keyset 分页续扫 —— GIN 不提供顺序，缺了它就只能
-        # 对整表 Seq Scan + Sort（见 features/tags/repo.py）。
-        Index(
-            "tag_search_bigm",
-            "search_lower",
-            postgresql_using="gin",
-            postgresql_ops={"search_lower": "gin_bigm_ops"},
-        ),
         Index(
             "tag_reference_count_id_idx",
             sa_text("reference_count DESC"),
@@ -286,7 +276,7 @@ class TagPreference(Base):
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     tag: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     preference: Mapped[str] = mapped_column(Text, nullable=False)
-    sort_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    sort_index: Mapped[int] = mapped_column(Integer, default=0, server_default=sa_text("0"), nullable=False)
 
     __table_args__ = (
         CheckConstraint(
@@ -319,16 +309,13 @@ class TagAlias(Base):
     target: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey(f"{C.TABLE_TAG}.id"),
-        index=True,
         nullable=False,
     )
 
     source_tag: Mapped[Tag] = relationship("Tag", foreign_keys=[source])
     target_tag: Mapped[Tag] = relationship("Tag", foreign_keys=[target])
 
-    __table_args__ = (
-        Index("ix_tag_alias_target", "target"),
-    )
+    __table_args__ = (Index("ix_tag_alias_target", "target"),)
 
     def __repr__(self) -> str:
         return f"<TagAlias(source_id={self.source}, target_id={self.target})>"
@@ -341,9 +328,11 @@ class ScheduledTask(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     task: Mapped[str] = mapped_column(Text, nullable=False)
     cron: Mapped[str] = mapped_column(Text, nullable=False)
-    params: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    is_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    sort_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    params: Mapped[dict[str, Any] | None] = mapped_column(JsonObjectType(), nullable=True)
+    is_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=sa_text("false"), nullable=False
+    )
+    sort_index: Mapped[int] = mapped_column(Integer, default=0, server_default=sa_text("0"), nullable=False)
 
 
 class TaskHistory(Base):
@@ -356,8 +345,8 @@ class TaskHistory(Base):
     start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     end_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     duration: Mapped[float | None] = mapped_column(Float)
-    result: Mapped[Any | None] = mapped_column(JSONB)
-    progress: Mapped[Any | None] = mapped_column(JSONB)
+    result: Mapped[Any | None] = mapped_column(JsonObjectType())
+    progress: Mapped[Any | None] = mapped_column(JsonObjectType())
     # No dedup index: repeated enqueues for the same ``task_func`` insert
     # separate pending rows and queue up (task ordering is the worker's job).
 
@@ -381,10 +370,23 @@ class Token(Base):
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     name: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     token: Mapped[str] = mapped_column(Text, nullable=False)
-    premium: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    valid: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    sort_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    is_follow: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    premium: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=sa_text("false"), nullable=False
+    )
+    valid: Mapped[bool] = mapped_column(Boolean, default=True, server_default=sa_text("true"), nullable=False)
+    sort_index: Mapped[int] = mapped_column(Integer, default=0, server_default=sa_text("0"), nullable=False)
+    is_follow: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=sa_text("false"), nullable=False
+    )
+
+    __table_args__ = (
+        Index(
+            "ux_token_follow",
+            "is_follow",
+            unique=True,
+            postgresql_where=sa_text("is_follow"),
+        ),
+    )
 
 
 class FailedNovel(Base):
@@ -401,13 +403,11 @@ class FailedNovel(Base):
     )
     failure_type: Mapped[str | None] = mapped_column(Text)
     error_message: Mapped[str | None] = mapped_column(Text)
-    failed_times: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    failed_times: Mapped[int] = mapped_column(Integer, default=1, server_default=sa_text("1"), nullable=False)
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    __table_args__ = (
-        Index("ix_failed_novel_last_failed_at", "last_failed_at"),
-    )
+    __table_args__ = (Index("ix_failed_novel_last_failed_at", "last_failed_at"),)
 
 
 class SeriesDeadLetter(Base):
@@ -429,7 +429,7 @@ class SeriesDeadLetter(Base):
 
     ``consecutive_failures`` guards against a single 404: pixiv can answer
     404 transiently, so a series is retired only after
-    :data:`copixiv.features.novels.series_ledger.RETIRE_AFTER_FAILURES`
+    :data:`copixiv.features.series.ledger.RETIRE_AFTER_FAILURES`
     consecutive *definitive* 404s.  Any success resets the count and clears
     ``retired_at``, so a mis-retired series comes back on its own.
     """
@@ -440,7 +440,9 @@ class SeriesDeadLetter(Base):
     # verdict may exist before/without a ``series`` row, and deleting a
     # ``series`` row must not silently resurrect the fetch attempts).
     series_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    consecutive_failures: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=sa_text("0"), nullable=False
+    )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # NULL = still worth trying; set = excluded from the candidate query.
@@ -448,7 +450,8 @@ class SeriesDeadLetter(Base):
 
     __table_args__ = (
         Index(
-            "ix_series_dead_letter_retired_at", "retired_at",
+            "ix_series_dead_letter_retired_at",
+            "retired_at",
             postgresql_where=sa_text("retired_at IS NOT NULL"),
         ),
     )
@@ -463,8 +466,6 @@ class SearchHistory(Base):
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
-        UniqueConstraint(
-            "type", "value", name="uq_search_history_type_value"
-        ),
+        UniqueConstraint("type", "value", name="uq_search_history_type_value"),
         Index("ix_search_history_type_timestamp", "type", "timestamp"),
     )

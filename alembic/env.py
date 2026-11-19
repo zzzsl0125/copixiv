@@ -10,23 +10,26 @@ from alembic import context
 # Alembic Config object
 config = context.config
 
-# Set up Python logging from alembic.ini
+# Set up Python logging from alembic.ini without silencing existing loggers (e.g. loguru).
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
+
+# ---------------------------------------------------------------------------
+# Ensure src/ is importable BEFORE importing copixiv models
+# ---------------------------------------------------------------------------
+_project_root = Path(__file__).resolve().parent.parent
+_src_dir = str(_project_root / "src")
+if _src_dir not in sys.path:
+    sys.path.insert(0, _src_dir)
 
 # ---------------------------------------------------------------------------
 # Target metadata — all ORM models registered on Base
 # ---------------------------------------------------------------------------
-from copixiv.db.models import Base
+from copixiv.db.models import Base  # noqa: E402
+
 target_metadata = Base.metadata
 
-# ---------------------------------------------------------------------------
-# Resolve database URL from copixiv config or fall back to alembic.ini
-# ---------------------------------------------------------------------------
-# Project root is the parent of the alembic/ directory
-_project_root = Path(__file__).resolve().parent.parent
-# Add src/ to sys.path so copixiv is importable
-sys.path.insert(0, str(_project_root / "src"))
+_DEFAULT_DATABASE_URL = "postgresql+psycopg2://postgres@127.0.0.1:5433/copixiv"
 
 
 def _get_database_url() -> str:
@@ -34,33 +37,31 @@ def _get_database_url() -> str:
 
     Priority:
       1. Command-line ``-x url=...`` override
-      2. ``alembic.ini`` ``sqlalchemy.url`` (if it's a real PG URL — the
-         ``engine.run_migrations`` path sets this) [replaces the old SQLite
-         ``path.database`` resolution]
-      3. copixiv ``config.yaml`` ``database_url``
-      4. ``alembic.ini`` ``sqlalchemy.url`` (as-is fallback)
+      2. ``alembic.ini`` ``sqlalchemy.url`` (if non-empty PG URL — the
+         ``engine.run_migrations`` path sets this)
+      3. copixiv ``config.yaml`` / ``COPIXIV_DATABASE_URL`` via ``load_config()``
+      4. Default local PG URL fallback
     """
     # 1. Command-line -x url=... override
     url_override = context.get_x_argument(as_dictionary=True).get("url")
     if url_override:
         return url_override
 
-    # 2. alembic.ini sqlalchemy.url (PG URL set by engine.run_migrations).
-    #    The default alembic.ini still carries the old SQLite placeholder
-    #    (``sqlite:///...``); ignore that and resolve from app config.
-    ini_url = config.get_main_option("sqlalchemy.url")
+    # 2. alembic.ini sqlalchemy.url (set at runtime by engine.run_migrations).
+    ini_url = (config.get_main_option("sqlalchemy.url") or "").strip()
     if ini_url and not ini_url.startswith("sqlite:///") and "://" in ini_url:
         return ini_url
 
-    # 3. copixiv config.yaml database_url
+    # 3. copixiv config.yaml / env override
     try:
-        from copixiv.config import config as app_config
-        return app_config.database_url
+        from copixiv.config import load_config
+
+        return load_config().database_url
     except Exception:
         pass
 
     # 4. Fallback
-    return ini_url
+    return ini_url or _DEFAULT_DATABASE_URL
 
 
 def run_migrations_offline() -> None:

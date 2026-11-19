@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import sys
+import uuid
 from datetime import date
 from pathlib import Path
 
@@ -32,9 +33,7 @@ def _pg_bin(name: str) -> str:
         return resolved
     spec = importlib.util.find_spec("pgserver")
     if spec is not None and spec.origin:
-        candidate = (
-            Path(spec.origin).resolve().parent / "pginstall" / "bin" / name
-        )
+        candidate = Path(spec.origin).resolve().parent / "pginstall" / "bin" / name
         if candidate.exists():
             return str(candidate)
     venv_bin = (
@@ -87,6 +86,8 @@ def backup_database(
     database_url: str,
     backup_dir: str | None = None,
     engine: Engine | None = None,
+    *,
+    timeout: float = 600,
 ) -> str:
     """Create a ``pg_dump -Fc`` backup of the PostgreSQL database.
 
@@ -97,6 +98,7 @@ def backup_database(
         backup_dir: Directory for backups.  Defaults to ``./backups``.
         engine: Unused — kept for backwards compatibility with the old
             SQLite ``backup_database`` signature.
+        timeout: Subprocess timeout in seconds (default 600).
 
     Returns:
         Path to the created backup file.
@@ -106,25 +108,35 @@ def backup_database(
     backup_path = Path(backup_dir)
     backup_path.mkdir(parents=True, exist_ok=True)
 
+    safe_url = make_url(database_url).render_as_string(hide_password=True)
     this_week = date.today().strftime("%G-W%V")
     dest = backup_path / f"{this_week}.dump"
-    tmp_dest = dest.with_suffix(".dump.tmp")
-
-    if tmp_dest.exists():
-        tmp_dest.unlink()
+    tmp_dest = backup_path / f".{this_week}.{os.getpid()}.{uuid.uuid4().hex[:8]}.dump.tmp"
 
     args, env = _connection_args(database_url)
     cmd = [_pg_bin("pg_dump"), "--format=custom", "--file", str(tmp_dest), *args]
 
     merged_env = {**os.environ, **env}
     try:
-        subprocess.run(cmd, check=True, env=merged_env)
+        subprocess.run(
+            cmd,
+            check=True,
+            env=merged_env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
         tmp_dest.replace(dest)
     except subprocess.CalledProcessError as e:
         tmp_dest.unlink(missing_ok=True)
-        raise RuntimeError(
-            f"pg_dump failed for {database_url!r}: {e}"
-        ) from e
+        stderr = (e.stderr or "").strip()
+        msg = f"pg_dump failed (exit {e.returncode}) for {safe_url}"
+        if stderr:
+            msg = f"{msg}: {stderr}"
+        raise RuntimeError(msg) from e
+    except subprocess.TimeoutExpired as e:
+        tmp_dest.unlink(missing_ok=True)
+        raise RuntimeError(f"pg_dump timed out after {timeout}s for {safe_url}") from e
     except BaseException:
         tmp_dest.unlink(missing_ok=True)
         raise
@@ -152,9 +164,7 @@ def cleanup_old_backups(
     if not backup_path.exists():
         return []
 
-    backups = sorted(
-        backup_path.glob("*.dump"), key=lambda f: f.name, reverse=True
-    )
+    backups = sorted(backup_path.glob("*.dump"), key=lambda f: f.name, reverse=True)
     removed: list[str] = []
 
     for f in backups[keep_count:]:

@@ -1,7 +1,7 @@
 """Base repository — shared SQLAlchemy helpers."""
 
 from collections.abc import Iterable
-from typing import Any, TypeVar
+from typing import Any
 
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
@@ -9,8 +9,6 @@ from sqlalchemy.orm import Session
 
 from copixiv.db import constants as C
 from copixiv.db import models
-
-ModelType = TypeVar("ModelType", bound=Any)
 
 
 def model_to_dict(obj: Any) -> dict:
@@ -23,7 +21,7 @@ def models_to_dicts(objs: list[Any]) -> list[dict]:
     return [model_to_dict(o) for o in objs]
 
 
-def update_summary(
+def update_summary[ModelType: Any](
     session: Session,
     model_class: type[ModelType],
     id_column_name: str,
@@ -82,11 +80,7 @@ def update_summary(
         func.coalesce(func.sum(models.Novel.text), 0).label(C.COL_TEXTS),
         *extra,
     ]
-    agg_select = (
-        select(*columns_to_select)
-        .where(source_col.in_(target_ids))
-        .group_by(source_col)
-    )
+    agg_select = select(*columns_to_select).where(source_col.in_(target_ids)).group_by(source_col)
 
     insert_stmt = postgresql_insert(model_class).from_select(
         [col.key for col in agg_select.selected_columns if col.key is not None],
@@ -116,13 +110,43 @@ def update_summary(
     session.execute(
         update(model_class)
         .where(pk_col.in_(target_ids), ~has_novel)
-        .values({
-            C.COL_NOVEL_COUNT: 0,
-            C.COL_VIEWS: 0,
-            C.COL_LIKES: 0,
-            C.COL_TEXTS: 0,
-        })
+        .values(
+            {
+                C.COL_NOVEL_COUNT: 0,
+                C.COL_VIEWS: 0,
+                C.COL_LIKES: 0,
+                C.COL_TEXTS: 0,
+            }
+        )
     )
+
+
+def ensure_parent_rows(
+    session: Session,
+    *,
+    author_ids: Iterable[int | None] = (),
+    series_ids: Iterable[int | None] = (),
+) -> None:
+    """INSERT ... ON CONFLICT DO NOTHING placeholder rows for FK safety."""
+    a_ids = sorted({aid for aid in author_ids if aid})
+    s_ids = sorted({sid for sid in series_ids if sid})
+    flushed = False
+    if a_ids:
+        session.execute(
+            postgresql_insert(models.Author)
+            .values([{"author_id": aid} for aid in a_ids])
+            .on_conflict_do_nothing()
+        )
+        flushed = True
+    if s_ids:
+        session.execute(
+            postgresql_insert(models.Series)
+            .values([{"series_id": sid} for sid in s_ids])
+            .on_conflict_do_nothing()
+        )
+        flushed = True
+    if flushed:
+        session.flush()
 
 
 def refresh_parent_summaries(
@@ -157,35 +181,56 @@ def refresh_parent_summaries(
         )
 
 
+def finalize_parent_links(
+    session: Session,
+    *,
+    author_ids: Iterable[int | None] = (),
+    series_ids: Iterable[int | None] = (),
+) -> None:
+    """Finalize author/series aggregates after novel link changes."""
+    refresh_parent_summaries(
+        session,
+        author_ids=author_ids,
+        series_ids=series_ids,
+    )
+
+
 class BaseRepository:
     """Common database operations shared by all repositories."""
 
     def __init__(self, session: Session):
         self.session = session
 
-    def count(self, model_class: type[ModelType]) -> int:
+    def count[ModelType: Any](self, model_class: type[ModelType]) -> int:
         stmt = select(func.count()).select_from(model_class)
         return self.session.execute(stmt).scalar() or 0
 
     # -- shared CRUD helpers (used by token/task/tag/search_history) ----------
 
-    def _update_attrs(
-        self, model_class: type[ModelType], item_id: Any, data: dict
-    ) -> Any | None:
+    def _update_attrs[ModelType: Any](
+        self,
+        model_class: type[ModelType],
+        item_id: Any,
+        data: dict,
+        *,
+        allow_none_fields: Iterable[str] = (),
+    ) -> ModelType | None:
         """Set the given attributes on an existing row.
 
         Returns the updated instance, or ``None`` when the row doesn't exist.
-        ``None`` values are skipped (callers pass ``exclude_none`` data).
+        ``None`` values are skipped unless the field name is listed in
+        *allow_none_fields*.
         """
         obj = self.session.get(model_class, item_id)
         if obj is None:
             return None
+        nullable = set(allow_none_fields)
         for k, v in data.items():
-            if v is not None and hasattr(obj, k):
+            if (v is not None or k in nullable) and hasattr(obj, k):
                 setattr(obj, k, v)
         return obj
 
-    def _delete_by_id(self, model_class: type[ModelType], item_id: Any) -> bool:
+    def _delete_by_id[ModelType: Any](self, model_class: type[ModelType], item_id: Any) -> bool:
         """Delete a row by id; returns False when it doesn't exist."""
         obj = self.session.get(model_class, item_id)
         if obj is None:
@@ -194,9 +239,7 @@ class BaseRepository:
         self.session.flush()
         return True
 
-    def _reorder(
-        self, model_class: type[ModelType], sort_field: str, ids: list[int]
-    ) -> int:
+    def _reorder[ModelType: Any](self, model_class: type[ModelType], sort_field: str, ids: list[int]) -> int:
         """Assign sort indices 0..n-1 with the listed *ids* placed first.
 
         Loads all rows in a single query, places valid *ids* in caller order
@@ -204,11 +247,13 @@ class BaseRepository:
         ``(sort_field, id)`` order, and assigns dense indices. Returns the
         number of listed rows that were found.
         """
-        rows = self.session.execute(
-            select(model_class).order_by(
-                getattr(model_class, sort_field), model_class.id
+        rows = (
+            self.session.execute(
+                select(model_class).order_by(getattr(model_class, sort_field), model_class.id)
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         by_id = {obj.id: obj for obj in rows}
         ordered: list[Any] = []
         seen: set[int] = set()
