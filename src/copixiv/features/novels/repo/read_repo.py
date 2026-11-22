@@ -13,10 +13,8 @@ from copixiv.core.exceptions import ValidationError
 from copixiv.core.models import SOURCE_PIXIV, EpubStatus, NovelSource
 from copixiv.core.search import QuerySpec, normalize_search_segments
 from copixiv.core.time import datetime_to_us, us_to_datetime
-from copixiv.db import constants as C
 from copixiv.db import delta as engine_delta
 from copixiv.db import models
-from copixiv.db.base import BaseRepository
 from copixiv.features.novels.schemas import NovelBase
 from copixiv.query_engine.adapter import RustNovelQueryEngine
 from copixiv.query_engine.port import EngineCursor, EngineQuery
@@ -29,40 +27,40 @@ COUNT_CAP = 5000
 
 _INT_FILTER_COLS = frozenset(
     {
-        C.COL_ID,
-        C.COL_AUTHOR_ID,
-        C.COL_SERIES_ID,
-        C.COL_LIKES,
-        C.COL_VIEWS,
-        C.COL_TEXTS,
-        C.COL_SERIES_INDEX,
-        C.COL_HAS_EPUB,
+        "id",
+        "author_id",
+        "series_id",
+        "like",
+        "view",
+        "text",
+        "series_index",
+        "has_epub",
     }
 )
 _STR_FILTER_COLS = frozenset(
     {
-        C.COL_TITLE,
-        C.COL_AUTHOR_NAME,
-        C.COL_SERIES_NAME,
-        C.COL_SOURCE,
+        "title",
+        "author_name",
+        "series_name",
+        "source",
     }
 )
 _FILTERABLE_NOVEL_FIELDS = _INT_FILTER_COLS | _STR_FILTER_COLS
 _SORTABLE_NOVEL_FIELDS = _INT_FILTER_COLS | frozenset(
     {
-        C.COL_CREATE_TIME,
-        C.COL_TITLE,
-        C.COL_AUTHOR_NAME,
-        C.COL_SERIES_NAME,
-        C.ORDER_BY_RANDOM,
+        "create_time",
+        "title",
+        "author_name",
+        "series_name",
+        "random",
     }
 )
 _VALID_CONDITION_FIELDS = _FILTERABLE_NOVEL_FIELDS | frozenset(
     {
-        C.FIELD_TAGS,
-        C.FIELD_KEYWORD,
-        C.FIELD_IS_FAVOURITE,
-        C.FIELD_IS_SPECIAL_FOLLOW,
+        "tags",
+        "keyword",
+        "is_favourite",
+        "is_special_follow",
     }
 )
 
@@ -109,12 +107,12 @@ def _parse_query_int(raw: Any, label: str) -> int:
 
 def _parse_cursor_val(order_by: str, raw: Any) -> Any:
     if raw is None:
-        if order_by == C.COL_CREATE_TIME:
+        if order_by == "create_time":
             return None
         raise ValidationError(f"Cursor missing non-null value for {order_by}")
     if order_by in _INT_FILTER_COLS:
         return _parse_query_int(raw, f"cursor.{order_by}")
-    if order_by == C.COL_CREATE_TIME:
+    if order_by == "create_time":
         if isinstance(raw, datetime):
             return raw
         if isinstance(raw, str):
@@ -136,9 +134,9 @@ def _categorize_conditions(conditions) -> tuple[set[str], set[str], dict[str, st
     for qtype, value in conditions:
         if not isinstance(value, str) or value.strip() == "":
             continue
-        if qtype == C.FIELD_TAGS:
+        if qtype == "tags":
             tags.add(value)
-        elif qtype == C.FIELD_KEYWORD:
+        elif qtype == "keyword":
             keywords.add(value)
         else:
             field_filters[qtype] = value
@@ -190,7 +188,7 @@ def _novel_from_orm(obj: models.Novel, *, is_special_follow: bool = False) -> St
     )
 
 
-class SQLAlchemyNovelReadRepository(BaseRepository):
+class SQLAlchemyNovelReadRepository:
     """Read-only repository for novel queries and scope filtering."""
 
     def __init__(
@@ -199,7 +197,7 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         *,
         query_engine: RustNovelQueryEngine | None = None,
     ):
-        super().__init__(session)
+        self.session = session
         self._query_engine: RustNovelQueryEngine | None = (
             query_engine if query_engine is not None else session.info.get(engine_delta.SESSION_ENGINE_KEY)
         )
@@ -227,10 +225,10 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         only_fav = False
         only_sf = False
         for qtype, value in field_filters.items():
-            if qtype == C.FIELD_IS_FAVOURITE:
+            if qtype == "is_favourite":
                 only_fav = True
                 continue
-            if qtype == C.FIELD_IS_SPECIAL_FOLLOW:
+            if qtype == "is_special_follow":
                 only_sf = True
                 continue
             if value == "":
@@ -269,7 +267,7 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         if "id" not in cursor:
             raise ValidationError("Cursor missing 'id'")
         cursor_id = _parse_query_int(cursor["id"], "cursor.id")
-        if order_by == C.ORDER_BY_RANDOM:
+        if order_by == "random":
             if "seed" not in cursor or "h" not in cursor:
                 raise ValidationError("Cursor missing 'seed'/'h' for random ordering")
             return EngineCursor(
@@ -279,12 +277,12 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
             )
         if order_by not in _SORTABLE_NOVEL_FIELDS:
             raise ValidationError(f"Invalid order_by for cursor pagination: {order_by}")
-        if order_by == C.COL_ID:
+        if order_by == "id":
             return EngineCursor(cursor_id=cursor_id, cursor_int=cursor_id)
         if order_by not in cursor:
             raise ValidationError(f"Cursor missing '{order_by}'")
         raw_val = _parse_cursor_val(order_by, cursor[order_by])
-        if order_by == C.COL_CREATE_TIME:
+        if order_by == "create_time":
             return EngineCursor(
                 cursor_id=cursor_id,
                 cursor_int=datetime_to_us(raw_val) if raw_val is not None else None,
@@ -325,16 +323,16 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
     def sort_novel_ids(
         self,
         novel_ids: list[int],
-        order_by: str = C.COL_LIKES,
+        order_by: str = "like",
         order_direction: str = "DESC",
     ) -> list[int]:
         """Return *novel_ids* ordered by a novel column (id / like / view / text / create_time)."""
         if not novel_ids or order_by not in (
-            C.COL_ID,
-            C.COL_LIKES,
-            C.COL_VIEWS,
-            C.COL_TEXTS,
-            C.COL_CREATE_TIME,
+            "id",
+            "like",
+            "view",
+            "text",
+            "create_time",
         ):
             return list(novel_ids)
         descending = order_direction.upper() == "DESC"
@@ -348,7 +346,7 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         self._validate_order_direction(spec.order_direction)
 
         query = self._compile_engine_query(spec, count_blocked=only_blocked)
-        order_by = spec.order_by or C.COL_ID
+        order_by = spec.order_by or "id"
         parsed_cursor = self._compile_engine_cursor(spec.cursor, order_by)
         descending = spec.order_direction.upper() == "DESC"
         page = eng.query_novel_rows(
@@ -361,7 +359,7 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         novels = [_novel_from_record(rec) for rec in page.rows]
         cursor_out: dict[str, Any] | None = None
         if page.has_more and novels:
-            if order_by == C.ORDER_BY_RANDOM:
+            if order_by == "random":
                 cursor_out = page.random_cursor
             else:
                 last = novels[-1]

@@ -14,13 +14,13 @@ from sqlalchemy.orm import Session, aliased
 from copixiv.core.exceptions import ValidationError
 from copixiv.db import delta as engine_delta
 from copixiv.db import models
-from copixiv.db.base import BaseRepository
+from copixiv.db.base import delete_by_id, reorder_rows
 from copixiv.query_engine.adapter import RustNovelQueryEngine
 
 from .suggest import suggest_tag_aliases
 
 
-class SQLAlchemyTagRepository(BaseRepository):
+class SQLAlchemyTagRepository:
     """Repository for tag entities, preferences, aliases, and suggestions."""
 
     def __init__(
@@ -29,7 +29,7 @@ class SQLAlchemyTagRepository(BaseRepository):
         *,
         query_engine: RustNovelQueryEngine | None = None,
     ):
-        super().__init__(session)
+        self.session = session
         self._query_engine: RustNovelQueryEngine | None = (
             query_engine if query_engine is not None else session.info.get(engine_delta.SESSION_ENGINE_KEY)
         )
@@ -127,10 +127,10 @@ class SQLAlchemyTagRepository(BaseRepository):
         return pref
 
     def delete_preference(self, pref_id: int) -> bool:
-        return self._delete_by_id(models.TagPreference, pref_id)
+        return delete_by_id(self.session, models.TagPreference, pref_id)
 
     def reorder_preferences(self, ids: list[int]) -> int:
-        return self._reorder(models.TagPreference, "sort_index", ids)
+        return reorder_rows(self.session, models.TagPreference, "sort_index", ids)
 
     # ------------------------------------------------------------------
     # Tag aliases

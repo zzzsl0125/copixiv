@@ -6,18 +6,15 @@ from typing import Any, cast
 
 from sqlalchemy import any_, func, or_, select, update
 from sqlalchemy import delete as _delete
+from sqlalchemy.orm import Session
 
 from copixiv.core.draft import NovelDraft
 from copixiv.core.exceptions import NotFoundError
 from copixiv.core.models import EpubStatus
 from copixiv.core.time import parse_pixiv_time
-from copixiv.db import constants as C
 from copixiv.db import delta as engine_delta
 from copixiv.db import models
-from copixiv.db.base import (
-    BaseRepository,
-    ensure_parent_rows,
-)
+from copixiv.db.base import ensure_parent_rows
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
 from copixiv.log import logger
 
@@ -42,8 +39,11 @@ BATCH_METADATA_COLUMNS = frozenset(
 )
 
 
-class SQLAlchemyNovelWriteRepository(BaseRepository):
+class SQLAlchemyNovelWriteRepository:
     """Write repository for novel upserts, deletes, and tag/metadata mutations."""
+
+    def __init__(self, session: Session):
+        self.session = session
 
     def upsert_novels(self, novels: list[NovelDraft], force_update: list[str] | None = None) -> int:
         """Insert or update novels and sync their tags."""
@@ -124,10 +124,10 @@ class SQLAlchemyNovelWriteRepository(BaseRepository):
 
         for novel in novels:
             filtered = {k: v for k, v in novel.items() if k in _VALID_NOVEL_FIELDS}
-            if filtered.get(C.COL_HAS_EPUB) is None:
-                filtered.pop(C.COL_HAS_EPUB, None)
-            if C.COL_CREATE_TIME in filtered and isinstance(filtered[C.COL_CREATE_TIME], str):
-                filtered[C.COL_CREATE_TIME] = parse_pixiv_time(filtered[C.COL_CREATE_TIME])
+            if filtered.get("has_epub") is None:
+                filtered.pop("has_epub", None)
+            if "create_time" in filtered and isinstance(filtered["create_time"], str):
+                filtered["create_time"] = parse_pixiv_time(filtered["create_time"])
             nid = int(novel["id"]) if novel.get("id") is not None else None
             existing = existing_map.get(nid) if nid is not None else None
 

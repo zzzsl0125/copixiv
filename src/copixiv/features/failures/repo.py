@@ -11,7 +11,6 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from copixiv.db import models
-from copixiv.db.base import BaseRepository
 
 MAX_RETRIES = 3
 
@@ -20,7 +19,7 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
-class FailedNovelRepository(BaseRepository):
+class FailedNovelRepository:
     """Persistently record which novels failed and how many times."""
 
     _NOT_FOUND_PATTERNS = (
@@ -29,7 +28,7 @@ class FailedNovelRepository(BaseRepository):
     )
 
     def __init__(self, session: Session):
-        super().__init__(session)
+        self.session = session
         self._max_retries = MAX_RETRIES
 
     def record(
@@ -132,10 +131,8 @@ class FailedNovelRepository(BaseRepository):
         )
         return [dict(row._mapping) for row in self.session.execute(stmt).all()]
 
-    def count(self, model_class: type | None = None) -> int:
-        """Total number of failure records (or *model_class* when delegated)."""
-        if model_class is not None:
-            return super().count(model_class)
+    def count(self) -> int:
+        """Total number of failure records."""
         stmt = select(func.count()).select_from(models.FailedNovel)
         return int(self.session.execute(stmt).scalar_one())
 

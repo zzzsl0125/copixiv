@@ -8,14 +8,14 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from copixiv.db import models
-from copixiv.db.base import BaseRepository
+from copixiv.db.base import delete_by_id, reorder_rows, update_attrs
 
 
-class SQLAlchemyTaskRepository(BaseRepository):
+class SQLAlchemyTaskRepository:
     """Repository for task history and scheduled tasks."""
 
     def __init__(self, session: Session):
-        super().__init__(session)
+        self.session = session
 
     # -- task history ------------------------------------------------------
 
@@ -142,7 +142,7 @@ class SQLAlchemyTaskRepository(BaseRepository):
         return log if isinstance(log, str) else None
 
     def count_history(self) -> int:
-        return self.count(models.TaskHistory)
+        return int(self.session.execute(select(func.count()).select_from(models.TaskHistory)).scalar_one())
 
     # -- scheduled tasks ----------------------------------------------------
 
@@ -160,7 +160,8 @@ class SQLAlchemyTaskRepository(BaseRepository):
         return task
 
     def update_scheduled(self, task_id: int, task_data: dict) -> models.ScheduledTask | None:
-        return self._update_attrs(
+        return update_attrs(
+            self.session,
             models.ScheduledTask,
             task_id,
             task_data,
@@ -168,7 +169,7 @@ class SQLAlchemyTaskRepository(BaseRepository):
         )
 
     def delete_scheduled(self, task_id: int) -> bool:
-        return self._delete_by_id(models.ScheduledTask, task_id)
+        return delete_by_id(self.session, models.ScheduledTask, task_id)
 
     def reorder_scheduled(self, ids: list[int]) -> int:
-        return self._reorder(models.ScheduledTask, "sort_index", ids)
+        return reorder_rows(self.session, models.ScheduledTask, "sort_index", ids)

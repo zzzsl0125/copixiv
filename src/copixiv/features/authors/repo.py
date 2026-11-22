@@ -11,18 +11,15 @@ from sqlalchemy.orm import Session
 from copixiv.core.exceptions import NotFoundError
 from copixiv.db import delta as engine_delta
 from copixiv.db import models
-from copixiv.db.base import (
-    BaseRepository,
-    model_to_dict,
-)
+from copixiv.db.base import model_to_dict
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
 
 
-class SQLAlchemyAuthorRepository(BaseRepository):
+class SQLAlchemyAuthorRepository:
     """Repository for author CRUD and statistics."""
 
     def __init__(self, session: Session):
-        super().__init__(session)
+        self.session = session
 
     def get_by_id(self, author_id: int) -> dict | None:
         author = self.session.get(models.Author, author_id)

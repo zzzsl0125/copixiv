@@ -7,15 +7,18 @@ caller decides the default.
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.orm import Session
 
 from copixiv.core.search import EXCLUDE_BLOCKED_SETTING_KEY, parse_bool_setting
 from copixiv.db import delta as engine_delta
 from copixiv.db import models
-from copixiv.db.base import BaseRepository
 
 
-class SQLAlchemySettingRepository(BaseRepository):
+class SQLAlchemySettingRepository:
     """Repository for runtime settings."""
+
+    def __init__(self, session: Session):
+        self.session = session
 
     def get_value(self, key: str) -> str | None:
         row = self.session.execute(

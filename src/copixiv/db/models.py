@@ -34,8 +34,6 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql.elements import quoted_name
 
-from . import constants as C
-
 
 class Base(DeclarativeBase):
     pass
@@ -56,9 +54,9 @@ class TagPreferenceORM(enum.StrEnum):
 # ``text`` are non-reserved in PG and would be emitted bare.  Quote all three
 # explicitly so column names always exactly match the design DDL and never
 # collide with a SQL keyword.
-LIKE_COL = quoted_name(C.COL_LIKES, True)
-VIEW_COL = quoted_name(C.COL_VIEWS, True)
-TEXT_COL = quoted_name(C.COL_TEXTS, True)
+LIKE_COL = quoted_name("like", True)
+VIEW_COL = quoted_name("view", True)
+TEXT_COL = quoted_name("text", True)
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +65,7 @@ TEXT_COL = quoted_name(C.COL_TEXTS, True)
 
 
 class Author(Base):
-    __tablename__ = C.TABLE_AUTHOR
+    __tablename__ = "author"
 
     author_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     author_name: Mapped[str | None] = mapped_column(Text)
@@ -89,12 +87,12 @@ class Author(Base):
 
 
 class Series(Base):
-    __tablename__ = C.TABLE_SERIES
+    __tablename__ = "series"
 
     series_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     series_name: Mapped[str | None] = mapped_column(Text)
     author_id: Mapped[int | None] = mapped_column(
-        BigInteger, ForeignKey(f"{C.TABLE_AUTHOR}.author_id", ondelete="SET NULL")
+        BigInteger, ForeignKey("author.author_id", ondelete="SET NULL")
     )
 
     __table_args__ = (Index("ix_series_author_id", "author_id"),)
@@ -104,11 +102,11 @@ class Series(Base):
 
 
 class Novel(Base):
-    __tablename__ = C.TABLE_NOVEL
+    __tablename__ = "novel"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     title: Mapped[str] = mapped_column(Text, nullable=False)
-    author_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey(f"{C.TABLE_AUTHOR}.author_id"))
+    author_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("author.author_id"))
     author_name: Mapped[str | None] = mapped_column(Text)
     path: Mapped[str | None] = mapped_column(Text, unique=True)
     like: Mapped[int] = mapped_column(
@@ -123,7 +121,7 @@ class Novel(Base):
     caption: Mapped[str | None] = mapped_column(Text)
     series_id: Mapped[int | None] = mapped_column(
         BigInteger,
-        ForeignKey(f"{C.TABLE_SERIES}.series_id", ondelete="SET NULL"),
+        ForeignKey("series.series_id", ondelete="SET NULL"),
         nullable=True,
     )
     series_name: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -177,7 +175,7 @@ class Novel(Base):
 
 
 class Tag(Base):
-    __tablename__ = C.TABLE_TAG
+    __tablename__ = "tag"
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
@@ -190,7 +188,7 @@ class Tag(Base):
 
 
 class TagPreference(Base):
-    __tablename__ = C.TABLE_TAG_PREFERENCE
+    __tablename__ = "tag_preference"
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     tag: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
@@ -208,7 +206,7 @@ class TagPreference(Base):
 class Setting(Base):
     """Runtime settings key-value store (UI-changeable, survives restarts)."""
 
-    __tablename__ = C.TABLE_SETTINGS
+    __tablename__ = "setting"
     key: Mapped[str] = mapped_column(Text, primary_key=True)
     value: Mapped[str] = mapped_column(Text, nullable=False)
 
@@ -217,17 +215,17 @@ class Setting(Base):
 
 
 class TagAlias(Base):
-    __tablename__ = C.TABLE_TAG_ALIAS
+    __tablename__ = "tag_alias"
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     source: Mapped[int] = mapped_column(
         BigInteger,
-        ForeignKey(f"{C.TABLE_TAG}.id"),
+        ForeignKey("tag.id"),
         unique=True,
         nullable=False,
     )
     target: Mapped[int] = mapped_column(
         BigInteger,
-        ForeignKey(f"{C.TABLE_TAG}.id"),
+        ForeignKey("tag.id"),
         nullable=False,
     )
 
@@ -238,7 +236,7 @@ class TagAlias(Base):
 
 
 class ScheduledTask(Base):
-    __tablename__ = C.TABLE_SCHEDULED_TASK
+    __tablename__ = "scheduled_task"
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     name: Mapped[str] = mapped_column(Text, nullable=False)
@@ -252,7 +250,7 @@ class ScheduledTask(Base):
 
 
 class TaskHistory(Base):
-    __tablename__ = C.TABLE_TASK_HISTORY
+    __tablename__ = "task_history"
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     task_func: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -276,7 +274,7 @@ class TaskHistory(Base):
 
 
 class Token(Base):
-    __tablename__ = C.TABLE_TOKEN
+    __tablename__ = "token"
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     name: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
@@ -301,7 +299,7 @@ class Token(Base):
 
 
 class FailedNovel(Base):
-    __tablename__ = C.TABLE_FAILED_NOVEL
+    __tablename__ = "failed_novel"
     # NOTE: deliberately NO ForeignKey.  The ingest pipeline downloads
     # BEFORE persisting (plan → download → persist), so a download failure
     # can occur for a novel that has never been written to ``novel`` —
@@ -343,7 +341,7 @@ class SeriesDeadLetter(Base):
     ``retired_at``, so a mis-retired series comes back on its own.
     """
 
-    __tablename__ = C.TABLE_SERIES_DEAD_LETTER
+    __tablename__ = "series_dead_letter"
 
     # Same shape as ``failed_novel``: the business key, no ForeignKey (a
     # verdict may exist before/without a ``series`` row, and deleting a
@@ -359,7 +357,7 @@ class SeriesDeadLetter(Base):
 
 
 class SearchHistory(Base):
-    __tablename__ = C.TABLE_SEARCH_HISTORY
+    __tablename__ = "search_history"
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     type: Mapped[str] = mapped_column(Text, nullable=False)
     value: Mapped[str] = mapped_column(Text, nullable=False)

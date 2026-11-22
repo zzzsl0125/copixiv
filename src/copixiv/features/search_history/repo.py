@@ -11,14 +11,14 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from copixiv.db import models
-from copixiv.db.base import BaseRepository
+from copixiv.db.base import delete_by_id
 
 
-class SQLAlchemySearchHistoryRepository(BaseRepository):
+class SQLAlchemySearchHistoryRepository:
     """Repository for search history entries."""
 
     def __init__(self, session: Session):
-        super().__init__(session)
+        self.session = session
 
     def get_all(self, limit: int = 50, offset: int = 0) -> Sequence[models.SearchHistory]:
         stmt = (
@@ -52,7 +52,7 @@ class SQLAlchemySearchHistoryRepository(BaseRepository):
         self.session.execute(stmt)
 
     def delete(self, history_id: int) -> bool:
-        return self._delete_by_id(models.SearchHistory, history_id)
+        return delete_by_id(self.session, models.SearchHistory, history_id)
 
     def clear_all(self) -> int:
         """Delete every search-history row. Returns the number deleted."""

@@ -10,11 +10,7 @@ from sqlalchemy.orm import Session
 
 from copixiv.db import delta as engine_delta
 from copixiv.db import models
-from copixiv.db.base import (
-    BaseRepository,
-    ensure_parent_rows,
-    model_to_dict,
-)
+from copixiv.db.base import ensure_parent_rows, model_to_dict
 
 
 def _retired_series_subquery():
@@ -22,7 +18,7 @@ def _retired_series_subquery():
     return _select(models.SeriesDeadLetter.series_id).where(models.SeriesDeadLetter.retired_at.isnot(None))
 
 
-class SQLAlchemySeriesRepository(BaseRepository):
+class SQLAlchemySeriesRepository:
     """Repository for series CRUD and statistics."""
 
     DRAFT_COLUMNS = (
@@ -33,7 +29,7 @@ class SQLAlchemySeriesRepository(BaseRepository):
     )
 
     def __init__(self, session: Session):
-        super().__init__(session)
+        self.session = session
 
     def get_by_id(self, series_id: int) -> dict | None:
         series = self.session.get(models.Series, series_id)

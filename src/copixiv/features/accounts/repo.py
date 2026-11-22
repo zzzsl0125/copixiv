@@ -6,14 +6,14 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from copixiv.db import models
-from copixiv.db.base import BaseRepository
+from copixiv.db.base import delete_by_id, reorder_rows, update_attrs
 
 
-class SQLAlchemyTokenRepository(BaseRepository):
+class SQLAlchemyTokenRepository:
     """Repository for Pixiv refresh tokens."""
 
     def __init__(self, session: Session):
-        super().__init__(session)
+        self.session = session
 
     def get_all(self) -> Sequence[models.Token]:
         stmt = select(models.Token).order_by(models.Token.sort_index)
@@ -26,13 +26,13 @@ class SQLAlchemyTokenRepository(BaseRepository):
         return token
 
     def update(self, token_id: int, token_data: dict) -> models.Token | None:
-        return self._update_attrs(models.Token, token_id, token_data)
+        return update_attrs(self.session, models.Token, token_id, token_data)
 
     def delete(self, token_id: int) -> bool:
-        return self._delete_by_id(models.Token, token_id)
+        return delete_by_id(self.session, models.Token, token_id)
 
     def reorder(self, ids: list[int]) -> int:
-        return self._reorder(models.Token, "sort_index", ids)
+        return reorder_rows(self.session, models.Token, "sort_index", ids)
 
     def set_follow(self, token_id: int, is_follow: bool) -> bool:
         """Designate one token as the「追更账号」, clearing the flag on all others.

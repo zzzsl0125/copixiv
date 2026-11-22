@@ -9,15 +9,14 @@ from sqlalchemy.orm import Session
 
 from copixiv.core.models import SOURCE_LOCAL, EpubStatus
 from copixiv.db import models
-from copixiv.db.base import BaseRepository
 from copixiv.features.library import local_axis
 
 
-class LocalLibraryRepository(BaseRepository):
+class LocalLibraryRepository:
     """Repository for local library dedup, coordinate allocation, and inserts."""
 
     def __init__(self, session: Session):
-        super().__init__(session)
+        self.session = session
 
     def lock_local_ids(self) -> None:
         """Acquire the transaction-level advisory lock serializing dedup+insert."""

@@ -1,13 +1,21 @@
-"""Base repository — shared SQLAlchemy helpers."""
+"""Shared SQLAlchemy repository helpers."""
 
 from collections.abc import Iterable
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.orm import Session
 
 from copixiv.db import models
+
+__all__ = [
+    "delete_by_id",
+    "ensure_parent_rows",
+    "model_to_dict",
+    "reorder_rows",
+    "update_attrs",
+]
 
 
 def model_to_dict(obj: Any) -> dict:
@@ -38,80 +46,73 @@ def ensure_parent_rows(
         )
 
 
-class BaseRepository:
-    """Common database operations shared by all repositories."""
+def update_attrs[ModelType: Any](
+    session: Session,
+    model_class: type[ModelType],
+    item_id: Any,
+    data: dict,
+    *,
+    allow_none_fields: Iterable[str] = (),
+) -> ModelType | None:
+    """Set the given attributes on an existing row.
 
-    def __init__(self, session: Session):
-        self.session = session
+    Returns the updated instance, or ``None`` when the row doesn't exist.
+    ``None`` values are skipped unless the field name is listed in
+    *allow_none_fields*.
+    """
+    obj = session.get(model_class, item_id)
+    if obj is None:
+        return None
+    nullable = set(allow_none_fields)
+    for k, v in data.items():
+        if (v is not None or k in nullable) and hasattr(obj, k):
+            setattr(obj, k, v)
+    return obj
 
-    def count[ModelType: Any](self, model_class: type[ModelType]) -> int:
-        stmt = select(func.count()).select_from(model_class)
-        return self.session.execute(stmt).scalar() or 0
 
-    # -- shared CRUD helpers (used by token/task/tag/search_history) ----------
+def delete_by_id[ModelType: Any](session: Session, model_class: type[ModelType], item_id: Any) -> bool:
+    """Delete a row by id; returns False when it doesn't exist."""
+    obj = session.get(model_class, item_id)
+    if obj is None:
+        return False
+    session.delete(obj)
+    session.flush()
+    return True
 
-    def _update_attrs[ModelType: Any](
-        self,
-        model_class: type[ModelType],
-        item_id: Any,
-        data: dict,
-        *,
-        allow_none_fields: Iterable[str] = (),
-    ) -> ModelType | None:
-        """Set the given attributes on an existing row.
 
-        Returns the updated instance, or ``None`` when the row doesn't exist.
-        ``None`` values are skipped unless the field name is listed in
-        *allow_none_fields*.
-        """
-        obj = self.session.get(model_class, item_id)
-        if obj is None:
-            return None
-        nullable = set(allow_none_fields)
-        for k, v in data.items():
-            if (v is not None or k in nullable) and hasattr(obj, k):
-                setattr(obj, k, v)
-        return obj
+def reorder_rows[ModelType: Any](
+    session: Session,
+    model_class: type[ModelType],
+    sort_field: str,
+    ids: list[int],
+) -> int:
+    """Assign sort indices 0..n-1 with the listed *ids* placed first.
 
-    def _delete_by_id[ModelType: Any](self, model_class: type[ModelType], item_id: Any) -> bool:
-        """Delete a row by id; returns False when it doesn't exist."""
-        obj = self.session.get(model_class, item_id)
-        if obj is None:
-            return False
-        self.session.delete(obj)
-        self.session.flush()
-        return True
-
-    def _reorder[ModelType: Any](self, model_class: type[ModelType], sort_field: str, ids: list[int]) -> int:
-        """Assign sort indices 0..n-1 with the listed *ids* placed first.
-
-        Loads all rows in a single query, places valid *ids* in caller order
-        (skipping duplicates), keeps remaining rows in their existing
-        ``(sort_field, id)`` order, and assigns dense indices. Returns the
-        number of listed rows that were found.
-        """
-        rows = (
-            self.session.execute(
-                select(model_class).order_by(getattr(model_class, sort_field), model_class.id)
-            )
-            .scalars()
-            .all()
-        )
-        by_id = {obj.id: obj for obj in rows}
-        ordered: list[Any] = []
-        seen: set[int] = set()
-        matched = 0
-        for obj_id in ids:
-            if obj_id in seen:
-                continue
-            seen.add(obj_id)
-            obj = by_id.get(obj_id)
-            if obj is not None:
-                ordered.append(obj)
-                matched += 1
-        for obj in rows:
-            if obj.id not in seen:
-                ordered.append(obj)
-        for idx, obj in enumerate(ordered):
-            setattr(obj, sort_field, idx)
-        return matched
+    Loads all rows in a single query, places valid *ids* in caller order
+    (skipping duplicates), keeps remaining rows in their existing
+    ``(sort_field, id)`` order, and assigns dense indices. Returns the
+    number of listed rows that were found.
+    """
+    rows = (
+        session.execute(select(model_class).order_by(getattr(model_class, sort_field), model_class.id))
+        .scalars()
+        .all()
+    )
+    by_id = {obj.id: obj for obj in rows}
+    ordered: list[Any] = []
+    seen: set[int] = set()
+    matched = 0
+    for obj_id in ids:
+        if obj_id in seen:
+            continue
+        seen.add(obj_id)
+        obj = by_id.get(obj_id)
+        if obj is not None:
+            ordered.append(obj)
+            matched += 1
+    for obj in rows:
+        if obj.id not in seen:
+            ordered.append(obj)
+    for idx, obj in enumerate(ordered):
+        setattr(obj, sort_field, idx)
+    return matched
