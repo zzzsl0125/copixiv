@@ -42,6 +42,11 @@ impl StringInterner {
         self.rodeo.resolve(&spur)
     }
 
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.rodeo.len()
+    }
+
     pub fn approx_bytes(&self) -> usize {
         self.rodeo.strings().map(str::len).sum::<usize>() + self.rodeo.len() * 24
     }

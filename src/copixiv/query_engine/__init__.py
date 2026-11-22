@@ -14,7 +14,7 @@ from .port import (
     TagCandidateProtocol,
     TagSuggestItemProtocol,
 )
-from .sync import attach_and_start_engine, build_engine_from_store, rebuild_engine
+from .sync import attach_and_start_engine, build_engine_from_store
 
 __all__ = [
     "EngineCountResult",
@@ -31,5 +31,4 @@ __all__ = [
     "TagSuggestItemProtocol",
     "attach_and_start_engine",
     "build_engine_from_store",
-    "rebuild_engine",
 ]

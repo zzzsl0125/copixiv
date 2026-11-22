@@ -4,9 +4,9 @@ use roaring::RoaringBitmap;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::arena::{PackedArena, PackedU32Arena};
-use crate::filter::{CanonNumKey, HotTrack, NumericField, StringSortField};
+use crate::filter::{CanonNumKey, HotTrack, NumericField};
 use crate::interner::StringInterner;
-use crate::postings::{PostingHandle, PostingSlab, TitleBuckets};
+use crate::postings::{PostingHandle, PostingSlab};
 use crate::tag_index::TagIndex;
 use crate::text_index::CharBigramIndex;
 
@@ -37,7 +37,7 @@ pub struct EngineState {
     // Flags & follow state
     pub fav_bitmap: RoaringBitmap,
     pub sf_bitmap: RoaringBitmap,
-    pub special_follow_authors: FxHashSet<i64>,
+    pub local_bitmap: RoaringBitmap,
 
     // Block / default settings
     pub blocked_tag_names: FxHashSet<String>,
@@ -52,10 +52,8 @@ pub struct EngineState {
 
     pub author_postings: FxHashMap<i64, PostingHandle>,
     pub series_postings: FxHashMap<i64, PostingHandle>,
-    pub epub_postings: FxHashMap<u8, PostingHandle>,
 
     pub source_interner: StringInterner,
-    pub source_postings: Vec<PostingHandle>,
     pub doc_source: Vec<u32>,
 
     pub author_name_interner: StringInterner,
@@ -68,7 +66,6 @@ pub struct EngineState {
 
     // Exact title + title-only sparse char 2-gram index
     pub title_arena: PackedArena,
-    pub title_buckets: TitleBuckets,
     pub text_index: CharBigramIndex,
 
     // Hot pre-sorted tracks (`DESC NULLS FIRST, id DESC`)
@@ -108,7 +105,7 @@ impl EngineState {
             null_series_index: RoaringBitmap::new(),
             fav_bitmap: RoaringBitmap::new(),
             sf_bitmap: RoaringBitmap::new(),
-            special_follow_authors: FxHashSet::default(),
+            local_bitmap: RoaringBitmap::new(),
             blocked_tag_names: FxHashSet::default(),
             blocked_bitmap: RoaringBitmap::new(),
             exclude_blocked_default: true,
@@ -118,9 +115,7 @@ impl EngineState {
             doc_tags: PackedU32Arena::with_capacity(docs, docs.saturating_mul(12)),
             author_postings: FxHashMap::default(),
             series_postings: FxHashMap::default(),
-            epub_postings: FxHashMap::default(),
             source_interner: StringInterner::new(),
-            source_postings: Vec::new(),
             doc_source: Vec::with_capacity(docs),
             author_name_interner: StringInterner::new(),
             author_name_postings: Vec::new(),
@@ -129,7 +124,6 @@ impl EngineState {
             series_name_postings: Vec::new(),
             doc_series_name: Vec::with_capacity(docs),
             title_arena: PackedArena::with_capacity(docs, docs.saturating_mul(56)),
-            title_buckets: TitleBuckets::with_capacity(docs),
             text_index: CharBigramIndex::with_capacity(docs.saturating_mul(2)),
             tracks: std::array::from_fn(|_| Vec::new()),
             tracks_dirty: [true; HotTrack::COUNT],
@@ -161,22 +155,6 @@ impl EngineState {
             NumericField::Like => CanonNumKey::from_val(false, self.likes[idx] as i128, nid),
             NumericField::View => CanonNumKey::from_val(false, self.views[idx] as i128, nid),
             NumericField::Text => CanonNumKey::from_val(false, self.texts[idx] as i128, nid),
-            NumericField::AuthorId => CanonNumKey::from_val(
-                self.null_author_id.contains(doc),
-                self.author_id[idx] as i128,
-                nid,
-            ),
-            NumericField::SeriesId => CanonNumKey::from_val(
-                self.null_series_id.contains(doc),
-                self.series_id[idx] as i128,
-                nid,
-            ),
-            NumericField::SeriesIndex => CanonNumKey::from_val(
-                self.null_series_index.contains(doc),
-                self.series_index[idx] as i128,
-                nid,
-            ),
-            NumericField::HasEpub => CanonNumKey::from_val(false, self.has_epub[idx] as i128, nid),
         }
     }
 
@@ -184,50 +162,7 @@ impl EngineState {
     pub fn field_is_null(&self, field: NumericField, doc: u32) -> bool {
         match field {
             NumericField::CreateTime => self.null_create_time.contains(doc),
-            NumericField::AuthorId => self.null_author_id.contains(doc),
-            NumericField::SeriesId => self.null_series_id.contains(doc),
-            NumericField::SeriesIndex => self.null_series_index.contains(doc),
             _ => false,
-        }
-    }
-
-    #[inline]
-    pub fn numeric_val_i128(&self, field: NumericField, doc: u32) -> i128 {
-        let idx = doc as usize;
-        match field {
-            NumericField::AbsId => self.doc_ids[idx].unsigned_abs() as i128,
-            NumericField::CreateTime => self.create_time_us[idx] as i128,
-            NumericField::Like => self.likes[idx] as i128,
-            NumericField::View => self.views[idx] as i128,
-            NumericField::Text => self.texts[idx] as i128,
-            NumericField::AuthorId => self.author_id[idx] as i128,
-            NumericField::SeriesId => self.series_id[idx] as i128,
-            NumericField::SeriesIndex => self.series_index[idx] as i128,
-            NumericField::HasEpub => self.has_epub[idx] as i128,
-        }
-    }
-
-    #[inline]
-    pub fn string_val(&self, field: StringSortField, doc: u32) -> (bool, &str) {
-        let idx = doc as usize;
-        match field {
-            StringSortField::Title => (false, self.title_arena.get_str(doc)),
-            StringSortField::AuthorName => {
-                let id = self.doc_author_name[idx];
-                if id == StringInterner::NONE {
-                    (true, "")
-                } else {
-                    (false, self.author_name_interner.get_str(id))
-                }
-            }
-            StringSortField::SeriesName => {
-                let id = self.doc_series_name[idx];
-                if id == StringInterner::NONE {
-                    (true, "")
-                } else {
-                    (false, self.series_name_interner.get_str(id))
-                }
-            }
         }
     }
 
@@ -237,8 +172,6 @@ impl EngineState {
                 .iter_mut()
                 .chain(self.author_postings.values_mut())
                 .chain(self.series_postings.values_mut())
-                .chain(self.epub_postings.values_mut())
-                .chain(self.source_postings.iter_mut())
                 .chain(self.author_name_postings.iter_mut())
                 .chain(self.series_name_postings.iter_mut()),
         );
@@ -250,8 +183,6 @@ impl EngineState {
                 .iter_mut()
                 .chain(self.author_postings.values_mut())
                 .chain(self.series_postings.values_mut())
-                .chain(self.epub_postings.values_mut())
-                .chain(self.source_postings.iter_mut())
                 .chain(self.author_name_postings.iter_mut())
                 .chain(self.series_name_postings.iter_mut()),
         );
@@ -262,7 +193,6 @@ impl EngineState {
         self.text_index.compact_and_shrink();
         self.title_arena.shrink_to_fit();
         self.doc_tags.shrink_to_fit();
-        self.title_buckets.shrink_to_fit();
 
         self.id_to_doc.shrink_to_fit();
         self.doc_ids.shrink_to_fit();
@@ -280,8 +210,6 @@ impl EngineState {
         self.tag_postings.shrink_to_fit();
         self.author_postings.shrink_to_fit();
         self.series_postings.shrink_to_fit();
-        self.epub_postings.shrink_to_fit();
-        self.source_postings.shrink_to_fit();
         self.author_name_postings.shrink_to_fit();
         self.series_name_postings.shrink_to_fit();
         for track in &mut self.tracks {
@@ -307,13 +235,10 @@ impl EngineState {
         let title_arena_bytes =
             self.title_arena.data.capacity() + self.title_arena.slots.capacity() * 8;
         let doc_tags_bytes = self.doc_tags.data.capacity() * 4 + self.doc_tags.slots.capacity() * 8;
-        let title_buckets_bytes = self.title_buckets.approx_heap_bytes();
 
         let posting_handles_bytes = self.tag_postings.capacity() * size_of::<PostingHandle>()
             + self.author_postings.capacity() * (size_of::<i64>() + size_of::<PostingHandle>() + 1)
             + self.series_postings.capacity() * (size_of::<i64>() + size_of::<PostingHandle>() + 1)
-            + self.epub_postings.capacity() * (size_of::<u8>() + size_of::<PostingHandle>() + 1)
-            + self.source_postings.capacity() * size_of::<PostingHandle>()
             + self.author_name_postings.capacity() * size_of::<PostingHandle>()
             + self.series_name_postings.capacity() * size_of::<PostingHandle>();
         let slab_bytes = self.postings_slab.approx_heap_bytes();
@@ -331,6 +256,7 @@ impl EngineState {
             + self.null_series_index.serialized_size()
             + self.fav_bitmap.serialized_size()
             + self.sf_bitmap.serialized_size()
+            + self.local_bitmap.serialized_size()
             + self.blocked_bitmap.serialized_size();
 
         vec![
@@ -343,7 +269,6 @@ impl EngineState {
                 title_arena_bytes,
             ),
             ("doc_tags".into(), self.doc_tags.data.len(), doc_tags_bytes),
-            ("title_buckets".into(), 0, title_buckets_bytes),
             ("posting_handles".into(), 0, posting_handles_bytes),
             ("postings_slab".into(), 0, slab_bytes),
             ("interners".into(), 0, interner_bytes),

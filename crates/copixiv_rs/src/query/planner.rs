@@ -1,8 +1,6 @@
 use std::cmp::Reverse;
-use std::hash::{Hash, Hasher};
 
 use roaring::RoaringBitmap;
-use rustc_hash::FxHasher;
 
 use crate::filter::{IntFilterField, QueryFilter, StrFilterField};
 use crate::interner::StringInterner;
@@ -10,13 +8,6 @@ use crate::postings::PostingHandle;
 use crate::query::mask::CandidateMask;
 use crate::storage::EngineState;
 use crate::text_index::{collect_query_char_bigrams, contains_ascii_ci, SegmentMatcher};
-
-#[inline]
-fn hash_bytes(bytes: &[u8]) -> u64 {
-    let mut h = FxHasher::default();
-    bytes.hash(&mut h);
-    h.finish()
-}
 
 const PRECOMPUTE_INTERNER_THRESHOLD: u64 = 512;
 
@@ -32,7 +23,7 @@ pub enum ResidualMatcher {
 
 impl EngineState {
     fn build_residual_matcher(&self, matcher: SegmentMatcher, cand_len: u64) -> ResidualMatcher {
-        if cand_len > PRECOMPUTE_INTERNER_THRESHOLD && !matcher.has_whitespace {
+        if cand_len > PRECOMPUTE_INTERNER_THRESHOLD {
             let nl = matcher.lower.len();
             let need_lower = matcher.need_lower;
             let finder = &matcher.finder;
@@ -203,16 +194,8 @@ impl EngineState {
                     };
                     mask.intersect_posting(h, &self.postings_slab);
                 }
-                IntFilterField::HasEpub => {
-                    let Ok(val_u8) = u8::try_from(val) else {
-                        return (CandidateMask::Bitmap(RoaringBitmap::new()), Vec::new());
-                    };
-                    let Some(&h) = self.epub_postings.get(&val_u8) else {
-                        return (CandidateMask::Bitmap(RoaringBitmap::new()), Vec::new());
-                    };
-                    mask.intersect_posting(h, &self.postings_slab);
-                }
-                IntFilterField::Like
+                IntFilterField::HasEpub
+                | IntFilterField::Like
                 | IntFilterField::View
                 | IntFilterField::Text
                 | IntFilterField::SeriesIndex => {}
@@ -255,10 +238,26 @@ impl EngineState {
         for (field, val) in &filter.str_filters {
             match field {
                 StrFilterField::Source => {
-                    let Some(id) = self.source_interner.get_id(val) else {
-                        return (CandidateMask::Bitmap(RoaringBitmap::new()), Vec::new());
-                    };
-                    mask.intersect_posting(self.source_postings[id as usize], &self.postings_slab);
+                    if val == "local" {
+                        mask.intersect_bm(&self.local_bitmap);
+                    } else {
+                        let Some(id) = self.source_interner.get_id(val) else {
+                            return (CandidateMask::Bitmap(RoaringBitmap::new()), Vec::new());
+                        };
+                        if val == "pixiv"
+                            && self.source_interner.len() <= 2
+                            && self.source_interner.get_id("local").is_some()
+                        {
+                            mask.subtract_bm(&self.local_bitmap, &self.alive);
+                        } else {
+                            let filtered: RoaringBitmap = mask
+                                .as_bitmap(&self.alive)
+                                .iter()
+                                .filter(|&d| self.doc_source[d as usize] == id)
+                                .collect();
+                            mask = CandidateMask::Bitmap(filtered);
+                        }
+                    }
                 }
                 StrFilterField::AuthorName => {
                     let Some(id) = self.author_name_interner.get_id(val) else {
@@ -279,18 +278,24 @@ impl EngineState {
                     );
                 }
                 StrFilterField::Title => {
-                    let th = hash_bytes(val.as_bytes());
-                    let Some(bucket) = self.title_buckets.get(th) else {
-                        return (CandidateMask::Bitmap(RoaringBitmap::new()), Vec::new());
-                    };
-                    let mut exact = RoaringBitmap::new();
-                    for &doc in bucket.as_slice() {
-                        if mask.contains_slot(doc, &self.alive)
-                            && self.title_arena.get_str(doc) == val
-                        {
-                            exact.insert(doc);
+                    let mut bgs = Vec::with_capacity(val.len());
+                    collect_query_char_bigrams(&val.to_ascii_lowercase(), &mut bgs);
+                    if !bgs.is_empty() {
+                        for &bg in &bgs {
+                            let Some(h) = self.text_index.get(bg) else {
+                                return (CandidateMask::Bitmap(RoaringBitmap::new()), Vec::new());
+                            };
+                            mask.intersect_posting(h, &self.text_index.slab);
+                            if mask.is_empty(&self.alive) {
+                                return (mask, Vec::new());
+                            }
                         }
                     }
+                    let exact: RoaringBitmap = mask
+                        .as_bitmap(&self.alive)
+                        .iter()
+                        .filter(|&doc| self.title_arena.get_str(doc) == val)
+                        .collect();
                     mask = CandidateMask::Bitmap(exact);
                 }
             }
@@ -301,6 +306,17 @@ impl EngineState {
 
         for &(field, val) in &filter.int_filters {
             match field {
+                IntFilterField::HasEpub => {
+                    let Ok(val_u8) = u8::try_from(val) else {
+                        return (CandidateMask::Bitmap(RoaringBitmap::new()), Vec::new());
+                    };
+                    let filtered: RoaringBitmap = mask
+                        .as_bitmap(&self.alive)
+                        .iter()
+                        .filter(|&d| self.has_epub[d as usize] == val_u8)
+                        .collect();
+                    mask = CandidateMask::Bitmap(filtered);
+                }
                 IntFilterField::Like => {
                     let filtered: RoaringBitmap = mask
                         .as_bitmap(&self.alive)
@@ -369,38 +385,22 @@ impl EngineState {
             return (mask, Vec::new());
         }
 
-        // Narrow with selective non-whitespace multi-char segments before single-char/whitespace checks.
-        lower_segments.sort_by_key(|s| (s.chars().any(char::is_whitespace), Reverse(s.len())));
+        // Narrow with longest segments first for maximum selectivity.
+        lower_segments.sort_by_key(|s| Reverse(s.len()));
 
         let mut matchers = Vec::with_capacity(lower_segments.len());
         let mut bg_scratch = Vec::with_capacity(32);
 
         for seg in lower_segments {
             let matcher = SegmentMatcher::new(seg);
-            if !matcher.has_whitespace {
-                collect_query_char_bigrams(&matcher.lower, &mut bg_scratch);
-                if !bg_scratch.is_empty() && mask.len(&self.alive) > PRECOMPUTE_INTERNER_THRESHOLD {
-                    self.narrow_by_contiguous_token(&matcher, &bg_scratch, &mut mask);
-                    if mask.is_empty(&self.alive) {
-                        return (mask, Vec::new());
-                    }
-                    // Already verified exhaustively across interners + title_arena.
-                    continue;
+            collect_query_char_bigrams(&matcher.lower, &mut bg_scratch);
+            if !bg_scratch.is_empty() && mask.len(&self.alive) > PRECOMPUTE_INTERNER_THRESHOLD {
+                self.narrow_by_contiguous_token(&matcher, &bg_scratch, &mut mask);
+                if mask.is_empty(&self.alive) {
+                    return (mask, Vec::new());
                 }
-            } else if mask.len(&self.alive) > PRECOMPUTE_INTERNER_THRESHOLD {
-                for tok in matcher.lower.split_whitespace() {
-                    collect_query_char_bigrams(tok, &mut bg_scratch);
-                    if !bg_scratch.is_empty() {
-                        let sub_m = SegmentMatcher::new(tok.to_owned());
-                        self.narrow_by_contiguous_token(&sub_m, &bg_scratch, &mut mask);
-                        if mask.is_empty(&self.alive) {
-                            return (mask, Vec::new());
-                        }
-                        if mask.len(&self.alive) <= PRECOMPUTE_INTERNER_THRESHOLD {
-                            break;
-                        }
-                    }
-                }
+                // Already verified exhaustively across interners + title_arena.
+                continue;
             }
 
             let cand_len = mask.len(&self.alive);
@@ -422,24 +422,6 @@ impl EngineState {
             } => (matcher, Some((tags, author_names, series_names))),
         };
         let idx = doc as usize;
-        if m.has_whitespace {
-            let an_id = self.doc_author_name[idx];
-            let an =
-                (an_id != StringInterner::NONE).then(|| self.author_name_interner.get_str(an_id));
-            let sn_id = self.doc_series_name[idx];
-            let sn =
-                (sn_id != StringInterner::NONE).then(|| self.series_name_interner.get_str(sn_id));
-            let joined = crate::text_index::build_search_lower(
-                self.title_arena.get_str(doc),
-                an,
-                sn,
-                self.doc_tags
-                    .get(doc)
-                    .iter()
-                    .map(|&tid| self.tag_interner.get_str(tid)),
-            );
-            return m.finder.find(joined.as_bytes()).is_some();
-        }
 
         if m.matches_str(self.title_arena.get_bytes(doc)) {
             return true;

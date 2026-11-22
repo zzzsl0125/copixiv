@@ -17,15 +17,14 @@ impl EngineState {
         keyed.into_iter().map(|(_, doc)| doc).collect()
     }
 
-    /// Invalidate dirty hot tracks (freeing stale `Vec`s) without performing
-    /// O(N) `Vec::insert/remove` inside the write lock.
+    /// Invalidate dirty hot tracks (preserving `Vec` capacity) without performing
+    /// O(N) `Vec::insert/remove` or allocator thrashing inside the write lock.
     pub fn invalidate_hot_tracks(&mut self, mask: u8) {
         for hot in HotTrack::ALL {
             if (mask & hot.bit()) != 0 {
                 let idx = hot as usize;
                 self.tracks_dirty[idx] = true;
                 self.tracks[idx].clear();
-                self.tracks[idx].shrink_to_fit();
             }
         }
     }

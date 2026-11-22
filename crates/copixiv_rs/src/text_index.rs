@@ -42,48 +42,6 @@ pub fn collect_query_char_bigrams(segment_lower: &str, out: &mut Vec<u64>) {
     collect_str_char_bigrams(segment_lower, out);
 }
 
-/// Replicate PostgreSQL's `copixiv_search_text(title, author_name, series_name, tags)`
-/// for edge-case queries where a raw segment contains whitespace and can span field boundaries.
-pub fn build_search_lower<'a, I>(
-    title: &str,
-    author_name: Option<&str>,
-    series_name: Option<&str>,
-    tags: I,
-) -> String
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    let mut tags_joined = String::new();
-    for tag in tags {
-        if !tags_joined.is_empty() {
-            tags_joined.push(' ');
-        }
-        tags_joined.push_str(tag);
-    }
-
-    let mut out = String::with_capacity(
-        title.len()
-            + author_name.map_or(0, str::len)
-            + series_name.map_or(0, str::len)
-            + tags_joined.len()
-            + 8,
-    );
-    let parts = [
-        (!title.is_empty()).then_some(title),
-        author_name.filter(|s| !s.is_empty()),
-        series_name.filter(|s| !s.is_empty()),
-        (!tags_joined.is_empty()).then_some(tags_joined.as_str()),
-    ];
-    for part in parts.into_iter().flatten() {
-        if !out.is_empty() {
-            out.push(' ');
-        }
-        out.push_str(part);
-    }
-    out.make_ascii_lowercase();
-    out
-}
-
 /// Check whether `haystack` contains `finder` under ASCII-only case folding (PG C-locale parity).
 /// For non-ASCII needles (CJK, digits, punctuation) no lowercasing or allocation occurs.
 #[inline]
@@ -117,19 +75,16 @@ pub struct SegmentMatcher {
     pub lower: String,
     pub finder: Finder<'static>,
     pub need_lower: bool,
-    pub has_whitespace: bool,
 }
 
 impl SegmentMatcher {
     pub fn new(lower: String) -> Self {
         let need_lower = lower.bytes().any(|b| b.is_ascii_lowercase());
-        let has_whitespace = lower.chars().any(char::is_whitespace);
         let finder = Finder::new(lower.as_bytes()).into_owned();
         Self {
             lower,
             finder,
             need_lower,
-            has_whitespace,
         }
     }
 

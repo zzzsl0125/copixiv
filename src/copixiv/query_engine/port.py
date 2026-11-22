@@ -13,7 +13,6 @@ class PendingDeltaProtocol(Protocol):
     novel_ids: set[int]
     author_ids: set[int]
     tag_names: set[str]
-    tags_full_refresh: bool
     aliases_dirty: bool
     blocked_tags_dirty: bool
     exclude_setting_dirty: bool
@@ -33,8 +32,6 @@ class SnapshotDeltaProtocol(Protocol):
     @property
     def special_follow_changes(self) -> list[tuple[int, bool]]: ...
     @property
-    def replace_all_tags(self) -> list[SlimTagTuple] | None: ...
-    @property
     def delete_tag_names(self) -> list[str] | None: ...
     @property
     def upsert_tags(self) -> list[SlimTagTuple] | None: ...
@@ -50,7 +47,7 @@ class SnapshotStoreProtocol(Protocol):
         consume_total: Callable[[int], None],
         consume_batch: Callable[[list[SlimNovelTuple]], None],
         batch_size: int = 2_000,
-    ) -> tuple[list[str], bool, list[int], list[SlimTagTuple], list[int]]: ...
+    ) -> tuple[list[str], bool, list[SlimTagTuple], list[int]]: ...
 
     def fetch_delta_payload(
         self,
@@ -179,7 +176,6 @@ class NovelQueryEnginePort(Protocol):
         staging: Any,
         blocked_tags: list[str],
         exclude_blocked_default: bool,
-        special_follow_authors: list[int],
         tags: list[SlimTagTuple] | None = None,
         aliased_tag_ids: list[int] | None = None,
     ) -> None: ...
@@ -192,7 +188,6 @@ class NovelQueryEnginePort(Protocol):
         blocked_tags: Sequence[str] | None = None,
         exclude_blocked_default: bool | None = None,
         special_follow_changes: Sequence[tuple[int, bool]] = (),
-        replace_all_tags: Sequence[SlimTagTuple] | None = None,
         delete_tag_names: Sequence[str] | None = None,
         upsert_tags: Sequence[SlimTagTuple] | None = None,
         aliased_tag_ids: Sequence[int] | None = None,
@@ -216,8 +211,6 @@ class NovelQueryEnginePort(Protocol):
 
     def list_matching_ids(self, query: EngineQuery) -> list[int]: ...
 
-    def list_blocked_ids(self) -> list[int]: ...
-
     def sort_ids(
         self,
         novel_ids: list[int],
@@ -232,4 +225,4 @@ class NovelQueryEnginePort(Protocol):
         limit: int = 5,
         offset: int = 0,
         target_tag: str | None = None,
-    ) -> tuple[list[TagSuggestItemProtocol], int]: ...
+    ) -> tuple[list[TagSuggestItemProtocol], int | None]: ...

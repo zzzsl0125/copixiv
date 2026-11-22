@@ -35,7 +35,7 @@ def build_engine_from_store(
         staging_holder[0].push_batch(batch)
         loaded += len(batch)
 
-    blocked_tags, exclude_default, sf_authors, all_tags, aliased_tag_ids = store.stream_snapshot(
+    blocked_tags, exclude_default, all_tags, aliased_tag_ids = store.stream_snapshot(
         _on_total,
         _on_batch,
         batch_size=2_000,
@@ -44,11 +44,10 @@ def build_engine_from_store(
         staging_holder.pop(),
         blocked_tags,
         exclude_default,
-        sf_authors,
         all_tags,
         aliased_tag_ids,
     )
-    del blocked_tags, sf_authors, all_tags, aliased_tag_ids
+    del blocked_tags, all_tags, aliased_tag_ids
     gc.collect()
     elapsed_ms = (time.perf_counter() - t0) * 1_000
     logger.info(
@@ -59,20 +58,6 @@ def build_engine_from_store(
         elapsed_ms,
     )
     return target
-
-
-def rebuild_engine(
-    store: SnapshotStoreProtocol,
-    engine: RustNovelQueryEngine,
-    *,
-    sync_lock: threading.Lock | None = None,
-) -> None:
-    """Perform a full atomic rebuild of *engine* from *store*."""
-    if sync_lock is not None:
-        with sync_lock:
-            build_engine_from_store(store, engine=engine)
-    else:
-        build_engine_from_store(store, engine=engine)
 
 
 def make_post_commit_hook(
@@ -99,7 +84,6 @@ def make_post_commit_hook(
                     or payload.blocked_tags is not None
                     or payload.exclude_blocked_default is not None
                     or payload.special_follow_changes
-                    or payload.replace_all_tags is not None
                     or payload.delete_tag_names is not None
                     or payload.upsert_tags is not None
                     or payload.aliased_tag_ids is not None
@@ -111,7 +95,6 @@ def make_post_commit_hook(
                         blocked_tags=payload.blocked_tags,
                         exclude_blocked_default=payload.exclude_blocked_default,
                         special_follow_changes=payload.special_follow_changes,
-                        replace_all_tags=payload.replace_all_tags,
                         delete_tag_names=payload.delete_tag_names,
                         upsert_tags=payload.upsert_tags,
                         aliased_tag_ids=payload.aliased_tag_ids,

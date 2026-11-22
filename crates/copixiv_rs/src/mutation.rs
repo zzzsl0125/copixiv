@@ -9,14 +9,6 @@ use crate::storage::EngineState;
 use crate::text_index::collect_str_char_bigrams;
 
 #[inline]
-fn hash_title(bytes: &[u8]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = rustc_hash::FxHasher::default();
-    bytes.hash(&mut h);
-    h.finish()
-}
-
-#[inline]
 fn insert_posting_vec(
     interner: &mut StringInterner,
     postings: &mut Vec<PostingHandle>,
@@ -44,15 +36,7 @@ fn insert_bm(bm: &mut RoaringBitmap, doc: u32, sequential: bool) {
 }
 
 impl EngineState {
-    fn alloc_doc(&mut self, novel_id: i64) -> (u32, bool) {
-        if let Some(&doc) = self.id_to_doc.get(&novel_id) {
-            return (doc, false);
-        }
-        if let Some(doc) = self.free_docs.pop() {
-            self.id_to_doc.insert(novel_id, doc);
-            self.doc_ids[doc as usize] = novel_id;
-            return (doc, true);
-        }
+    pub fn push_empty_doc(&mut self, novel_id: i64) -> u32 {
         let doc = self.doc_ids.len() as u32;
         self.id_to_doc.insert(novel_id, doc);
         self.doc_ids.push(novel_id);
@@ -68,7 +52,19 @@ impl EngineState {
         self.doc_source.push(StringInterner::NONE);
         self.doc_author_name.push(StringInterner::NONE);
         self.doc_series_name.push(StringInterner::NONE);
-        (doc, true)
+        doc
+    }
+
+    fn alloc_doc(&mut self, novel_id: i64) -> (u32, bool) {
+        if let Some(&doc) = self.id_to_doc.get(&novel_id) {
+            return (doc, false);
+        }
+        if let Some(doc) = self.free_docs.pop() {
+            self.id_to_doc.insert(novel_id, doc);
+            self.doc_ids[doc as usize] = novel_id;
+            return (doc, true);
+        }
+        (self.push_empty_doc(novel_id), true)
     }
 
     fn clear_doc_postings(&mut self, doc: u32, bigram_scratch: &mut Vec<u64>, for_delete: bool) {
@@ -85,6 +81,7 @@ impl EngineState {
 
         self.fav_bitmap.remove(doc);
         self.sf_bitmap.remove(doc);
+        self.local_bitmap.remove(doc);
         self.blocked_bitmap.remove(doc);
 
         self.null_create_time.remove(doc);
@@ -108,20 +105,7 @@ impl EngineState {
         }
         self.null_series_index.remove(doc);
 
-        let he = self.has_epub[idx];
-        if let Some(handle) = self.epub_postings.get_mut(&he) {
-            self.postings_slab.remove(handle, doc);
-            if handle.is_empty() {
-                self.epub_postings.remove(&he);
-            }
-        }
-
-        let src_id = self.doc_source[idx];
-        if src_id != StringInterner::NONE {
-            self.postings_slab
-                .remove(&mut self.source_postings[src_id as usize], doc);
-            self.doc_source[idx] = StringInterner::NONE;
-        }
+        self.doc_source[idx] = StringInterner::NONE;
         let old_an_id = self.doc_author_name[idx];
         if old_an_id != StringInterner::NONE {
             self.postings_slab
@@ -140,11 +124,6 @@ impl EngineState {
                 .remove(&mut self.tag_postings[tid as usize], doc);
         }
         self.doc_tags.clear_slot(doc);
-
-        if self.alive.contains(doc) {
-            let th = hash_title(self.title_arena.get_bytes(doc));
-            self.title_buckets.remove(th, doc);
-        }
 
         if for_delete {
             self.title_arena.clear_slot(doc);
@@ -211,34 +190,19 @@ impl EngineState {
             }
         }
 
-        let ep = self.epub_postings.entry(self.has_epub[idx]).or_default();
-        self.postings_slab.insert(ep, doc);
-
         if row.is_favourite {
             insert_bm(&mut self.fav_bitmap, doc, sequential_push);
         }
 
-        let sf = row.is_special_follow
-            || row
-                .author_id
-                .is_some_and(|aid| self.special_follow_authors.contains(&aid));
-        if sf {
+        if row.is_special_follow {
             insert_bm(&mut self.sf_bitmap, doc, sequential_push);
-            if let Some(aid) = row.author_id {
-                if row.is_special_follow {
-                    self.special_follow_authors.insert(aid);
-                }
-            }
         }
 
-        let src_id = insert_posting_vec(
-            &mut self.source_interner,
-            &mut self.source_postings,
-            &mut self.postings_slab,
-            &row.source,
-            doc,
-        );
+        let src_id = self.source_interner.intern(&row.source);
         self.doc_source[idx] = src_id;
+        if row.source == "local" {
+            insert_bm(&mut self.local_bitmap, doc, sequential_push);
+        }
 
         if let Some(ref an) = row.author_name {
             let an_id = insert_posting_vec(
@@ -279,7 +243,7 @@ impl EngineState {
             if !tag_ids_scratch.contains(&tid) {
                 tag_ids_scratch.push(tid);
             }
-            if !sequential_push && self.blocked_tag_names.contains(tag) {
+            if !sequential_push && !self.blocked_tag_names.is_empty() && self.is_tag_blocked(tag) {
                 is_blocked = true;
             }
         }
@@ -288,20 +252,33 @@ impl EngineState {
             self.blocked_bitmap.insert(doc);
         }
 
-        self.title_arena.set(doc, &row.title);
-        self.title_buckets
-            .insert(hash_title(row.title.as_bytes()), doc);
+        self.title_arena.set_str(doc, &row.title);
 
         collect_str_char_bigrams(&row.title, bigram_scratch);
         self.text_index.insert_doc(doc, bigram_scratch);
     }
 
+    #[inline]
+    fn is_tag_blocked(&self, tag: &str) -> bool {
+        if tag.bytes().any(|b| b.is_ascii_uppercase()) {
+            self.blocked_tag_names.contains(&tag.to_ascii_lowercase())
+        } else {
+            self.blocked_tag_names.contains(tag)
+        }
+    }
+
     pub fn recompute_blocked_bitmap(&mut self) {
         self.blocked_bitmap.clear();
-        for name in &self.blocked_tag_names {
-            if let Some(tid) = self.tag_interner.get_id(name) {
-                self.tag_postings[tid as usize]
-                    .union_into(&self.postings_slab, &mut self.blocked_bitmap);
+        if self.blocked_tag_names.is_empty() {
+            return;
+        }
+        self.blocked_tag_names = std::mem::take(&mut self.blocked_tag_names)
+            .into_iter()
+            .map(|name| name.to_ascii_lowercase())
+            .collect();
+        for (tid, handle) in self.tag_postings.iter().enumerate() {
+            if !handle.is_empty() && self.is_tag_blocked(self.tag_interner.get_str(tid as u32)) {
+                handle.union_into(&self.postings_slab, &mut self.blocked_bitmap);
             }
         }
     }
@@ -405,14 +382,10 @@ impl EngineState {
     }
 
     pub fn toggle_special_follow(&mut self, author_id: i64, is_special_follow: bool) {
-        if is_special_follow {
-            self.special_follow_authors.insert(author_id);
-            if let Some(&h) = self.author_postings.get(&author_id) {
+        if let Some(&h) = self.author_postings.get(&author_id) {
+            if is_special_follow {
                 h.union_into(&self.postings_slab, &mut self.sf_bitmap);
-            }
-        } else {
-            self.special_follow_authors.remove(&author_id);
-            if let Some(&h) = self.author_postings.get(&author_id) {
+            } else {
                 h.subtract_from(&self.postings_slab, &mut self.sf_bitmap);
             }
         }
@@ -431,7 +404,6 @@ impl EngineState {
         blocked_tags: Option<Vec<String>>,
         exclude_blocked_default: Option<bool>,
         special_follow_changes: &[(i64, bool)],
-        replace_all_tags: Option<Vec<(i64, String, i32)>>,
         delete_tag_names: Option<Vec<String>>,
         upsert_tags: Option<Vec<(i64, String, i32)>>,
         aliased_tag_ids: Option<Vec<i64>>,
@@ -451,17 +423,80 @@ impl EngineState {
         for &(author_id, flag) in special_follow_changes {
             self.toggle_special_follow(author_id, flag);
         }
-        if replace_all_tags.is_some()
-            || delete_tag_names.is_some()
-            || upsert_tags.is_some()
-            || aliased_tag_ids.is_some()
-        {
-            self.tag_index.apply_delta(
-                replace_all_tags,
-                delete_tag_names,
-                upsert_tags,
-                aliased_tag_ids,
-            );
+        if delete_tag_names.is_some() || upsert_tags.is_some() || aliased_tag_ids.is_some() {
+            self.tag_index
+                .apply_delta(delete_tag_names, upsert_tags, aliased_tag_ids);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::NovelIndex;
+    use crate::filter::QueryFilter;
+    use crate::staging::StagingBuilder;
+
+    fn novel(id: i64, tags: Vec<&str>) -> NovelRecord {
+        NovelRecord {
+            id,
+            title: format!("Title {id}"),
+            author_id: Some(1),
+            author_name: Some("Author".to_string()),
+            series_id: None,
+            series_name: None,
+            series_index: None,
+            text: 100,
+            like: 10,
+            view: 20,
+            has_epub: 0,
+            create_time_us: Some(id * 1_000_000),
+            source: "pixiv".to_string(),
+            is_favourite: false,
+            is_special_follow: false,
+            tags: tags.into_iter().map(str::to_string).collect(),
+        }
+    }
+
+    #[test]
+    fn blocked_tags_match_ascii_case_insensitively() {
+        let mut b = StagingBuilder::new(8);
+        b.push_batch(vec![
+            novel(1, vec!["GAY"]),
+            novel(2, vec!["Gay"]),
+            novel(3, vec!["Bl"]),
+            novel(4, vec!["normal"]),
+        ]);
+        let engine = NovelIndex::new();
+        engine.swap_state(b.finalize(vec!["gay".into(), "BL".into()], true, vec![], vec![]));
+
+        let f = QueryFilter::default();
+        assert_eq!(engine.count_novels(&f, 100), (1, false));
+
+        // Upsert with mixed-case blocked tag must also be blocked.
+        engine.apply_delta(
+            &[],
+            vec![novel(5, vec!["gAy"]), novel(6, vec!["clean"])],
+            None,
+            None,
+            &[],
+            None,
+            None,
+            None,
+        );
+        assert_eq!(engine.count_novels(&f, 100), (2, false));
+
+        // Updating blocked tags with uppercase must match lowercase novel tags.
+        engine.apply_delta(
+            &[],
+            vec![novel(7, vec!["ntr"])],
+            Some(vec!["NTR".into()]),
+            None,
+            &[],
+            None,
+            None,
+            None,
+        );
+        assert_eq!(engine.count_novels(&f, 100), (6, false));
     }
 }

@@ -78,7 +78,6 @@ class RustNovelQueryEngine:
         staging: copixiv_rs.StagingEngine,
         blocked_tags: list[str],
         exclude_blocked_default: bool,
-        special_follow_authors: list[int],
         tags: list[SlimTagTuple] | None = None,
         aliased_tag_ids: list[int] | None = None,
     ) -> None:
@@ -86,25 +85,9 @@ class RustNovelQueryEngine:
             staging,
             blocked_tags,
             exclude_blocked_default,
-            special_follow_authors,
             list(tags) if tags is not None else [],
             list(aliased_tag_ids) if aliased_tag_ids is not None else [],
         )
-
-    def upsert_batch(self, rows: Iterable[SlimNovelTuple]) -> None:
-        self._rs.upsert_batch(list(rows))
-
-    def delete_ids(self, novel_ids: Sequence[int]) -> None:
-        self._rs.delete_ids(list(novel_ids))
-
-    def toggle_special_follow(self, author_id: int, is_special_follow: bool) -> None:
-        self._rs.toggle_special_follow(author_id, is_special_follow)
-
-    def set_blocked_tags(self, blocked_tags: Sequence[str]) -> None:
-        self._rs.set_blocked_tags(list(blocked_tags))
-
-    def set_exclude_blocked_default(self, value: bool) -> None:
-        self._rs.set_exclude_blocked_default(value)
 
     def apply_delta(
         self,
@@ -114,7 +97,6 @@ class RustNovelQueryEngine:
         blocked_tags: Sequence[str] | None = None,
         exclude_blocked_default: bool | None = None,
         special_follow_changes: Sequence[tuple[int, bool]] = (),
-        replace_all_tags: Sequence[SlimTagTuple] | None = None,
         delete_tag_names: Sequence[str] | None = None,
         upsert_tags: Sequence[SlimTagTuple] | None = None,
         aliased_tag_ids: Sequence[int] | None = None,
@@ -125,7 +107,6 @@ class RustNovelQueryEngine:
             blocked_tags=list(blocked_tags) if blocked_tags is not None else None,
             exclude_blocked_default=exclude_blocked_default,
             special_follow_changes=list(special_follow_changes),
-            replace_all_tags=list(replace_all_tags) if replace_all_tags is not None else None,
             delete_tag_names=list(delete_tag_names) if delete_tag_names is not None else None,
             upsert_tags=list(upsert_tags) if upsert_tags is not None else None,
             aliased_tag_ids=list(aliased_tag_ids) if aliased_tag_ids is not None else None,
@@ -147,7 +128,6 @@ class RustNovelQueryEngine:
                 descending=descending,
                 limit=limit,
                 cursor_int=cursor.cursor_int if cursor is not None else None,
-                cursor_str=cursor.cursor_str if cursor is not None else None,
                 cursor_id=cursor.cursor_id if cursor is not None else None,
                 random_seed_hex=cursor.random_seed_hex if cursor is not None else None,
                 random_h_hex=cursor.random_h_hex if cursor is not None else None,
@@ -178,9 +158,6 @@ class RustNovelQueryEngine:
     def list_matching_ids(self, query: EngineQuery) -> list[int]:
         return self._rs.list_matching_ids(_to_rust_filter(self._ext, query))
 
-    def list_blocked_ids(self) -> list[int]:
-        return self._rs.list_blocked_ids()
-
     def sort_ids(
         self,
         novel_ids: list[int],
@@ -199,10 +176,10 @@ class RustNovelQueryEngine:
         limit: int = 5,
         offset: int = 0,
         target_tag: str | None = None,
-    ) -> tuple[list[TagSuggestItemProtocol], int]:
-        items, next_offset = self._rs.suggest_tag_aliases(
+    ) -> tuple[list[TagSuggestItemProtocol], int | None]:
+        items, next_cursor = self._rs.suggest_tag_aliases(
             limit=limit,
             offset=offset,
             target_tag=target_tag,
         )
-        return list(items), int(next_offset)
+        return list(items), (int(next_cursor) if next_cursor is not None else None)

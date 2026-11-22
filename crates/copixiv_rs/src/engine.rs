@@ -57,28 +57,6 @@ impl NovelIndex {
         *guard = next;
     }
 
-    pub fn upsert_batch(&self, rows: Vec<NovelRecord>) {
-        self.inner.write().upsert_batch(rows);
-    }
-
-    pub fn delete_ids(&self, novel_ids: &[i64]) {
-        self.inner.write().delete_ids(novel_ids);
-    }
-
-    pub fn toggle_special_follow(&self, author_id: i64, is_special_follow: bool) {
-        self.inner
-            .write()
-            .toggle_special_follow(author_id, is_special_follow);
-    }
-
-    pub fn set_blocked_tags(&self, blocked_tags: Vec<String>) {
-        self.inner.write().set_blocked_tags(blocked_tags);
-    }
-
-    pub fn set_exclude_blocked_default(&self, value: bool) {
-        self.inner.write().exclude_blocked_default = value;
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn apply_delta(
         &self,
@@ -87,7 +65,6 @@ impl NovelIndex {
         blocked_tags: Option<Vec<String>>,
         exclude_blocked_default: Option<bool>,
         special_follow_changes: &[(i64, bool)],
-        replace_all_tags: Option<Vec<(i64, String, i32)>>,
         delete_tag_names: Option<Vec<String>>,
         upsert_tags: Option<Vec<(i64, String, i32)>>,
         aliased_tag_ids: Option<Vec<i64>>,
@@ -98,7 +75,6 @@ impl NovelIndex {
             blocked_tags,
             exclude_blocked_default,
             special_follow_changes,
-            replace_all_tags,
             delete_tag_names,
             upsert_tags,
             aliased_tag_ids,
@@ -120,13 +96,8 @@ impl NovelIndex {
                 return Ok((Vec::new(), false, None));
             }
             let hot = field.hot_track();
-            let can_bypass_track = match hot {
-                None => true,
-                Some(h) => {
-                    !guard.tracks_dirty[h as usize]
-                        || matches!(&mask, CandidateMask::Bitmap(bm) if bm.len() <= 4096)
-                }
-            };
+            let can_bypass_track = !guard.tracks_dirty[hot as usize]
+                || matches!(&mask, CandidateMask::Bitmap(bm) if bm.len() <= 4096);
             if can_bypass_track {
                 let (slots, has_more, rand_out) = guard.query_novels_slots_with_mask(
                     filter, mask, matchers, axis, descending, limit, cursor,
@@ -141,7 +112,6 @@ impl NovelIndex {
 
             // Large candidate set needs a dirty hot track: build off write lock under
             // `upgradable_read()` so concurrent readers stay unblocked during O(N log N) sort.
-            let hot = hot.expect("hot track present when track rebuild requested");
             let up = self.inner.upgradable_read();
             let guard = if up.tracks_dirty[hot as usize] {
                 let built = up.build_track(hot);
@@ -183,7 +153,7 @@ impl NovelIndex {
         limit: usize,
         offset: i64,
         target_tag: Option<&str>,
-    ) -> (Vec<TagSuggestItem>, i64) {
+    ) -> (Vec<TagSuggestItem>, Option<i64>) {
         {
             let guard = self.inner.read();
             if !guard.tag_index.sorted_dirty {
@@ -192,8 +162,12 @@ impl NovelIndex {
         }
         let up = self.inner.upgradable_read();
         let guard = if up.tag_index.sorted_dirty {
+            let (sorted_slots, first_char_index) = up.tag_index.build_sorted_state();
             let mut w = RwLockUpgradableReadGuard::upgrade(up);
-            w.tag_index.ensure_sorted();
+            if w.tag_index.sorted_dirty {
+                w.tag_index
+                    .install_sorted_state(sorted_slots, first_char_index);
+            }
             parking_lot::RwLockWriteGuard::downgrade(w)
         } else {
             RwLockUpgradableReadGuard::downgrade(up)
@@ -217,10 +191,6 @@ impl NovelIndex {
         self.inner.read().list_matching_ids(filter)
     }
 
-    pub fn list_blocked_ids(&self) -> Vec<i64> {
-        self.inner.read().list_blocked_ids()
-    }
-
     pub fn sort_ids(&self, novel_ids: &[i64], axis: SortAxis, descending: bool) -> Vec<i64> {
         self.inner.read().sort_ids(novel_ids, axis, descending)
     }
@@ -232,7 +202,6 @@ mod tests {
     use crate::filter::{HotTrack, NumericField};
     use crate::random::hex16_decode;
     use crate::staging::StagingBuilder;
-    use crate::text_index::build_search_lower;
     use rustc_hash::FxHashSet;
 
     fn sample_row(id: i64, title: &str, tags: Vec<&str>) -> NovelRecord {
@@ -257,17 +226,14 @@ mod tests {
     }
 
     #[test]
-    fn search_text_ascii_only_fold_and_whitespace() {
-        let s = build_search_lower("Hello Ñ World", Some("Bob"), None, ["原神", "A"]);
-        assert_eq!(s, "hello Ñ world bob 原神 a");
-
+    fn search_text_ascii_only_fold_and_1char() {
         let mut b = StagingBuilder::new(4);
         b.push_batch(vec![
             sample_row(1, "Hello Ñ Test", vec!["原神", "百合"]),
             sample_row(2, "ñ lower only", vec!["原神"]),
         ]);
         let engine = NovelIndex::new();
-        engine.swap_state(b.finalize(vec![], true, vec![], vec![], vec![]));
+        engine.swap_state(b.finalize(vec![], true, vec![], vec![]));
 
         let f = QueryFilter {
             keyword_segments: vec!["hello".into(), "Ñ".into()],
@@ -296,7 +262,7 @@ mod tests {
         let mut b = StagingBuilder::new(4);
         b.push_batch(vec![r1, r2, r3, r4]);
         let engine = NovelIndex::new();
-        engine.swap_state(b.finalize(vec![], true, vec![], vec![], vec![]));
+        engine.swap_state(b.finalize(vec![], true, vec![], vec![]));
 
         let f = QueryFilter::default();
         let desc_ids: Vec<i64> = engine
@@ -347,7 +313,7 @@ mod tests {
             .collect();
         assert_eq!(ct_asc, vec![100, 300, -200, 200]);
 
-        let c = TrackCursor::Int(900, 300);
+        let c = TrackCursor::Int(Some(900), 300);
         let after_desc: Vec<i64> = engine
             .query_novel_rows(
                 &f,
@@ -363,7 +329,7 @@ mod tests {
             .collect();
         assert_eq!(after_desc, vec![100]);
 
-        let c_asc = TrackCursor::Int(500, 100);
+        let c_asc = TrackCursor::Int(Some(500), 100);
         let after_asc: Vec<i64> = engine
             .query_novel_rows(
                 &f,
@@ -377,7 +343,39 @@ mod tests {
             .into_iter()
             .map(|r| r.id)
             .collect();
-        assert_eq!(after_asc, vec![300]);
+        assert_eq!(after_asc, vec![300, -200, 200]);
+
+        let c_null_desc = TrackCursor::Int(None, 200);
+        let after_null_desc: Vec<i64> = engine
+            .query_novel_rows(
+                &f,
+                SortAxis::Numeric(NumericField::CreateTime),
+                true,
+                10,
+                Some(&c_null_desc),
+            )
+            .unwrap()
+            .0
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(after_null_desc, vec![-200, 300, 100]);
+
+        let c_null_asc = TrackCursor::Int(None, -200);
+        let after_null_asc: Vec<i64> = engine
+            .query_novel_rows(
+                &f,
+                SortAxis::Numeric(NumericField::CreateTime),
+                false,
+                10,
+                Some(&c_null_asc),
+            )
+            .unwrap()
+            .0
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(after_null_asc, vec![200]);
     }
 
     #[test]
@@ -388,11 +386,11 @@ mod tests {
         let mut b = StagingBuilder::new(35);
         b.push_batch(rows);
         let engine = NovelIndex::new();
-        engine.swap_state(b.finalize(vec!["T1".into()], true, vec![], vec![], vec![]));
+        engine.swap_state(b.finalize(vec!["T1".into()], true, vec![], vec![]));
 
         let f = QueryFilter::default();
         assert_eq!(engine.count_novels(&f, 5000), (0, false));
-        engine.set_blocked_tags(vec![]);
+        engine.apply_delta(&[], vec![], Some(vec![]), None, &[], None, None, None);
         assert_eq!(engine.count_novels(&f, 5000), (35, false));
 
         // Early stop and binary-search count on clean Like track
@@ -417,7 +415,7 @@ mod tests {
         assert_eq!(asc_min_like, vec![20, 21, 22]);
 
         // Deleting duplicate IDs must not push duplicate slots into free_docs
-        engine.delete_ids(&[2, 2, 2]);
+        engine.apply_delta(&[2, 2, 2], vec![], None, None, &[], None, None, None);
         assert_eq!(engine.inner.read().free_docs.len(), 1);
         assert!(engine.inner.read().tracks_dirty[HotTrack::Like as usize]);
 
@@ -430,7 +428,7 @@ mod tests {
         // Mutation on non-hot field keeps HotTrack::Like clean!
         let mut r3 = sample_row(3, "NonHotEdit", vec!["T2"]);
         r3.is_favourite = true;
-        engine.upsert_batch(vec![r3]);
+        engine.apply_delta(&[], vec![r3], None, None, &[], None, None, None);
         assert!(!engine.inner.read().tracks_dirty[HotTrack::Like as usize]);
 
         // Exhaustive random walk collects remaining 34 IDs cleanly
@@ -470,7 +468,6 @@ mod tests {
         engine.swap_state(b.finalize(
             vec![],
             true,
-            vec![],
             vec![(1, "unique_small".into(), 2), (2, "other".into(), 1)],
             vec![],
         ));
@@ -478,7 +475,7 @@ mod tests {
         // Force HotTrack::Like dirty via a novel like mutation
         let mut r2_mod = sample_row(2, "Beta", vec!["other"]);
         r2_mod.like = 99999;
-        engine.upsert_batch(vec![r2_mod]);
+        engine.apply_delta(&[], vec![r2_mod], None, None, &[], None, None, None);
         assert!(engine.inner.read().tracks_dirty[HotTrack::Like as usize]);
 
         // Small candidate set queries Like without rebuilding track
@@ -507,7 +504,6 @@ mod tests {
             None,
             None,
             &[],
-            None,
             None,
             Some(vec![(3, "unique_small_v2".into(), 1)]),
             None,

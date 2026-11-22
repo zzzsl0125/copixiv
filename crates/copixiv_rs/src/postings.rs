@@ -633,10 +633,6 @@ pub struct TitleBuckets {
 }
 
 impl TitleBuckets {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn with_capacity(approx: usize) -> Self {
         Self {
             primary: FxHashMap::with_capacity_and_hasher(approx, Default::default()),
@@ -809,7 +805,7 @@ mod tests {
 
     #[test]
     fn title_buckets_single_and_overflow() {
-        let mut buckets = TitleBuckets::new();
+        let mut buckets = TitleBuckets::default();
         buckets.insert(42, 10);
         assert_eq!(buckets.get(42).unwrap().as_slice(), &[10]);
         buckets.insert(42, 10);

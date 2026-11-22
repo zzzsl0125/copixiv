@@ -191,7 +191,6 @@ impl PyNovelQueryEngine {
         staging,
         blocked_tags = vec![],
         exclude_blocked_default = true,
-        special_follow_authors = vec![],
         tags = vec![],
         aliased_tag_ids = vec![],
     ))]
@@ -202,7 +201,6 @@ impl PyNovelQueryEngine {
         staging: &PyStagingEngine,
         blocked_tags: Vec<String>,
         exclude_blocked_default: bool,
-        special_follow_authors: Vec<i64>,
         tags: Vec<(i64, String, i32)>,
         aliased_tag_ids: Vec<i64>,
     ) -> PyResult<()> {
@@ -212,49 +210,11 @@ impl PyNovelQueryEngine {
             .take()
             .ok_or_else(|| PyValueError::new_err("StagingEngine already finalized"))?;
         py.allow_threads(|| {
-            let state = builder.finalize(
-                blocked_tags,
-                exclude_blocked_default,
-                special_follow_authors,
-                tags,
-                aliased_tag_ids,
-            );
+            let state =
+                builder.finalize(blocked_tags, exclude_blocked_default, tags, aliased_tag_ids);
             self.index.swap_state(state);
         });
         Ok(())
-    }
-
-    fn upsert_batch(&self, py: Python<'_>, rows: &Bound<'_, PyAny>) -> PyResult<()> {
-        let parsed = extract_rows(rows)?;
-        py.allow_threads(|| {
-            self.index.upsert_batch(parsed);
-        });
-        Ok(())
-    }
-
-    fn delete_ids(&self, py: Python<'_>, novel_ids: Vec<i64>) {
-        py.allow_threads(|| {
-            self.index.delete_ids(&novel_ids);
-        });
-    }
-
-    fn toggle_special_follow(&self, py: Python<'_>, author_id: i64, is_special_follow: bool) {
-        py.allow_threads(|| {
-            self.index
-                .toggle_special_follow(author_id, is_special_follow);
-        });
-    }
-
-    fn set_blocked_tags(&self, py: Python<'_>, blocked_tags: Vec<String>) {
-        py.allow_threads(|| {
-            self.index.set_blocked_tags(blocked_tags);
-        });
-    }
-
-    fn set_exclude_blocked_default(&self, py: Python<'_>, value: bool) {
-        py.allow_threads(|| {
-            self.index.set_exclude_blocked_default(value);
-        });
     }
 
     #[pyo3(signature = (
@@ -263,7 +223,6 @@ impl PyNovelQueryEngine {
         blocked_tags = None,
         exclude_blocked_default = None,
         special_follow_changes = vec![],
-        replace_all_tags = None,
         delete_tag_names = None,
         upsert_tags = None,
         aliased_tag_ids = None,
@@ -277,7 +236,6 @@ impl PyNovelQueryEngine {
         blocked_tags: Option<Vec<String>>,
         exclude_blocked_default: Option<bool>,
         special_follow_changes: Vec<(i64, bool)>,
-        replace_all_tags: Option<Vec<(i64, String, i32)>>,
         delete_tag_names: Option<Vec<String>>,
         upsert_tags: Option<Vec<(i64, String, i32)>>,
         aliased_tag_ids: Option<Vec<i64>>,
@@ -293,7 +251,6 @@ impl PyNovelQueryEngine {
                 blocked_tags,
                 exclude_blocked_default,
                 &special_follow_changes,
-                replace_all_tags,
                 delete_tag_names,
                 upsert_tags,
                 aliased_tag_ids,
@@ -308,7 +265,6 @@ impl PyNovelQueryEngine {
         descending = true,
         limit = 20,
         cursor_int = None,
-        cursor_str = None,
         cursor_id = None,
         random_seed_hex = None,
         random_h_hex = None,
@@ -322,21 +278,13 @@ impl PyNovelQueryEngine {
         descending: bool,
         limit: usize,
         cursor_int: Option<i64>,
-        cursor_str: Option<String>,
         cursor_id: Option<i64>,
         random_seed_hex: Option<String>,
         random_h_hex: Option<String>,
     ) -> PyResult<QueryPage<NovelRecord>> {
         let axis = SortAxis::parse(order_by).map_err(PyValueError::new_err)?;
-        let cursor = build_cursor(
-            axis,
-            cursor_int,
-            cursor_str,
-            cursor_id,
-            random_seed_hex,
-            random_h_hex,
-        )
-        .map_err(PyValueError::new_err)?;
+        let cursor = build_cursor(axis, cursor_int, cursor_id, random_seed_hex, random_h_hex)
+            .map_err(PyValueError::new_err)?;
         let filter_ref = &filter.inner;
         py.allow_threads(|| {
             self.index
@@ -364,10 +312,6 @@ impl PyNovelQueryEngine {
         py.allow_threads(|| self.index.list_matching_ids(filter_ref))
     }
 
-    fn list_blocked_ids(&self, py: Python<'_>) -> Vec<i64> {
-        py.allow_threads(|| self.index.list_blocked_ids())
-    }
-
     #[pyo3(signature = (novel_ids, order_by = "like", descending = true))]
     fn sort_ids(
         &self,
@@ -387,7 +331,7 @@ impl PyNovelQueryEngine {
         limit: usize,
         offset: i64,
         target_tag: Option<String>,
-    ) -> (Vec<TagSuggestItem>, i64) {
+    ) -> (Vec<TagSuggestItem>, Option<i64>) {
         py.allow_threads(|| {
             self.index
                 .suggest_tag_aliases(limit, offset, target_tag.as_deref())
@@ -398,7 +342,6 @@ impl PyNovelQueryEngine {
 fn build_cursor(
     axis: SortAxis,
     cursor_int: Option<i64>,
-    cursor_str: Option<String>,
     cursor_id: Option<i64>,
     random_seed_hex: Option<String>,
     random_h_hex: Option<String>,
@@ -408,16 +351,9 @@ fn build_cursor(
     };
     match axis {
         SortAxis::Numeric(crate::filter::NumericField::AbsId) => {
-            Ok(Some(TrackCursor::Int(cid, cid)))
+            Ok(Some(TrackCursor::Int(Some(cid), cid)))
         }
-        SortAxis::Numeric(_) => {
-            let val = cursor_int.ok_or_else(|| "Numeric cursor requires cursor_int".to_string())?;
-            Ok(Some(TrackCursor::Int(val, cid)))
-        }
-        SortAxis::String(_) => {
-            let val = cursor_str.ok_or_else(|| "String cursor requires cursor_str".to_string())?;
-            Ok(Some(TrackCursor::Str(val, cid)))
-        }
+        SortAxis::Numeric(_) => Ok(Some(TrackCursor::Int(cursor_int, cid))),
         SortAxis::Random => {
             let sh = random_seed_hex
                 .as_deref()

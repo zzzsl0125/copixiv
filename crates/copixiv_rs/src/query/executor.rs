@@ -2,9 +2,7 @@ use rayon::prelude::*;
 use roaring::RoaringBitmap;
 use rustc_hash::FxHashSet;
 
-use crate::filter::{
-    HotTrack, NumericRankItem, QueryFilter, SortAxis, StringRankItem, TrackCursor,
-};
+use crate::filter::{HotTrack, NumericRankItem, QueryFilter, SortAxis, TrackCursor};
 use crate::model::QueryPage;
 use crate::query::mask::CandidateMask;
 use crate::query::planner::ResidualMatcher;
@@ -158,19 +156,6 @@ impl EngineState {
         ids
     }
 
-    pub fn list_blocked_ids(&self) -> Vec<i64> {
-        if !self.exclude_blocked_default || self.blocked_bitmap.is_empty() {
-            return Vec::new();
-        }
-        let mut ids: Vec<i64> = self
-            .blocked_bitmap
-            .iter()
-            .map(|d| self.doc_ids[d as usize])
-            .collect();
-        ids.sort_unstable();
-        ids
-    }
-
     pub fn sort_ids(&self, novel_ids: &[i64], axis: SortAxis, descending: bool) -> Vec<i64> {
         if novel_ids.is_empty() {
             return Vec::new();
@@ -184,40 +169,16 @@ impl EngineState {
                 }
             }
         }
-        match axis {
-            SortAxis::Numeric(field) => {
-                docs.sort_unstable_by(|&a, &b| {
-                    let ka = self.numeric_key(field, a);
-                    let kb = self.numeric_key(field, b);
-                    if descending {
-                        ka.cmp(&kb)
-                    } else {
-                        kb.cmp(&ka)
-                    }
-                });
-            }
-            SortAxis::String(field) => {
-                docs.sort_unstable_by(|&a, &b| {
-                    let (na, va) = self.string_val(field, a);
-                    let (nb, vb) = self.string_val(field, b);
-                    let ia = StringRankItem {
-                        descending,
-                        is_null: na,
-                        val: va,
-                        novel_id: self.doc_ids[a as usize],
-                        doc: a,
-                    };
-                    let ib = StringRankItem {
-                        descending,
-                        is_null: nb,
-                        val: vb,
-                        novel_id: self.doc_ids[b as usize],
-                        doc: b,
-                    };
-                    ia.cmp(&ib)
-                });
-            }
-            SortAxis::None | SortAxis::Random => {}
+        if let SortAxis::Numeric(field) = axis {
+            docs.sort_unstable_by(|&a, &b| {
+                let ka = self.numeric_key(field, a);
+                let kb = self.numeric_key(field, b);
+                if descending {
+                    ka.cmp(&kb)
+                } else {
+                    kb.cmp(&ka)
+                }
+            });
         }
         docs.into_iter().map(|d| self.doc_ids[d as usize]).collect()
     }
@@ -301,52 +262,44 @@ impl EngineState {
                 Ok((slots, has_more, None))
             }
             SortAxis::Numeric(field) => {
-                let cursor_int = match cursor {
-                    Some(TrackCursor::Int(v, cid)) => {
-                        let cmp_val = if field == crate::filter::NumericField::AbsId {
-                            cid.unsigned_abs() as i128
-                        } else {
-                            *v as i128
+                let cursor_key = match cursor {
+                    Some(TrackCursor::Int(v_opt, cid)) => {
+                        let (is_null, cmp_val) = match v_opt {
+                            None => (true, 0i128),
+                            Some(v) => {
+                                let cv = if field == crate::filter::NumericField::AbsId {
+                                    cid.unsigned_abs() as i128
+                                } else {
+                                    *v as i128
+                                };
+                                (false, cv)
+                            }
                         };
-                        Some((cmp_val, *cid))
+                        Some(crate::filter::CanonNumKey::from_val(is_null, cmp_val, *cid))
                     }
                     None => None,
                     Some(_) => return Err("Expected integer/datetime cursor".into()),
                 };
 
                 let hot = field.hot_track();
-                let use_top_k = match hot {
-                    None => true, // Cold numeric fields never build full-corpus tracks
-                    Some(h) => {
-                        self.tracks_dirty[h as usize]
-                            || (matches!(&mask, CandidateMask::Bitmap(_)) && base_bm.len() <= 4096)
-                    }
-                };
+                let use_top_k = self.tracks_dirty[hot as usize]
+                    || (matches!(&mask, CandidateMask::Bitmap(_)) && base_bm.len() <= 4096);
 
                 if use_top_k {
                     let iter = base_bm.iter().filter_map(|doc| {
                         if !self.doc_passes_inline(doc, min_like, min_text, &matchers) {
                             return None;
                         }
-                        if let Some((cval, cid)) = cursor_int {
-                            if self.field_is_null(field, doc) {
-                                return None;
-                            }
-                            let dval = self.numeric_val_i128(field, doc);
-                            let did = self.doc_ids[doc as usize];
-                            let ok = if descending {
-                                (dval, did) < (cval, cid)
-                            } else {
-                                (dval, did) > (cval, cid)
-                            };
+                        let key = self.numeric_key(field, doc);
+                        if let Some(ckey) = cursor_key {
+                            let ok = if descending { key > ckey } else { key < ckey };
                             if !ok {
                                 return None;
                             }
                         }
                         Some(NumericRankItem {
                             descending,
-                            key: self.numeric_key(field, doc),
-                            novel_id: self.doc_ids[doc as usize],
+                            key,
                             doc,
                         })
                     });
@@ -354,20 +307,14 @@ impl EngineState {
                     return Ok((hits.into_iter().map(|h| h.doc).collect(), has_more, None));
                 }
 
-                let hot = hot.expect("hot track must exist when use_top_k is false");
                 let track = &self.tracks[hot as usize];
                 let mut out = Vec::with_capacity(limit + 1);
                 if descending {
-                    let start = match cursor_int {
+                    let start = match cursor_key {
                         None => 0,
-                        Some((cval, cid)) => track.partition_point(|&doc| {
-                            if self.field_is_null(field, doc) {
-                                return true;
-                            }
-                            let dval = self.numeric_val_i128(field, doc);
-                            let did = self.doc_ids[doc as usize];
-                            dval > cval || (dval == cval && did >= cid)
-                        }),
+                        Some(ckey) => {
+                            track.partition_point(|&doc| self.numeric_key(field, doc) <= ckey)
+                        }
                     };
                     for &doc in &track[start..] {
                         if hot == HotTrack::Like
@@ -403,19 +350,28 @@ impl EngineState {
                         _ => track.len(),
                     };
 
-                    match cursor_int {
-                        Some((cval, cid)) => {
-                            let cursor_end = track.partition_point(|&doc| {
-                                if self.field_is_null(field, doc) {
-                                    return true;
+                    match cursor_key {
+                        Some(ckey) => 'asc_cur: {
+                            if ckey.is_null_rev == std::cmp::Reverse(false) {
+                                let cursor_end = track
+                                    .partition_point(|&doc| self.numeric_key(field, doc) < ckey);
+                                let end = cursor_end.min(threshold_end);
+                                if null_end < end {
+                                    for &doc in track[null_end..end].iter().rev() {
+                                        if (matches!(mask, CandidateMask::AllAlive)
+                                            || base_bm.contains(doc))
+                                            && self.doc_passes_inline(
+                                                doc, min_like, min_text, &matchers,
+                                            )
+                                        {
+                                            out.push(doc);
+                                            if out.len() > limit {
+                                                break 'asc_cur;
+                                            }
+                                        }
+                                    }
                                 }
-                                let dval = self.numeric_val_i128(field, doc);
-                                let did = self.doc_ids[doc as usize];
-                                dval > cval || (dval == cval && did > cid)
-                            });
-                            let end = cursor_end.min(threshold_end);
-                            if null_end < end {
-                                for &doc in track[null_end..end].iter().rev() {
+                                for &doc in track[..null_end].iter().rev() {
                                     if (matches!(mask, CandidateMask::AllAlive)
                                         || base_bm.contains(doc))
                                         && self
@@ -423,7 +379,22 @@ impl EngineState {
                                     {
                                         out.push(doc);
                                         if out.len() > limit {
-                                            break;
+                                            break 'asc_cur;
+                                        }
+                                    }
+                                }
+                            } else {
+                                let null_cursor_end = track[..null_end]
+                                    .partition_point(|&doc| self.numeric_key(field, doc) < ckey);
+                                for &doc in track[..null_cursor_end].iter().rev() {
+                                    if (matches!(mask, CandidateMask::AllAlive)
+                                        || base_bm.contains(doc))
+                                        && self
+                                            .doc_passes_inline(doc, min_like, min_text, &matchers)
+                                    {
+                                        out.push(doc);
+                                        if out.len() > limit {
+                                            break 'asc_cur;
                                         }
                                     }
                                 }
@@ -461,40 +432,6 @@ impl EngineState {
                 let has_more = out.len() > limit;
                 out.truncate(limit);
                 Ok((out, has_more, None))
-            }
-            SortAxis::String(field) => {
-                let cursor_str = match cursor {
-                    Some(TrackCursor::Str(s, cid)) => Some((s.as_str(), *cid)),
-                    None => None,
-                    Some(_) => return Err("Expected string cursor".into()),
-                };
-                let bm = self.verify_all_matching(&mask, min_like, min_text, &matchers);
-                let iter = bm.iter().filter_map(|doc| {
-                    let (is_null, val) = self.string_val(field, doc);
-                    let nid = self.doc_ids[doc as usize];
-                    if let Some((cstr, cid)) = cursor_str {
-                        if is_null {
-                            return None;
-                        }
-                        let ok = if descending {
-                            (val, nid) < (cstr, cid)
-                        } else {
-                            (val, nid) > (cstr, cid)
-                        };
-                        if !ok {
-                            return None;
-                        }
-                    }
-                    Some(StringRankItem {
-                        descending,
-                        is_null,
-                        val,
-                        novel_id: nid,
-                        doc,
-                    })
-                });
-                let (hits, has_more) = collect_top_k(iter, limit);
-                Ok((hits.into_iter().map(|h| h.doc).collect(), has_more, None))
             }
         }
     }
