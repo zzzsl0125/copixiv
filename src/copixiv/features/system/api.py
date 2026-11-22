@@ -49,7 +49,7 @@ def get_system_config(
     app_config: AppConfigDep,
     uow: UowDep,
 ):
-    with uow.begin():
+    with uow.begin(read_only=True):
         return _config_response(uow, app_config)
 
 

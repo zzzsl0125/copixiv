@@ -58,3 +58,14 @@ class SQLAlchemySearchHistoryRepository(BaseRepository):
         """Delete every search-history row. Returns the number deleted."""
         result = self.session.execute(_delete(models.SearchHistory))
         return cast(CursorResult[Any], result).rowcount or 0
+
+    def prune_old(self, keep: int = 50) -> int:
+        """Delete oldest rows beyond the latest *keep* entries. Returns deleted count."""
+        keep_ids = (
+            select(models.SearchHistory.id)
+            .order_by(models.SearchHistory.timestamp.desc(), models.SearchHistory.id.desc())
+            .limit(keep)
+        )
+        stmt = _delete(models.SearchHistory).where(models.SearchHistory.id.not_in(keep_ids))
+        result = self.session.execute(stmt)
+        return cast(CursorResult[Any], result).rowcount or 0

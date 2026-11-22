@@ -15,6 +15,7 @@ def _require_engine(
     eng = query_engine if query_engine is not None else session.info.get(engine_delta.SESSION_ENGINE_KEY)
     if eng is None or not eng.ready():
         raise RuntimeError("Rust query_engine is not attached or not ready on this session")
+    engine_delta.sync_engine_if_needed(session, eng)
     return eng
 
 
@@ -28,7 +29,7 @@ def suggest_tag_aliases(
 ) -> dict:
     """Suggest tag alias groupings using the in-process Rust engine."""
     eng = _require_engine(session, query_engine)
-    items_rs, next_offset = eng.suggest_tag_aliases(
+    items_rs, next_cursor = eng.suggest_tag_aliases(
         limit=limit,
         offset=int(offset or 0),
         target_tag=target_tag,
@@ -51,4 +52,8 @@ def suggest_tag_aliases(
         }
         for item in items_rs
     ]
-    return {"items": items, "next_offset": next_offset}
+    return {
+        "items": items,
+        "next_offset": next_cursor if next_cursor is not None else 0,
+        "next_cursor": next_cursor,
+    }

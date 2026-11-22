@@ -32,7 +32,7 @@ def get_search_history(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ):
-    with uow.begin():
+    with uow.begin(read_only=True):
         rows = SQLAlchemySearchHistoryRepository(uow.session).get_all(limit=limit, offset=offset)
         return [SearchHistoryResponse.model_validate(row) for row in rows]
 
