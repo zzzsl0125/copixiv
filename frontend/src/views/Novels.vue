@@ -13,9 +13,7 @@ import ExclusionBar from '../components/features/ExclusionBar.vue'
 import NovelModalsHost from '../components/features/NovelModalsHost.vue'
 import {
   useBatchMode,
-  useCollectionViews,
   useNovels,
-  useNovelShellState,
   useToast,
   useVirtualMasonry,
 } from '../composables'
@@ -34,7 +32,6 @@ const emit = defineEmits<{
 
 const toast = useToast()
 const queryClient = useQueryClient()
-const shell = useNovelShellState()
 const viewingExcluded = ref(false)
 
 const {
@@ -64,13 +61,30 @@ const {
   selectedCount,
   hasSelection,
   scope: batchScope,
+  viewingSelected,
+  selectedNovels,
+  viewLoading,
+  viewLoadingMore,
+  viewHasMore,
+  viewShownCount,
+  viewTotalCount,
   toggleCard: toggleBatchCard,
   removeCard: removeBatchCard,
   isCardSelected,
   selectAllMatched,
   clearSelection: clearBatchSelection,
   clearSelectionInScope,
-} = useBatchMode(filters)
+  toggleViewSelected,
+  loadMoreSelected,
+  patchSelectedNovel,
+  patchSelectedNovelState,
+} = useBatchMode(filters, {
+  afterLayout: () => measure(),
+})
+
+const displayNovels = computed<Novel[]>(() =>
+  viewingSelected.value ? selectedNovels.value : novels.value,
+)
 
 const stickyHeaderRef = ref<HTMLElement | null>(null)
 const masonryContainerRef = ref<HTMLElement | null>(null)
@@ -104,33 +118,6 @@ const tagOperation = ref<'add_tags' | 'remove_tags'>('add_tags')
 const exportOpen = ref(false)
 const batchEditOpen = ref(false)
 const editingNovel = ref<Novel | null>(null)
-
-// ---- 「查看已选」集合视图编排 ----
-const {
-  viewingSelected,
-  selectedView,
-  displayNovels,
-  viewLoading,
-  viewLoadingMore,
-  viewHasMore,
-  viewShownCount,
-  viewTotalCount,
-  toggleViewSelected,
-  handleViewLoadMore,
-  patchNovel,
-  patchNovelState,
-  removeNovel,
-} = useCollectionViews({
-  filters,
-  batchScope,
-  batchMode,
-  hasSelection,
-  novels,
-  onActiveChange: (active) => {
-    shell.isInCollectionView.value = active
-  },
-  afterLayout: () => measure(),
-})
 
 function toggleViewExcluded() {
   viewingExcluded.value = !viewingExcluded.value
@@ -210,17 +197,6 @@ function handleBarClear() {
   }
 }
 
-function handleBatchToggleCard(id: number) {
-  if (viewingSelected.value && isCardSelected(id)) {
-    selectedView.removeId(id)
-    if (selectedView.novels.value.length === 0 && selectedView.hasMore.value) {
-      void selectedView.loadMore()
-    }
-    void nextTick().then(measure)
-  }
-  toggleBatchCard(id)
-}
-
 const handleBatchOperationSuccess = async (payload: {
   operation: string
   result: BatchOperationResult | BatchMetadataResult
@@ -258,7 +234,7 @@ const handleToggleActive = (id: number | string) => {
 
 const applyNovelStateChange = (payload: NovelStateChange, authorId?: number) => {
   patchNovelStateInCache(payload, authorId)
-  patchNovelState(payload, authorId)
+  patchSelectedNovelState(payload, authorId)
 }
 
 const handleDownloadNovel = (novel: Novel) => {
@@ -298,19 +274,15 @@ const handleToggleFollow = async (novel: Novel) => {
 const handleNovelUpdated = (updated: Novel) => {
   if (editingNovel.value?.id === updated.id) editingNovel.value = updated
   patchNovelInCache(updated)
-  patchNovel(updated)
+  patchSelectedNovel(updated)
   void nextTick().then(measure)
 }
 
 const handleNovelDeleted = (novelId: number) => {
   removeNovelFromCache(novelId)
-  removeNovel(novelId)
   removeBatchCard(novelId)
   if (activeCardId.value === novelId) activeCardId.value = null
   if (editingNovel.value?.id === novelId) editingNovel.value = null
-  if (viewingSelected.value && selectedView.novels.value.length === 0 && selectedView.hasMore.value) {
-    void selectedView.loadMore()
-  }
   void nextTick().then(measure)
   toast.success('已删除小说')
 }
@@ -402,7 +374,7 @@ const handleNovelDeleted = (novelId: number) => {
             :batch-mode="batchMode"
             :batch-selected="isCardSelected(displayNovels[vItem.index]!.id)"
             @toggle-active="handleToggleActive"
-            @toggle-batch-select="handleBatchToggleCard"
+            @toggle-batch-select="toggleBatchCard"
             @search="(type: string, value: string | number) => void handleCardSearch(type, value)"
             @toggle-favourite="(n) => void handleToggleFavourite(n)"
             @toggle-follow="(n) => void handleToggleFollow(n)"
@@ -435,7 +407,7 @@ const handleNovelDeleted = (novelId: number) => {
         :loading="viewLoadingMore"
         :no-more-data="!viewHasMore"
         :has-data="viewShownCount > 0"
-        @load-more="handleViewLoadMore"
+        @load-more="loadMoreSelected"
       />
     </main>
 

@@ -10,7 +10,6 @@ export {
   useNovelShellState,
   type NovelShellState,
 } from './useNovelShellState'
-export { usePagedNovelIdView } from './usePagedNovelIdView'
 export { useSystem } from './useSystem'
 export { useTokens } from './useTokens'
 export {
@@ -21,8 +20,7 @@ export {
 } from './useVirtualMasonry'
 export { useToast } from './useToast'
 export { useConfirm, type ConfirmOptions } from './useConfirm'
-export { useCollectionViews, type UseCollectionViewsOptions } from './useCollectionViews'
-export { useBatchMode, type BatchMode } from './useBatchMode'
+export { useBatchMode, type BatchMode, type UseBatchModeOptions } from './useBatchMode'
 export {
   useIdLookup,
   parseIdInput,
