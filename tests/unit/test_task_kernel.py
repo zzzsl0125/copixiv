@@ -413,9 +413,19 @@ async def test_phase1_task_context_cron_locking_backup_decode_and_filename(
     assert "--port" in args
     assert args[args.index("--port") + 1] == "5433"
 
+    fake_pgserver_pkg = tmp_path / "fake_pgserver"
+    fake_pg_dump = fake_pgserver_pkg / "pginstall" / "bin" / "pg_dump"
+    fake_pg_dump.parent.mkdir(parents=True)
+    fake_pg_dump.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        "copixiv.db.backup.importlib.util.find_spec",
+        lambda name: (
+            SimpleNamespace(origin=str(fake_pgserver_pkg / "__init__.py")) if name == "pgserver" else None
+        ),
+    )
     monkeypatch.setattr("copixiv.db.backup.shutil.which", lambda name: f"/usr/bin/{name}")
     monkeypatch.delenv("COPIXIV_USE_SYSTEM_PG", raising=False)
-    assert _pg_bin("pg_dump") != "/usr/bin/pg_dump"
+    assert _pg_bin("pg_dump") == str(fake_pg_dump.resolve())
     monkeypatch.setenv("COPIXIV_USE_SYSTEM_PG", "1")
     assert _pg_bin("pg_dump") == "/usr/bin/pg_dump"
     monkeypatch.delenv("COPIXIV_USE_SYSTEM_PG", raising=False)
