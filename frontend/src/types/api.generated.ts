@@ -15,27 +15,6 @@ export interface paths {
         get: operations["list_failed_novels_api_failed_novels_get"];
         put?: never;
         post?: never;
-        /**
-         * Clear All Failed Novels
-         * @description Clear the whole ledger.
-         */
-        delete: operations["clear_all_failed_novels_api_failed_novels_delete"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/failed-novels/count": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Count Failed Novels */
-        get: operations["count_failed_novels_api_failed_novels_count_get"];
-        put?: never;
-        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -103,26 +82,6 @@ export interface paths {
          */
         post: operations["retry_all_failed_novels_api_failed_novels_retry_all_post"];
         delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/failed-novels/{novel_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post?: never;
-        /**
-         * Delete Failed Novel
-         * @description Clear one failure record (unblocks automatic retry).
-         */
-        delete: operations["delete_failed_novel_api_failed_novels__novel_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -349,71 +308,11 @@ export interface paths {
          *     不解析名字、不打网络），用户先看到「N 篇本地书将被修改、M 篇 pixiv 书跳过」
          *     再确认；``apply=true`` 先算数再落库，``affected`` 是真正被改动的行数。
          *
-         *     ``cap=None``：与 ``batch_task_operation`` 同一口径，不引入新的 5000 上限——
-         *     写操作是**一条** set-based UPDATE（``update_metadata_many``），天然快，
-         *     ``matched`` 可以任意大。作用域解析仍是唯一那条规则（``resolve_batch_scope``）；
-         *     来源收窄（只动本地书）由用例做，全量 id 原样交给它。
-         *
          *     路由是**精确路径** ``/batch-metadata``，与 ``/batch`` / ``/batch-export``
          *     同形：``POST /{novel_id}/...`` 那几条都要第二段路径，所以不会把
          *     ``batch-metadata`` 当成 ``novel_id``（``batch-export`` 早已是同样的形状）。
          */
         post: operations["batch_metadata_operation_api_novels_batch_metadata_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/novels/batch-task": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Batch Task Operation
-         * @description Enqueue a batch operation into the background task system.
-         *
-         *     Unlike :func:`batch_operation` (synchronous, capped at
-         *     :data:`BATCH_MAX_NOVELS`), this path accepts selections of ANY size —
-         *     the task chunks the work, so the user can close the page and watch
-         *     progress in 「任务管理」.  Validation (empty scope / tags) still
-         *     happens synchronously so mistakes surface immediately.
-         */
-        post: operations["batch_task_operation_api_novels_batch_task_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/novels/blocked-ids": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Blocked Novel Ids
-         * @description IDs of novels carrying blocked tags WITHIN the current search scope.
-         *
-         *     Powers the 「查看被排除」view.  Follows the global exclusion setting:
-         *     empty when exclusion is off.  The blocked-id list is filtered through
-         *     the same scope logic as ``filter_ids_in_scope`` (chunked to keep each
-         *     PostgreSQL query bounded); exclusion itself is not re-applied (the ids
-         *     are already the excluded set).
-         *
-         *     ``order_by`` (id/like/text) orders the result set; ``random`` or
-         *     unsupported values return the scope order.
-         */
-        get: operations["get_blocked_novel_ids_api_novels_blocked_ids_get"];
-        put?: never;
-        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -433,9 +332,7 @@ export interface paths {
          * Get Novels By Ids
          * @description Novel details for an explicit ID list — powers the 「查看已选」view.
          *
-         *     Preserves the caller's ID order; missing IDs are dropped.  The input
-         *     is capped at :data:`BATCH_MAX_NOVELS` (the view's page size — the
-         *     frontend pages large selections in 5000-novel slices).
+         *     Preserves the caller's ID order; missing IDs are dropped.
          */
         post: operations["get_novels_by_ids_api_novels_by_ids_post"];
         delete?: never;
@@ -453,13 +350,11 @@ export interface paths {
         };
         /**
          * Count Novels
-         * @description 匹配数（**有界**）+ 被厌恶标签隐藏数 + 两个截断标志。
+         * @description 匹配数（**有界**）+ 截断标志。
          *
          *     计数由 ``repo.COUNT_CAP`` 封顶（见 :class:`NovelCount`）：``total`` 保持
          *     老客户端的读法不变，但被截断时它只是下界 —— ``truncated: true`` 表示真实
-         *     匹配数 > ``total``（调用方应显示 ``total+`` / ``≥ total``）。``excluded``
-         *     同理，标志为 ``excluded_truncated``。两个标志恒在响应里，值只可能是
-         *     布尔，不会缺席。
+         *     匹配数 > ``total``（调用方应显示 ``total+`` / ``≥ total``）。
          */
         get: operations["count_novels_api_novels_count_get"];
         put?: never;
@@ -502,8 +397,7 @@ export interface paths {
          * @description All VISIBLE IDs matching the filters — powers the 「全选匹配」bulk-add action.
          *
          *     No size cap: the selection itself may be any size (operations beyond
-         *     the sync cap run as background tasks).  ``truncated`` is kept for wire
-         *     compatibility and is always false here.
+         *     the sync cap run as background tasks).
          *
          *     ``total`` 直接取 ID 列表长度（精确、免费），**不**再打一次有界计数：
          *     有界计数的值会与这里完整返回的 ID 数不一致。
@@ -532,8 +426,7 @@ export interface paths {
          *
          *     Intersects the accumulated selection with the CURRENT search scope so
          *     the clear action only removes what belongs to the visible scope (the
-         *     rest of the selection survives across searches).  Any-size input: the
-         *     ID list is processed in internal chunks to keep each PostgreSQL query bounded.
+         *     rest of the selection survives across searches).
          */
         post: operations["match_novel_ids_api_novels_match_ids_post"];
         delete?: never;
@@ -767,6 +660,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/tag-aliases/batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create Tag Aliases Batch */
+        post: operations["create_tag_aliases_batch_api_tag_aliases_batch_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/tag-aliases/groups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Replace Tag Alias Group */
+        put: operations["replace_tag_alias_group_api_tag_aliases_groups_put"];
+        post?: never;
+        /** Delete Tag Alias Group */
+        delete: operations["delete_tag_alias_group_api_tag_aliases_groups_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/tag-aliases/suggest": {
         parameters: {
             query?: never;
@@ -852,31 +780,10 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Update Tag Preference */
-        put: operations["update_tag_preference_api_tag_preferences__pref_id__put"];
+        put?: never;
         post?: never;
         /** Delete Tag Preference */
         delete: operations["delete_tag_preference_api_tag_preferences__pref_id__delete"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/tasks/busy": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Busy Tasks
-         * @description Task functions with a pending/running row — the front-end busy set.
-         */
-        get: operations["get_busy_tasks_api_tasks_busy_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -1315,11 +1222,6 @@ export interface components {
          * @enum {integer}
          */
         EpubStatus: 0 | 1 | 2 | 3 | 4;
-        /** FailedNovelCountResponse */
-        FailedNovelCountResponse: {
-            /** Count */
-            count: number;
-        };
         /**
          * FailedNovelItem
          * @description One download-failure record.
@@ -1396,8 +1298,6 @@ export interface components {
         MatchIdsResponse: {
             /** Matching Ids */
             matching_ids: number[];
-            /** Truncated */
-            truncated: boolean;
         };
         /**
          * NovelBase
@@ -1437,14 +1337,14 @@ export interface components {
             id: number;
             /**
              * Is Favourite
-             * @default 0
+             * @default false
              */
-            is_favourite: number;
+            is_favourite: boolean;
             /**
              * Is Special Follow
-             * @default 0
+             * @default false
              */
-            is_special_follow: number;
+            is_special_follow: boolean;
             /**
              * Like
              * @default 0
@@ -1478,20 +1378,12 @@ export interface components {
         };
         /**
          * NovelCountResponse
-         * @description ``GET /api/novels/count`` —— 匹配数 + 隐藏数（均为有界计数）。
+         * @description ``GET /api/novels/count`` —— 匹配数（有界计数）。
          *
-         *     计数由仓库的 ``COUNT_CAP`` 封顶：``truncated`` / ``excluded_truncated``
-         *     为 true 时对应数字只是下界，前端必须显示成 ``5000+`` 之类的形态。
-         *     两个标志恒在响应里（与老客户端的读法一致）。
+         *     计数由仓库的 ``COUNT_CAP`` 封顶：``truncated`` 为 true 时对应数字只是下界，
+         *     前端必须显示成 ``5000+`` 之类的形态。
          */
         NovelCountResponse: {
-            /** Excluded */
-            excluded: number;
-            /**
-             * Excluded Truncated
-             * @default false
-             */
-            excluded_truncated: boolean;
             /** Total */
             total: number;
             /**
@@ -1503,17 +1395,12 @@ export interface components {
         /**
          * NovelIdsResponse
          * @description Matching novel IDs for the 「全选匹配」 bulk-add action.
-         *
-         *     *limit*-truncated when the match set is larger than the batch cap;
-         *     ``truncated`` tells the frontend to warn the user.
          */
         NovelIdsResponse: {
             /** Ids */
             ids: number[];
             /** Total */
             total: number;
-            /** Truncated */
-            truncated: boolean;
         };
         /** NovelListResponse */
         NovelListResponse: {
@@ -1594,15 +1481,13 @@ export interface components {
         NovelsByIdsResponse: {
             /** Novels */
             novels: components["schemas"]["NovelBase"][];
-            /** Truncated */
-            truncated: boolean;
         };
         /**
          * OrderBy
          * @description Supported novel ordering axes.
          * @enum {string}
          */
-        OrderBy: "id" | "like" | "view" | "text" | "create_time" | "random" | "none";
+        OrderBy: "id" | "like" | "view" | "text" | "create_time" | "random";
         /**
          * OrderDirection
          * @description Sort direction (case-insensitive normalization).
@@ -1753,6 +1638,22 @@ export interface components {
             /** Target */
             target: string;
         };
+        /** TagAliasBatchCreate */
+        TagAliasBatchCreate: {
+            /** Sources */
+            sources: string[];
+            /** Target */
+            target: string;
+        };
+        /** TagAliasGroupReplace */
+        TagAliasGroupReplace: {
+            /** Old Target */
+            old_target: string;
+            /** Sources */
+            sources: string[];
+            /** Target */
+            target: string;
+        };
         /** TagAliasResponse */
         TagAliasResponse: {
             /** Id */
@@ -1766,6 +1667,8 @@ export interface components {
         TagAliasSuggestListResponse: {
             /** Items */
             items: components["schemas"]["TagAliasSuggestResponse"][];
+            /** Next Cursor */
+            next_cursor?: number | null;
             /** Next Offset */
             next_offset: number;
         };
@@ -1791,11 +1694,8 @@ export interface components {
              * @enum {string}
              */
             preference: "favourite" | "blocked";
-            /**
-             * Sort Index
-             * @default 0
-             */
-            sort_index: number;
+            /** Sort Index */
+            sort_index?: number | null;
             /** Tag */
             tag: string;
         };
@@ -1813,26 +1713,29 @@ export interface components {
             /** Tag */
             tag: string;
         };
-        /** TagPreferenceUpdate */
-        TagPreferenceUpdate: {
-            /** Preference */
-            preference?: ("favourite" | "blocked") | null;
-            /** Sort Index */
-            sort_index?: number | null;
-            /** Tag */
-            tag?: string | null;
-        };
-        /**
-         * TaskBusyResponse
-         * @description Task functions that currently have a pending or running history row.
-         *
-         *     Deliberately its own endpoint: the front-end needs exactly this set to
-         *     gray out the "run" buttons, and reusing the history list for it meant
-         *     polling a ~7.4 MB page every 5 seconds.
-         */
-        TaskBusyResponse: {
-            /** Funcs */
-            funcs: string[];
+        /** TaskArgumentField */
+        TaskArgumentField: {
+            /** Default */
+            default?: unknown;
+            /** Description */
+            description?: string | null;
+            /** Name */
+            name: string;
+            /**
+             * Nullable
+             * @default false
+             */
+            nullable: boolean;
+            /**
+             * Required
+             * @default false
+             */
+            required: boolean;
+            /**
+             * Type
+             * @enum {string}
+             */
+            type: "string" | "integer" | "number" | "boolean" | "array";
         };
         /**
          * TaskCancelResponse
@@ -1898,10 +1801,11 @@ export interface components {
         };
         /** TaskMethod */
         TaskMethod: {
-            /** Arguments */
-            arguments?: {
-                [key: string]: unknown;
-            } | null;
+            /**
+             * Arguments
+             * @default []
+             */
+            arguments: components["schemas"]["TaskArgumentField"][];
             /** Description */
             description?: string | null;
             /** Name */
@@ -2079,44 +1983,6 @@ export interface operations {
             };
         };
     };
-    clear_all_failed_novels_api_failed_novels_delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    count_failed_novels_api_failed_novels_count_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["FailedNovelCountResponse"];
-                };
-            };
-        };
-    };
     reset_all_failed_novel_counts_api_failed_novels_reset_count_post: {
         parameters: {
             query?: never;
@@ -2184,35 +2050,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BatchTaskResponse"];
-                };
-            };
-        };
-    };
-    delete_failed_novel_api_failed_novels__novel_id__delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                novel_id: number;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2290,6 +2127,7 @@ export interface operations {
                 order_direction?: components["schemas"]["OrderDirection"];
                 cursor?: string | null;
                 per_page?: number;
+                only_blocked?: boolean;
             };
             header?: never;
             path?: never;
@@ -2542,74 +2380,6 @@ export interface operations {
             };
         };
     };
-    batch_task_operation_api_novels_batch_task_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["BatchOperationRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["BatchTaskResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_blocked_novel_ids_api_novels_blocked_ids_get: {
-        parameters: {
-            query?: {
-                keyword?: string | null;
-                min_like?: number | null;
-                min_text?: number | null;
-                order_by?: components["schemas"]["OrderBy"] | null;
-                order_direction?: components["schemas"]["OrderDirection"];
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["NovelIdsResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     get_novels_by_ids_api_novels_by_ids_post: {
         parameters: {
             query?: never;
@@ -2650,8 +2420,6 @@ export interface operations {
                 min_like?: number | null;
                 min_text?: number | null;
                 exclude_blocked?: boolean | null;
-                excluded_ids?: number[] | null;
-                with_excluded?: boolean;
             };
             header?: never;
             path?: never;
@@ -3185,6 +2953,101 @@ export interface operations {
             };
         };
     };
+    create_tag_aliases_batch_api_tag_aliases_batch_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TagAliasBatchCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TagAliasResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    replace_tag_alias_group_api_tag_aliases_groups_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TagAliasGroupReplace"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TagAliasResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_tag_alias_group_api_tag_aliases_groups_delete: {
+        parameters: {
+            query: {
+                target: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     suggest_tag_aliases_api_tag_aliases_suggest_get: {
         parameters: {
             query?: {
@@ -3333,41 +3196,6 @@ export interface operations {
             };
         };
     };
-    update_tag_preference_api_tag_preferences__pref_id__put: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                pref_id: number;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["TagPreferenceUpdate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TagPreferenceResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     delete_tag_preference_api_tag_preferences__pref_id__delete: {
         parameters: {
             query?: never;
@@ -3393,26 +3221,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_busy_tasks_api_tasks_busy_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TaskBusyResponse"];
                 };
             };
         };

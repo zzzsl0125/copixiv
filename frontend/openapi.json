@@ -455,19 +455,6 @@
         "title": "EpubStatus",
         "type": "integer"
       },
-      "FailedNovelCountResponse": {
-        "properties": {
-          "count": {
-            "title": "Count",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "count"
-        ],
-        "title": "FailedNovelCountResponse",
-        "type": "object"
-      },
       "FailedNovelItem": {
         "description": "One download-failure record.\n\n``title`` may be null for legacy rows recorded before title capture\nexisted; ``last_failed_at`` may be null for pre-migration rows (they\nsort to the end of the list).",
         "properties": {
@@ -659,15 +646,10 @@
             },
             "title": "Matching Ids",
             "type": "array"
-          },
-          "truncated": {
-            "title": "Truncated",
-            "type": "boolean"
           }
         },
         "required": [
-          "matching_ids",
-          "truncated"
+          "matching_ids"
         ],
         "title": "MatchIdsResponse",
         "type": "object"
@@ -727,14 +709,14 @@
             "type": "integer"
           },
           "is_favourite": {
-            "default": 0,
+            "default": false,
             "title": "Is Favourite",
-            "type": "integer"
+            "type": "boolean"
           },
           "is_special_follow": {
-            "default": 0,
+            "default": false,
             "title": "Is Special Follow",
-            "type": "integer"
+            "type": "boolean"
           },
           "like": {
             "default": 0,
@@ -810,17 +792,8 @@
         "type": "object"
       },
       "NovelCountResponse": {
-        "description": "``GET /api/novels/count`` —— 匹配数 + 隐藏数（均为有界计数）。\n\n计数由仓库的 ``COUNT_CAP`` 封顶：``truncated`` / ``excluded_truncated``\n为 true 时对应数字只是下界，前端必须显示成 ``5000+`` 之类的形态。\n两个标志恒在响应里（与老客户端的读法一致）。",
+        "description": "``GET /api/novels/count`` —— 匹配数（有界计数）。\n\n计数由仓库的 ``COUNT_CAP`` 封顶：``truncated`` 为 true 时对应数字只是下界，\n前端必须显示成 ``5000+`` 之类的形态。",
         "properties": {
-          "excluded": {
-            "title": "Excluded",
-            "type": "integer"
-          },
-          "excluded_truncated": {
-            "default": false,
-            "title": "Excluded Truncated",
-            "type": "boolean"
-          },
           "total": {
             "title": "Total",
             "type": "integer"
@@ -832,14 +805,13 @@
           }
         },
         "required": [
-          "total",
-          "excluded"
+          "total"
         ],
         "title": "NovelCountResponse",
         "type": "object"
       },
       "NovelIdsResponse": {
-        "description": "Matching novel IDs for the 「全选匹配」 bulk-add action.\n\n*limit*-truncated when the match set is larger than the batch cap;\n``truncated`` tells the frontend to warn the user.",
+        "description": "Matching novel IDs for the 「全选匹配」 bulk-add action.",
         "properties": {
           "ids": {
             "items": {
@@ -851,16 +823,11 @@
           "total": {
             "title": "Total",
             "type": "integer"
-          },
-          "truncated": {
-            "title": "Truncated",
-            "type": "boolean"
           }
         },
         "required": [
           "ids",
-          "total",
-          "truncated"
+          "total"
         ],
         "title": "NovelIdsResponse",
         "type": "object"
@@ -1008,15 +975,10 @@
             },
             "title": "Novels",
             "type": "array"
-          },
-          "truncated": {
-            "title": "Truncated",
-            "type": "boolean"
           }
         },
         "required": [
-          "novels",
-          "truncated"
+          "novels"
         ],
         "title": "NovelsByIdsResponse",
         "type": "object"
@@ -1029,8 +991,7 @@
           "view",
           "text",
           "create_time",
-          "random",
-          "none"
+          "random"
         ],
         "title": "OrderBy",
         "type": "string"
@@ -1382,6 +1343,53 @@
         "title": "TagAliasBase",
         "type": "object"
       },
+      "TagAliasBatchCreate": {
+        "properties": {
+          "sources": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Sources",
+            "type": "array"
+          },
+          "target": {
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sources",
+          "target"
+        ],
+        "title": "TagAliasBatchCreate",
+        "type": "object"
+      },
+      "TagAliasGroupReplace": {
+        "properties": {
+          "old_target": {
+            "title": "Old Target",
+            "type": "string"
+          },
+          "sources": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Sources",
+            "type": "array"
+          },
+          "target": {
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sources",
+          "target",
+          "old_target"
+        ],
+        "title": "TagAliasGroupReplace",
+        "type": "object"
+      },
       "TagAliasResponse": {
         "properties": {
           "id": {
@@ -1413,6 +1421,17 @@
             },
             "title": "Items",
             "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
           },
           "next_offset": {
             "title": "Next Offset",
@@ -1480,9 +1499,15 @@
             "type": "string"
           },
           "sort_index": {
-            "default": 0,
-            "title": "Sort Index",
-            "type": "integer"
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sort Index"
           },
           "tag": {
             "title": "Tag",
@@ -1528,35 +1553,12 @@
         "title": "TagPreferenceResponse",
         "type": "object"
       },
-      "TagPreferenceUpdate": {
+      "TaskArgumentField": {
         "properties": {
-          "preference": {
-            "anyOf": [
-              {
-                "enum": [
-                  "favourite",
-                  "blocked"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Preference"
+          "default": {
+            "title": "Default"
           },
-          "sort_index": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Sort Index"
-          },
-          "tag": {
+          "description": {
             "anyOf": [
               {
                 "type": "string"
@@ -1565,27 +1567,39 @@
                 "type": "null"
               }
             ],
-            "title": "Tag"
-          }
-        },
-        "title": "TagPreferenceUpdate",
-        "type": "object"
-      },
-      "TaskBusyResponse": {
-        "description": "Task functions that currently have a pending or running history row.\n\nDeliberately its own endpoint: the front-end needs exactly this set to\ngray out the \"run\" buttons, and reusing the history list for it meant\npolling a ~7.4 MB page every 5 seconds.",
-        "properties": {
-          "funcs": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Funcs",
-            "type": "array"
+            "title": "Description"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "nullable": {
+            "default": false,
+            "title": "Nullable",
+            "type": "boolean"
+          },
+          "required": {
+            "default": false,
+            "title": "Required",
+            "type": "boolean"
+          },
+          "type": {
+            "enum": [
+              "string",
+              "integer",
+              "number",
+              "boolean",
+              "array"
+            ],
+            "title": "Type",
+            "type": "string"
           }
         },
         "required": [
-          "funcs"
+          "name",
+          "type"
         ],
-        "title": "TaskBusyResponse",
+        "title": "TaskArgumentField",
         "type": "object"
       },
       "TaskCancelResponse": {
@@ -1751,16 +1765,12 @@
       "TaskMethod": {
         "properties": {
           "arguments": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Arguments"
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/TaskArgumentField"
+            },
+            "title": "Arguments",
+            "type": "array"
           },
           "description": {
             "anyOf": [
@@ -2098,24 +2108,6 @@
   "openapi": "3.1.0",
   "paths": {
     "/api/failed-novels": {
-      "delete": {
-        "description": "Clear the whole ledger.",
-        "operationId": "clear_all_failed_novels_api_failed_novels_delete",
-        "responses": {
-          "204": {
-            "description": "Successful Response"
-          }
-        },
-        "security": [
-          {
-            "APIKeyHeader": []
-          }
-        ],
-        "summary": "Clear All Failed Novels",
-        "tags": [
-          "failed-novels"
-        ]
-      },
       "get": {
         "operationId": "list_failed_novels_api_failed_novels_get",
         "parameters": [
@@ -2171,32 +2163,6 @@
           }
         ],
         "summary": "List Failed Novels",
-        "tags": [
-          "failed-novels"
-        ]
-      }
-    },
-    "/api/failed-novels/count": {
-      "get": {
-        "operationId": "count_failed_novels_api_failed_novels_count_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/FailedNovelCountResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "security": [
-          {
-            "APIKeyHeader": []
-          }
-        ],
-        "summary": "Count Failed Novels",
         "tags": [
           "failed-novels"
         ]
@@ -2291,47 +2257,6 @@
           }
         ],
         "summary": "Retry All Failed Novels",
-        "tags": [
-          "failed-novels"
-        ]
-      }
-    },
-    "/api/failed-novels/{novel_id}": {
-      "delete": {
-        "description": "Clear one failure record (unblocks automatic retry).",
-        "operationId": "delete_failed_novel_api_failed_novels__novel_id__delete",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "novel_id",
-            "required": true,
-            "schema": {
-              "title": "Novel Id",
-              "type": "integer"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "APIKeyHeader": []
-          }
-        ],
-        "summary": "Delete Failed Novel",
         "tags": [
           "failed-novels"
         ]
@@ -2536,6 +2461,16 @@
               "minimum": 1,
               "title": "Per Page",
               "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "only_blocked",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Only Blocked",
+              "type": "boolean"
             }
           }
         ],
@@ -2843,7 +2778,7 @@
     },
     "/api/novels/batch-metadata": {
       "post": {
-        "description": "批量编辑本地书的「作者」/「系列」—— 预演（``apply=false``，默认）或落库。\n\n与单本 ``PATCH /{novel_id}`` 同一套三态与收尾语义（名字由 id 解析、解析失败\n落 NULL 待补、解除关联时作者留名 / 系列连名字与章节号一起清），唯一刻意的\n差异是**来源**：pixiv 书不报 400，而是被跳过并计数\n（``applicable`` / ``skipped``）——批量的选择集天然混合，整体 400 会让这个\n功能不可用。论证与写路径纪律见 ``batch_edit_metadata.py``。\n\n``apply=false`` 是**预演**：只算数、一个字都不写（不建占位 author / series 行、\n不解析名字、不打网络），用户先看到「N 篇本地书将被修改、M 篇 pixiv 书跳过」\n再确认；``apply=true`` 先算数再落库，``affected`` 是真正被改动的行数。\n\n``cap=None``：与 ``batch_task_operation`` 同一口径，不引入新的 5000 上限——\n写操作是**一条** set-based UPDATE（``update_metadata_many``），天然快，\n``matched`` 可以任意大。作用域解析仍是唯一那条规则（``resolve_batch_scope``）；\n来源收窄（只动本地书）由用例做，全量 id 原样交给它。\n\n路由是**精确路径** ``/batch-metadata``，与 ``/batch`` / ``/batch-export``\n同形：``POST /{novel_id}/...`` 那几条都要第二段路径，所以不会把\n``batch-metadata`` 当成 ``novel_id``（``batch-export`` 早已是同样的形状）。",
+        "description": "批量编辑本地书的「作者」/「系列」—— 预演（``apply=false``，默认）或落库。\n\n与单本 ``PATCH /{novel_id}`` 同一套三态与收尾语义（名字由 id 解析、解析失败\n落 NULL 待补、解除关联时作者留名 / 系列连名字与章节号一起清），唯一刻意的\n差异是**来源**：pixiv 书不报 400，而是被跳过并计数\n（``applicable`` / ``skipped``）——批量的选择集天然混合，整体 400 会让这个\n功能不可用。论证与写路径纪律见 ``batch_edit_metadata.py``。\n\n``apply=false`` 是**预演**：只算数、一个字都不写（不建占位 author / series 行、\n不解析名字、不打网络），用户先看到「N 篇本地书将被修改、M 篇 pixiv 书跳过」\n再确认；``apply=true`` 先算数再落库，``affected`` 是真正被改动的行数。\n\n路由是**精确路径** ``/batch-metadata``，与 ``/batch`` / ``/batch-export``\n同形：``POST /{novel_id}/...`` 那几条都要第二段路径，所以不会把\n``batch-metadata`` 当成 ``novel_id``（``batch-export`` 早已是同样的形状）。",
         "operationId": "batch_metadata_operation_api_novels_batch_metadata_post",
         "requestBody": {
           "content": {
@@ -2888,168 +2823,9 @@
         ]
       }
     },
-    "/api/novels/batch-task": {
-      "post": {
-        "description": "Enqueue a batch operation into the background task system.\n\nUnlike :func:`batch_operation` (synchronous, capped at\n:data:`BATCH_MAX_NOVELS`), this path accepts selections of ANY size —\nthe task chunks the work, so the user can close the page and watch\nprogress in 「任务管理」.  Validation (empty scope / tags) still\nhappens synchronously so mistakes surface immediately.",
-        "operationId": "batch_task_operation_api_novels_batch_task_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/BatchOperationRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BatchTaskResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "APIKeyHeader": []
-          }
-        ],
-        "summary": "Batch Task Operation",
-        "tags": [
-          "novels"
-        ]
-      }
-    },
-    "/api/novels/blocked-ids": {
-      "get": {
-        "description": "IDs of novels carrying blocked tags WITHIN the current search scope.\n\nPowers the 「查看被排除」view.  Follows the global exclusion setting:\nempty when exclusion is off.  The blocked-id list is filtered through\nthe same scope logic as ``filter_ids_in_scope`` (chunked to keep each\nPostgreSQL query bounded); exclusion itself is not re-applied (the ids\nare already the excluded set).\n\n``order_by`` (id/like/text) orders the result set; ``random`` or\nunsupported values return the scope order.",
-        "operationId": "get_blocked_novel_ids_api_novels_blocked_ids_get",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "keyword",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Keyword"
-            }
-          },
-          {
-            "in": "query",
-            "name": "min_like",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Min Like"
-            }
-          },
-          {
-            "in": "query",
-            "name": "min_text",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Min Text"
-            }
-          },
-          {
-            "in": "query",
-            "name": "order_by",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "$ref": "#/components/schemas/OrderBy"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Order By"
-            }
-          },
-          {
-            "in": "query",
-            "name": "order_direction",
-            "required": false,
-            "schema": {
-              "$ref": "#/components/schemas/OrderDirection",
-              "default": "DESC"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/NovelIdsResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "APIKeyHeader": []
-          }
-        ],
-        "summary": "Get Blocked Novel Ids",
-        "tags": [
-          "novels"
-        ]
-      }
-    },
     "/api/novels/by-ids": {
       "post": {
-        "description": "Novel details for an explicit ID list — powers the 「查看已选」view.\n\nPreserves the caller's ID order; missing IDs are dropped.  The input\nis capped at :data:`BATCH_MAX_NOVELS` (the view's page size — the\nfrontend pages large selections in 5000-novel slices).",
+        "description": "Novel details for an explicit ID list — powers the 「查看已选」view.\n\nPreserves the caller's ID order; missing IDs are dropped.",
         "operationId": "get_novels_by_ids_api_novels_by_ids_post",
         "requestBody": {
           "content": {
@@ -3096,7 +2872,7 @@
     },
     "/api/novels/count": {
       "get": {
-        "description": "匹配数（**有界**）+ 被厌恶标签隐藏数 + 两个截断标志。\n\n计数由 ``repo.COUNT_CAP`` 封顶（见 :class:`NovelCount`）：``total`` 保持\n老客户端的读法不变，但被截断时它只是下界 —— ``truncated: true`` 表示真实\n匹配数 > ``total``（调用方应显示 ``total+`` / ``≥ total``）。``excluded``\n同理，标志为 ``excluded_truncated``。两个标志恒在响应里，值只可能是\n布尔，不会缺席。",
+        "description": "匹配数（**有界**）+ 截断标志。\n\n计数由 ``repo.COUNT_CAP`` 封顶（见 :class:`NovelCount`）：``total`` 保持\n老客户端的读法不变，但被截断时它只是下界 —— ``truncated: true`` 表示真实\n匹配数 > ``total``（调用方应显示 ``total+`` / ``≥ total``）。",
         "operationId": "count_novels_api_novels_count_get",
         "parameters": [
           {
@@ -3161,35 +2937,6 @@
                 }
               ],
               "title": "Exclude Blocked"
-            }
-          },
-          {
-            "in": "query",
-            "name": "excluded_ids",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "items": {
-                    "type": "integer"
-                  },
-                  "type": "array"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Excluded Ids"
-            }
-          },
-          {
-            "in": "query",
-            "name": "with_excluded",
-            "required": false,
-            "schema": {
-              "default": false,
-              "title": "With Excluded",
-              "type": "boolean"
             }
           }
         ],
@@ -3277,7 +3024,7 @@
     },
     "/api/novels/ids": {
       "get": {
-        "description": "All VISIBLE IDs matching the filters — powers the 「全选匹配」bulk-add action.\n\nNo size cap: the selection itself may be any size (operations beyond\nthe sync cap run as background tasks).  ``truncated`` is kept for wire\ncompatibility and is always false here.\n\n``total`` 直接取 ID 列表长度（精确、免费），**不**再打一次有界计数：\n有界计数的值会与这里完整返回的 ID 数不一致。",
+        "description": "All VISIBLE IDs matching the filters — powers the 「全选匹配」bulk-add action.\n\nNo size cap: the selection itself may be any size (operations beyond\nthe sync cap run as background tasks).\n\n``total`` 直接取 ID 列表长度（精确、免费），**不**再打一次有界计数：\n有界计数的值会与这里完整返回的 ID 数不一致。",
         "operationId": "get_matching_novel_ids_api_novels_ids_get",
         "parameters": [
           {
@@ -3380,7 +3127,7 @@
     },
     "/api/novels/match-ids": {
       "post": {
-        "description": "Subset of *novel_ids* that match the filters — scoped 「清除选择」.\n\nIntersects the accumulated selection with the CURRENT search scope so\nthe clear action only removes what belongs to the visible scope (the\nrest of the selection survives across searches).  Any-size input: the\nID list is processed in internal chunks to keep each PostgreSQL query bounded.",
+        "description": "Subset of *novel_ids* that match the filters — scoped 「清除选择」.\n\nIntersects the accumulated selection with the CURRENT search scope so\nthe clear action only removes what belongs to the visible scope (the\nrest of the selection survives across searches).",
         "operationId": "match_novel_ids_api_novels_match_ids_post",
         "parameters": [
           {
@@ -4046,6 +3793,145 @@
         ]
       }
     },
+    "/api/tag-aliases/batch": {
+      "post": {
+        "operationId": "create_tag_aliases_batch_api_tag_aliases_batch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TagAliasBatchCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TagAliasResponse"
+                  },
+                  "title": "Response Create Tag Aliases Batch Api Tag Aliases Batch Post",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Create Tag Aliases Batch",
+        "tags": [
+          "tag_aliases"
+        ]
+      }
+    },
+    "/api/tag-aliases/groups": {
+      "delete": {
+        "operationId": "delete_tag_alias_group_api_tag_aliases_groups_delete",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "target",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Target",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Delete Tag Alias Group",
+        "tags": [
+          "tag_aliases"
+        ]
+      },
+      "put": {
+        "operationId": "replace_tag_alias_group_api_tag_aliases_groups_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TagAliasGroupReplace"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TagAliasResponse"
+                  },
+                  "title": "Response Replace Tag Alias Group Api Tag Aliases Groups Put",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Replace Tag Alias Group",
+        "tags": [
+          "tag_aliases"
+        ]
+      }
+    },
     "/api/tag-aliases/suggest": {
       "get": {
         "description": "相似标签建议。\n\n``offset`` 是**游标**（不是行偏移）：把上一次响应里的 ``next_offset`` 原样\n传回来续扫即可（字段名保留 ``offset`` / ``next_offset`` 是为了不动前端契约，\n前端只把它当不透明整数回传）。``target_tag=`` 模式只指名一个 target，\n没有「页」可续，因此忽略 ``offset`` 且 ``next_offset`` 恒为 0。",
@@ -4323,88 +4209,6 @@
         "summary": "Delete Tag Preference",
         "tags": [
           "tag_preferences"
-        ]
-      },
-      "put": {
-        "operationId": "update_tag_preference_api_tag_preferences__pref_id__put",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "pref_id",
-            "required": true,
-            "schema": {
-              "title": "Pref Id",
-              "type": "integer"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/TagPreferenceUpdate"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TagPreferenceResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "APIKeyHeader": []
-          }
-        ],
-        "summary": "Update Tag Preference",
-        "tags": [
-          "tag_preferences"
-        ]
-      }
-    },
-    "/api/tasks/busy": {
-      "get": {
-        "description": "Task functions with a pending/running row — the front-end busy set.",
-        "operationId": "get_busy_tasks_api_tasks_busy_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TaskBusyResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "security": [
-          {
-            "APIKeyHeader": []
-          }
-        ],
-        "summary": "Get Busy Tasks",
-        "tags": [
-          "tasks"
         ]
       }
     },
