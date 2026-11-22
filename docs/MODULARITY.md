@@ -7,8 +7,8 @@
 | 目录 / 模块 | 职责 |
 |-------------|------|
 | `app.py` / `middleware.py` / `error_handlers.py` / `lifespan.py` | 组合根：FastAPI 工厂、中间件、域异常映射、生命周期装配（含查询引擎启动与 UoW 提交后钩子绑定）与 SPA 静态托管 |
-| `config.py` | Pydantic 配置模型、严格校验与加载（含 `query_engine` 模式开关） |
-| `deps.py` | FastAPI DI 依赖（`get_uow` / `get_write_uow` / `get_task_manager` 等） |
+| `config.py` | Pydantic 配置模型、严格校验（`extra="forbid"`）与加载 |
+| `deps.py` | FastAPI DI 依赖（`get_uow` / `get_pixiv_client` / `get_task_manager` 及 `TaskManagerProtocol` 等） |
 | `core/` | 纯 Python 核心：`models.py`、`services.py`、`exceptions.py`、`draft.py`、`naming.py`、`ids.py`、`language.py`、`calendar.py`、`formats.py`、`search_text.py` |
 | `db/` | PostgreSQL 唯一适配层：`engine` / `uow` / `write_lock`（事务边界标记）/ `backup` / `models` / `constants` / `base` / `delta`（事务提交后增量缓冲）/ `novel_snapshot`（窄列快照投影） |
 | `query_engine/` | 进程内查询引擎叶子适配层：`port.py`（协议与 DTO）/ `adapter.py`（封装 `copixiv_rs`）/ `sync.py`（启动快照与串行增量同步） |

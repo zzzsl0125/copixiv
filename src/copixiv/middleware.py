@@ -33,6 +33,10 @@ class AccessLogMiddleware:
 
         try:
             await self.app(scope, receive, _send_wrapper)
+        except Exception:
+            if status_code == 0:
+                status_code = 500
+            raise
         finally:
             elapsed_ms = (time.monotonic() - start) * 1000
             with logger.contextualize(name="http_access"):
@@ -77,8 +81,7 @@ class HostValidationMiddleware:
         self._allowed_hosts_lower = frozenset(h.lower() for h in self.allowed_hosts)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send):
-        scope_type = scope["type"]
-        if scope_type not in ("http", "websocket"):
+        if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
@@ -88,10 +91,6 @@ class HostValidationMiddleware:
             if self._is_allowed(host):
                 await self.app(scope, receive, send)
                 return
-
-        if scope_type == "websocket":
-            await send({"type": "websocket.close", "code": 1008})
-            return
 
         await _send_json_error(send, 400, "Invalid Host header")
 

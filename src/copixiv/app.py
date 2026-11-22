@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -11,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from copixiv.error_handlers import register_exception_handlers
 from copixiv.lifespan import create_lifespan, resolve_config
-from copixiv.log import InterceptHandler, logger, setup_logging
+from copixiv.log import logger, setup_logging
 from copixiv.middleware import (
     AccessLogMiddleware,
     HostValidationMiddleware,
@@ -22,19 +21,6 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session, sessionmaker
 
     from copixiv.config import AppConfig
-
-UVICORN_LOG_CONFIG = {
-    "version": 1,
-    "disable_existing_loggers": False,
-    "handlers": {
-        "loguru": {"()": InterceptHandler},
-    },
-    "loggers": {
-        "uvicorn": {"handlers": ["loguru"], "level": "INFO", "propagate": False},
-        "uvicorn.error": {"handlers": ["loguru"], "level": "INFO", "propagate": False},
-        "uvicorn.access": {"handlers": ["loguru"], "level": "INFO", "propagate": False},
-    },
-}
 
 _FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 _ASSET_CACHE = {"Cache-Control": "public, max-age=31536000, immutable"}
@@ -154,7 +140,7 @@ def mount_frontend(app: FastAPI, dist: Path | None = None) -> bool:
             raise HTTPException(status_code=404, detail="Not Found")
         if full_path:
             candidate = (root / full_path).resolve()
-            if candidate.is_relative_to(root) and candidate.is_file():
+            if candidate != index and candidate.is_relative_to(root) and candidate.is_file():
                 return FileResponse(candidate)
         return FileResponse(index, headers=_INDEX_CACHE)
 
@@ -166,16 +152,14 @@ def create_app(
     config: str | AppConfig | None = None,
     log_dir: str | None = None,
     *,
-    config_path: str | None = None,
     session_factory: sessionmaker[Session] | None = None,
     skip_init_db: bool = False,
-    skip_auto_backup: bool = False,
     mount_spa: bool = True,
     run_background_tasks: bool = True,
 ):
     """Build the FastAPI app; DB/HTTP/Rust singletons start inside lifespan."""
     setup_logging(log_dir)
-    resolved_config = resolve_config(config if config is not None else config_path)
+    resolved_config = resolve_config(config)
 
     from fastapi import FastAPI
     from fastapi.middleware.cors import CORSMiddleware
@@ -217,7 +201,6 @@ def create_app(
             resolved_config,
             session_factory=session_factory,
             skip_init_db=skip_init_db,
-            skip_auto_backup=skip_auto_backup,
             run_background_tasks=run_background_tasks,
         ),
         middleware=middlewares,
@@ -233,7 +216,7 @@ def create_app(
 
 def ensure_port_free(port: int) -> None:
     """Check that *port* is not in use; exit with a clear error if it is."""
-    port_re = re.compile(rf":{port}(?!\d)")
+    suffix = f":{port}"
     try:
         result = subprocess.run(
             ["ss", "-tlnp"],
@@ -242,7 +225,9 @@ def ensure_port_free(port: int) -> None:
             timeout=5,
         )
         for line in result.stdout.splitlines():
-            if not port_re.search(line):
+            parts = line.split()
+            # Column 3 is Local Address:Port; checking endswith avoids IPv6 body false positives.
+            if len(parts) < 4 or not parts[3].endswith(suffix):
                 continue
             logger.error(
                 f"Port {port} is already in use:\n  {line.strip()}\n"
@@ -258,7 +243,6 @@ def main() -> None:
     """Run the uvicorn server (used by the ``copixiv`` console script)."""
     import uvicorn
 
-    setup_logging()
     port = int(os.environ.get("PORT", "9000"))
     ensure_port_free(port)
 
@@ -269,7 +253,7 @@ def main() -> None:
             host="0.0.0.0",
             port=port,
             reload=os.environ.get("COPIXIV_RELOAD") == "1",
-            log_config=UVICORN_LOG_CONFIG,
+            log_config=None,
             access_log=False,
         )
     except SystemExit:

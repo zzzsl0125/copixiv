@@ -53,12 +53,6 @@ uv run python scripts/pg_dev.py start
 uv run python -u main.py
 ```
 
-> **老库升级到 Phase 6 压缩基线**：若现有生产库曾在旧 `0001`–`0017` 迁移链上运行，先执行只读检查，再清理历史索引/列并重打基线戳：
-> ```bash
-> uv run python scripts/transition_to_baseline.py          # 只读检查
-> uv run python scripts/transition_to_baseline.py --apply  # 幂等清理并 stamp 至 0001_baseline
-> ```
-
 ### 3. 构建前端（可选）
 
 后端（`copixiv.app.mount_frontend`）会直接静态托管 `frontend/dist`，因此只需构建一次，无需单独运行 `vite preview`：
@@ -92,7 +86,7 @@ sudo systemctl enable --now copixiv-pg.service copixiv.service
 
 | 前缀 | 路由模块 | 说明 |
 |------|----------|------|
-| `/api/novels` | `features/novels/routes/` | 列表、计数、按 ID 批量卡片（`by-ids`）、排序/范围辅助（`sort-ids` / `match-ids` / `ids` / `blocked-ids`）、作者/系列预览、下载、收藏、特别关注、单本编辑/同步/删除、批量操作与打包导出 |
+| `/api/novels` | `features/novels/routes/` | 列表、计数、按 ID 批量卡片（`by-ids`）、排序/范围辅助（`sort-ids` / `match-ids` / `ids`）、作者/系列预览、下载、收藏、特别关注、单本编辑/同步/删除、批量操作与打包导出 |
 | `/api/library` | `features/library/api.py` | 本地 TXT / EPUB 上传与入库 |
 | `/api/authors` | `features/authors/api.py` | 作者删除与级联清理 |
 | `/api/tasks` | `tasks/api.py` | 任务方法、定时任务管理、立即运行、任务取消与执行历史 |
@@ -157,14 +151,14 @@ src/copixiv/
 ├── query_engine/       # 进程内引擎适配层：port / adapter / sync
 ├── pixiv/              # 原生异步 httpx Pixiv 协议层：client / http / models / account / accounts / errors
 ├── storage/            # 本地存储：file_storage / image_downloader / encoding / orphan_cleanup / zip / atomic / assets / epub/
-├── notify/             # 通知适配：telegram / factory
+├── notify/             # 通知适配：telegram
 ├── tasks/              # registry / executor / cron / manager / history_repo / schemas / api / novels / batch / maintenance/
 └── features/           # accounts / authors / failures / library / novels / search_history / series / system / tags
-alembic/                # 数据库迁移基线 (0001_baseline)
+alembic/                # 数据库迁移 (0001_baseline .. 0005_align_schema_drift)
 deploy/                 # systemd 单元文件 (copixiv.service + copixiv-pg.service)
 docs/                   # MODULARITY.md、REFACTOR_PLAN.md、设计文档与性能分析
 frontend/               # Vue 3 + TypeScript + Tailwind CSS v4 + Vue Query + reka-ui 前端
-scripts/                # pg_dev.py / transition_to_baseline.py / deploy_backend.sh / run_verification.sh / bench_engine_comparison.py
+scripts/                # pg_dev.py / deploy_backend.sh / run_verification.sh / bench_engine_comparison.py
 tests/                  # unit/、db/（PG 基线迁移、触发器与 Rust 对拍）与 integration/
 ```
 
@@ -176,6 +170,5 @@ tests/                  # unit/、db/（PG 基线迁移、触发器与 Rust 对�
 bash scripts/run_verification.sh                            # 完整 8 项本地门禁（Rust → ruff → mypy → lint-imports → OpenAPI → pytest → alembic check → 前端）
 uv run pytest tests -v --cov=copixiv                      # 后端 unit + PG16 + integration 全量测试
 uv run alembic check                                      # ORM 模型 ↔ 迁移基线对齐检查
-uv run python scripts/transition_to_baseline.py           # 生产老库迁移至 0001_baseline 的只读预检
 uv run python scripts/bench_engine_comparison.py          # 只读检索延迟与一致性基准
 ```

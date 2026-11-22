@@ -11,6 +11,7 @@ from copixiv.core.exceptions import (
     NotFoundError,
     ValidationError,
 )
+from copixiv.log import logger
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -66,6 +67,7 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(IntegrityError)
     async def _integrity_error_handler(_request, exc: IntegrityError):
+        logger.warning(f"IntegrityError mapped to 400: {exc.orig or exc}")
         return JSONResponse(
             status_code=400,
             content={"detail": _integrity_error_detail(exc)},

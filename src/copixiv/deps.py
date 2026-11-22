@@ -9,7 +9,7 @@ state lookups.
 from __future__ import annotations
 
 import secrets
-from typing import Annotated, Any
+from typing import Annotated, Any, Protocol
 
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import APIKeyHeader, APIKeyQuery
@@ -20,6 +20,24 @@ from copixiv.db.uow import SqlUnitOfWork
 from copixiv.pixiv.accounts import AccountPool
 from copixiv.pixiv.client import PixivClient
 from copixiv.storage.file_storage import FileStorage
+
+
+class ExportTaskInfoProtocol(Protocol):
+    """Structural interface for export task metadata returned by ``TaskManagerProtocol``."""
+
+    @property
+    def zip_name(self) -> str | None: ...
+
+
+class TaskManagerProtocol(Protocol):
+    """Structural interface for the task manager stored on ``app.state``."""
+
+    def reload_cron_jobs(self) -> None: ...
+    def run_task(self, name: str, params: dict[str, Any] | None = None) -> int: ...
+    def run_task_now(self, task_id: int) -> None: ...
+    def cancel_task(self, task_id: int) -> str: ...
+    def get_export_info(self, task_id: int) -> ExportTaskInfoProtocol | None: ...
+
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 api_key_query = APIKeyQuery(name="api_key", auto_error=False)
@@ -50,7 +68,7 @@ def get_pixiv_client(request: Request) -> PixivClient:
     return request.app.state.client
 
 
-def get_task_manager(request: Request) -> Any:
+def get_task_manager(request: Request) -> TaskManagerProtocol:
     """The task-manager facade (app.state)."""
     return request.app.state.task_manager
 
@@ -60,8 +78,7 @@ AppConfigDep = Annotated[AppConfig, Depends(get_app_config)]
 AccountPoolDep = Annotated[AccountPool, Depends(get_account_pool)]
 FileStorageDep = Annotated[FileStorage, Depends(get_file_storage)]
 PixivClientDep = Annotated[PixivClient, Depends(get_pixiv_client)]
-OptionalPixivClientDep = Annotated[PixivClient | None, Depends(get_pixiv_client)]
-TaskManagerDep = Annotated[Any, Depends(get_task_manager)]
+TaskManagerDep = Annotated[TaskManagerProtocol, Depends(get_task_manager)]
 
 
 def get_uow(session_factory: SessionFactoryDep) -> SqlUnitOfWork:

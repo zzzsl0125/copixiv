@@ -161,7 +161,7 @@ def setup_logging(log_dir: str | None = None) -> None:
             diagnose=False,
         )
 
-    logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
+    logging.basicConfig(handlers=[InterceptHandler()], level=logging.INFO, force=True)
 
     # Quiet noisy HTTP client loggers routed through InterceptHandler.
     for noisy_logger in ("httpx", "httpcore"):
