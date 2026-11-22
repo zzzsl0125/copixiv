@@ -17,11 +17,11 @@ from copixiv.features.novels.field_policy import editable_fields
 from copixiv.features.novels.ingest import ingest
 from copixiv.features.novels.use_cases.batch_download import BatchDownloadUseCase
 from copixiv.features.novels.use_cases.batch_operations import (
-    BatchDeleteUseCase,
-    BatchTagUseCase,
+    batch_delete,
+    batch_tag,
 )
 from copixiv.features.novels.use_cases.update_metadata import (
-    UpdateNovelMetadataUseCase,
+    update_novel_metadata,
 )
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
 from copixiv.storage.file_storage import FileStorage
@@ -171,17 +171,15 @@ async def test_update_novel_metadata_policy_and_unlink_semantics(
             )
         )
 
-    uc = UpdateNovelMetadataUseCase(uow, client=fake_pixiv_client)
-
     with pytest.raises(ValidationError, match="没有要更新的字段"):
-        await uc.execute(-501, {})
+        await update_novel_metadata(-501, {}, uow=uow, client=fake_pixiv_client)
     with pytest.raises(ValidationError, match="章节号必须是正整数"):
-        await uc.execute(501, {"series_index": 0})
+        await update_novel_metadata(501, {"series_index": 0}, uow=uow, client=fake_pixiv_client)
     with pytest.raises(ValidationError, match="仅本地书可编辑"):
-        await uc.execute(501, {"title": "CannotChange"})
+        await update_novel_metadata(501, {"title": "CannotChange"}, uow=uow, client=fake_pixiv_client)
 
     # Local novel can attach author/series, then unlink them with asymmetric semantics
-    updated = await uc.execute(
+    updated = await update_novel_metadata(
         -501,
         {
             "title": "LocalRenamed",
@@ -191,6 +189,8 @@ async def test_update_novel_metadata_policy_and_unlink_semantics(
             "tags": ["TagA", "TagB/TagC"],
             "create_time": "2026-10-19",
         },
+        uow=uow,
+        client=fake_pixiv_client,
     )
     from copixiv.features.novels.repo import StoredNovel
 
@@ -204,7 +204,12 @@ async def test_update_novel_metadata_policy_and_unlink_semantics(
     assert updated.create_time is not None
     assert updated.create_time.astimezone(UTC) == datetime(2026, 10, 19, 0, 0, tzinfo=UTC)
 
-    unlinked = await uc.execute(-501, {"author_id": None, "series_id": None})
+    unlinked = await update_novel_metadata(
+        -501,
+        {"author_id": None, "series_id": None},
+        uow=uow,
+        client=fake_pixiv_client,
+    )
     # Unlinking author preserves display name; unlinking series clears id, name, and index
     assert unlinked.author_id is None
     assert unlinked.author_name == "LocalAuth"
@@ -261,10 +266,9 @@ async def test_batch_tag_delete_and_download_by_ids(
         tag_repo = SQLAlchemyTagRepository(uow.session)
         tag_repo.create_alias({"source": "alias_src", "target": "alias_dst"})
 
-    tag_uc = BatchTagUseCase(uow)
-    added = tag_uc.execute("add_tags", [1001, 1002], ["alias_src"])
+    added = batch_tag("add_tags", [1001, 1002], ["alias_src"], uow=uow)
     assert added == 2
-    removed = tag_uc.execute("remove_tags", [1001], ["old"])
+    removed = batch_tag("remove_tags", [1001], ["old"], uow=uow)
     assert removed == 1
 
     with uow.begin():
@@ -285,8 +289,7 @@ async def test_batch_tag_delete_and_download_by_ids(
         await dl_uc.execute(novel_ids=[999999])
 
     # Batch delete cleans DB rows, failed_novel ledger, and files on disk
-    del_uc = BatchDeleteUseCase(uow, storage)
-    affected = del_uc.execute([1001, 1002, 999999])
+    affected = batch_delete([1001, 1002, 999999], uow=uow, file_storage=storage)
     assert affected == 2
     assert not p1.exists()
     assert not p2.exists()
@@ -303,7 +306,7 @@ async def test_sync_novel_preserves_author_name_on_fetch_failure_and_clears_seri
     fake_pixiv_client,
     tmp_path: Path,
 ):
-    from copixiv.features.novels.use_cases.sync_novel import SyncNovelUseCase
+    from copixiv.features.novels.use_cases.sync_novel import sync_novel
 
     uow = SqlUnitOfWork(committed_session_factory)
     with uow.begin():
@@ -332,8 +335,12 @@ async def test_sync_novel_preserves_author_name_on_fetch_failure_and_clears_seri
         author_id=20,
     )
 
-    uc = SyncNovelUseCase(uow, fake_pixiv_client, str(tmp_path))
-    updated = await uc.execute(2001)
+    updated = await sync_novel(
+        2001,
+        uow=uow,
+        client=fake_pixiv_client,
+        download_dir=str(tmp_path),
+    )
     assert updated.title == "NewTitle"
     assert updated.author_name == "KeepMe"
     assert updated.series_id is None
@@ -345,7 +352,7 @@ def test_delete_novel_single_lookup_and_oserror_resilience(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    from copixiv.features.novels.use_cases.delete_novel import DeleteNovelUseCase
+    from copixiv.features.novels.use_cases.delete_novel import delete_novel
 
     uow = SqlUnitOfWork(committed_session_factory)
     storage = FileStorage(str(tmp_path))
@@ -370,14 +377,13 @@ def test_delete_novel_single_lookup_and_oserror_resilience(
 
     monkeypatch.setattr(storage, "delete_novel_files", _boom)
 
-    del_uc = DeleteNovelUseCase(uow, storage)
-    del_uc.execute(3001)  # Must not raise OSError after DB commit
+    delete_novel(3001, uow=uow, file_storage=storage)  # Must not raise OSError after DB commit
 
     with uow.begin():
         assert uow.session.get(models.Novel, 3001) is None
 
     with pytest.raises(NotFoundError):
-        del_uc.execute(3001)
+        delete_novel(3001, uow=uow, file_storage=storage)
 
 
 @pytest.mark.asyncio

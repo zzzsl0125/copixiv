@@ -3,7 +3,7 @@
 from pydantic import BaseModel
 
 from copixiv.core.models import TaskResult
-from copixiv.features.authors.delete_author import DeleteAuthorUseCase
+from copixiv.features.authors.service import delete_author
 from copixiv.features.novels.use_cases.discovery import (
     fetch_author_novels,
     fetch_follow_feed,
@@ -117,11 +117,12 @@ async def author_fetch(args: AuthorFetchArgs, ctx: TaskContext) -> TaskResult:
 )
 async def author_delete(args: AuthorDeleteArgs, ctx: TaskContext) -> TaskResult:
     """Delete an author and all their novels."""
-    return await DeleteAuthorUseCase(
+    return await delete_author(
+        args.author_id,
         uow=ctx.require_uow(),
         file_storage=ctx.require_file_storage(),
         client=ctx.require_client(),
-    ).execute(args.author_id)
+    )
 
 
 @register(

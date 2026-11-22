@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from copixiv.core.models import TaskResult
 from copixiv.db.backup import backup_database
-from copixiv.features.library.filenames import parse_filename
+from copixiv.features.library.ingest import parse_filename
 from copixiv.storage.encoding import decode_text_bytes
 from copixiv.tasks import registry
 from copixiv.tasks.cron import CRON_TIMEZONE, CronTicker, next_occurrence

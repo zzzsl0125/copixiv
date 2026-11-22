@@ -11,12 +11,12 @@ from copixiv.core.exceptions import NotFoundError, ValidationError
 from copixiv.db.tx import run_write_transaction_sync
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.deps import UowDep
-from copixiv.features.tags.apply_alias import (
+from copixiv.features.tags.repo import (
+    SQLAlchemyTagRepository,
     create_and_apply_aliases_batch,
     replace_alias_group,
 )
-from copixiv.features.tags.repo import SQLAlchemyTagRepository
-from copixiv.features.tags.suggest import suggest_tag_aliases as _suggest_tag_aliases
+from copixiv.features.tags.repo import suggest_tag_aliases as _suggest_tag_aliases
 
 
 def _strip_tag_name(v: str) -> str:

@@ -23,8 +23,8 @@
 的 :func:`editable_fields` 派生），前端不再自己判断 ``source``——两端只有一份判断，
 不会各自漂移。
 
-来源常量复用 ``features/library/local_axis.py`` 里已有的那一份，本模块不新增
-字符串字面量（``local_axis`` 是 ``novel.source`` 两值的原始所有者）。
+来源常量复用 ``copixiv.core.models`` 里已有的 ``SOURCE_LOCAL`` / ``SOURCE_PIXIV``，
+本模块不新增字符串字面量。
 """
 
 from __future__ import annotations

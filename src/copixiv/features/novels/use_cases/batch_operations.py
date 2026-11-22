@@ -67,82 +67,73 @@ def delete_novel_paths(file_storage: FileStorage, paths: Sequence[str | None]) -
                 logger.exception("删除小说文件失败: {}", path)
 
 
-class BatchDeleteUseCase:
+def batch_delete(
+    novel_ids: list[int],
+    *,
+    uow: SqlUnitOfWork,
+    file_storage: FileStorage,
+    defer_file_cleanup: Callable[[list[str]], None] | None = None,
+) -> int:
     """Delete all novels in a resolved ID list, then clean up their files.
 
-    DB first, files second — the same order as :class:`DeleteNovelUseCase`:
+    DB first, files second — the same order as :func:`~copixiv.features.novels.use_cases.delete_novel.delete_novel`:
     a failed DB delete must not leave rows pointing at deleted files.
     File cleanup stays best-effort so a disk hiccup cannot fail the API
     call after the rows are already gone.
     """
+    deleted_count = 0
+    all_paths: list[str] = []
+    for i in range(0, len(novel_ids), BATCH_ID_CHUNK_SIZE):
+        chunk = novel_ids[i : i + BATCH_ID_CHUNK_SIZE]
 
-    def __init__(self, uow, file_storage: FileStorage):
-        self._uow = uow
-        self._file_storage = file_storage
+        def _delete_chunk(tx: SqlUnitOfWork, chunk: list[int] = chunk) -> tuple[int, list[str]]:
+            return SQLAlchemyNovelRepository(tx.session).delete_many(chunk)
 
-    def execute(
-        self,
-        novel_ids: list[int],
-        *,
-        defer_file_cleanup: Callable[[list[str]], None] | None = None,
-    ) -> int:
-        deleted_count = 0
-        all_paths: list[str] = []
-        for i in range(0, len(novel_ids), BATCH_ID_CHUNK_SIZE):
-            chunk = novel_ids[i : i + BATCH_ID_CHUNK_SIZE]
+        count, paths = run_write_transaction_sync(uow, _delete_chunk)
+        deleted_count += count
+        all_paths.extend(paths)
 
-            def _delete_chunk(tx: SqlUnitOfWork, chunk: list[int] = chunk) -> tuple[int, list[str]]:
-                return SQLAlchemyNovelRepository(tx.session).delete_many(chunk)
-
-            count, paths = run_write_transaction_sync(self._uow, _delete_chunk)
-            deleted_count += count
-            all_paths.extend(paths)
-
-        if defer_file_cleanup is not None and len(all_paths) > 500:
-            defer_file_cleanup(all_paths)
-        else:
-            delete_novel_paths(self._file_storage, all_paths)
-        return deleted_count
+    if defer_file_cleanup is not None and len(all_paths) > 500:
+        defer_file_cleanup(all_paths)
+    else:
+        delete_novel_paths(file_storage, all_paths)
+    return deleted_count
 
 
-class BatchTagUseCase:
+def batch_tag(
+    operation: str,
+    novel_ids: list[int],
+    tags: list[str],
+    *,
+    uow: SqlUnitOfWork,
+) -> int:
     """Add or remove tags on all novels in a resolved ID list.
 
     Tag names are normalized (stripped, deduped) and resolved through the
     alias map so a batch add behaves exactly like the write path.
     """
+    if operation not in ("add_tags", "remove_tags"):
+        raise ValidationError(f"未知的批量操作: {operation}")
+    cleaned_tags = validate_tags(
+        list(tags),
+        max_count=BATCH_MAX_TAGS,
+        max_length=MAX_TAG_LENGTH,
+        require_non_empty=True,
+    )
+    tag_set = set(cleaned_tags)
 
-    def __init__(self, uow: SqlUnitOfWork):
-        self._uow = uow
+    affected = 0
+    for i in range(0, len(novel_ids), BATCH_ID_CHUNK_SIZE):
+        chunk = novel_ids[i : i + BATCH_ID_CHUNK_SIZE]
 
-    def execute(
-        self,
-        operation: str,
-        novel_ids: list[int],
-        tags: list[str],
-    ) -> int:
-        if operation not in ("add_tags", "remove_tags"):
-            raise ValidationError(f"未知的批量操作: {operation}")
-        cleaned_tags = validate_tags(
-            list(tags),
-            max_count=BATCH_MAX_TAGS,
-            max_length=MAX_TAG_LENGTH,
-            require_non_empty=True,
-        )
-        tag_set = set(cleaned_tags)
+        def _tag_chunk(tx: SqlUnitOfWork, chunk: list[int] = chunk) -> int:
+            novel_repo = SQLAlchemyNovelRepository(tx.session)
+            tag_repo = SQLAlchemyTagRepository(tx.session)
+            alias_map = tag_repo.get_alias_map()
+            resolved = {alias_map.get(t, t) for t in tag_set}
+            if operation == "add_tags":
+                return novel_repo.add_tags_to_novels(chunk, resolved)
+            return novel_repo.remove_tags_from_novels(chunk, resolved)
 
-        affected = 0
-        for i in range(0, len(novel_ids), BATCH_ID_CHUNK_SIZE):
-            chunk = novel_ids[i : i + BATCH_ID_CHUNK_SIZE]
-
-            def _tag_chunk(tx: SqlUnitOfWork, chunk: list[int] = chunk) -> int:
-                novel_repo = SQLAlchemyNovelRepository(tx.session)
-                tag_repo = SQLAlchemyTagRepository(tx.session)
-                alias_map = tag_repo.get_alias_map()
-                resolved = {alias_map.get(t, t) for t in tag_set}
-                if operation == "add_tags":
-                    return novel_repo.add_tags_to_novels(chunk, resolved)
-                return novel_repo.remove_tags_from_novels(chunk, resolved)
-
-            affected += run_write_transaction_sync(self._uow, _tag_chunk)
-        return affected
+        affected += run_write_transaction_sync(uow, _tag_chunk)
+    return affected

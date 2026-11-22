@@ -25,7 +25,7 @@ from copixiv.core.draft import NovelDraft, NovelInfoLike, build_from_novel_info
 from copixiv.core.models import EpubStatus
 from copixiv.db.tx import read_transaction, run_write_transaction
 from copixiv.db.uow import SqlUnitOfWork
-from copixiv.features.authors.resolve_names import collect_author_names, writeback_author_names
+from copixiv.features.authors.service import collect_author_names, writeback_author_names
 from copixiv.features.failures.repo import FailedNovelRepository
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.features.series.index import resolve_series_indices

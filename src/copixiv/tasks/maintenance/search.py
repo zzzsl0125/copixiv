@@ -1,7 +1,7 @@
 """Library-wide metadata repair task adapter (``sync_empty_name``, general lane)."""
 
 from copixiv.core.models import TaskResult
-from copixiv.features.authors.resolve_names import sync_empty_author_names
+from copixiv.features.authors.service import sync_empty_author_names
 from copixiv.tasks.executor import TaskContext
 from copixiv.tasks.registry import register
 

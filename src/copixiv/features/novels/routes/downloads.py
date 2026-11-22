@@ -16,7 +16,7 @@ from copixiv.deps import (
 )
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.features.novels.routes.batch import _strip_zip_suffix
-from copixiv.features.novels.use_cases.get_novel_file import GetNovelFileUseCase
+from copixiv.features.novels.use_cases.get_novel_file import get_novel_file
 
 router = APIRouter(dependencies=[Depends(require_download_api_key)])
 
@@ -55,10 +55,11 @@ def download_novel(
     format: FormatMode = FormatMode.TXT,
 ):
     with uow.begin(read_only=True):
-        use_case = GetNovelFileUseCase(
-            SQLAlchemyNovelRepository(uow.session),
-            file_storage.download_dir,
+        file_path, media_type = get_novel_file(
+            novel_id,
+            format.value,
+            novel_repo=SQLAlchemyNovelRepository(uow.session),
+            download_root=file_storage.download_dir,
         )
-        file_path, media_type = use_case.execute(novel_id, format.value)
     headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(file_path.name)}"}
     return FileResponse(path=str(file_path), media_type=media_type, headers=headers)

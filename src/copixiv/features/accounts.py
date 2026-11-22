@@ -1,18 +1,74 @@
-"""Token API endpoints."""
+"""Accounts feature slice: Pixiv refresh token repository and API endpoints."""
+
+from __future__ import annotations
 
 import threading
+from collections.abc import Sequence
 
 from fastapi import APIRouter
 from pydantic import BaseModel, field_validator
+from sqlalchemy import select, update
+from sqlalchemy.orm import Session
 
 from copixiv.core.exceptions import NotFoundError
+from copixiv.db import models
+from copixiv.db.base import delete_by_id, reorder_rows, update_attrs
 from copixiv.db.tx import run_write_transaction_sync
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.deps import AccountPoolDep, UowDep
-from copixiv.features.accounts.repo import SQLAlchemyTokenRepository
 
 # ---------------------------------------------------------------------------
-# Token schemas — carried with the feature (S1 pilot).
+# Repository
+# ---------------------------------------------------------------------------
+
+
+class SQLAlchemyTokenRepository:
+    """Repository for Pixiv refresh tokens."""
+
+    def __init__(self, session: Session):
+        self.session = session
+
+    def get_all(self) -> Sequence[models.Token]:
+        stmt = select(models.Token).order_by(models.Token.sort_index)
+        return list(self.session.execute(stmt).scalars().all())
+
+    def create(self, token_data: dict) -> models.Token:
+        token = models.Token(**token_data)
+        self.session.add(token)
+        self.session.flush()
+        return token
+
+    def update(self, token_id: int, token_data: dict) -> models.Token | None:
+        return update_attrs(self.session, models.Token, token_id, token_data)
+
+    def delete(self, token_id: int) -> bool:
+        return delete_by_id(self.session, models.Token, token_id)
+
+    def reorder(self, ids: list[int]) -> int:
+        return reorder_rows(self.session, models.Token, "sort_index", ids)
+
+    def set_follow(self, token_id: int, is_follow: bool) -> bool:
+        """Designate one token as the「追更账号」, clearing the flag on all others.
+
+        Returns ``False`` when *token_id* doesn't exist.  Runs as a single
+        transaction — the write UoW commits on clean exit.  There is no
+        global write lock under PG; the single transaction keeps the
+        clear-then-set atomic.  At most one account can be flagged at a
+        time.
+        """
+        if is_follow:
+            self.session.execute(
+                update(models.Token).where(models.Token.id != token_id).values(is_follow=False)
+            )
+        token = self.session.get(models.Token, token_id)
+        if token is None:
+            return False
+        token.is_follow = is_follow
+        return True
+
+
+# ---------------------------------------------------------------------------
+# Schemas & HTTP API
 # ---------------------------------------------------------------------------
 
 

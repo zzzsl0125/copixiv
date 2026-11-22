@@ -37,7 +37,7 @@
 ``author_name`` 需要一点额外动作：webview 形状**没有**作者名
 （``build_from_webview`` 恒给 ``None``），而它在 ``force_update`` 里——直接落库
 会把库里已有的显示名抹成 NULL。所以落库前先解析一次（见
-:meth:`SyncNovelUseCase._with_author_name`）。
+:func:`_with_author_name`）。
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ from copixiv.core.exceptions import (
 from copixiv.core.models import SOURCE_PIXIV
 from copixiv.db.tx import read_transaction, run_write_transaction
 from copixiv.db.uow import SqlUnitOfWork
-from copixiv.features.authors.resolve_names import (
+from copixiv.features.authors.service import (
     collect_author_names,
     writeback_author_names,
 )
@@ -77,141 +77,146 @@ SYNC_FORCE_UPDATE: list[str] = [
 LOCAL_BOOK_HAS_NO_SOURCE = "本地书没有来源可同步（同步用于恢复 pixiv 来源值）"
 
 
-class SyncNovelUseCase:
+async def sync_novel(
+    novel_id: int,
+    *,
+    uow: SqlUnitOfWork,
+    client: PixivClient,
+    download_dir: str,
+) -> StoredNovel:
     """把一行 pixiv 小说按 id 重抓一遍，恢复来源值。
 
-    调用方（``api.py``）传请求级的 ``Depends(get_uow)`` 单元 —— **不是**
-    ``get_write_uow``：这个用例的写事务由 :func:`run_write_transaction` 自己
-    开（与 ``tasks/maintenance.py`` 同一种用法），因为抓取必须在写事务之外，
-    而依赖注入阶段开不出"稍后再写"的事务边界。
+    调用方（``routes/novel.py``）传请求级的 ``Depends(get_uow)`` 单元 —— **不是**
+    ``get_write_uow``：写事务由 :func:`run_write_transaction` 自己开（与
+    ``tasks/maintenance`` 同一种用法），因为抓取必须在写事务之外，而依赖注入阶段
+    开不出"稍后再写"的事务边界。
+
+    Raises:
+        NotFoundError: 库里没有这一行 → 404；或 pixiv 上已不存在 / 受限
+            （webview 返回空）→ 404。
+        ValidationError: 本地书 → 400（没有来源可同步）。
     """
+    novel = await read_transaction(
+        uow,
+        lambda read_uow: _read_novel(read_uow, novel_id),
+    )
+    if novel is None:
+        raise NotFoundError(f"Novel {novel_id} not found")
+    if novel.source != SOURCE_PIXIV:
+        raise ValidationError(LOCAL_BOOK_HAS_NO_SOURCE)
 
-    def __init__(
-        self,
-        uow: SqlUnitOfWork,
-        client: PixivClient,
-        download_dir: str,
-    ):
-        self._uow = uow
-        self._client = client
-        # 只为算 draft.path（``build_path``）——落库时它只在库中为 NULL 时才生效。
-        self._download_dir = download_dir
+    # ---- 以下两步都是网络 I/O，必须在写事务之外 ----
+    draft = await _fetch_draft(client, novel_id, download_dir)
+    if draft is None:
+        # 与 ``ingest.py::_download_novels`` 的记账口径一致：webview 返回空
+        # = 已删除 / 受限（那两条路都把它当"取不到"，只是这里回 404 而不是
+        # 写 failed_novel 台账——用户点一下按钮不该往失败账本里写东西）。
+        raise NotFoundError(f"小说 #{novel_id} 在 pixiv 上不存在或不可访问")
+    draft = await _with_author_name(draft, uow=uow, client=client)
 
-    async def execute(self, novel_id: int) -> StoredNovel:
-        """重抓并落库，返回更新后的存储模型（HTTP 层直接做 response_model）。
+    # ---- 落库：短写事务，重试撞锁（run_write_transaction 的既有语义）----
+    await run_write_transaction(
+        uow,
+        lambda tx: _persist_sync(tx, draft),
+    )
 
-        Raises:
-            NotFoundError: 库里没有这一行 → 404；或 pixiv 上已不存在 / 受限
-                （webview 返回空）→ 404。
-            ValidationError: 本地书 → 400（没有来源可同步）。
-        """
-        novel = await read_transaction(
-            self._uow,
-            lambda read_uow: self._read(read_uow, novel_id),
+    # 读回与 PATCH 同一条路（``get_by_id`` 的域模型已处理 is_special_follow
+    # 的 NULL 归一），前端拿到的形状与 PATCH 响应一致。
+    updated = await read_transaction(
+        uow,
+        lambda read_uow: _read_novel(read_uow, novel_id),
+    )
+    if updated is None:  # 并发删除的兜底——上面刚写过，实际不会发生
+        raise NotFoundError(f"Novel {novel_id} not found")
+    return updated
+
+
+# ------------------------------------------------------------------
+# 三个阶段：读（短事务）→ 抓（网络）→ 写（短事务）
+# ------------------------------------------------------------------
+
+
+def _read_novel(uow: SqlUnitOfWork, novel_id: int) -> StoredNovel | None:
+    """短读事务读一行；读不到就是不存在。
+
+    同步：事务边界由调用方的 ``read_transaction`` 提供（那个
+    ``asyncio.to_thread`` 既把阻塞读搬出事件循环，也负责 BEGIN/COMMIT）。
+    读完即提交/释放，抓取阶段不会挂着一个打开的读事务。
+    """
+    return SQLAlchemyNovelRepository(uow.session).get_by_id(novel_id)
+
+
+async def _fetch_draft(
+    client: PixivClient,
+    novel_id: int,
+    download_dir: str,
+) -> NovelDraft | None:
+    """``webview_novel`` → ``build_from_webview``；取不到返回 ``None``。
+
+    取数方式与 ``ingest.py::_download_novels`` 的同一条路
+    （``fetch_novel_and_assets`` 内部就是这两步），但这里刻意**不**做它另外
+    两件事：不写正文文件、不触发资产 / EPUB 流水线——同步只动元数据，
+    点一下"同步"不该顺带重建 EPUB。
+    """
+    try:
+        response = await client.webview_novel(novel_id)
+    except NovelNotFoundError:
+        # 确定性失败（404 / 内容被删）——与下载路径同一种处理，交给调用方 404；
+        # 网络错误 / 限流**不**吞，让它们照旧冒泡（那才是可重试的失败）。
+        logger.warning(f"同步: #{novel_id} 在 pixiv 上不存在或不可访问")
+        return None
+    if not response:
+        return None
+
+    draft = build_from_webview(response, download_dir)
+    # has_epub 归产线所有：None = "别覆盖库里的值"（见模块 docstring 第 1 条）。
+    return replace(draft, has_epub=None)
+
+
+async def _with_author_name(
+    draft: NovelDraft,
+    *,
+    uow: SqlUnitOfWork,
+    client: PixivClient,
+) -> NovelDraft:
+    """给 draft 补上作者显示名（``force_update`` 含 ``author_name``）。
+
+    名字的来源链与本库其它地方一致：``author`` 表优先、pixiv
+    ``user_detail`` 兜底（``collect_author_names`` 的两阶段，全部在写事务
+    之外；本地命中时零网络）。解析不出来就留 NULL——名字待解析是**仓库认可
+    的中间态**（id 是身份、名字是缓存），**不是**"有兜底任务在等着"：
+    ``sync_empty_name`` 默认禁用（``scheduled_task.is_enabled`` 列默认
+    false，只有手动启用才跑）；真正会把名字补回来的是**再抓一次这个作品 /
+    作者**，或者用户再点一次「同步」。
+    """
+    if not draft.author_id:
+        return draft
+    names = await collect_author_names(
+        {draft.author_id},
+        uow=uow,
+        client=client,
+    )
+    return replace(draft, author_name=names.get(draft.author_id))
+
+
+def _persist_sync(uow: SqlUnitOfWork, draft: NovelDraft) -> None:
+    """落库（调用方已开写事务）：upsert 一行 + 把作者名写回 ``author`` 行。
+
+    ``writeback_author_names`` 与 ``ingest`` 的持久化阶段同一个收尾：名字是
+    作者的**属性**，只写 novel 行会让作者页与卡片显示两个名字。
+
+    同步：它是 ``run_write_transaction`` 的 ``fn`` 回调，整个事务跑在同一个
+    worker 线程里——写成 ``async def`` 会被当成普通返回值，写入静默丢失。
+    """
+    force_update = list(SYNC_FORCE_UPDATE)
+    if not draft.author_name:
+        force_update = [f for f in force_update if f != "author_name"]
+    if draft.series_id is None:
+        draft = replace(draft, series_index=None)
+        force_update.append("series_index")
+    persist_novels(uow, [draft], force_update=force_update)
+    if draft.author_name:
+        writeback_author_names(
+            {draft.author_id: draft.author_name},
+            uow,
         )
-        if novel is None:
-            raise NotFoundError(f"Novel {novel_id} not found")
-        if novel.source != SOURCE_PIXIV:
-            raise ValidationError(LOCAL_BOOK_HAS_NO_SOURCE)
-
-        # ---- 以下两步都是网络 I/O，必须在写事务之外 ----
-        draft = await self._fetch(novel_id)
-        if draft is None:
-            # 与 ``ingest.py::_download_novels`` 的记账口径一致：webview 返回空
-            # = 已删除 / 受限（那两条路都把它当"取不到"，只是这里回 404 而不是
-            # 写 failed_novel 台账——用户点一下按钮不该往失败账本里写东西）。
-            raise NotFoundError(f"小说 #{novel_id} 在 pixiv 上不存在或不可访问")
-        draft = await self._with_author_name(draft)
-
-        # ---- 落库：短写事务，重试撞锁（run_write_transaction 的既有语义）----
-        await run_write_transaction(
-            self._uow,
-            lambda uow: self._persist(uow, draft),
-        )
-
-        # 读回与 PATCH 同一条路（``get_by_id`` 的域模型已处理 is_special_follow
-        # 的 NULL 归一），前端拿到的形状与 PATCH 响应一致。
-        updated = await read_transaction(
-            self._uow,
-            lambda read_uow: self._read(read_uow, novel_id),
-        )
-        if updated is None:  # 并发删除的兜底——上面刚写过，实际不会发生
-            raise NotFoundError(f"Novel {novel_id} not found")
-        return updated
-
-    # ------------------------------------------------------------------
-    # 三个阶段：读（短事务）→ 抓（网络）→ 写（短事务）
-    # ------------------------------------------------------------------
-
-    def _read(self, uow: SqlUnitOfWork, novel_id: int) -> StoredNovel | None:
-        """短读事务读一行；读不到就是不存在。
-
-        同步：事务边界由调用方的 ``read_transaction`` 提供（那个
-        ``asyncio.to_thread`` 既把阻塞读搬出事件循环，也负责 BEGIN/COMMIT）。
-        读完即提交/释放，抓取阶段不会挂着一个打开的读事务。
-        """
-        return SQLAlchemyNovelRepository(uow.session).get_by_id(novel_id)
-
-    async def _fetch(self, novel_id: int) -> NovelDraft | None:
-        """``webview_novel`` → ``build_from_webview``；取不到返回 ``None``。
-
-        取数方式与 ``ingest.py::_download_novels`` 的同一条路
-        （``fetch_novel_and_assets`` 内部就是这两步），但这里刻意**不**做它另外
-        两件事：不写正文文件、不触发资产 / EPUB 流水线——同步只动元数据，
-        点一下"同步"不该顺带重建 EPUB。
-        """
-        try:
-            response = await self._client.webview_novel(novel_id)
-        except NovelNotFoundError:
-            # 确定性失败（404 / 内容被删）——与下载路径同一种处理，交给调用方 404；
-            # 网络错误 / 限流**不**吞，让它们照旧冒泡（那才是可重试的失败）。
-            logger.warning(f"同步: #{novel_id} 在 pixiv 上不存在或不可访问")
-            return None
-        if not response:
-            return None
-
-        draft = build_from_webview(response, self._download_dir)
-        # has_epub 归产线所有：None = "别覆盖库里的值"（见模块 docstring 第 1 条）。
-        return replace(draft, has_epub=None)
-
-    async def _with_author_name(self, draft: NovelDraft) -> NovelDraft:
-        """给 draft 补上作者显示名（``force_update`` 含 ``author_name``）。
-
-        名字的来源链与本库其它地方一致：``author`` 表优先、pixiv
-        ``user_detail`` 兜底（``collect_author_names`` 的两阶段，全部在写事务
-        之外；本地命中时零网络）。解析不出来就留 NULL——名字待解析是**仓库认可
-        的中间态**（id 是身份、名字是缓存），**不是**"有兜底任务在等着"：
-        ``sync_empty_name`` 默认禁用（``scheduled_task.is_enabled`` 列默认
-        false，只有手动启用才跑）；真正会把名字补回来的是**再抓一次这个作品 /
-        作者**，或者用户再点一次「同步」。
-        """
-        if not draft.author_id:
-            return draft
-        names = await collect_author_names(
-            {draft.author_id},
-            uow=self._uow,
-            client=self._client,
-        )
-        return replace(draft, author_name=names.get(draft.author_id))
-
-    def _persist(self, uow: SqlUnitOfWork, draft: NovelDraft) -> None:
-        """落库（调用方已开写事务）：upsert 一行 + 把作者名写回 ``author`` 行。
-
-        ``writeback_author_names`` 与 ``ingest`` 的持久化阶段同一个收尾：名字是
-        作者的**属性**，只写 novel 行会让作者页与卡片显示两个名字。
-
-        同步：它是 ``run_write_transaction`` 的 ``fn`` 回调，整个事务跑在同一个
-        worker 线程里——写成 ``async def`` 会被当成普通返回值，写入静默丢失。
-        """
-        force_update = list(SYNC_FORCE_UPDATE)
-        if not draft.author_name:
-            force_update = [f for f in force_update if f != "author_name"]
-        if draft.series_id is None:
-            draft = replace(draft, series_index=None)
-            force_update.append("series_index")
-        persist_novels(uow, [draft], force_update=force_update)
-        if draft.author_name:
-            writeback_author_names(
-                {draft.author_id: draft.author_name},
-                uow,
-            )

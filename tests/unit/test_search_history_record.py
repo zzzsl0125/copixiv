@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 from copixiv.features.novels.routes.query import _filter_recordable_conditions
-from copixiv.features.search_history.record import record_search_history
+from copixiv.features.search_history import record_search_history
 
 
 def test_filter_recordable_conditions_drops_shelf_navigation_dsl():
@@ -34,9 +34,9 @@ def test_record_search_history_avoids_savepoints_and_prunes_to_50():
     uow.session = session
 
     with (
-        patch("copixiv.features.search_history.record.SQLAlchemyAuthorRepository") as author_cls,
-        patch("copixiv.features.search_history.record.SQLAlchemySeriesRepository") as series_cls,
-        patch("copixiv.features.search_history.record.SQLAlchemySearchHistoryRepository") as history_cls,
+        patch("copixiv.features.search_history.SQLAlchemyAuthorRepository") as author_cls,
+        patch("copixiv.features.search_history.SQLAlchemySeriesRepository") as series_cls,
+        patch("copixiv.features.search_history.SQLAlchemySearchHistoryRepository") as history_cls,
     ):
         author_cls.return_value.get_by_id.return_value = {"author_name": "Alice"}
         series_cls.return_value.get_by_id.return_value = {"series_name": "Saga"}

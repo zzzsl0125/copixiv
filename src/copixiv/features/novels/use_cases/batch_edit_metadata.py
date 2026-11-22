@@ -30,7 +30,7 @@
 **③ 计数契约。** ``matched`` = 调用方给的整个选择集（``all_matched`` 模式下就是
 解析出的匹配集），``applicable`` = 其中**本地书**的数量（走
 ``filter_ids_by_source(..., {SOURCE_LOCAL})``，来源常量取自
-``features/library/local_axis.py``），``skipped = matched - applicable``，
+``copixiv.core.models``），``skipped = matched - applicable``，
 ``affected`` = 本次真正被 UPDATE 改动的行数（预演恒为 0）。四个键**恒定存在**
 ——HTTP 层不需要按模式分支取值。
 
@@ -64,7 +64,7 @@ from copixiv.db.base import ensure_parent_rows
 from copixiv.db.tx import read_transaction, run_write_transaction
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
-from copixiv.features.authors.resolve_names import lookup_author_profile
+from copixiv.features.authors.service import lookup_author_profile
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.features.series.repo import SQLAlchemySeriesRepository
 from copixiv.features.series.resolve import lookup_series_profile
@@ -74,7 +74,7 @@ from copixiv.pixiv.client import PixivClient
 class _Unset:
     """「这个字段这次没提交」的哨兵类型 —— 与显式 ``None``（解除关联）不同。
 
-    用类型而不是裸 ``object()``：``execute`` 的签名要能写出
+    用类型而不是裸 ``object()``：:func:`batch_edit_metadata` 的签名要能写出
     ``int | None | _Unset``，而且调试时 ``repr`` 直接说明三态里的哪一态。
     """
 
@@ -97,119 +97,108 @@ class BatchMetadataCounts(TypedDict):
     affected: int
 
 
-class BatchEditMetadataUseCase:
-    """把"一个作者 id / 一个系列 id"写到一批**本地书**上（预演或落库）。
+async def batch_edit_metadata(
+    eligible_ids: list[int],
+    *,
+    uow: SqlUnitOfWork,
+    client: PixivClient | None = None,
+    author_id: int | None | _Unset = _UNSET,
+    series_id: int | None | _Unset = _UNSET,
+    apply: bool = False,
+) -> BatchMetadataCounts:
+    """把"一个作者 id / 一个系列 id"写到一批**本地书**上（计数 ``apply=False`` 或落库 ``apply=True``）。
 
-    与 :class:`~copixiv.features.novels.update_metadata.UpdateNovelMetadataUseCase`
+    与 :func:`~copixiv.features.novels.use_cases.update_metadata.update_novel_metadata`
     同构（同样的仓库装配、同样的三态、同样的解析链），差别全在"批量"这两个字上：
     选择集先按来源收窄、pixiv 书跳过而不是 400、解析只做一次、落库是一条 UPDATE。
     """
+    if apply and author_id is _UNSET and series_id is _UNSET:
+        raise ValidationError("没有要修改的字段")
+    if not eligible_ids:
+        raise ValidationError("请先勾选要修改的小说")
 
-    def __init__(
-        self,
-        uow: SqlUnitOfWork,
-        client: PixivClient | None = None,
-    ):
-        self._uow = uow
-        # 可选：为 None 时名字只能来自本地表（测试与离线场景），与单本一致。
-        self._client = client
+    if author_id is not _UNSET and author_id is not None:
+        author_id = _author_id(author_id)
+    if series_id is not _UNSET and series_id is not None:
+        series_id = _series_id(series_id)
 
-    async def execute(
-        self,
-        eligible_ids: list[int],
-        *,
-        author_id: int | None | _Unset = _UNSET,
-        series_id: int | None | _Unset = _UNSET,
-        apply: bool = False,
-    ) -> BatchMetadataCounts:
-        """计数（``apply=False``）或"计数 + 写库"（``apply=True``）。"""
-        if apply and author_id is _UNSET and series_id is _UNSET:
-            raise ValidationError("没有要修改的字段")
-        if not eligible_ids:
-            raise ValidationError("请先勾选要修改的小说")
+    applicable = await read_transaction(
+        uow,
+        lambda tx: SQLAlchemyNovelRepository(tx.session).filter_ids_by_source(
+            eligible_ids,
+            {SOURCE_LOCAL},
+        ),
+    )
+    counts = BatchMetadataCounts(
+        matched=len(eligible_ids),
+        applicable=len(applicable),
+        skipped=len(eligible_ids) - len(applicable),
+        affected=0,
+    )
 
-        if author_id is not _UNSET and author_id is not None:
-            author_id = _author_id(author_id)
-        if series_id is not _UNSET and series_id is not None:
-            series_id = _series_id(series_id)
-
-        applicable = await read_transaction(
-            self._uow,
-            lambda tx: SQLAlchemyNovelRepository(tx.session).filter_ids_by_source(
-                eligible_ids,
-                {SOURCE_LOCAL},
-            ),
-        )
-        counts = BatchMetadataCounts(
-            matched=len(eligible_ids),
-            applicable=len(applicable),
-            skipped=len(eligible_ids) - len(applicable),
-            affected=0,
-        )
-
-        if not apply or not applicable:
-            return counts
-
-        values: dict[str, Any] = {}
-        resolved_author: tuple[int, str] | None = None
-        resolved_series: tuple[int, str] | None = None
-        backfill_unknown_author = False
-
-        if isinstance(author_id, int):
-            author_profile = await lookup_author_profile(
-                author_id,
-                uow=self._uow,
-                client=self._client,
-            )
-            values["author_id"] = author_id
-            values["author_name"] = author_profile.author_name
-            if author_profile.author_name:
-                resolved_author = (author_id, author_profile.author_name)
-        elif author_id is None:
-            values["author_id"] = None
-            backfill_unknown_author = True
-
-        if isinstance(series_id, int):
-            series_profile = await lookup_series_profile(
-                series_id,
-                uow=self._uow,
-                client=self._client,
-            )
-            values["series_id"] = series_id
-            values["series_name"] = series_profile.series_name
-            if series_profile.series_name:
-                resolved_series = (series_id, series_profile.series_name)
-        elif series_id is None:
-            values["series_id"] = None
-            values["series_name"] = None
-            values["series_index"] = None
-
-        def _commit(tx: SqlUnitOfWork) -> int:
-            write_repo = SQLAlchemyNovelRepository(tx.session)
-            author_repo = SQLAlchemyAuthorRepository(tx.session)
-            series_repo = SQLAlchemySeriesRepository(tx.session)
-
-            ensure_parent_rows(
-                tx.session,
-                author_ids={author_id} if isinstance(author_id, int) else (),
-                series_ids={series_id} if isinstance(series_id, int) else (),
-            )
-
-            affected = write_repo.update_metadata_many(applicable, values)
-
-            if backfill_unknown_author:
-                write_repo.update_metadata_many(
-                    applicable,
-                    {"author_name": UNKNOWN_AUTHOR},
-                    only_where_null="author_name",
-                )
-
-            if resolved_author is not None:
-                author_repo.update_author_name(*resolved_author)
-            if resolved_series is not None:
-                series_repo.update_series_name(*resolved_series)
-
-            return affected
-
-        counts["affected"] = await run_write_transaction(self._uow, _commit)
+    if not apply or not applicable:
         return counts
+
+    values: dict[str, Any] = {}
+    resolved_author: tuple[int, str] | None = None
+    resolved_series: tuple[int, str] | None = None
+    backfill_unknown_author = False
+
+    if isinstance(author_id, int):
+        author_profile = await lookup_author_profile(
+            author_id,
+            uow=uow,
+            client=client,
+        )
+        values["author_id"] = author_id
+        values["author_name"] = author_profile.author_name
+        if author_profile.author_name:
+            resolved_author = (author_id, author_profile.author_name)
+    elif author_id is None:
+        values["author_id"] = None
+        backfill_unknown_author = True
+
+    if isinstance(series_id, int):
+        series_profile = await lookup_series_profile(
+            series_id,
+            uow=uow,
+            client=client,
+        )
+        values["series_id"] = series_id
+        values["series_name"] = series_profile.series_name
+        if series_profile.series_name:
+            resolved_series = (series_id, series_profile.series_name)
+    elif series_id is None:
+        values["series_id"] = None
+        values["series_name"] = None
+        values["series_index"] = None
+
+    def _commit(tx: SqlUnitOfWork) -> int:
+        write_repo = SQLAlchemyNovelRepository(tx.session)
+        author_repo = SQLAlchemyAuthorRepository(tx.session)
+        series_repo = SQLAlchemySeriesRepository(tx.session)
+
+        ensure_parent_rows(
+            tx.session,
+            author_ids={author_id} if isinstance(author_id, int) else (),
+            series_ids={series_id} if isinstance(series_id, int) else (),
+        )
+
+        affected = write_repo.update_metadata_many(applicable, values)
+
+        if backfill_unknown_author:
+            write_repo.update_metadata_many(
+                applicable,
+                {"author_name": UNKNOWN_AUTHOR},
+                only_where_null="author_name",
+            )
+
+        if resolved_author is not None:
+            author_repo.update_author_name(*resolved_author)
+        if resolved_series is not None:
+            series_repo.update_series_name(*resolved_series)
+
+        return affected
+
+    counts["affected"] = await run_write_transaction(uow, _commit)
+    return counts

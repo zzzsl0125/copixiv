@@ -1,4 +1,4 @@
-"""Author name resolution service (two-phase).
+"""Author application services: name resolution and author deletion.
 
 Resolves Pixiv author names in two independent phases:
 
@@ -17,9 +17,11 @@ Resolves Pixiv author names in two independent phases:
    editor's *preview* uses it (``GET /api/novels/author/{id}``), and the
    ``PATCH`` uses it to learn the name it must store alongside the id.
 
-Lives in the application layer (not domain) because it orchestrates
-I/O through the Pixiv client and the unit of work.
+4. ``delete_author`` — delete an author and all their stored data across
+   PostgreSQL, disk, and Pixiv follow list.
 """
+
+from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
@@ -32,6 +34,7 @@ from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 from copixiv.log import logger
 from copixiv.pixiv.client import PixivClient
+from copixiv.storage.file_storage import FileStorage
 
 
 async def collect_author_names(
@@ -192,3 +195,25 @@ async def sync_empty_author_names(
     if mapping:
         await run_write_transaction(uow, lambda uw: writeback_author_names(mapping, uw))
     return TaskResult(summary=f"作者名同步: 处理 {novel_count} 本空名小说 ({len(mapping)} 位作者解析成功)")
+
+
+async def delete_author(
+    author_id: int,
+    *,
+    uow: SqlUnitOfWork,
+    file_storage: FileStorage,
+    client: PixivClient,
+) -> TaskResult:
+    """Delete an author and all their stored data from PG, disk, and Pixiv follow list."""
+    paths = await run_write_transaction(
+        uow,
+        lambda uw: SQLAlchemyAuthorRepository(uw.session).delete_author_and_data(author_id),
+    )
+
+    for path in paths:
+        await asyncio.to_thread(file_storage.delete_novel_files, path)
+
+    async with client.account_rule(force_follow=True):
+        await client.user_follow_delete(author_id)
+
+    return TaskResult(summary=f"已删除作者 #{author_id} 及其全部小说")

@@ -1,1 +1,0 @@
-"""Accounts feature package."""

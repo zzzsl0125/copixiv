@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,11 +12,10 @@ from typing import Literal
 from sqlalchemy import event
 
 from copixiv.core import naming as formats
-from copixiv.core.models import EpubStatus
+from copixiv.core.models import UNKNOWN_AUTHOR, EpubStatus
 from copixiv.core.text import sha256_text
 from copixiv.db.base import ensure_parent_rows
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
-from copixiv.features.library.filenames import clean_filename, parse_filename
 from copixiv.features.library.repo import LocalLibraryRepository
 from copixiv.log import logger
 from copixiv.storage import atomic
@@ -30,14 +30,108 @@ __all__ = [
     "STATUS_CREATED",
     "STATUS_DUPLICATE",
     "STATUS_FAILED",
+    "UNNAMED_TITLE",
     "UploadStatus",
     "UploadUnreadable",
     "body_fingerprint",
+    "clean_filename",
     "ingest_uploads",
     "normalize_text",
+    "parse_filename",
     "parse_upload",
     "resolve_metadata",
 ]
+
+UNNAMED_TITLE = "未命名"
+
+# ``【作者】标题`` / ``[作者] 标题`` —— 方括号（中英文）打头即作者。
+_BRACKET_RE = re.compile(r"^\s*[【\[]\s*(?P<author>[^】\]]+?)\s*[】\]]\s*(?P<title>.+?)\s*$")
+
+# ``作者 - 标题`` 的分隔符：半角/全角连字符**两侧要有空白**，破折号（– —）可无空白。
+_DASH_SEPARATORS = (" - ", " － ", " – ", " — ", " –", "—", "–")
+
+_STATUS_MARKERS = frozenset(
+    {
+        "完结",
+        "已完结",
+        "完结文",
+        "全本",
+        "全集",
+        "完",
+        "连载",
+        "未完结",
+        "txt",
+        "精校",
+        "校对",
+    }
+)
+_TRAILING_GROUP_RE = re.compile(r"[（(\[【]\s*([^）)\]】]{0,16}?)\s*[）)\]】]\s*$")
+_KNOWN_SUFFIXES = (".txt", ".epub")
+
+
+def clean_filename(filename: str) -> str:
+    """取出文件名本体（去掉上传客户端可能带上的目录部分）。"""
+    name = (filename or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
+    return name or "未命名.txt"
+
+
+def _strip_status_markers(title: str) -> str:
+    """剥掉尾部的 ``(完结)`` / ``（全本）`` / ``[txt]`` 一类状态标记。"""
+    current = title.strip()
+    while True:
+        match = _TRAILING_GROUP_RE.search(current)
+        if not match:
+            return current
+        if match.group(1).strip().lower() not in _STATUS_MARKERS:
+            return current
+        stripped = current[: match.start()].strip()
+        if not stripped:
+            return current
+        current = stripped
+
+
+def _split_dash(stem: str) -> tuple[str, str] | None:
+    """``作者 - 标题`` → ``(author, title)``；没有分隔符返回 None。"""
+    for separator in _DASH_SEPARATORS:
+        index = stem.find(separator)
+        if index <= 0:
+            continue
+        author = stem[:index].strip()
+        title = stem[index + len(separator) :].strip()
+        if author and title:
+            return author, title
+    return None
+
+
+def parse_filename(filename: str) -> tuple[str, str]:
+    """从文件名解析 ``(title, author_name)``。
+
+    支持 ``【作者】标题(完结).txt`` / ``[作者] 标题.txt`` / ``作者 - 标题.txt``
+    / 纯 ``标题.txt``（§4-5；``.epub`` 后缀同样先剥掉）。**``author_name``
+    永不为空**：解析不出即「未知作者」。EPUB 上传时它只是**兜底**：
+    ``dc:title`` / ``dc:creator`` 才是首选来源（见 :func:`resolve_metadata`）。
+    """
+    stem = clean_filename(filename)
+    lower = stem.lower()
+    for suffix in _KNOWN_SUFFIXES:
+        if lower.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    stem = stem.strip()
+
+    author = ""
+    title = stem
+    match = _BRACKET_RE.match(stem)
+    if match:
+        author, title = match.group("author"), match.group("title")
+    else:
+        split = _split_dash(stem)
+        if split:
+            author, title = split
+
+    title = _strip_status_markers(title).strip() or title.strip() or stem or UNNAMED_TITLE
+    return title, (author.strip() or UNKNOWN_AUTHOR)
+
 
 EMPTY_ERROR = "文件内容为空"
 
@@ -102,7 +196,7 @@ def resolve_metadata(filename: str, parsed: ParsedUpload) -> tuple[str, str]:
 
 @dataclass(frozen=True)
 class IngestResult:
-    """逐条上传结果（响应契约见 §4 / ``features/library/schemas.py``）。"""
+    """逐条上传结果（响应契约见 §4 / ``features/library/api.py``）。"""
 
     filename: str
     status: UploadStatus

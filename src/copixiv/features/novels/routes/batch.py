@@ -31,11 +31,11 @@ from copixiv.features.novels.schemas import (
 )
 from copixiv.features.novels.use_cases.batch_download import BatchDownloadUseCase
 from copixiv.features.novels.use_cases.batch_edit_metadata import (
-    BatchEditMetadataUseCase,
+    batch_edit_metadata,
 )
 from copixiv.features.novels.use_cases.batch_operations import (
-    BatchDeleteUseCase,
-    BatchTagUseCase,
+    batch_delete,
+    batch_tag,
     delete_novel_paths,
     resolve_batch_scope,
 )
@@ -141,9 +141,10 @@ def batch_operation(
             excluded_ids=body.scope.excluded_ids,
         )
     if body.operation == "delete":
-        use_case = BatchDeleteUseCase(uow, file_storage)
-        affected = use_case.execute(
+        affected = batch_delete(
             ids,
+            uow=uow,
+            file_storage=file_storage,
             defer_file_cleanup=lambda paths: background_tasks.add_task(
                 delete_novel_paths,
                 file_storage,
@@ -151,7 +152,7 @@ def batch_operation(
             ),
         )
     else:
-        affected = BatchTagUseCase(uow).execute(body.operation, ids, body.tags)
+        affected = batch_tag(body.operation, ids, body.tags, uow=uow)
     return BatchOperationResponse(matched=len(ids), affected=affected)
 
 
@@ -193,8 +194,13 @@ async def batch_metadata_operation(
     changes = body.model_dump(exclude_unset=True)
     field_changes = {name: changes[name] for name in ("author_id", "series_id") if name in changes}
 
-    use_case = BatchEditMetadataUseCase(uow, client=client)
-    counts = await use_case.execute(ids, apply=body.apply, **field_changes)
+    counts = await batch_edit_metadata(
+        ids,
+        uow=uow,
+        client=client,
+        apply=body.apply,
+        **field_changes,
+    )
     return BatchMetadataResponse(**counts)
 
 

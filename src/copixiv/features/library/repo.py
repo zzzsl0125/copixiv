@@ -1,15 +1,74 @@
-"""Local library repository — isolated persistence for locally uploaded books."""
+"""Local library repository and timeline coordinate allocation for locally uploaded books."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 
-from copixiv.core.models import SOURCE_LOCAL, EpubStatus
+from copixiv.core.models import SOURCE_LOCAL, SOURCE_PIXIV, EpubStatus
 from copixiv.db import models
-from copixiv.features.library import local_axis
+
+# 坐标游标（迁移 0005 建的 ``novel_local_id_seq``，0006 改名并改为承载坐标）。
+COORD_SEQUENCE = "novel_local_coord_seq"
+ID_LOCK_KEY = "copixiv.library.local_novel_id"
+
+# 只在「库里还没有任何 pixiv 行」时使用（新装、先上传后抓取）：此时没有水位
+# 可参照，只能按时间线性外推作品号，否则本地书会被钉在 id 轴起点（2012 年），
+# 等第一次抓取落地就永远沉底。
+#
+# 校准值来自线上库（2026-09-18）：最新作品号 29,155,910 / create_time
+# 2026-09-17T15:00Z，近 90 天实测增速 8,509 号/天。
+SEED_ID = 29_155_910
+SEED_AT = datetime(2026, 9, 17, 15, 0, tzinfo=UTC)
+SEED_IDS_PER_DAY = 8509.0
+
+
+def seed_coord(now: datetime | None = None) -> int:
+    """空轴兜底：把时刻线性外推成作品号坐标（恒 ≥ 1）。"""
+    now = now or datetime.now(UTC)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    days = (now - SEED_AT).total_seconds() / 86400.0
+    return max(1, int(SEED_ID + days * SEED_IDS_PER_DAY))
+
+
+def pixiv_watermark(session: Session) -> int | None:
+    """已抓取的最大 pixiv 作品号；一行都没有时 ``None``。"""
+    return session.execute(
+        select(func.max(models.Novel.id)).where(models.Novel.source == SOURCE_PIXIV)
+    ).scalar()
+
+
+def lock_local_ids(session: Session) -> None:
+    """获取事务级咨询锁，串行化本地书的去重检查、发号与落库。"""
+    session.execute(
+        sa_text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+        {"key": ID_LOCK_KEY},
+    )
+
+
+def next_local_id(session: Session, now: datetime | None = None, *, lock: bool = True) -> int:
+    """下一个本地书 id（负数）。发号在写事务内进行（2 条 SQL）。
+
+    调用方若已在当前事务持有 :func:`lock_local_ids` 咨询锁，可传 ``lock=False``
+    省去重复加锁；独立调用时默认 ``lock=True``，确保并发 ``setval`` 不撞号。
+    """
+    if lock:
+        lock_local_ids(session)
+    watermark = pixiv_watermark(session)
+    floor = watermark + 1 if watermark is not None else seed_coord(now)
+    coord = int(
+        session.execute(
+            sa_text(
+                f"SELECT setval('{COORD_SEQUENCE}', GREATEST(nextval('{COORD_SEQUENCE}'), :floor), true)"
+            ),
+            {"floor": floor},
+        ).scalar_one()
+    )
+    return -coord
 
 
 class LocalLibraryRepository:
@@ -20,11 +79,11 @@ class LocalLibraryRepository:
 
     def lock_local_ids(self) -> None:
         """Acquire the transaction-level advisory lock serializing dedup+insert."""
-        local_axis.lock_local_ids(self.session)
+        lock_local_ids(self.session)
 
     def next_local_id(self) -> int:
         """Allocate the next monotonic negative coordinate ID (lock already held)."""
-        return local_axis.next_local_id(self.session, lock=False)
+        return next_local_id(self.session, lock=False)
 
     def find_local_duplicate(self, source_key: str) -> tuple[int, str] | None:
         """Return ``(id, title)`` if a local book with *source_key* already exists."""

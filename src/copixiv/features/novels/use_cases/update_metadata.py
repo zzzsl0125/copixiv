@@ -26,7 +26,7 @@
 * **解除关联（显式 null）时两者刻意不同**（2026-09-22 修）：作者保留显示名——它在
   上传时来自文件名解析，有独立来源；系列连名字与章节号一起清——本地书的系列名只
   可能由 id 解析而来（上传时是 NULL），留着它就是一串"点不动的系列名"，而名字本身
-  提交即 422，用户没有任何出口能清掉。见 :meth:`_series_columns`。
+  提交即 422，用户没有任何出口能清掉。见 :func:`_series_columns`。
 
 写路径纪律：只做**单行更新**（``SQLAlchemyNovelWriteRepository.update_metadata``），
 **绝不走 ``_upsert_rows``**——那是来源刷新的写路径，带"来源权威"白名单与
@@ -59,7 +59,7 @@ from copixiv.db.base import ensure_parent_rows
 from copixiv.db.tx import read_transaction, run_write_transaction
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
-from copixiv.features.authors.resolve_names import lookup_author_profile
+from copixiv.features.authors.service import lookup_author_profile
 from copixiv.features.novels import field_policy
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository, StoredNovel
 from copixiv.features.series.repo import SQLAlchemySeriesRepository
@@ -70,7 +70,7 @@ from copixiv.pixiv.client import PixivClient
 # 本地书的 ``author_name`` 在上传时永不为 NULL（LIBRARY_DESIGN.md §3.3）：解析
 # 不出写「未知作者」。它是**产品承诺**「每本书都有作者名可显示」的落点——这条
 # 承诺不外包给任何任务（``sync_empty_name`` 默认禁用，见 §7）。解除作者关联时
-# 若名字仍是 NULL，会被补回本值（见 :meth:`_author_columns` 的守卫）。
+# 若名字仍是 NULL，会被补回本值（见 :func:`_author_columns` 的守卫）。
 
 MAX_TITLE = 300
 MAX_TAGS = 50
@@ -83,202 +83,207 @@ MAX_TAGS = 50
 SERIES_INDEX_POSITIVE = "章节号必须是正整数"
 
 
-class UpdateNovelMetadataUseCase:
+async def update_novel_metadata(
+    novel_id: int,
+    changes: dict[str, Any],
+    *,
+    uow: SqlUnitOfWork,
+    client: PixivClient | None = None,
+) -> StoredNovel:
     """按"提交了什么就改什么"更新一行——PATCH 三态：未提交 / 给值 / 显式 null。
 
     调用方传 ``NovelUpdateRequest.model_dump(exclude_unset=True)``：键不出现 =
     不动，显式 ``null`` = 清空（``series_index`` / ``create_time`` / ``tags`` /
     ``author_id`` / ``series_id``）。两个 id 的差别只在"名字怎么收尾"：
     ``series_id = null`` 连名字与章节号一起清，``author_id = null`` 保留显示名
-    ——原因见 :meth:`_series_columns` 与 :meth:`_author_columns`。
+    ——原因见 :func:`_series_columns` 与 :func:`_author_columns`。
+
+    DB reads and writes run off the event loop via :func:`read_transaction`
+    and :func:`run_write_transaction`; Pixiv lookups never hold an open
+    DB session or transaction.
+
+    Raises:
+        NotFoundError: 小说不存在 → 404。
+        ValidationError: 空 patch / 校验失败 / pixiv 书提交只读字段 → 400。
     """
+    if not changes:
+        raise ValidationError("没有要更新的字段")
 
-    def __init__(
-        self,
-        uow: SqlUnitOfWork,
-        client: PixivClient | None = None,
-    ):
-        self._uow = uow
-        # 可选：为 None 时名字只能来自本地表（测试与离线场景）。
-        self._client = client
+    def _prepare(tx: SqlUnitOfWork) -> tuple[StoredNovel, dict[str, Any]]:
+        novel_repo = SQLAlchemyNovelRepository(tx.session)
+        novel = novel_repo.get_by_id(novel_id)
+        if novel is None:
+            raise NotFoundError(f"Novel {novel_id} not found")
+        tag_repo = SQLAlchemyTagRepository(tx.session)
+        return novel, _build_values(novel, changes, tag_repo)
 
-    async def execute(self, novel_id: int, changes: dict[str, Any]) -> StoredNovel:
-        """应用 *changes*（只含客户端提交的键），返回更新后的存储模型。
+    novel, values = await read_transaction(uow, _prepare)
 
-        DB reads and writes run off the event loop via :func:`read_transaction`
-        and :func:`run_write_transaction`; Pixiv lookups never hold an open
-        DB session or transaction.
-
-        Raises:
-            NotFoundError: 小说不存在 → 404。
-            ValidationError: 空 patch / 校验失败 / pixiv 书提交只读字段 → 400。
-        """
-        if not changes:
-            raise ValidationError("没有要更新的字段")
-
-        def _prepare(tx: SqlUnitOfWork) -> tuple[StoredNovel, dict[str, Any]]:
-            novel_repo = SQLAlchemyNovelRepository(tx.session)
-            novel = novel_repo.get_by_id(novel_id)
-            if novel is None:
-                raise NotFoundError(f"Novel {novel_id} not found")
-            tag_repo = SQLAlchemyTagRepository(tx.session)
-            return novel, self._build_values(novel, changes, tag_repo)
-
-        novel, values = await read_transaction(self._uow, _prepare)
-
-        # 作者与系列是仅有的"先解析再落库"的字段（其余全是纯函数归一）：解析要读
-        # 本地表、可能还要问一次 Pixiv，所以它们不在 _build_values 里。
-        resolved_author: tuple[int, str] | None = None
-        if "author_id" in changes:
-            author_values, resolved_author = await self._author_columns(
-                changes["author_id"],
-                novel,
-            )
-            values.update(author_values)
-
-        resolved_series: tuple[int, str] | None = None
-        if "series_id" in changes:
-            series_values, resolved_series = await self._series_columns(
-                changes["series_id"],
-            )
-            values.update(series_values)
-
-        def _commit(tx: SqlUnitOfWork) -> StoredNovel:
-            novel_repo = SQLAlchemyNovelRepository(tx.session)
-            author_repo = SQLAlchemyAuthorRepository(tx.session)
-            series_repo = SQLAlchemySeriesRepository(tx.session)
-
-            current = novel_repo.get_by_id(novel_id)
-            if current is None:
-                raise NotFoundError(f"Novel {novel_id} not found")
-
-            ensure_parent_rows(
-                tx.session,
-                author_ids=(
-                    {values["author_id"]} if "author_id" in values and values["author_id"] is not None else ()
-                ),
-                series_ids=(
-                    {values["series_id"]} if "series_id" in values and values["series_id"] is not None else ()
-                ),
-            )
-
-            novel_repo.update_metadata(novel_id, values)
-
-            if resolved_author is not None:
-                author_repo.update_author_name(*resolved_author)
-            if resolved_series is not None:
-                series_repo.update_series_name(*resolved_series)
-
-            updated = novel_repo.get_by_id(novel_id)
-            if updated is None:  # 并发删除的兜底——上面刚写过，实际不会发生
-                raise NotFoundError(f"Novel {novel_id} not found")
-            return updated
-
-        return await run_write_transaction(self._uow, _commit)
-
-    # ------------------------------------------------------------------
-    # 校验 / 归一
-    # ------------------------------------------------------------------
-
-    def _build_values(
-        self,
-        novel: StoredNovel,
-        changes: dict[str, Any],
-        tag_repo: SQLAlchemyTagRepository,
-    ) -> dict[str, Any]:
-        """逐字段校验并归一，返回可直接 setattr 的列值字典。"""
-        # 先判"这个字段这本书能不能改"：pixiv 书的只读字段即便传的是合法值也拒。
-        # 迭代 ``LOCAL_ONLY_FIELDS`` 而不是请求体的键顺序——报错顺序是契约的一部分
-        # （同一请求提交多个非法字段时，报的是清单里最靠前的那个）。
-        # 判定本身走 ``is_editable``：清单将来若变动（某字段在 pixiv 放开），
-        # 这里不用跟着改。
-        for field in field_policy.LOCAL_ONLY_FIELDS:
-            if field in changes and not field_policy.is_editable(
-                novel.source,
-                field,
-            ):
-                raise ValidationError(field_policy.rejection_reason(field))
-
-        values: dict[str, Any] = {}
-
-        if "title" in changes:
-            title = _text(changes["title"])
-            if not title:
-                raise ValidationError("标题不能为空")
-            _check_length("标题", title, MAX_TITLE)
-            values["title"] = title
-
-        if "series_index" in changes:
-            values["series_index"] = _series_index(changes["series_index"])
-
-        if "tags" in changes:
-            values["tags"] = self._normalize_tags(changes["tags"], tag_repo)
-
-        if "create_time" in changes:
-            values["create_time"] = _create_time(changes["create_time"])
-
-        return values
-
-    async def _author_columns(
-        self,
-        raw: Any,
-        novel: StoredNovel,
-    ) -> tuple[dict[str, Any], tuple[int, str] | None]:
-        """``author_id`` 提交值 → 列值 + 需要写回作者行的 ``(id, 名字)``。"""
-        if raw is None:
-            values: dict[str, Any] = {"author_id": None}
-            if novel.author_name is None:
-                values["author_name"] = UNKNOWN_AUTHOR
-            return values, None
-
-        author_id = _author_id(raw)
-
-        profile = await lookup_author_profile(
-            author_id,
-            uow=self._uow,
-            client=self._client,
+    # 作者与系列是仅有的"先解析再落库"的字段（其余全是纯函数归一）：解析要读
+    # 本地表、可能还要问一次 Pixiv，所以它们不在 _build_values 里。
+    resolved_author: tuple[int, str] | None = None
+    if "author_id" in changes:
+        author_values, resolved_author = await _author_columns(
+            changes["author_id"],
+            novel,
+            uow=uow,
+            client=client,
         )
-        values = {"author_id": author_id, "author_name": profile.author_name}
-        resolved = (author_id, profile.author_name) if profile.author_name else None
-        return values, resolved
+        values.update(author_values)
 
-    async def _series_columns(
-        self,
-        raw: Any,
-    ) -> tuple[dict[str, Any], tuple[int, str] | None]:
-        """``series_id`` 提交值 → 列值 + 需要写回系列行的 ``(id, 名字)``。"""
-        if raw is None:
-            return {
-                "series_id": None,
-                "series_name": None,
-                "series_index": None,
-            }, None
-
-        series_id = _series_id(raw)
-
-        profile = await lookup_series_profile(
-            series_id,
-            uow=self._uow,
-            client=self._client,
+    resolved_series: tuple[int, str] | None = None
+    if "series_id" in changes:
+        series_values, resolved_series = await _series_columns(
+            changes["series_id"],
+            uow=uow,
+            client=client,
         )
-        values = {"series_id": series_id, "series_name": profile.series_name}
-        resolved = (series_id, profile.series_name) if profile.series_name else None
-        return values, resolved
+        values.update(series_values)
 
-    def _normalize_tags(self, raw: Any, tag_repo: SQLAlchemyTagRepository) -> list[str]:
-        if raw is None:
-            raw = []
-        if not isinstance(raw, list):
-            raise ValidationError("标签必须是字符串数组")
+    def _commit(tx: SqlUnitOfWork) -> StoredNovel:
+        novel_repo = SQLAlchemyNovelRepository(tx.session)
+        author_repo = SQLAlchemyAuthorRepository(tx.session)
+        series_repo = SQLAlchemySeriesRepository(tx.session)
 
-        cleaned = parse_tags(raw)
-        alias_map = tag_repo.get_alias_map()
-        merged = sorted({alias_map.get(tag, tag) for tag in cleaned})
+        current = novel_repo.get_by_id(novel_id)
+        if current is None:
+            raise NotFoundError(f"Novel {novel_id} not found")
 
-        if len(merged) > MAX_TAGS:
-            raise ValidationError(f"标签过多（最多 {MAX_TAGS} 个）")
-        validate_tags(merged, max_length=MAX_TAG_LENGTH)
-        return merged
+        ensure_parent_rows(
+            tx.session,
+            author_ids=(
+                {values["author_id"]} if "author_id" in values and values["author_id"] is not None else ()
+            ),
+            series_ids=(
+                {values["series_id"]} if "series_id" in values and values["series_id"] is not None else ()
+            ),
+        )
+
+        novel_repo.update_metadata(novel_id, values)
+
+        if resolved_author is not None:
+            author_repo.update_author_name(*resolved_author)
+        if resolved_series is not None:
+            series_repo.update_series_name(*resolved_series)
+
+        updated = novel_repo.get_by_id(novel_id)
+        if updated is None:  # 并发删除的兜底——上面刚写过，实际不会发生
+            raise NotFoundError(f"Novel {novel_id} not found")
+        return updated
+
+    return await run_write_transaction(uow, _commit)
+
+
+# ------------------------------------------------------------------
+# 校验 / 归一
+# ------------------------------------------------------------------
+
+
+def _build_values(
+    novel: StoredNovel,
+    changes: dict[str, Any],
+    tag_repo: SQLAlchemyTagRepository,
+) -> dict[str, Any]:
+    """逐字段校验并归一，返回可直接 setattr 的列值字典。"""
+    # 先判"这个字段这本书能不能改"：pixiv 书的只读字段即便传的是合法值也拒。
+    # 迭代 ``LOCAL_ONLY_FIELDS`` 而不是请求体的键顺序——报错顺序是契约的一部分
+    # （同一请求提交多个非法字段时，报的是清单里最靠前的那个）。
+    # 判定本身走 ``is_editable``：清单将来若变动（某字段在 pixiv 放开），
+    # 这里不用跟着改。
+    for field in field_policy.LOCAL_ONLY_FIELDS:
+        if field in changes and not field_policy.is_editable(
+            novel.source,
+            field,
+        ):
+            raise ValidationError(field_policy.rejection_reason(field))
+
+    values: dict[str, Any] = {}
+
+    if "title" in changes:
+        title = _text(changes["title"])
+        if not title:
+            raise ValidationError("标题不能为空")
+        _check_length("标题", title, MAX_TITLE)
+        values["title"] = title
+
+    if "series_index" in changes:
+        values["series_index"] = _series_index(changes["series_index"])
+
+    if "tags" in changes:
+        values["tags"] = _normalize_tags(changes["tags"], tag_repo)
+
+    if "create_time" in changes:
+        values["create_time"] = _create_time(changes["create_time"])
+
+    return values
+
+
+async def _author_columns(
+    raw: Any,
+    novel: StoredNovel,
+    *,
+    uow: SqlUnitOfWork,
+    client: PixivClient | None,
+) -> tuple[dict[str, Any], tuple[int, str] | None]:
+    """``author_id`` 提交值 → 列值 + 需要写回作者行的 ``(id, 名字)``。"""
+    if raw is None:
+        values: dict[str, Any] = {"author_id": None}
+        if novel.author_name is None:
+            values["author_name"] = UNKNOWN_AUTHOR
+        return values, None
+
+    author_id = _author_id(raw)
+
+    profile = await lookup_author_profile(
+        author_id,
+        uow=uow,
+        client=client,
+    )
+    values = {"author_id": author_id, "author_name": profile.author_name}
+    resolved = (author_id, profile.author_name) if profile.author_name else None
+    return values, resolved
+
+
+async def _series_columns(
+    raw: Any,
+    *,
+    uow: SqlUnitOfWork,
+    client: PixivClient | None,
+) -> tuple[dict[str, Any], tuple[int, str] | None]:
+    """``series_id`` 提交值 → 列值 + 需要写回系列行的 ``(id, 名字)``。"""
+    if raw is None:
+        return {
+            "series_id": None,
+            "series_name": None,
+            "series_index": None,
+        }, None
+
+    series_id = _series_id(raw)
+
+    profile = await lookup_series_profile(
+        series_id,
+        uow=uow,
+        client=client,
+    )
+    values = {"series_id": series_id, "series_name": profile.series_name}
+    resolved = (series_id, profile.series_name) if profile.series_name else None
+    return values, resolved
+
+
+def _normalize_tags(raw: Any, tag_repo: SQLAlchemyTagRepository) -> list[str]:
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        raise ValidationError("标签必须是字符串数组")
+
+    cleaned = parse_tags(raw)
+    alias_map = tag_repo.get_alias_map()
+    merged = sorted({alias_map.get(tag, tag) for tag in cleaned})
+
+    if len(merged) > MAX_TAGS:
+        raise ValidationError(f"标签过多（最多 {MAX_TAGS} 个）")
+    validate_tags(merged, max_length=MAX_TAG_LENGTH)
+    return merged
 
 
 # ---------------------------------------------------------------------------

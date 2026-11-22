@@ -11,10 +11,10 @@ from copixiv.deps import (
 )
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.features.novels.schemas import NovelBase, NovelUpdateRequest
-from copixiv.features.novels.use_cases.delete_novel import DeleteNovelUseCase
-from copixiv.features.novels.use_cases.sync_novel import SyncNovelUseCase
+from copixiv.features.novels.use_cases.delete_novel import delete_novel as _delete_novel
+from copixiv.features.novels.use_cases.sync_novel import sync_novel as _sync_novel
 from copixiv.features.novels.use_cases.update_metadata import (
-    UpdateNovelMetadataUseCase,
+    update_novel_metadata as _update_novel_metadata,
 )
 
 router = APIRouter(dependencies=[Depends(require_api_key)])
@@ -55,8 +55,12 @@ async def update_novel_metadata(
     ``author_id`` / ``series_id`` 是仅有的可能触发网络请求的字段（本地表没有
     这个名字时问一次 Pixiv）。失败**不致命**：id 照写，名字留 NULL 待补。
     """
-    use_case = UpdateNovelMetadataUseCase(uow, client=client)
-    return await use_case.execute(novel_id, body.model_dump(exclude_unset=True))
+    return await _update_novel_metadata(
+        novel_id,
+        body.model_dump(exclude_unset=True),
+        uow=uow,
+        client=client,
+    )
 
 
 @router.post("/{novel_id}/sync", response_model=NovelBase)
@@ -79,8 +83,12 @@ async def sync_novel(
     依赖用 ``UowDep`` 而**不是** ``get_write_uow``：抓取必须在写事务
     之外，写事务由用例里的 ``run_write_transaction`` 自己开。
     """
-    use_case = SyncNovelUseCase(uow, client, file_storage.download_dir)
-    return await use_case.execute(novel_id)
+    return await _sync_novel(
+        novel_id,
+        uow=uow,
+        client=client,
+        download_dir=file_storage.download_dir,
+    )
 
 
 @router.delete("/{novel_id}", status_code=204)
@@ -89,5 +97,4 @@ def delete_novel(
     file_storage: FileStorageDep,
     uow: UowDep,
 ):
-    use_case = DeleteNovelUseCase(uow, file_storage)
-    use_case.execute(novel_id)
+    _delete_novel(novel_id, uow=uow, file_storage=file_storage)

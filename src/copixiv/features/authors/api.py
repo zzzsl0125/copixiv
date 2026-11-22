@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from copixiv.db.tx import read_transaction, run_write_transaction_sync
 from copixiv.deps import PixivClientDep, UowDep
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
-from copixiv.features.authors.resolve_names import lookup_author_profile
+from copixiv.features.authors.service import lookup_author_profile
 
 
 class AuthorLookupResponse(BaseModel):

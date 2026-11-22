@@ -104,12 +104,12 @@ type = forbidden
 source_modules =
     copixiv.tasks
 forbidden_modules =
-    copixiv.features.accounts.api
+    copixiv.features.accounts
     copixiv.features.authors.api
     copixiv.features.failures.api
     copixiv.features.library.api
     copixiv.features.novels.routes
-    copixiv.features.search_history.api
+    copixiv.features.search_history
     copixiv.features.series.api
     copixiv.features.system.api
     copixiv.features.tags.aliases

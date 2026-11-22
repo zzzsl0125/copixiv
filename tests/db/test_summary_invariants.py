@@ -13,10 +13,10 @@ from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.library.ingest import ingest_uploads
 from copixiv.features.novels.ingest import persist_novels
 from copixiv.features.novels.use_cases.batch_edit_metadata import (
-    BatchEditMetadataUseCase,
+    batch_edit_metadata,
 )
 from copixiv.features.novels.use_cases.update_metadata import (
-    UpdateNovelMetadataUseCase,
+    update_novel_metadata,
 )
 from copixiv.storage.file_storage import FileStorage
 
@@ -67,19 +67,18 @@ async def test_parent_name_sync_across_write_paths(uow: SqlUnitOfWork, tmp_path:
         assert a20 is not None
         assert a20.author_name == "Author20"
 
-    # 3. UpdateNovelMetadataUseCase: syncs author/series display names
-    uc_single = UpdateNovelMetadataUseCase(uow)
-    await uc_single.execute(local_ids[0], {"author_id": 10, "series_id": 100})
+    # 3. update_novel_metadata: syncs author/series display names
+    await update_novel_metadata(local_ids[0], {"author_id": 10, "series_id": 100}, uow=uow)
     with uow.begin():
         novel = uow.session.get(models.Novel, local_ids[0])
         assert novel is not None
         assert novel.author_name == "Author10"
         assert novel.series_name == "S100"
 
-    # 4. BatchEditMetadataUseCase: mixed [local_ids[0], local_ids[1], 1001 (pixiv)] -> Author 20 / Series 100
-    uc_batch = BatchEditMetadataUseCase(uow)
-    counts = await uc_batch.execute(
+    # 4. batch_edit_metadata: mixed [local_ids[0], local_ids[1], 1001 (pixiv)] -> Author 20 / Series 100
+    counts = await batch_edit_metadata(
         [local_ids[0], local_ids[1], 1001],
+        uow=uow,
         author_id=20,
         series_id=100,
         apply=True,
@@ -155,8 +154,7 @@ async def test_batch_edit_metadata_dry_run_with_empty_fields(uow: SqlUnitOfWork)
         uow.session.add(models.Novel(id=8001, title="PixivBook", source="pixiv", path="p/8001.txt"))
         local_id = local_novel.id
 
-    uc = BatchEditMetadataUseCase(uow)
-    counts = await uc.execute([local_id, 8001], apply=False)
+    counts = await batch_edit_metadata([local_id, 8001], uow=uow, apply=False)
     assert counts == {
         "matched": 2,
         "applicable": 1,

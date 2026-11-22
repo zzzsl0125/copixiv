@@ -23,7 +23,7 @@ from copixiv.features.novels.schemas import (
     NovelsByIdsResponse,
     SortIdsRequest,
 )
-from copixiv.features.search_history.record import record_search_history
+from copixiv.features.search_history import record_search_history
 
 _SHELF_NAVIGATION_TYPES = frozenset({"is_favourite", "is_special_follow", "source"})
 

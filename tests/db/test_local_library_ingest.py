@@ -19,7 +19,7 @@ from copixiv.features.library.ingest import (
     STATUS_FAILED,
     ingest_uploads,
 )
-from copixiv.features.library.local_axis import next_local_id
+from copixiv.features.library.repo import next_local_id
 from copixiv.features.system.repo import SQLAlchemySettingRepository
 from copixiv.storage.file_storage import FileStorage
 
