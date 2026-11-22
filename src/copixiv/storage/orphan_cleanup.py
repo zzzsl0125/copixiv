@@ -97,19 +97,11 @@ def collect_orphan_files(
     return orphans
 
 
-def unlink_files(files: Sequence[tuple[Path, int]] | Sequence[Path]) -> tuple[int, int]:
+def unlink_files(files: Sequence[tuple[Path, int]]) -> tuple[int, int]:
     """Delete *files*; return ``(deleted_count, freed_bytes)``."""
     deleted = 0
     freed = 0
-    for item in files:
-        if isinstance(item, tuple):
-            path, size = item
-        else:
-            path = item
-            try:
-                size = path.stat().st_size
-            except OSError:
-                size = 0
+    for path, size in files:
         try:
             path.unlink()
         except OSError as exc:

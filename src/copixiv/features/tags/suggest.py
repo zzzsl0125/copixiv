@@ -54,6 +54,5 @@ def suggest_tag_aliases(
     ]
     return {
         "items": items,
-        "next_offset": next_cursor if next_cursor is not None else 0,
         "next_cursor": next_cursor,
     }

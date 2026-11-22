@@ -652,8 +652,7 @@ export interface paths {
         /** Get Tag Aliases */
         get: operations["get_tag_aliases_api_tag_aliases_get"];
         put?: never;
-        /** Create Tag Alias */
-        post: operations["create_tag_alias_api_tag_aliases_post"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -706,32 +705,14 @@ export interface paths {
          * Suggest Tag Aliases
          * @description 相似标签建议。
          *
-         *     ``offset`` 是**游标**（不是行偏移）：把上一次响应里的 ``next_offset`` 原样
-         *     传回来续扫即可（字段名保留 ``offset`` / ``next_offset`` 是为了不动前端契约，
-         *     前端只把它当不透明整数回传）。``target_tag=`` 模式只指名一个 target，
-         *     没有「页」可续，因此忽略 ``offset`` 且 ``next_offset`` 恒为 0。
+         *     ``offset`` 是游标（不是行偏移）：把上一次响应里的 ``next_cursor`` 原样
+         *     传回来续扫即可（``None`` 表示已扫描结束）。``target_tag=`` 模式只指名一个
+         *     target，没有「页」可续，因此忽略 ``offset`` 且 ``next_cursor`` 恒为 ``None``。
          */
         get: operations["suggest_tag_aliases_api_tag_aliases_suggest_get"];
         put?: never;
         post?: never;
         delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/tag-aliases/{alias_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post?: never;
-        /** Delete Tag Alias */
-        delete: operations["delete_tag_alias_api_tag_aliases__alias_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1631,13 +1612,6 @@ export interface components {
             /** Exclude Blocked Tag Novels */
             exclude_blocked_tag_novels?: boolean | null;
         };
-        /** TagAliasBase */
-        TagAliasBase: {
-            /** Source */
-            source: string;
-            /** Target */
-            target: string;
-        };
         /** TagAliasBatchCreate */
         TagAliasBatchCreate: {
             /** Sources */
@@ -1669,8 +1643,6 @@ export interface components {
             items: components["schemas"]["TagAliasSuggestResponse"][];
             /** Next Cursor */
             next_cursor?: number | null;
-            /** Next Offset */
-            next_offset: number;
         };
         /** TagAliasSuggestResponse */
         TagAliasSuggestResponse: {
@@ -2920,39 +2892,6 @@ export interface operations {
             };
         };
     };
-    create_tag_alias_api_tag_aliases_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["TagAliasBase"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TagAliasResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     create_tag_aliases_batch_api_tag_aliases_batch_post: {
         parameters: {
             query?: never;
@@ -3069,35 +3008,6 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["TagAliasSuggestListResponse"];
                 };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    delete_tag_alias_api_tag_aliases__alias_id__delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                alias_id: number;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
             };
             /** @description Validation Error */
             422: {

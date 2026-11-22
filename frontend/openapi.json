@@ -1325,24 +1325,6 @@
         "title": "SystemConfigUpdate",
         "type": "object"
       },
-      "TagAliasBase": {
-        "properties": {
-          "source": {
-            "title": "Source",
-            "type": "string"
-          },
-          "target": {
-            "title": "Target",
-            "type": "string"
-          }
-        },
-        "required": [
-          "source",
-          "target"
-        ],
-        "title": "TagAliasBase",
-        "type": "object"
-      },
       "TagAliasBatchCreate": {
         "properties": {
           "sources": {
@@ -1406,9 +1388,9 @@
           }
         },
         "required": [
+          "id",
           "source",
-          "target",
-          "id"
+          "target"
         ],
         "title": "TagAliasResponse",
         "type": "object"
@@ -1432,15 +1414,10 @@
               }
             ],
             "title": "Next Cursor"
-          },
-          "next_offset": {
-            "title": "Next Offset",
-            "type": "integer"
           }
         },
         "required": [
-          "items",
-          "next_offset"
+          "items"
         ],
         "title": "TagAliasSuggestListResponse",
         "type": "object"
@@ -3747,50 +3724,6 @@
         "tags": [
           "tag_aliases"
         ]
-      },
-      "post": {
-        "operationId": "create_tag_alias_api_tag_aliases_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/TagAliasBase"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TagAliasResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "APIKeyHeader": []
-          }
-        ],
-        "summary": "Create Tag Alias",
-        "tags": [
-          "tag_aliases"
-        ]
       }
     },
     "/api/tag-aliases/batch": {
@@ -3934,7 +3867,7 @@
     },
     "/api/tag-aliases/suggest": {
       "get": {
-        "description": "相似标签建议。\n\n``offset`` 是**游标**（不是行偏移）：把上一次响应里的 ``next_offset`` 原样\n传回来续扫即可（字段名保留 ``offset`` / ``next_offset`` 是为了不动前端契约，\n前端只把它当不透明整数回传）。``target_tag=`` 模式只指名一个 target，\n没有「页」可续，因此忽略 ``offset`` 且 ``next_offset`` 恒为 0。",
+        "description": "相似标签建议。\n\n``offset`` 是游标（不是行偏移）：把上一次响应里的 ``next_cursor`` 原样\n传回来续扫即可（``None`` 表示已扫描结束）。``target_tag=`` 模式只指名一个\ntarget，没有「页」可续，因此忽略 ``offset`` 且 ``next_cursor`` 恒为 ``None``。",
         "operationId": "suggest_tag_aliases_api_tag_aliases_suggest_get",
         "parameters": [
           {
@@ -4005,46 +3938,6 @@
           }
         ],
         "summary": "Suggest Tag Aliases",
-        "tags": [
-          "tag_aliases"
-        ]
-      }
-    },
-    "/api/tag-aliases/{alias_id}": {
-      "delete": {
-        "operationId": "delete_tag_alias_api_tag_aliases__alias_id__delete",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "alias_id",
-            "required": true,
-            "schema": {
-              "title": "Alias Id",
-              "type": "integer"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "APIKeyHeader": []
-          }
-        ],
-        "summary": "Delete Tag Alias",
         "tags": [
           "tag_aliases"
         ]

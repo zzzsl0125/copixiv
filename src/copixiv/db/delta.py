@@ -85,7 +85,7 @@ def attach_engine_runtime(
         pending = pop_pending_delta(session)
         if not committed:
             return
-        needs_rebuild = callable(getattr(engine, "needs_rebuild", None)) and bool(engine.needs_rebuild())
+        needs_rebuild = bool(engine.needs_rebuild())
         if (pending is None or pending.is_empty()) and not needs_rebuild:
             return
         post_commit_hook(pending if pending is not None else PendingEngineDelta())
@@ -247,8 +247,7 @@ def sync_engine_if_needed(session: Session | None, engine: Any | None = None) ->
     eng = engine if engine is not None else session.info.get(SESSION_ENGINE_KEY)
     if eng is None:
         return
-    needs_rebuild = getattr(eng, "needs_rebuild", None)
-    if not callable(needs_rebuild) or not needs_rebuild():
+    if not eng.needs_rebuild():
         return
     hook = session.info.get(_SESSION_HOOK_KEY)
     if callable(hook):

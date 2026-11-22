@@ -120,5 +120,4 @@ __all__ = [
     "collect_orphan_files",
     "extract_managed_novel_id",
     "prune_orphan_files",
-    "unlink_files",
 ]

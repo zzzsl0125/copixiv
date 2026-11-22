@@ -12,7 +12,6 @@ from copixiv.db.tx import run_write_transaction_sync
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.deps import UowDep
 from copixiv.features.tags.apply_alias import (
-    create_and_apply_alias,
     create_and_apply_aliases_batch,
     replace_alias_group,
 )
@@ -40,16 +39,6 @@ def _strip_tag_list(values: list[str]) -> list[str]:
     return cleaned
 
 
-class TagAliasBase(BaseModel):
-    source: str
-    target: str
-
-    @field_validator("source", "target")
-    @classmethod
-    def _strip_non_empty(cls, v: str) -> str:
-        return _strip_tag_name(v)
-
-
 class TagAliasBatchCreate(BaseModel):
     sources: list[str]
     target: str
@@ -74,8 +63,10 @@ class TagAliasGroupReplace(TagAliasBatchCreate):
         return _strip_tag_name(v)
 
 
-class TagAliasResponse(TagAliasBase):
+class TagAliasResponse(BaseModel):
     id: int
+    source: str
+    target: str
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -92,7 +83,6 @@ class TagAliasSuggestResponse(BaseModel):
 
 class TagAliasSuggestListResponse(BaseModel):
     items: list[TagAliasSuggestResponse]
-    next_offset: int
     next_cursor: int | None = None
 
 
@@ -114,25 +104,12 @@ def suggest_tag_aliases(
 ):
     """相似标签建议。
 
-    ``offset`` 是**游标**（不是行偏移）：把上一次响应里的 ``next_offset`` 原样
-    传回来续扫即可（字段名保留 ``offset`` / ``next_offset`` 是为了不动前端契约，
-    前端只把它当不透明整数回传）。``target_tag=`` 模式只指名一个 target，
-    没有「页」可续，因此忽略 ``offset`` 且 ``next_offset`` 恒为 0。
+    ``offset`` 是游标（不是行偏移）：把上一次响应里的 ``next_cursor`` 原样
+    传回来续扫即可（``None`` 表示已扫描结束）。``target_tag=`` 模式只指名一个
+    target，没有「页」可续，因此忽略 ``offset`` 且 ``next_cursor`` 恒为 ``None``。
     """
     with uow.begin(read_only=True):
         return _suggest_tag_aliases(uow.session, limit=limit, offset=offset, target_tag=target_tag)
-
-
-@router.post("", response_model=TagAliasResponse)
-def create_tag_alias(data: TagAliasBase, uow: UowDep):
-    if data.source == data.target:
-        raise ValidationError("原标签不能和目标标签相同")
-
-    def _write(tx: SqlUnitOfWork):
-        alias = create_and_apply_alias(tx.session, data.source, data.target)
-        return TagAliasResponse.model_validate(alias)
-
-    return run_write_transaction_sync(uow, _write)
 
 
 @router.post("/batch", response_model=list[TagAliasResponse])
@@ -169,14 +146,5 @@ def delete_tag_alias_group(
     def _write(tx: SqlUnitOfWork):
         if SQLAlchemyTagRepository(tx.session).delete_aliases_by_target(cleaned_target) == 0:
             raise NotFoundError(f"Tag alias group '{cleaned_target}' not found")
-
-    run_write_transaction_sync(uow, _write)
-
-
-@router.delete("/{alias_id}", status_code=204)
-def delete_tag_alias(alias_id: int, uow: UowDep):
-    def _write(tx: SqlUnitOfWork):
-        if not SQLAlchemyTagRepository(tx.session).delete_alias(alias_id):
-            raise NotFoundError(f"Tag alias {alias_id} not found")
 
     run_write_transaction_sync(uow, _write)

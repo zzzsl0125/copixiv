@@ -70,6 +70,31 @@ def _case_retire(prior_failures):
     )
 
 
+def retire_series(session, series_id: int, reason: str) -> None:
+    """Immediately retire *series_id* in ``series_dead_letter`` (idempotent)."""
+    now = datetime.now(UTC)
+    stmt = (
+        pg_insert(models.SeriesDeadLetter)
+        .values(
+            series_id=series_id,
+            consecutive_failures=RETIRE_AFTER_FAILURES,
+            last_error=reason,
+            last_failed_at=now,
+            retired_at=now,
+        )
+        .on_conflict_do_update(
+            index_elements=[models.SeriesDeadLetter.series_id],
+            set_={
+                "consecutive_failures": RETIRE_AFTER_FAILURES,
+                "last_error": reason,
+                "last_failed_at": now,
+                "retired_at": now,
+            },
+        )
+    )
+    session.execute(stmt)
+
+
 def note_success(session, series_id: int) -> None:
     """Clear a series' ledger entry after a successful roster fetch."""
     session.execute(_delete(models.SeriesDeadLetter).where(models.SeriesDeadLetter.series_id == series_id))
@@ -86,5 +111,6 @@ __all__ = [
     "is_definitive_error",
     "note_failure",
     "note_success",
+    "retire_series",
     "tracked_series_ids",
 ]

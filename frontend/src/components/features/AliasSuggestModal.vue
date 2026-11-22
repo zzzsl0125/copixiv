@@ -5,7 +5,7 @@ import AppInput from '../ui/AppInput.vue'
 import AppCheckbox from '../ui/AppCheckbox.vue'
 import { tagAliasApi, getApiErrorMessage } from '../../api'
 import { useToast } from '../../composables'
-import type { TagAliasSuggest, TagAliasSuggestList } from '../../types'
+import type { TagAliasSuggest } from '../../types'
 
 const props = defineProps<{
   isOpen: boolean
@@ -33,9 +33,7 @@ const fetchSuggestions = async () => {
   try {
     const data = await tagAliasApi.suggestTagAliases(5, currentOffset.value, props.targetTag)
     suggestions.value = data.items
-    const nextCursor =
-      (data as TagAliasSuggestList & { next_cursor?: number | null }).next_cursor ??
-      (data.next_offset > 0 ? data.next_offset : null)
+    const nextCursor = data.next_cursor ?? null
     currentOffset.value = nextCursor ?? 0
     hasMore.value = nextCursor !== null
     resetForm()
@@ -75,14 +73,14 @@ const handleSave = async () => {
   try {
     const targetTag = currentSuggestion.value.target.name
     if (customTarget.value.trim()) {
-      await tagAliasApi.createTagAlias(targetTag, customTarget.value.trim())
+      await tagAliasApi.createTagAliasesBatch([targetTag], customTarget.value.trim())
       emit('updated')
     } else {
       const selectedNames = currentSuggestion.value.candidates
         .filter(c => selectedCandidates.value.has(c.id))
         .map(c => c.name)
       if (selectedNames.length > 0) {
-        for (const source of selectedNames) await tagAliasApi.createTagAlias(source, targetTag)
+        await tagAliasApi.createTagAliasesBatch(selectedNames, targetTag)
         emit('updated')
       }
     }

@@ -83,7 +83,7 @@ def test_aliased_zero_ref_tag_survives_until_alias_deleted(uow: SqlUnitOfWork):
         assert src_row.reference_count == 0
 
         # Deleting the alias immediately prunes the unreferenced src_alias row
-        assert tag_repo.delete_alias(alias["id"]) is True
+        assert tag_repo.delete_aliases_by_ids([alias["id"]]) == 1
         assert (
             uow.session.execute(select(models.Tag).where(models.Tag.name == "src_alias")).scalar_one_or_none()
             is None
@@ -177,7 +177,7 @@ def test_suggest_aliases_end_to_end_via_rust_tag_index(uow: SqlUnitOfWork):
         tag_repo = SQLAlchemyTagRepository(uow.session)
         # Literal '%' does not act as SQL wildcard
         pct = tag_repo.suggest_aliases(limit=5, offset=0, target_tag="%高中生")
-        assert pct["next_offset"] == 0
+        assert pct["next_cursor"] is None
         assert len(pct["items"]) == 1
         assert [c["name"] for c in pct["items"][0]["candidates"]] == ["%高中生女子"]
 

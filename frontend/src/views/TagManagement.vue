@@ -146,23 +146,14 @@ async function saveTag() {
           (g) => g.target === editingAliasOriginalTarget.value,
         )
         if (existingGroup) {
-          const oldSources = existingGroup.sources
-          const toAdd = newSources.filter((s) => !oldSources.includes(s))
-          const toRemove = existingGroup.aliases.filter((a) => !newSources.includes(a.source))
-          for (const a of toRemove) await tagAliasApi.deleteTagAlias(a.id)
-          for (const s of toAdd) await tagAliasApi.createTagAlias(s, target)
-          if (target !== editingAliasOriginalTarget.value) {
-            const toKeepAndRename = existingGroup.aliases.filter((a) =>
-              newSources.includes(a.source),
-            )
-            for (const a of toKeepAndRename) {
-              await tagAliasApi.deleteTagAlias(a.id)
-              await tagAliasApi.createTagAlias(a.source, target)
-            }
-          }
+          await tagAliasApi.replaceTagAliasGroup(
+            editingAliasOriginalTarget.value,
+            target,
+            newSources,
+          )
         }
       } else {
-        for (const s of newSources) await tagAliasApi.createTagAlias(s, target)
+        await tagAliasApi.createTagAliasesBatch(newSources, target)
       }
       await invalidateAfterTagChange({ prefs: true, aliases: true, novels: true })
       closeModal()
@@ -212,7 +203,7 @@ async function removeAliasGroup(group: GroupedAlias) {
   })
   if (!confirmed) return
   try {
-    for (const alias of group.aliases) await tagAliasApi.deleteTagAlias(alias.id)
+    await tagAliasApi.deleteTagAliasGroup(group.target)
     await invalidateAfterTagChange({ aliases: true })
   } catch (err: unknown) {
     toast.error(getApiErrorMessage(err, '删除失败'))

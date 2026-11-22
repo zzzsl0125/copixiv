@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 from copixiv.core.draft import guess_series_order, safe_get
 from copixiv.core.models import TaskResult
 from copixiv.db.tx import read_transaction, run_write_transaction
@@ -17,20 +15,6 @@ from copixiv.pixiv.client import PixivClient
 _SERIES_CURSOR_KEY = "fix_series_index.cursor"
 _ORPHAN_CURSOR_KEY = "fix_series_index.orphan_cursor"
 _SWEEP_CURSOR_KEY = "fix_series_index.sweep_cursor"
-_ROSTER_ABSENT_KEY = "fix_series_index.roster_absent"
-
-
-def _load_roster_absent(settings: SQLAlchemySettingRepository) -> set[int]:
-    raw = settings.get_value(_ROSTER_ABSENT_KEY)
-    if not raw:
-        return set()
-    try:
-        items = json.loads(raw)
-    except ValueError:
-        return set()
-    if not isinstance(items, list):
-        return set()
-    return {int(x) for x in items if isinstance(x, int) or (isinstance(x, str) and x.isdigit())}
 
 
 def _page(ids: list[int], cap: int | None) -> tuple[list[int], bool]:
@@ -73,16 +57,15 @@ async def run_series_repair(
 
     def _read_candidates(
         uw,
-    ) -> tuple[int, int, int, set[int], set[int], list[int], list, list[int]]:
+    ) -> tuple[int, int, int, set[int], list[int], list, list[int]]:
         settings = SQLAlchemySettingRepository(uw.session)
         s_cursor = settings.get_int(_SERIES_CURSOR_KEY, 0)
         o_cursor = settings.get_int(_ORPHAN_CURSOR_KEY, 0)
         w_cursor = settings.get_int(_SWEEP_CURSOR_KEY, 0)
-        absent_ids = _load_roster_absent(settings)
         dl_ids = series_ledger.tracked_series_ids(uw.session)
 
         repo = SQLAlchemySeriesRepository(uw.session)
-        cands = sorted(sid for sid in repo.series_with_empty_index() if sid not in absent_ids)
+        cands = sorted(repo.series_with_empty_index())
         orphans = repo.novels_with_orphan_index(
             limit=(max_orphans + 1 if max_orphans is not None else None),
             after_id=o_cursor,
@@ -95,13 +78,12 @@ async def run_series_repair(
             if sweep_all
             else []
         )
-        return s_cursor, o_cursor, w_cursor, absent_ids, dl_ids, cands, orphans, sweeps
+        return s_cursor, o_cursor, w_cursor, dl_ids, cands, orphans, sweeps
 
     (
         series_cursor,
         orphan_cursor,
         sweep_cursor,
-        roster_absent_ids,
         dead_letter_ids,
         candidates,
         orphan_candidates,
@@ -380,9 +362,8 @@ async def run_series_repair(
             settings = SQLAlchemySettingRepository(uw.session)
             for key, value in cursor_updates.items():
                 settings.set_int(key, value)
-            if new_roster_absent_ids:
-                updated = sorted(roster_absent_ids | new_roster_absent_ids)
-                settings.set_value(_ROSTER_ABSENT_KEY, json.dumps(updated))
+            for sid in sorted(new_roster_absent_ids):
+                series_ledger.retire_series(uw.session, sid, "roster_absent")
 
         await run_write_transaction(uow, _persist_round_state)
 

@@ -56,16 +56,27 @@ export const tagAliasApi = {
     return unwrap(res, '获取别名建议失败')
   },
 
-  async createTagAlias(source: string, target: string): Promise<TagAlias> {
-    const res = await apiClient.POST('/api/tag-aliases', {
-      body: { source, target },
+  async createTagAliasesBatch(sources: string[], target: string): Promise<TagAlias[]> {
+    const res = await apiClient.POST('/api/tag-aliases/batch', {
+      body: { sources, target },
     })
     return unwrap(res, '创建标签别名失败')
   },
 
-  async deleteTagAlias(id: number): Promise<void> {
-    const res = await apiClient.DELETE('/api/tag-aliases/{alias_id}', {
-      params: { path: { alias_id: id } },
+  async replaceTagAliasGroup(
+    oldTarget: string,
+    target: string,
+    sources: string[],
+  ): Promise<TagAlias[]> {
+    const res = await apiClient.PUT('/api/tag-aliases/groups', {
+      body: { old_target: oldTarget, target, sources },
+    })
+    return unwrap(res, '更新标签别名失败')
+  },
+
+  async deleteTagAliasGroup(target: string): Promise<void> {
+    const res = await apiClient.DELETE('/api/tag-aliases/groups', {
+      params: { query: { target } },
     })
     unwrapVoid(res, '删除标签别名失败')
   },

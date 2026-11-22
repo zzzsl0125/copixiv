@@ -228,17 +228,6 @@ class SQLAlchemyTagRepository(BaseRepository):
             "target": target_name,
         }
 
-    def delete_alias(self, alias_id: int) -> bool:
-        alias = self.session.get(models.TagAlias, alias_id)
-        if alias is None:
-            return False
-        tag_ids = {alias.source, alias.target}
-        self.session.delete(alias)
-        self.session.flush()
-        engine_delta.record_aliases_dirty(self.session)
-        self.prune_unused_tag_ids(tag_ids)
-        return True
-
     def delete_aliases_by_ids(self, alias_ids: Iterable[int]) -> int:
         """Delete multiple aliases by ID and prune any resulting orphan tags."""
         ids = sorted(set(alias_ids))

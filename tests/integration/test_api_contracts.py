@@ -365,11 +365,24 @@ def test_task_cancellation_and_uniform_204_deletes(db_session_factory, tmp_path:
         assert client.delete(f"/api/tag-preferences/{pref.json()['id']}").status_code == 204
 
         alias = client.post(
-            "/api/tag-aliases",
-            json={"source": "src_alias_tag", "target": "dst_alias_tag"},
+            "/api/tag-aliases/batch",
+            json={"sources": ["src_alias_tag"], "target": "dst_alias_tag"},
         )
         assert alias.status_code == 200
-        assert client.delete(f"/api/tag-aliases/{alias.json()['id']}").status_code == 204
+        assert len(alias.json()) == 1
+        replaced = client.put(
+            "/api/tag-aliases/groups",
+            json={
+                "old_target": "dst_alias_tag",
+                "target": "dst_alias_tag_v2",
+                "sources": ["src_alias_tag"],
+            },
+        )
+        assert replaced.status_code == 200
+        assert replaced.json()[0]["target"] == "dst_alias_tag_v2"
+        assert (
+            client.delete("/api/tag-aliases/groups", params={"target": "dst_alias_tag_v2"}).status_code == 204
+        )
 
         assert client.delete("/api/search-history").status_code == 204
 

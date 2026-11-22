@@ -174,7 +174,7 @@ def _build_cases(probe: dict[str, Any]) -> list[BenchCase]:
         BenchCase(
             name="Tag aliases suggest page limit=10",
             run=lambda _nr, tr: tr.suggest_aliases(limit=10, offset=0),
-            summary=lambda d: f"items={len(d['items'])} next={d['next_offset']}",
+            summary=lambda d: f"items={len(d['items'])} next={d['next_cursor']}",
         ),
         BenchCase(
             name=f"Tag aliases suggest target={probe['med_tag']!r}",
