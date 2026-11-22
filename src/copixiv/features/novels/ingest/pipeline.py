@@ -19,7 +19,7 @@ pass the fields they need (``session_factory``, ``client``,
 """
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from copixiv.core.draft import NovelDraft, NovelInfoLike, build_from_novel_info
 from copixiv.core.models import EpubStatus
@@ -157,9 +157,8 @@ def _plan_batch(
 
     # Exclude novels that have already failed too many times
     skip_ids: set[int] = set()
-    if failed_repo is not None:
-        need_check = ids if redownload else ids - existing
-        skip_ids = failed_repo.get_skip_ids(need_check)
+    if failed_repo is not None and not redownload:
+        skip_ids = failed_repo.get_skip_ids(ids - existing)
 
     need_download = ids if redownload else ids - existing - skip_ids
 
@@ -208,7 +207,7 @@ def _upsert_batch(
 
     if existing_meta:
         new_count += persist_novels(uow, existing_meta)
-        logger.info(f"_upsert_batch: metadata upsert done for {new_count} existing novels")
+        logger.info(f"_upsert_batch: metadata upsert done for {len(existing_meta)} existing novels")
 
     if downloaded:
         success_ids = {d.id for d in downloaded}
@@ -217,8 +216,7 @@ def _upsert_batch(
         # anchor every reader resolves and rewriting it would orphan the file
         # that is already there.  The download path is the one writer allowed to
         # replace it: ``FileStorage.adopt_anchor`` refuses a stored path that
-        # escapes the root, or that is too long to write a ``.tmp`` beside (253
-        # bytes stored + ".tmp" > NAME_MAX — three production rows), and the
+        # escapes the root or exceeds ``NAME_MAX``, and the
         # body is then written to a freshly computed name.  The row must follow,
         # or the file lands where nothing reads it.
         #
@@ -423,24 +421,15 @@ async def _settle_assets(
     ``novel_search`` 扇出多个 ``author_fetch``），确保即便两批重叠到同一本
     小说，也能各自拿到独立、完整的完成通知与结局状态。
     """
-    if image_downloader is None:
+    if image_downloader is None or asset_batch is None:
         return _AssetOutcome([], [])
 
-    if asset_batch is not None:
-        failures = await asset_batch.await_all()
-        if failures:
-            logger.warning(
-                f"ingest: {len(failures)} novels failed image/EPUB processing",
-            )
-        outcomes = asset_batch.drain_outcomes()
-    else:
-        ids = [d.id for d in downloaded]
-        failures = await image_downloader.await_all(ids)
-        if failures:
-            logger.warning(
-                f"ingest: {len(failures)} novels failed image/EPUB processing",
-            )
-        outcomes = image_downloader.drain_outcomes(ids)
+    failures = await asset_batch.await_all()
+    if failures:
+        logger.warning(
+            f"ingest: {len(failures)} novels failed image/EPUB processing",
+        )
+    outcomes = asset_batch.drain_outcomes()
 
     done_ids = [nid for nid, outcome in outcomes.items() if outcome == "done"]
     return _AssetOutcome(failures, done_ids)
@@ -605,6 +594,10 @@ def _persist_round(
     COMMIT）跑在同一个 worker 线程里，绝不能是 ``async def``——anyio 不会 await
     协程，只会把它当普通返回值，写入就静默丢了。
     """
+    if done_ids:
+        done_set = set(done_ids)
+        downloaded = [replace(d, has_epub=EpubStatus.DONE) if d.id in done_set else d for d in downloaded]
+
     titles_out, new_titles_out, new_count = _upsert_batch(
         existing_meta,
         downloaded,
@@ -614,12 +607,6 @@ def _persist_round(
         titles=titles,
     )
     if done_ids:
-        # 仓库方法是普通 ``def``（``repo.py::update_has_epub_status``）：本回调
-        # 同步执行，不需要 ``await``。
-        SQLAlchemyNovelRepository(uow.session).update_has_epub_status(
-            done_ids,
-            EpubStatus.DONE,
-        )
         logger.info(f"_persist: {len(done_ids)} novels marked EPUB DONE")
     if mapping:
         writeback_author_names(mapping, uow)

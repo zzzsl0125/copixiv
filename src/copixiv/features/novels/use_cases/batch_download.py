@@ -30,7 +30,7 @@ class BatchDownloadResult:
     """
 
     zip_buffer: BinaryIO
-    titles: list[str]
+    added_count: int
     missing_ids: list[str]
     search_desc: str
 
@@ -67,7 +67,6 @@ class BatchDownloadUseCase:
         zip_name: str | None = None,
         naming_template: str | None = None,
         novel_ids: list[int] | None = None,
-        excluded_ids: list[int] | None = None,
     ) -> BatchDownloadResult:
         """Build the ZIP.
 
@@ -83,7 +82,7 @@ class BatchDownloadUseCase:
                 all_novels = repo.get_novels_by_ids(novel_ids)
                 selected = sorted(
                     all_novels,
-                    key=lambda n: n.id or 0,
+                    key=lambda n: abs(n.id or 0),
                     reverse=True,
                 )[:limit]
             else:
@@ -95,7 +94,6 @@ class BatchDownloadUseCase:
                         per_page=limit,
                         min_like=min_like,
                         min_text=min_text,
-                        exclude_ids=excluded_ids or [],
                     )
                 )
                 selected = results.get("novels", [])
@@ -119,7 +117,7 @@ class BatchDownloadUseCase:
             # ZIP_DEFLATED compression is pure CPU — run it in a worker
             # thread so a large export (选多少下多少, no size cap) never
             # freezes the event loop / background tasks.
-            zip_buf, titles, missing = await asyncio.to_thread(
+            zip_buf, added_count, missing = await asyncio.to_thread(
                 build_batch_zip,
                 novels,
                 format_mode,
@@ -128,14 +126,14 @@ class BatchDownloadUseCase:
             )
         except ValueError as exc:
             raise ValidationError(str(exc)) from exc
-        if not titles:
+        if not added_count:
             raise NotFoundError("未找到可下载的有效文件")
 
         zip_buf.seek(0)
         search_desc = zip_name or _build_search_desc(conditions or [])
         return BatchDownloadResult(
             zip_buffer=zip_buf,
-            titles=titles,
+            added_count=added_count,
             missing_ids=missing,
             search_desc=search_desc,
         )
@@ -151,7 +149,6 @@ class BatchDownloadUseCase:
         format_mode: str = "txt",
         naming_template: str | None = None,
         novel_ids: list[int] | None = None,
-        excluded_ids: list[int] | None = None,
     ) -> str | None:
         """Resolve the naming template for the first matching novel.
 
@@ -165,12 +162,7 @@ class BatchDownloadUseCase:
         with self._uow.begin():
             repo = SQLAlchemyNovelRepository(self._uow.session)
             if novel_ids:
-                all_novels = repo.get_novels_by_ids(novel_ids)
-                novels = sorted(
-                    all_novels,
-                    key=lambda n: n.id or 0,
-                    reverse=True,
-                )[:1]
+                novel = repo.get_latest_novel_by_ids(novel_ids)
             else:
                 results = repo.get_novels(
                     QuerySpec(
@@ -180,11 +172,11 @@ class BatchDownloadUseCase:
                         per_page=1,
                         min_like=min_like,
                         min_text=min_text,
-                        exclude_ids=excluded_ids or [],
                     )
                 )
                 novels = results.get("novels", [])
-        if not novels:
+                novel = novels[0] if novels else None
+        if novel is None:
             return None
 
         naming = naming_template or self._naming_template or DEFAULT_NAMING_TEMPLATE
@@ -193,7 +185,6 @@ class BatchDownloadUseCase:
         except ValueError as exc:
             raise ValidationError(str(exc)) from exc
 
-        novel = novels[0]
         actual_fmt = formats.preferred_format(
             format_mode,
             epub_ready=novel.has_epub == EpubStatus.DONE,

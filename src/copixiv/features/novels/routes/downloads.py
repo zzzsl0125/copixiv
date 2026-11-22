@@ -54,7 +54,7 @@ def download_novel(
     uow: UowDep,
     format: FormatMode = FormatMode.TXT,
 ):
-    with uow.begin():
+    with uow.begin(read_only=True):
         use_case = GetNovelFileUseCase(
             SQLAlchemyNovelRepository(uow.session),
             file_storage.download_dir,

@@ -24,7 +24,7 @@ from copixiv.query_engine.port import (
     NovelQueryEnginePort,
 )
 
-# Bounded count cap — matches ``batch_operations.BATCH_MAX_NOVELS``.
+# Bounded count cap for list/count endpoints.
 COUNT_CAP = 5000
 
 _INT_FILTER_COLS = frozenset(
@@ -55,7 +55,14 @@ _SORTABLE_NOVEL_FIELDS = _INT_FILTER_COLS | frozenset(
         C.COL_AUTHOR_NAME,
         C.COL_SERIES_NAME,
         C.ORDER_BY_RANDOM,
-        C.ORDER_BY_NONE,
+    }
+)
+_VALID_CONDITION_FIELDS = _FILTERABLE_NOVEL_FIELDS | frozenset(
+    {
+        C.FIELD_TAGS,
+        C.FIELD_KEYWORD,
+        C.FIELD_IS_FAVOURITE,
+        C.FIELD_IS_SPECIAL_FOLLOW,
     }
 )
 
@@ -79,6 +86,8 @@ def _parse_query_int(raw: Any, label: str) -> int:
 
 def _parse_cursor_val(order_by: str, raw: Any) -> Any:
     if raw is None:
+        if order_by == C.COL_CREATE_TIME:
+            return None
         raise ValidationError(f"Cursor missing non-null value for {order_by}")
     if order_by in _INT_FILTER_COLS:
         return _parse_query_int(raw, f"cursor.{order_by}")
@@ -129,7 +138,6 @@ def _novel_from_record(rec: EngineNovelRecord) -> Novel:
         series_name=rec.series_name,
         series_index=rec.series_index,
         create_time=us_to_datetime(rec.create_time_us),
-        shuffle=0,
         has_epub=EpubStatus(rec.has_epub),
         source=rec.source,
         source_key=None,
@@ -179,20 +187,12 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         self._query_engine: NovelQueryEnginePort | None = (
             query_engine if query_engine is not None else session.info.get(engine_delta.SESSION_ENGINE_KEY)
         )
-        self.VALID_NOVEL_FIELDS = {c.name for c in models.Novel.__table__.c}
-        self.VALID_NOVEL_QUERY_FIELDS = self.VALID_NOVEL_FIELDS | {
-            C.FIELD_TAGS,
-            C.FIELD_KEYWORD,
-            C.FIELD_IS_FAVOURITE,
-            C.FIELD_IS_SPECIAL_FOLLOW,
-            C.ORDER_BY_NONE,
-            C.ORDER_BY_RANDOM,
-        }
 
     def _require_engine(self) -> NovelQueryEnginePort:
         eng = self._query_engine
         if eng is None or not eng.ready():
             raise RuntimeError("Rust query_engine is not attached or not ready on this session")
+        engine_delta.sync_engine_if_needed(self.session, eng)
         return eng
 
     def _compile_engine_query(
@@ -203,22 +203,20 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         restrict_ids: list[int] | None = None,
     ) -> EngineQuery:
         for q_type, _qvalue in spec.conditions:
-            self._validate_query_field(q_type)
+            if q_type not in _VALID_CONDITION_FIELDS:
+                raise ValidationError(f"Invalid query field: {q_type}")
         tags, keywords, field_filters = _categorize_conditions(spec.conditions)
         int_filters: list[tuple[str, int]] = []
         str_filters: list[tuple[str, str]] = []
         only_fav = False
         only_sf = False
         for qtype, value in field_filters.items():
-            self._validate_query_field(qtype)
             if qtype == C.FIELD_IS_FAVOURITE:
                 only_fav = True
                 continue
             if qtype == C.FIELD_IS_SPECIAL_FOLLOW:
                 only_sf = True
                 continue
-            if qtype not in _FILTERABLE_NOVEL_FIELDS:
-                raise ValidationError(f"Field is not filterable: {qtype}")
             if value == "":
                 continue
             if qtype in _INT_FILTER_COLS:
@@ -263,7 +261,7 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
                 random_seed_hex=str(cursor["seed"]),
                 random_h_hex=str(cursor["h"]),
             )
-        if order_by == C.ORDER_BY_NONE or order_by not in _SORTABLE_NOVEL_FIELDS:
+        if order_by not in _SORTABLE_NOVEL_FIELDS:
             raise ValidationError(f"Invalid order_by for cursor pagination: {order_by}")
         if order_by == C.COL_ID:
             return EngineCursor(cursor_id=cursor_id, cursor_int=cursor_id)
@@ -271,7 +269,10 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
             raise ValidationError(f"Cursor missing '{order_by}'")
         raw_val = _parse_cursor_val(order_by, cursor[order_by])
         if order_by == C.COL_CREATE_TIME:
-            return EngineCursor(cursor_id=cursor_id, cursor_int=datetime_to_us(raw_val))
+            return EngineCursor(
+                cursor_id=cursor_id,
+                cursor_int=datetime_to_us(raw_val) if raw_val is not None else None,
+            )
         if order_by in _INT_FILTER_COLS:
             return EngineCursor(cursor_id=cursor_id, cursor_int=int(raw_val))
         return EngineCursor(cursor_id=cursor_id, cursor_str=str(raw_val))
@@ -300,9 +301,6 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         )
         return {nid: path for nid, path in self.session.execute(stmt).all() if path}
 
-    def list_blocked_ids(self) -> list[int]:
-        return self._require_engine().list_blocked_ids()
-
     def sort_novel_ids(
         self,
         novel_ids: list[int],
@@ -321,16 +319,14 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         descending = order_direction.upper() == "DESC"
         return self._require_engine().sort_ids(novel_ids, order_by=order_by, descending=descending)
 
-    def get_novels(self, spec: QuerySpec) -> dict:
+    def get_novels(self, spec: QuerySpec, *, only_blocked: bool = False) -> dict:
         """Retrieve a paginated, filtered list of novels per *spec*."""
         eng = self._require_engine()
-        if spec.order_by:
-            self._validate_query_field(spec.order_by)
         if spec.order_by and spec.order_by not in _SORTABLE_NOVEL_FIELDS:
             raise ValidationError(f"Invalid order_by field: {spec.order_by}")
         self._validate_order_direction(spec.order_direction)
 
-        query = self._compile_engine_query(spec)
+        query = self._compile_engine_query(spec, count_blocked=only_blocked)
         order_by = spec.order_by or C.COL_ID
         parsed_cursor = self._compile_engine_cursor(spec.cursor, order_by)
         descending = spec.order_direction.upper() == "DESC"
@@ -359,15 +355,6 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         eng = self._require_engine()
         self._validate_order_direction(spec.order_direction)
         res = eng.count_novels(self._compile_engine_query(spec), cap=COUNT_CAP)
-        return NovelCount(res.count, truncated=res.truncated)
-
-    def count_excluded_novels(self, spec: QuerySpec) -> NovelCount:
-        """Count novels matching *spec* that carry blocked tags (bounded)."""
-        eng = self._require_engine()
-        res = eng.count_novels(
-            self._compile_engine_query(spec, count_blocked=True),
-            cap=COUNT_CAP,
-        )
         return NovelCount(res.count, truncated=res.truncated)
 
     def has_excluded_novels(self, spec: QuerySpec) -> bool:
@@ -406,13 +393,20 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
             self.session.execute(select(models.Novel).where(models.Novel.id.in_(novel_ids))).scalars().all()
         )
         novels = [_novel_from_orm(n) for n in rows]
-        _attach_special_follow(self.session, novels)
         by_id = {n.id: n for n in novels}
         return [by_id[nid] for nid in novel_ids if nid in by_id]
 
-    def _validate_query_field(self, field: str) -> None:
-        if field not in self.VALID_NOVEL_QUERY_FIELDS:
-            raise ValidationError(f"Invalid query field: {field}")
+    def get_latest_novel_by_ids(self, novel_ids: list[int]) -> Novel | None:
+        """Return the highest-ID novel among *novel_ids* (without ``is_special_follow``)."""
+        if not novel_ids:
+            return None
+        row = self.session.execute(
+            select(models.Novel)
+            .where(models.Novel.id.in_(novel_ids))
+            .order_by(models.Novel.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        return _novel_from_orm(row) if row is not None else None
 
     @staticmethod
     def _validate_order_direction(order_direction: str) -> None:
@@ -423,6 +417,11 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         """Return every novel ID currently stored in PostgreSQL."""
         rows = self.session.execute(select(models.Novel.id)).scalars().all()
         return {int(nid) for nid in rows}
+
+    def list_all_id_paths(self) -> list[tuple[int, str | None]]:
+        """Return ``(id, path)`` for every novel currently stored in PostgreSQL."""
+        rows = self.session.execute(select(models.Novel.id, models.Novel.path)).all()
+        return [(int(nid), path) for nid, path in rows]
 
     def iter_epub_sweep_page(self, after_id: int | None, limit: int) -> list[Any]:
         """Return one keyset page of ``(id, path, has_epub)`` ordered by ``id``."""

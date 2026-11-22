@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -12,10 +11,12 @@ from copixiv.core.models import TaskResult
 from copixiv.db.tx import read_transaction
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.failures.repo import MAX_RETRIES
+from copixiv.features.novels.ingest import ingest
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
-from copixiv.features.novels.use_cases.discovery import fetch_single_novel
 from copixiv.log import logger
 from copixiv.pixiv.client import PixivClient
+
+_REFETCH_BATCH_SIZE = 50
 
 
 def count_missing_source(session: Session) -> int:
@@ -83,29 +84,23 @@ async def refetch_missing_novels(
             )
         )
 
-    results = await asyncio.gather(
-        *[
-            fetch_single_novel(
-                nid,
-                redownload=True,
-                session_factory=uow.session_factory,
-                client=client,
-                file_storage=file_storage,
-                image_downloader=image_downloader,
-            )
-            for nid in candidates
-        ],
-        return_exceptions=True,
-    )
-
     ok_ids: list[int] = []
     failed_ids: list[int] = []
-    for nid, result in zip(candidates, results, strict=True):
-        if isinstance(result, TaskResult) and not result.failed_ids:
-            ok_ids.append(nid)
-        else:
-            failed_ids.append(nid)
-            logger.error(f"refetch_missing_source: #{nid} 重抓失败: {result!r}")
+    for i in range(0, len(candidates), _REFETCH_BATCH_SIZE):
+        chunk = candidates[i : i + _REFETCH_BATCH_SIZE]
+        out = await ingest(
+            ids=chunk,
+            force=True,
+            session_factory=uow.session_factory,
+            client=client,
+            file_storage=file_storage,
+            image_downloader=image_downloader,
+        )
+        for nid, reason in out.failed:
+            logger.error(f"refetch_missing_source: #{nid} 重抓失败: {reason}")
+        chunk_failed = set(out.failed_ids)
+        failed_ids.extend(out.failed_ids)
+        ok_ids.extend(nid for nid in chunk if nid not in chunk_failed)
 
     remaining = await read_transaction(
         uow,

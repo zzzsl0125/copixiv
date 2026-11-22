@@ -203,7 +203,13 @@ class SyncNovelUseCase:
         同步：它是 ``run_write_transaction`` 的 ``fn`` 回调，整个事务跑在同一个
         worker 线程里——写成 ``async def`` 会被当成普通返回值，写入静默丢失。
         """
-        persist_novels(uow, [draft], force_update=SYNC_FORCE_UPDATE)
+        force_update = list(SYNC_FORCE_UPDATE)
+        if not draft.author_name:
+            force_update = [f for f in force_update if f != "author_name"]
+        if draft.series_id is None:
+            draft = replace(draft, series_index=None)
+            force_update.append("series_index")
+        persist_novels(uow, [draft], force_update=force_update)
         if draft.author_name:
             writeback_author_names(
                 {draft.author_id: draft.author_name},

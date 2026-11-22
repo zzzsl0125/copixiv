@@ -18,7 +18,7 @@ from pydantic import (
     field_validator,
 )
 
-from copixiv.core.models import BatchTaskResponse, EpubStatus, NovelSource
+from copixiv.core.models import EpubStatus, NovelSource
 from copixiv.core.naming import FormatMode
 from copixiv.core.search import OrderBy, OrderDirection, SortableOrderBy
 from copixiv.features.novels import field_policy
@@ -50,8 +50,8 @@ class NovelBase(BaseModel):
     create_time: datetime | None = None
     has_epub: EpubStatus = EpubStatus.NO
     tags: list[str] = []
-    is_favourite: int = 0
-    is_special_follow: int = 0
+    is_favourite: bool = False
+    is_special_follow: bool = False
     series_id: int | None = None
     series_name: str | None = None
     series_index: int | None = None
@@ -91,17 +91,14 @@ class NovelListResponse(BaseModel):
 
 
 class NovelCountResponse(BaseModel):
-    """``GET /api/novels/count`` —— 匹配数 + 隐藏数（均为有界计数）。
+    """``GET /api/novels/count`` —— 匹配数（有界计数）。
 
-    计数由仓库的 ``COUNT_CAP`` 封顶：``truncated`` / ``excluded_truncated``
-    为 true 时对应数字只是下界，前端必须显示成 ``5000+`` 之类的形态。
-    两个标志恒在响应里（与老客户端的读法一致）。
+    计数由仓库的 ``COUNT_CAP`` 封顶：``truncated`` 为 true 时对应数字只是下界，
+    前端必须显示成 ``5000+`` 之类的形态。
     """
 
     total: int
-    excluded: int
     truncated: bool = False
-    excluded_truncated: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -213,23 +210,7 @@ class NovelListParams(NovelFilterParams):
     order_direction: OrderDirection = OrderDirection.DESC
     cursor: str | None = None
     per_page: int = Field(default=20, ge=1, le=200)
-
-
-class NovelCountParams(NovelFilterParams):
-    """Query parameters for ``GET /api/novels/count``."""
-
-    excluded_ids: list[int] | None = None
-    with_excluded: bool = False
-
-
-class BlockedIdsParams(BaseModel):
-    """Query parameters for ``GET /api/novels/blocked-ids``."""
-
-    keyword: str | None = None
-    min_like: int | None = None
-    min_text: int | None = None
-    order_by: OrderBy | None = None
-    order_direction: OrderDirection = OrderDirection.DESC
+    only_blocked: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -321,15 +302,10 @@ class BatchMetadataResponse(BaseModel):
 
 
 class NovelIdsResponse(BaseModel):
-    """Matching novel IDs for the 「全选匹配」 bulk-add action.
-
-    *limit*-truncated when the match set is larger than the batch cap;
-    ``truncated`` tells the frontend to warn the user.
-    """
+    """Matching novel IDs for the 「全选匹配」 bulk-add action."""
 
     ids: list[int]
     total: int
-    truncated: bool
 
 
 class NovelsByIdsRequest(BaseModel):
@@ -338,7 +314,6 @@ class NovelsByIdsRequest(BaseModel):
 
 class NovelsByIdsResponse(BaseModel):
     novels: list[NovelBase]
-    truncated: bool
 
 
 class MatchIdsRequest(BaseModel):
@@ -360,7 +335,6 @@ class SortIdsRequest(BaseModel):
 
 class MatchIdsResponse(BaseModel):
     matching_ids: list[int]
-    truncated: bool
 
 
 class BatchExportRequest(BaseModel):
@@ -386,12 +360,9 @@ __all__ = [
     "BatchOperationRequest",
     "BatchOperationResponse",
     "BatchScope",
-    "BatchTaskResponse",
-    "BlockedIdsParams",
     "MatchIdsRequest",
     "MatchIdsResponse",
     "NovelBase",
-    "NovelCountParams",
     "NovelCountResponse",
     "NovelFilterParams",
     "NovelIdsResponse",

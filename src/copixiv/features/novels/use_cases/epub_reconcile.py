@@ -167,21 +167,29 @@ def _sweep(
             continue
 
         txt_path = Path(path_str)
-        epub_path = formats.sibling_path(txt_path, formats.EPUB)
-        epub_ok = state.is_readable_container(epub_path)
-
         if not txt_path.is_file():
             if status != EpubStatus.MISSING_SOURCE:
                 missing_ids.append(novel_id)
+            continue
+
+        epub_path = formats.sibling_path(txt_path, formats.EPUB)
+        epub_ok, epub_complete = state.inspect_epub(epub_path)
+
+        # 本地上传书（负 ID）不由 Pixiv 图片目录规则判定完整性，仅校验可读容器即可
+        if novel_id < 0:
+            if status == EpubStatus.DONE and not epub_ok:
+                no_image_ids.append(novel_id)
+            elif status == EpubStatus.NO_IMAGES and epub_ok:
+                completed_ids.append(novel_id)
             continue
 
         if status == EpubStatus.DONE:
             if not epub_ok:
                 revert_ids.append(novel_id)
                 continue
-            if state.is_complete(epub_path):
+            if epub_complete:
                 continue
-            canonical = _txt_has_images(txt_path)
+            canonical = _scan_placeholder(txt_path)
             if canonical is False:
                 no_image_ids.append(novel_id)
             elif canonical is None:
@@ -195,10 +203,10 @@ def _sweep(
         if status == EpubStatus.NO_IMAGES and not epub_ok:
             continue
 
-        canonical = _txt_has_images(txt_path)
+        canonical = _scan_placeholder(txt_path)
 
         if status == EpubStatus.NO_IMAGES:
-            if epub_ok and state.is_complete(epub_path):
+            if epub_complete:
                 completed_ids.append(novel_id)
             continue
 
@@ -212,10 +220,10 @@ def _sweep(
                 no_image_ids.append(novel_id)
             elif canonical is None:
                 pending_ids.append(novel_id)
-            elif state.is_complete(epub_path):
+            elif epub_complete:
                 completed_ids.append(novel_id)
             elif _no_images_ever_and_stale(txt_path, novel_id):
-                # ORDER IS LOAD-BEARING: must stay *after* state.is_complete.
+                # ORDER IS LOAD-BEARING: must stay *after* epub_complete.
                 no_image_ids.append(novel_id)
             else:
                 pending_ids.append(novel_id)
@@ -226,7 +234,7 @@ def _sweep(
             no_image_ids.append(novel_id)
         elif canonical is None:
             continue
-        elif not epub_ok or not state.is_complete(epub_path):
+        elif not epub_complete:
             enable_ids.append(novel_id)
         else:
             completed_ids.append(novel_id)
@@ -239,11 +247,6 @@ def _sweep(
         pending_ids,
         missing_ids,
     )
-
-
-def _txt_has_images(txt_path: Path) -> bool | None:
-    """``True`` / ``False`` for the body's placeholder state, ``None`` if unknown."""
-    return _scan_placeholder(txt_path)
 
 
 def _scan_placeholder(txt_path: Path) -> bool | None:

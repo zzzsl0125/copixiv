@@ -101,7 +101,6 @@ async def fetch_novel_and_assets(
             data.id,
             data.title,
             content,
-            force=True,
             # ``data.path`` is the anchor: the stored path for a known row,
             # the freshly computed ``build_path`` for a first-time one.  Read
             # and write therefore always agree on the same file.
@@ -110,7 +109,10 @@ async def fetch_novel_and_assets(
     elif content:
         logger.info(f"下载: #{data.id} 正文未变，保留本地副本")
 
-    data = replace(data, has_epub=None) if not rewrote else replace(data, rewrote_body=True)
+    if rewrote:
+        data = replace(data, rewrote_body=True)
+    elif stored_path is not None:
+        data = replace(data, has_epub=None)
 
     # Download assets in background.  Still called when the body is unchanged
     # — that path also heals a missing/corrupt EPUB — but without force, so an

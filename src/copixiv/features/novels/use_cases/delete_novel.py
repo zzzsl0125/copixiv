@@ -4,6 +4,7 @@ from copixiv.core.exceptions import NotFoundError
 from copixiv.db.tx import run_write_transaction_sync
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
+from copixiv.log import logger
 from copixiv.storage.file_storage import FileStorage
 
 
@@ -28,16 +29,17 @@ class DeleteNovelUseCase:
         """
 
         def _delete_tx(tx: SqlUnitOfWork) -> str | None:
-            repo = SQLAlchemyNovelRepository(tx.session)
-            novel = repo.get_by_id(novel_id)
-            if not novel:
+            deleted, novel_path = SQLAlchemyNovelRepository(tx.session).delete(novel_id)
+            if not deleted:
                 raise NotFoundError(f"Novel {novel_id} not found")
-            repo.delete(novel_id)
-            return novel.path
+            return novel_path
 
         novel_path = run_write_transaction_sync(self._uow, _delete_tx)
 
         if novel_path:
             # Best-effort cleanup — a failure here must not fail the API
             # call (the row is already gone).
-            self._file_storage.delete_novel_files(novel_path)
+            try:
+                self._file_storage.delete_novel_files(novel_path)
+            except OSError:
+                logger.warning("删除小说文件失败: {}", novel_path, exc_info=True)

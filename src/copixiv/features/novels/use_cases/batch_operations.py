@@ -2,38 +2,23 @@
 
 from __future__ import annotations
 
-from typing import cast
+from collections.abc import Callable, Sequence
 
 from copixiv.core.exceptions import NotFoundError, ValidationError
 from copixiv.core.search import QuerySpec, parse_search_keyword
 from copixiv.core.text import MAX_TAG_LENGTH, validate_tags
 from copixiv.db.tx import run_write_transaction_sync
+from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
+from copixiv.log import logger
 from copixiv.storage.file_storage import FileStorage
 
-# Hard safety cap per SYNCHRONOUS batch operation — one HTTP request must
-# never walk the whole library.  The frontend prompts the user to narrow
-# the scope when the matched set is large; selections beyond this run as
-# background tasks (POST /api/novels/batch-task).
-BATCH_MAX_NOVELS = 5000
 BATCH_MAX_TAGS = 20
 
-# Internal chunk size for statements that address an explicit ID list
-# (match-ids intersection, blocked-ids, sort-ids, task safety fallback).
-#
-# The original 30k was chosen to stay under SQLite's variable limit; the
-# database is PostgreSQL now, which has no such limit for ``IN`` lists.  The
-# value is kept as a *bounded-work* default: it caps statement length, keeps
-# one request's memory/latency predictable, and lets long operations report
-# progress between chunks.  It is a tuning knob, not a correctness boundary.
+# Internal chunk size for statements/transactions addressing explicit ID lists
+# (match-ids intersection, blocked-ids, batch delete/tag chunks).
 BATCH_ID_CHUNK_SIZE = 30_000
-
-
-# Sentinel: "cap not given" → resolve the module-level BATCH_MAX_NOVELS at
-# call time (monkeypatch-friendly), while an explicit ``cap=None`` means
-# truly uncapped (background-task path).
-_DEFAULT_CAP = object()
 
 
 def resolve_batch_scope(
@@ -45,64 +30,20 @@ def resolve_batch_scope(
     min_like: int | None,
     min_text: int | None,
     excluded_ids: list[int],
-    cap: int | None | object = _DEFAULT_CAP,
 ) -> list[int]:
     """Resolve the effective novel ID list for a batch operation.
 
-    The single scope-resolution rule, shared by the synchronous batch
-    endpoint (capped at :data:`BATCH_MAX_NOVELS`) and the background-task
-    enqueue path (``cap=None`` — any size, the task chunks the work).
-
-    Args:
-        cap: Maximum matched/selected size; ``None`` disables the check
-            (background tasks accept selections of any size).  Defaults to
-            the current :data:`BATCH_MAX_NOVELS`.
-
     Raises:
-        ValidationError: Empty scope, or scope larger than *cap*.
+        ValidationError: Empty ``ids`` selection.
         NotFoundError: Filter-matched scope contains no novels.
-
-    The ``all_matched`` size check reads a **bounded** count
-    (``repo.COUNT_CAP``): it answers "is the scope over the cap?", not
-    "how many novels are there?".
-
-    Synchronous: it only queries the repository (blocking SQLAlchemy calls),
-    so the endpoint declaring it as a plain ``def`` keeps the session work on
-    the worker thread FastAPI runs it in.
     """
-    resolved_cap: int | None = BATCH_MAX_NOVELS if cap is _DEFAULT_CAP else cast("int | None", cap)
     if mode == "ids":
         ids = sorted({int(i) for i in novel_ids})
         if not ids:
             raise ValidationError("请先勾选要操作的小说")
-        if resolved_cap is not None and len(ids) > resolved_cap:
-            raise ValidationError(
-                f"已勾选 {len(ids)} 篇，单次批量操作上限为 {resolved_cap} 篇，请减少勾选数量"
-            )
         return ids
 
     conditions = parse_search_keyword(keyword) if keyword else None
-    # Only the capped path (sync endpoint) needs the COUNT — the
-    # background-task path (cap=None) skips it and goes straight to the
-    # ID list.
-    if resolved_cap is not None:
-        matched = novel_repo.count_novels(
-            QuerySpec(
-                conditions=conditions or [],
-                min_like=min_like,
-                min_text=min_text,
-            )
-        )
-        # 计数是有界的（``repo.COUNT_CAP``）：``truncated`` 说明真实匹配数超过
-        # 计数上限，此时按「超过 *cap*」处理 —— 上限取值只会 ≤ COUNT_CAP，所以
-        # 截断必然是超限；只比 value 会让「恰好等于 cap 的截断值」漏过检查，
-        # 把超限选择放进同步批量操作。
-        if matched.truncated or matched.value > resolved_cap:
-            shown = f"{matched.value}+" if matched.truncated else str(matched.value)
-            raise ValidationError(
-                f"当前筛选匹配 {shown} 篇，超过单次批量操作上限 {resolved_cap} 篇，请先缩小筛选范围"
-            )
-
     ids = novel_repo.list_matching_ids(
         QuerySpec(
             conditions=conditions or [],
@@ -114,6 +55,16 @@ def resolve_batch_scope(
     if not ids:
         raise NotFoundError("当前范围内没有可操作的小说")
     return ids
+
+
+def delete_novel_paths(file_storage: FileStorage, paths: Sequence[str | None]) -> None:
+    """Best-effort delete novel files on disk."""
+    for path in paths:
+        if path:
+            try:
+                file_storage.delete_novel_files(path)
+            except Exception:  # noqa: BLE001
+                logger.exception("删除小说文件失败: {}", path)
 
 
 class BatchDeleteUseCase:
@@ -129,15 +80,29 @@ class BatchDeleteUseCase:
         self._uow = uow
         self._file_storage = file_storage
 
-    def execute(self, novel_ids: list[int]) -> int:
-        paths = run_write_transaction_sync(
-            self._uow,
-            lambda tx: SQLAlchemyNovelRepository(tx.session).delete_many(novel_ids),
-        )
-        for path in paths:
-            if path:
-                self._file_storage.delete_novel_files(path)
-        return len(novel_ids)
+    def execute(
+        self,
+        novel_ids: list[int],
+        *,
+        defer_file_cleanup: Callable[[list[str]], None] | None = None,
+    ) -> int:
+        deleted_count = 0
+        all_paths: list[str] = []
+        for i in range(0, len(novel_ids), BATCH_ID_CHUNK_SIZE):
+            chunk = novel_ids[i : i + BATCH_ID_CHUNK_SIZE]
+
+            def _delete_chunk(tx: SqlUnitOfWork, chunk: list[int] = chunk) -> tuple[int, list[str]]:
+                return SQLAlchemyNovelRepository(tx.session).delete_many(chunk)
+
+            count, paths = run_write_transaction_sync(self._uow, _delete_chunk)
+            deleted_count += count
+            all_paths.extend(paths)
+
+        if defer_file_cleanup is not None and len(all_paths) > 500:
+            defer_file_cleanup(all_paths)
+        else:
+            delete_novel_paths(self._file_storage, all_paths)
+        return deleted_count
 
 
 class BatchTagUseCase:
@@ -147,9 +112,8 @@ class BatchTagUseCase:
     alias map so a batch add behaves exactly like the write path.
     """
 
-    def __init__(self, novel_repo: SQLAlchemyNovelRepository, tag_repo: SQLAlchemyTagRepository):
-        self._repo = novel_repo
-        self._tag_repo = tag_repo
+    def __init__(self, uow: SqlUnitOfWork):
+        self._uow = uow
 
     def execute(
         self,
@@ -157,6 +121,8 @@ class BatchTagUseCase:
         novel_ids: list[int],
         tags: list[str],
     ) -> int:
+        if operation not in ("add_tags", "remove_tags"):
+            raise ValidationError(f"未知的批量操作: {operation}")
         cleaned_tags = validate_tags(
             list(tags),
             max_count=BATCH_MAX_TAGS,
@@ -165,11 +131,18 @@ class BatchTagUseCase:
         )
         tag_set = set(cleaned_tags)
 
-        alias_map = self._tag_repo.get_alias_map()
-        resolved = {alias_map.get(t, t) for t in tag_set}
+        affected = 0
+        for i in range(0, len(novel_ids), BATCH_ID_CHUNK_SIZE):
+            chunk = novel_ids[i : i + BATCH_ID_CHUNK_SIZE]
 
-        if operation == "add_tags":
-            return self._repo.add_tags_to_novels(novel_ids, resolved)
-        if operation == "remove_tags":
-            return self._repo.remove_tags_from_novels(novel_ids, resolved)
-        raise ValidationError(f"未知的批量操作: {operation}")
+            def _tag_chunk(tx: SqlUnitOfWork, chunk: list[int] = chunk) -> int:
+                novel_repo = SQLAlchemyNovelRepository(tx.session)
+                tag_repo = SQLAlchemyTagRepository(tx.session)
+                alias_map = tag_repo.get_alias_map()
+                resolved = {alias_map.get(t, t) for t in tag_set}
+                if operation == "add_tags":
+                    return novel_repo.add_tags_to_novels(chunk, resolved)
+                return novel_repo.remove_tags_from_novels(chunk, resolved)
+
+            affected += run_write_transaction_sync(self._uow, _tag_chunk)
+        return affected

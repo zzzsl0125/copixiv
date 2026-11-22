@@ -13,7 +13,7 @@ from typing import Any
 from copixiv.core import naming as formats
 from copixiv.core.draft import NovelDraft
 from copixiv.log import logger
-from copixiv.pixiv.http import PIXIV_IMAGE_HEADERS, pick_image_url
+from copixiv.pixiv.http import pick_image_url
 from copixiv.storage import assets
 from copixiv.storage.epub import state
 from copixiv.storage.epub.builder import EpubBuildResult
@@ -22,13 +22,12 @@ from copixiv.storage.image_downloader import ImageDownloader
 
 def _existing_epub_finished(epub_path: Path, needs_epub: bool | None) -> bool:
     """Return True if *epub_path* already satisfies *needs_epub* (blocking zip I/O)."""
-    if not epub_path.exists() or not state.is_readable_container(epub_path):
+    readable, complete = state.inspect_epub(epub_path)
+    if not readable:
         return False
-    if needs_epub is False:
-        return True
-    if needs_epub is None:
-        return not state.has_raw_markers(epub_path)
-    return bool(needs_epub is True and state.is_complete(epub_path))
+    if needs_epub is True:
+        return complete
+    return True
 
 
 def _remove_downloaded_files(paths: Iterable[Path]) -> None:
@@ -105,9 +104,8 @@ class NovelAssetPipeline:
     ) -> None:
         self._downloader = image_downloader
         self._epub_builder = epub_builder
-        self._image_headers = dict(PIXIV_IMAGE_HEADERS if image_headers is None else image_headers)
+        self._image_headers = dict(image_headers) if image_headers is not None else None
         self._download_root = Path(download_root) if download_root is not None else None
-        self._default_batch = AssetBatch()
         self._in_flight: dict[int, asyncio.Task[tuple[str | None, str | None]]] = {}
 
     def new_batch(self) -> AssetBatch:
@@ -121,10 +119,12 @@ class NovelAssetPipeline:
         batch: AssetBatch | None = None,
     ) -> None:
         """Queue async image downloads + EPUB creation for *novel*."""
-        target = batch if batch is not None else self._default_batch
+        if batch is None:
+            raise ValueError("AssetBatch is required")
+
         path_str = novel.path
         if not path_str:
-            target.record_outcome(novel.id, "skipped")
+            batch.record_outcome(novel.id, "skipped")
             return
 
         novel_id = novel.id
@@ -132,21 +132,21 @@ class NovelAssetPipeline:
         epub_path = formats.sibling_path(Path(path_str), formats.EPUB)
 
         if not force and await asyncio.to_thread(_existing_epub_finished, epub_path, needs_epub):
-            target.record_outcome(novel_id, "done")
+            batch.record_outcome(novel_id, "done")
             return
 
         if not novel.images and not novel.illusts and needs_epub is not True:
-            target.record_outcome(novel_id, "skipped")
+            batch.record_outcome(novel_id, "skipped")
             return
 
         existing_task = self._in_flight.get(novel_id)
         if existing_task is not None and not existing_task.done():
-            target.add_task(novel_id, existing_task)
+            batch.add_task(novel_id, existing_task)
             return
 
         task = asyncio.create_task(self._process_one(copy.copy(novel), needs_epub))
         self._in_flight[novel_id] = task
-        target.add_task(novel_id, task)
+        batch.add_task(novel_id, task)
 
         def _on_done(
             finished_task: asyncio.Task[tuple[str | None, str | None]],
@@ -165,14 +165,8 @@ class NovelAssetPipeline:
         if task is None or current is task:
             self._in_flight.pop(novel_id, None)
 
-    def drain_outcomes(self, ids: Iterable[int] | None = None) -> dict[int, str]:
-        return self._default_batch.drain_outcomes(ids)
-
-    async def await_all(self, ids: Iterable[int] | None = None) -> list[tuple[int, str]]:
-        return await self._default_batch.await_all(ids)
-
     async def aclose(self) -> None:
-        """Cancel pending asset tasks and close the underlying downloader."""
+        """Cancel pending asset tasks."""
         pending = [t for t in self._in_flight.values() if not t.done()]
         for task in pending:
             task.cancel()
@@ -180,7 +174,6 @@ class NovelAssetPipeline:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         self._in_flight.clear()
-        await self._downloader.aclose()
 
     async def _process_one(
         self,
@@ -189,6 +182,7 @@ class NovelAssetPipeline:
     ) -> tuple[str | None, str | None]:
         base_dir = Path(novel.path or "").parent
         novel_id = str(novel.id)
+        downloaded: list[Path] = []
         try:
             downloaded = await self._download_all_images(novel, base_dir)
             return await self._build_epub(novel, downloaded, needs_epub)
@@ -197,6 +191,9 @@ class NovelAssetPipeline:
         except Exception:
             logger.exception(f"Error processing assets for novel {novel_id}")
             return "failed", f"资产处理异常: novel {novel_id}"
+        finally:
+            if downloaded:
+                await asyncio.to_thread(_remove_downloaded_files, downloaded)
 
     async def _download_all_images(
         self,
@@ -264,47 +261,35 @@ class NovelAssetPipeline:
         if self._epub_builder is None:
             return "skipped", None
 
-        result = await asyncio.to_thread(
+        build_kwargs: dict[str, Any] = {"needs_epub": needs_epub}
+        if downloaded:
+            build_kwargs["asset_paths"] = downloaded
+        result: EpubBuildResult = await asyncio.to_thread(
             self._epub_builder.create_epub,
             novel,
-            needs_epub=needs_epub,
+            **build_kwargs,
         )
         has_source_images = bool(novel.images or novel.illusts)
 
-        if isinstance(result, EpubBuildResult):
-            if not result.ok:
-                return "failed", f"EPUB 生成失败: novel {novel_id}"
-            if needs_epub is False or not result.written:
-                return "skipped", None
-            if result.is_complete:
-                outcome = "done"
-            elif has_source_images:
-                logger.warning(f"下载: #{novel_id} EPUB 未完成（图片下载失败）")
-                return "failed", f"EPUB 不完整: novel {novel_id}"
-            else:
-                logger.warning(f"下载: #{novel_id} 正文有图片占位符但来源未给图片，交给检查任务判定")
-                return None, None
-        else:
-            if not result:
-                return "failed", f"EPUB 生成失败: novel {novel_id}"
-            if needs_epub is False:
-                return "skipped", None
-            epub_path = formats.sibling_path(Path(novel.path or ""), formats.EPUB)
-            if await asyncio.to_thread(state.is_complete, epub_path):
-                outcome = "done"
-            elif has_source_images:
-                logger.warning(f"下载: #{novel_id} EPUB 未完成（图片下载失败）")
-                return "failed", f"EPUB 不完整: novel {novel_id}"
-            else:
-                logger.warning(f"下载: #{novel_id} 正文有图片占位符但来源未给图片，交给检查任务判定")
-                return None, None
+        if not result.ok:
+            if result.written and result.output_path is not None:
+                await asyncio.to_thread(_remove_downloaded_files, [result.output_path])
+            return "failed", f"EPUB 生成失败: novel {novel_id}"
+        if needs_epub is False or not result.written:
+            return "skipped", None
+        if result.is_complete:
+            logger.info(
+                f"下载: #{novel_id} EPUB 完成 (已清理 {len(downloaded)} 张临时图片)",
+            )
+            return "done", None
+        if has_source_images:
+            logger.warning(f"下载: #{novel_id} EPUB 未完成（图片下载失败）")
+            if result.output_path is not None:
+                await asyncio.to_thread(_remove_downloaded_files, [result.output_path])
+            return "failed", f"EPUB 不完整: novel {novel_id}"
 
-        logger.info(
-            f"下载: #{novel_id} EPUB 完成 (已清理 {len(downloaded)} 张临时图片)",
-        )
-        if downloaded:
-            await asyncio.to_thread(_remove_downloaded_files, downloaded)
-        return outcome, None
+        logger.warning(f"下载: #{novel_id} 正文有图片占位符但来源未给图片，交给检查任务判定")
+        return None, None
 
 
 __all__ = ["AssetBatch", "NovelAssetPipeline"]

@@ -19,16 +19,14 @@ from copixiv.core.time import month_ranges
 from copixiv.db.tx import read_transaction, run_write_transaction
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
-from copixiv.features.authors.resolve_names import (
-    collect_author_names,
-    writeback_author_names,
-)
 from copixiv.features.novels.ingest import ingest
 from copixiv.log import logger
 from copixiv.pixiv.client import PixivClient
 
 # How many ``fetch_author_novels`` branches may run at once during ranking/search fan-out.
 _FAN_OUT_LIMIT = 8
+# How many novel IDs are processed per ``ingest`` batch in retry flows.
+_RETRY_BATCH_SIZE = 50
 
 
 def _batch_summary(prefix: str, out: Any) -> str:
@@ -125,7 +123,7 @@ async def fetch_author_novels(
 
     def _plan(uw: SqlUnitOfWork) -> tuple[bool, dict | None]:
         repo = SQLAlchemyAuthorRepository(uw.session)
-        skip = (not force) and repo.need_update(author_id)
+        skip = (not force) and repo.was_updated_today(author_id)
         return skip, (None if skip else repo.get_by_id(author_id))
 
     skip, author = await read_transaction(uow, _plan)
@@ -138,7 +136,8 @@ async def fetch_author_novels(
             await client.user_follow_add(author_id)
 
     resp = await client.user_novels(author_id, fetch_all=True)
-    novels = filter_chinese(safe_get(resp, "novels", []))
+    raw_novels = safe_get(resp, "novels", [])
+    novels = filter_chinese(raw_novels)
 
     out = await ingest(
         novels,
@@ -149,21 +148,21 @@ async def fetch_author_novels(
         image_downloader=image_downloader,
     )
 
-    await run_write_transaction(
-        uow,
-        lambda uw: SQLAlchemyAuthorRepository(uw.session).update_last_update(author_id),
+    name = (
+        safe_get(resp, "user.name", "")
+        or next((safe_get(n, "user.name", "") for n in raw_novels if safe_get(n, "user.name")), "")
+        or (author.get("author_name") or "" if author else "")
     )
 
-    mapping = await collect_author_names(
-        {author_id},
-        uow=uow,
-        client=client,
-    )
-    await run_write_transaction(
-        uow,
-        lambda uw: writeback_author_names(mapping, uw),
-    )
-    name = mapping.get(author_id, "")
+    if author is not None or out.titles or author_id in out.new_author_ids:
+
+        def _finish_author_update(uw: SqlUnitOfWork) -> None:
+            repo = SQLAlchemyAuthorRepository(uw.session)
+            repo.update_last_update(author_id)
+            if name and (author is None or author.get("author_name") != name):
+                repo.update_author_name(author_id, name)
+
+        await run_write_transaction(uow, _finish_author_update)
 
     label = name or f"#{author_id}"
     return TaskResult(
@@ -379,34 +378,25 @@ async def retry_failed_novels(
     if not ids:
         return TaskResult(summary="重试列表为空", new_novel_titles=[])
 
-    results = await asyncio.gather(
-        *[
-            fetch_single_novel(
-                nid,
-                redownload=True,
-                session_factory=session_factory,
-                client=client,
-                file_storage=file_storage,
-                image_downloader=image_downloader,
-            )
-            for nid in ids
-        ],
-        return_exceptions=True,
-    )
-
-    titles: list[str] = []
+    new_titles: list[str] = []
     failed_ids: list[int] = []
-    for nid, result in zip(ids, results, strict=True):
-        if isinstance(result, TaskResult) and not result.failed_ids:
-            titles.extend(result.new_novel_titles)
-        else:
-            failed_ids.append(nid)
-            logger.error(f"failed_retry: #{nid} 重试失败: {result!r}")
-
+    for i in range(0, len(ids), _RETRY_BATCH_SIZE):
+        chunk = ids[i : i + _RETRY_BATCH_SIZE]
+        out = await ingest(
+            ids=chunk,
+            force=True,
+            session_factory=session_factory,
+            client=client,
+            file_storage=file_storage,
+            image_downloader=image_downloader,
+        )
+        new_titles.extend(out.new_titles)
+        failed_ids.extend(out.failed_ids)
+    failed_ids = list(dict.fromkeys(failed_ids))
     ok = len(ids) - len(failed_ids)
     return TaskResult(
         summary=f"重试失败小说: 成功 {ok}/{len(ids)}",
-        new_novel_titles=titles,
+        new_novel_titles=new_titles,
         failed_ids=failed_ids,
     )
 

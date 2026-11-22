@@ -55,7 +55,7 @@ from copixiv.core.models import author_id as _author_id
 from copixiv.core.models import series_id as _series_id
 from copixiv.core.text import MAX_TAG_LENGTH, parse_tags, validate_tags
 from copixiv.core.time import parse_pixiv_time
-from copixiv.db.base import ensure_parent_rows, finalize_parent_links
+from copixiv.db.base import ensure_parent_rows
 from copixiv.db.tx import read_transaction, run_write_transaction
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
@@ -151,8 +151,6 @@ class UpdateNovelMetadataUseCase:
             current = novel_repo.get_by_id(novel_id)
             if current is None:
                 raise NotFoundError(f"Novel {novel_id} not found")
-            old_author_id = current.author_id
-            old_series_id = current.series_id
 
             ensure_parent_rows(
                 tx.session,
@@ -170,14 +168,6 @@ class UpdateNovelMetadataUseCase:
                 author_repo.update_author_name(*resolved_author)
             if resolved_series is not None:
                 series_repo.update_series_name(*resolved_series)
-
-            new_author_id = values.get("author_id", old_author_id)
-            new_series_id = values.get("series_id", old_series_id)
-            finalize_parent_links(
-                tx.session,
-                author_ids={old_author_id, new_author_id},
-                series_ids={old_series_id, new_series_id},
-            )
 
             updated = novel_repo.get_by_id(novel_id)
             if updated is None:  # 并发删除的兜底——上面刚写过，实际不会发生

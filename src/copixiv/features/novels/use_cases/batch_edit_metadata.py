@@ -60,7 +60,7 @@ from copixiv.core.exceptions import ValidationError
 from copixiv.core.models import SOURCE_LOCAL, UNKNOWN_AUTHOR
 from copixiv.core.models import author_id as _author_id
 from copixiv.core.models import series_id as _series_id
-from copixiv.db.base import ensure_parent_rows, finalize_parent_links
+from copixiv.db.base import ensure_parent_rows
 from copixiv.db.tx import read_transaction, run_write_transaction
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
@@ -123,7 +123,7 @@ class BatchEditMetadataUseCase:
         apply: bool = False,
     ) -> BatchMetadataCounts:
         """计数（``apply=False``）或"计数 + 写库"（``apply=True``）。"""
-        if author_id is _UNSET and series_id is _UNSET:
+        if apply and author_id is _UNSET and series_id is _UNSET:
             raise ValidationError("没有要修改的字段")
         if not eligible_ids:
             raise ValidationError("请先勾选要修改的小说")
@@ -195,7 +195,6 @@ class BatchEditMetadataUseCase:
                 series_ids={series_id} if isinstance(series_id, int) else (),
             )
 
-            old_authors, old_series = write_repo.get_parent_ids(set(applicable))
             affected = write_repo.update_metadata_many(applicable, values)
 
             if backfill_unknown_author:
@@ -210,13 +209,6 @@ class BatchEditMetadataUseCase:
             if resolved_series is not None:
                 series_repo.update_series_name(*resolved_series)
 
-            new_authors: set[int] = {author_id} if isinstance(author_id, int) else set()
-            new_series: set[int] = {series_id} if isinstance(series_id, int) else set()
-            finalize_parent_links(
-                tx.session,
-                author_ids=old_authors | new_authors,
-                series_ids=old_series | new_series,
-            )
             return affected
 
         counts["affected"] = await run_write_transaction(self._uow, _commit)

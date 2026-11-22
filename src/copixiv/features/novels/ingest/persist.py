@@ -16,8 +16,10 @@ single ``asyncio.to_thread`` hop.  A caller who is already in a transaction
 
 from __future__ import annotations
 
+from sqlalchemy import update
+
 from copixiv.core.draft import NovelDraft
-from copixiv.db.base import ensure_parent_rows, finalize_parent_links
+from copixiv.db import models
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 
@@ -27,10 +29,7 @@ def persist_novels(
     novels: list[NovelDraft],
     force_update: list[str] | None = None,
 ) -> int:
-    """Upsert *novels* and refresh author/series summaries.
-
-    Ensures author + series placeholder rows exist before the novel
-    insert so FK constraints are satisfied for first-seen authors/series.
+    """Upsert *novels* and sync author/series display names.
 
     Returns the number of newly-inserted novels.
     """
@@ -38,22 +37,47 @@ def persist_novels(
     if not novels:
         return 0
 
-    author_ids = {n.author_id for n in novels if n.author_id}
-    series_ids = {n.series_id for n in novels if n.series_id}
-
-    ensure_parent_rows(
-        uow.session,
-        author_ids=author_ids,
-        series_ids=series_ids,
-    )
-
     novel_repo = SQLAlchemyNovelRepository(uow.session)
-    old_authors, old_series = novel_repo.get_parent_ids({n.id for n in novels if n.id is not None})
     count = novel_repo.upsert_novels(novels, force_update or [])
-    finalize_parent_links(
-        uow.session,
-        author_ids=author_ids | old_authors,
-        series_ids=series_ids | old_series,
-    )
+
+    author_names: dict[int, str] = {}
+    series_names: dict[int, str] = {}
+    series_authors: dict[int, int] = {}
+    for n in novels:
+        if n.author_id and n.author_name:
+            author_names[n.author_id] = n.author_name
+        if n.series_id:
+            if n.series_name:
+                series_names[n.series_id] = n.series_name
+            if n.author_id:
+                series_authors[n.series_id] = n.author_id
+
+    for aid, name in author_names.items():
+        uow.session.execute(
+            update(models.Author)
+            .where(
+                models.Author.author_id == aid,
+                models.Author.author_name.is_distinct_from(name),
+            )
+            .values(author_name=name)
+        )
+    for sid, name in series_names.items():
+        uow.session.execute(
+            update(models.Series)
+            .where(
+                models.Series.series_id == sid,
+                models.Series.series_name.is_distinct_from(name),
+            )
+            .values(series_name=name)
+        )
+    for sid, aid in series_authors.items():
+        uow.session.execute(
+            update(models.Series)
+            .where(
+                models.Series.series_id == sid,
+                models.Series.author_id.is_distinct_from(aid),
+            )
+            .values(author_id=aid)
+        )
 
     return count
