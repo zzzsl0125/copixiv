@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 
 from copixiv.core.search import normalize_search_segments
-from copixiv.core.snapshot_types import SlimNovelRecord, SlimTagRecord
+from copixiv.core.snapshot_types import SlimNovelRecord
 from copixiv.core.time import datetime_to_us, us_to_datetime
 from copixiv.query_engine.adapter import RustNovelQueryEngine
 from copixiv.query_engine.port import EngineCursor, EngineQuery
@@ -228,24 +228,26 @@ def test_abs_id_null_sort_order_and_js_safe_random_cursor():
 
 def test_tag_suggestions_rebuild_flag_and_memory_breakdown():
     eng = RustNovelQueryEngine()
-    stg = eng.create_staging(capacity=1)
-    stg.push_batch([_row(1, title="Book", tags=["百合"])])
+    stg = eng.create_staging(capacity=2)
+    stg.push_batch(
+        [
+            _row(1, title="Book 1", tags=["百合", "日常"]),
+            _row(2, title="Book 2", tags=["百合", "百合漫画"]),
+        ]
+    )
     eng.swap_from_staging(
         stg,
         [],
         True,
-        tags=[
-            SlimTagRecord(1, "百合", 10),
-            SlimTagRecord(2, "百合漫画", 5),
-            SlimTagRecord(3, "日常", 8),
-        ],
-        aliased_tag_ids=[],
+        aliased_tags=[],
     )
     assert eng.needs_rebuild() is False
     items, next_off = eng.suggest_tag_aliases(limit=5, offset=0, target_tag="百合")
     assert next_off is None
     assert len(items) == 1
-    assert [c.name for c in items[0].candidates] == ["百合漫画"]
+    assert items[0].target.reference_count == 2
+    assert items[0].target.id > 0
+    assert [(c.name, c.reference_count) for c in items[0].candidates] == [("百合漫画", 1)]
     breakdown = eng.memory_breakdown()
     assert any(name == "postings_slab" for name, _, _ in breakdown)
     eng.mark_needs_rebuild()

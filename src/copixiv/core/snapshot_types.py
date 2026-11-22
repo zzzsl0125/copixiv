@@ -26,15 +26,6 @@ class SlimNovelRecord(NamedTuple):
     tags: list[str]
 
 
-class SlimTagRecord(NamedTuple):
-    """3-column tag tuple ``(id, name, reference_count)`` consumed by ``copixiv_rs``."""
-
-    id: int
-    name: str
-    reference_count: int
-
-
 __all__ = [
     "SlimNovelRecord",
-    "SlimTagRecord",
 ]

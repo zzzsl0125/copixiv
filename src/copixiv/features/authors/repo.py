@@ -12,7 +12,6 @@ from copixiv.core.exceptions import NotFoundError
 from copixiv.db import delta as engine_delta
 from copixiv.db import models
 from copixiv.db.base import model_to_dict
-from copixiv.features.tags.repo import SQLAlchemyTagRepository
 
 
 class SQLAlchemyAuthorRepository:
@@ -64,11 +63,8 @@ class SQLAlchemyAuthorRepository:
     def update_author_name(self, author_id: int, name: str) -> None:
         """Write *name* to the author row **and** normalise its novel rows.
 
-        Only touch novel rows whose name actually changed.  The
-        ``sync_tag_refs`` trigger is declared ``UPDATE OF tags``, so an
-        author-name writeback must not produce any ``novel`` UPDATE that
-        could interact with ``tag`` row locks; narrowing the predicate
-        also keeps the write batch short (no no-op row updates).
+        Only touch novel rows whose name actually changed, keeping the
+        write batch short (no no-op row updates).
         """
         changed_ids = list(
             self.session.execute(
@@ -107,13 +103,11 @@ class SQLAlchemyAuthorRepository:
                 models.Novel.id,
                 models.Novel.path,
                 models.Novel.series_id,
-                models.Novel.tags,
             ).where(models.Novel.author_id == author_id)
         ).all()
         novel_ids = [r[0] for r in rows]
         paths = [r[1] for r in rows if r[1]]
         affected_series_ids = {r[2] for r in rows if r[2] is not None}
-        affected_tags = {t for r in rows for t in (r[3] or [])}
 
         owned_series_ids = set(
             self.session.execute(_select(models.Series.series_id).where(models.Series.author_id == author_id))
@@ -129,9 +123,6 @@ class SQLAlchemyAuthorRepository:
             self.session.execute(_delete(models.Novel).where(models.Novel.id.in_(novel_ids)))
             engine_delta.record_novel_deletes(self.session, novel_ids)
             self.session.flush()
-            if affected_tags:
-                engine_delta.record_tags_dirty(self.session, affected_tags)
-                SQLAlchemyTagRepository(self.session).prune_unused_tags(affected_tags)
         engine_delta.record_authors_dirty(self.session, [author_id])
 
         check_series = affected_series_ids | owned_series_ids

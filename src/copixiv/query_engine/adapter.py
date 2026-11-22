@@ -6,7 +6,7 @@ from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING
 
 from copixiv.core.exceptions import ValidationError
-from copixiv.core.snapshot_types import SlimNovelRecord, SlimTagRecord
+from copixiv.core.snapshot_types import SlimNovelRecord
 from copixiv.query_engine.port import (
     EngineCountResult,
     EngineCursor,
@@ -76,15 +76,13 @@ class RustNovelQueryEngine:
         staging: copixiv_rs.StagingEngine,
         blocked_tags: list[str],
         exclude_blocked_default: bool,
-        tags: list[SlimTagRecord] | None = None,
-        aliased_tag_ids: list[int] | None = None,
+        aliased_tags: list[str] | None = None,
     ) -> None:
         self._rs.swap_from_staging(
             staging,
             blocked_tags,
             exclude_blocked_default,
-            list(tags) if tags is not None else [],
-            list(aliased_tag_ids) if aliased_tag_ids is not None else [],
+            list(aliased_tags) if aliased_tags is not None else [],
         )
 
     def apply_delta(
@@ -95,9 +93,7 @@ class RustNovelQueryEngine:
         blocked_tags: Sequence[str] | None = None,
         exclude_blocked_default: bool | None = None,
         special_follow_changes: Sequence[tuple[int, bool]] = (),
-        delete_tag_names: Sequence[str] | None = None,
-        upsert_tags: Sequence[SlimTagRecord] | None = None,
-        aliased_tag_ids: Sequence[int] | None = None,
+        aliased_tags: Sequence[str] | None = None,
     ) -> None:
         self._rs.apply_delta(
             delete_ids=list(delete_ids),
@@ -105,9 +101,7 @@ class RustNovelQueryEngine:
             blocked_tags=list(blocked_tags) if blocked_tags is not None else None,
             exclude_blocked_default=exclude_blocked_default,
             special_follow_changes=list(special_follow_changes),
-            delete_tag_names=list(delete_tag_names) if delete_tag_names is not None else None,
-            upsert_tags=list(upsert_tags) if upsert_tags is not None else None,
-            aliased_tag_ids=list(aliased_tag_ids) if aliased_tag_ids is not None else None,
+            aliased_tags=list(aliased_tags) if aliased_tags is not None else None,
         )
 
     def query_novel_rows(

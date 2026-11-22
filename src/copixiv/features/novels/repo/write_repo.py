@@ -196,19 +196,13 @@ class SQLAlchemyNovelWriteRepository:
         Returns ``(deleted, stored_path)``.
         """
         row = self.session.execute(
-            _delete(models.Novel)
-            .where(models.Novel.id == novel_id)
-            .returning(models.Novel.path, models.Novel.tags)
+            _delete(models.Novel).where(models.Novel.id == novel_id).returning(models.Novel.path)
         ).one_or_none()
         if row is None:
             return False, None
-        old_tags = list(row.tags or [])
         self.session.execute(_delete(models.FailedNovel).where(models.FailedNovel.novel_id == novel_id))
         engine_delta.record_novel_deletes(self.session, [novel_id])
         self.session.flush()
-        if old_tags:
-            engine_delta.record_tags_dirty(self.session, old_tags)
-            SQLAlchemyTagRepository(self.session).prune_unused_tags(old_tags)
         return True, row.path
 
     def toggle_favourite(self, novel_id: int) -> None:
@@ -235,12 +229,9 @@ class SQLAlchemyNovelWriteRepository:
         novel = self.session.get(models.Novel, novel_id)
         if novel is None:
             return
-        removed_tags = set(novel.tags or []) - set(values["tags"] or []) if "tags" in values else set()
         for field, value in values.items():
             setattr(novel, field, value)
         self.session.flush()
-        if removed_tags:
-            SQLAlchemyTagRepository(self.session).prune_unused_tags(removed_tags)
 
     # ---- batch operations ----------------------------------------------------
 
@@ -254,16 +245,12 @@ class SQLAlchemyNovelWriteRepository:
         rows = self.session.execute(
             _delete(models.Novel)
             .where(models.Novel.id == any_(cast(Any, novel_ids)))
-            .returning(models.Novel.id, models.Novel.path, models.Novel.tags)
+            .returning(models.Novel.id, models.Novel.path)
         ).all()
         deleted_ids = [row.id for row in rows]
-        old_tags = {t for row in rows for t in (row.tags or [])}
         if deleted_ids:
             engine_delta.record_novel_deletes(self.session, deleted_ids)
         self.session.flush()
-        if old_tags:
-            engine_delta.record_tags_dirty(self.session, old_tags)
-            SQLAlchemyTagRepository(self.session).prune_unused_tags(old_tags)
         paths = [row.path for row in rows if row.path]
         return len(deleted_ids), paths
 
@@ -290,7 +277,6 @@ class SQLAlchemyNovelWriteRepository:
         )
         if changed:
             engine_delta.record_novel_upserts(self.session, changed)
-        engine_delta.record_tags_dirty(self.session, tag_names)
         return len(changed)
 
     def filter_ids_by_source(self, novel_ids: list[int], sources: set[str]) -> list[int]:
@@ -369,8 +355,6 @@ class SQLAlchemyNovelWriteRepository:
         )
         if changed:
             engine_delta.record_novel_upserts(self.session, changed)
-            engine_delta.record_tags_dirty(self.session, tag_names)
-            SQLAlchemyTagRepository(self.session).prune_unused_tags(tag_names)
         return len(changed)
 
 

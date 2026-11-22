@@ -4,6 +4,7 @@ use crate::filter::{QueryFilter, SortAxis, TrackCursor};
 use crate::model::{NovelRecord, QueryPage, TagSuggestItem};
 use crate::query::mask::CandidateMask;
 use crate::storage::EngineState;
+use crate::tag_index::TagIndex;
 
 /// Thread-safe in-process query engine combining novel search/pagination
 /// and tag similarity suggestions behind a single `parking_lot::RwLock`.
@@ -43,7 +44,7 @@ impl NovelIndex {
             s.doc_ids.len(),
             s.blocked_bitmap.len() as usize,
             s.exclude_blocked_default,
-            s.tag_index.tag_count(),
+            s.tag_postings.iter().filter(|h| !h.is_empty()).count(),
             s.needs_rebuild,
         )
     }
@@ -57,7 +58,6 @@ impl NovelIndex {
         *guard = next;
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn apply_delta(
         &self,
         delete_ids: &[i64],
@@ -65,9 +65,7 @@ impl NovelIndex {
         blocked_tags: Option<Vec<String>>,
         exclude_blocked_default: Option<bool>,
         special_follow_changes: &[(i64, bool)],
-        delete_tag_names: Option<Vec<String>>,
-        upsert_tags: Option<Vec<(i64, String, i32)>>,
-        aliased_tag_ids: Option<Vec<i64>>,
+        aliased_tags: Option<Vec<String>>,
     ) {
         self.inner.write().apply_delta(
             delete_ids,
@@ -75,9 +73,7 @@ impl NovelIndex {
             blocked_tags,
             exclude_blocked_default,
             special_follow_changes,
-            delete_tag_names,
-            upsert_tags,
-            aliased_tag_ids,
+            aliased_tags,
         );
     }
 
@@ -156,23 +152,41 @@ impl NovelIndex {
     ) -> (Vec<TagSuggestItem>, Option<i64>) {
         {
             let guard = self.inner.read();
-            if !guard.tag_index.sorted_dirty {
-                return guard.tag_index.suggest_aliases(limit, offset, target_tag);
+            if !guard.tag_index.dirty {
+                return guard.tag_index.suggest_aliases(
+                    &guard.tag_interner,
+                    &guard.tag_postings,
+                    &guard.postings_slab,
+                    limit,
+                    offset,
+                    target_tag,
+                );
             }
         }
         let up = self.inner.upgradable_read();
-        let guard = if up.tag_index.sorted_dirty {
-            let (sorted_slots, first_char_index) = up.tag_index.build_sorted_state();
+        let guard = if up.tag_index.dirty {
+            let built = TagIndex::build_from_state(
+                &up.tag_interner,
+                &up.tag_postings,
+                &up.postings_slab,
+                &up.aliased_tag_names,
+            );
             let mut w = RwLockUpgradableReadGuard::upgrade(up);
-            if w.tag_index.sorted_dirty {
-                w.tag_index
-                    .install_sorted_state(sorted_slots, first_char_index);
+            if w.tag_index.dirty {
+                w.tag_index = built;
             }
             parking_lot::RwLockWriteGuard::downgrade(w)
         } else {
             RwLockUpgradableReadGuard::downgrade(up)
         };
-        guard.tag_index.suggest_aliases(limit, offset, target_tag)
+        guard.tag_index.suggest_aliases(
+            &guard.tag_interner,
+            &guard.tag_postings,
+            &guard.postings_slab,
+            limit,
+            offset,
+            target_tag,
+        )
     }
 
     pub fn get_novel_rows_by_ids(&self, novel_ids: &[i64]) -> Vec<NovelRecord> {
@@ -233,7 +247,7 @@ mod tests {
             sample_row(2, "ñ lower only", vec!["原神"]),
         ]);
         let engine = NovelIndex::new();
-        engine.swap_state(b.finalize(vec![], true, vec![], vec![]));
+        engine.swap_state(b.finalize(vec![], true, vec![]));
 
         let f = QueryFilter {
             keyword_segments: vec!["hello".into(), "Ñ".into()],
@@ -262,7 +276,7 @@ mod tests {
         let mut b = StagingBuilder::new(4);
         b.push_batch(vec![r1, r2, r3, r4]);
         let engine = NovelIndex::new();
-        engine.swap_state(b.finalize(vec![], true, vec![], vec![]));
+        engine.swap_state(b.finalize(vec![], true, vec![]));
 
         let f = QueryFilter::default();
         let desc_ids: Vec<i64> = engine
@@ -386,11 +400,11 @@ mod tests {
         let mut b = StagingBuilder::new(35);
         b.push_batch(rows);
         let engine = NovelIndex::new();
-        engine.swap_state(b.finalize(vec!["T1".into()], true, vec![], vec![]));
+        engine.swap_state(b.finalize(vec!["T1".into()], true, vec![]));
 
         let f = QueryFilter::default();
         assert_eq!(engine.count_novels(&f, 5000), (0, false));
-        engine.apply_delta(&[], vec![], Some(vec![]), None, &[], None, None, None);
+        engine.apply_delta(&[], vec![], Some(vec![]), None, &[], None);
         assert_eq!(engine.count_novels(&f, 5000), (35, false));
 
         // Early stop and binary-search count on clean Like track
@@ -415,7 +429,7 @@ mod tests {
         assert_eq!(asc_min_like, vec![20, 21, 22]);
 
         // Deleting duplicate IDs must not push duplicate slots into free_docs
-        engine.apply_delta(&[2, 2, 2], vec![], None, None, &[], None, None, None);
+        engine.apply_delta(&[2, 2, 2], vec![], None, None, &[], None);
         assert_eq!(engine.inner.read().free_docs.len(), 1);
         assert!(engine.inner.read().tracks_dirty[HotTrack::Like as usize]);
 
@@ -428,7 +442,7 @@ mod tests {
         // Mutation on non-hot field keeps HotTrack::Like clean!
         let mut r3 = sample_row(3, "NonHotEdit", vec!["T2"]);
         r3.is_favourite = true;
-        engine.apply_delta(&[], vec![r3], None, None, &[], None, None, None);
+        engine.apply_delta(&[], vec![r3], None, None, &[], None);
         assert!(!engine.inner.read().tracks_dirty[HotTrack::Like as usize]);
 
         // Exhaustive random walk collects remaining 34 IDs cleanly
@@ -465,17 +479,13 @@ mod tests {
         let mut b = StagingBuilder::new(8);
         b.push_batch(vec![r1, r2, r3]);
         let engine = NovelIndex::new();
-        engine.swap_state(b.finalize(
-            vec![],
-            true,
-            vec![(1, "unique_small".into(), 2), (2, "other".into(), 1)],
-            vec![],
-        ));
+        engine.swap_state(b.finalize(vec![], true, vec![]));
+        assert!(engine.inner.read().tag_index.dirty);
 
         // Force HotTrack::Like dirty via a novel like mutation
         let mut r2_mod = sample_row(2, "Beta", vec!["other"]);
         r2_mod.like = 99999;
-        engine.apply_delta(&[], vec![r2_mod], None, None, &[], None, None, None);
+        engine.apply_delta(&[], vec![r2_mod], None, None, &[], None);
         assert!(engine.inner.read().tracks_dirty[HotTrack::Like as usize]);
 
         // Small candidate set queries Like without rebuilding track
@@ -496,20 +506,30 @@ mod tests {
         assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), vec![3, 1]);
         assert!(engine.inner.read().tracks_dirty[HotTrack::Like as usize]);
 
-        // Atomic delta syncs both novel index and tag index
+        // Atomic delta syncs novel tags and derives TagIndex lazily on demand
         let row4 = sample_row(4, "Four", vec!["unique_small_v2"]);
+        engine.apply_delta(&[], vec![row4], None, None, &[], None);
+        let (items, _) = engine.suggest_tag_aliases(5, 0, Some("unique_small"));
+        assert!(!engine.inner.read().tag_index.dirty);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].target.reference_count, 2);
+        assert!(items[0].target.id > 0);
+        assert_eq!(items[0].candidates[0].name, "unique_small_v2");
+        assert_eq!(items[0].candidates[0].reference_count, 1);
+
+        // Alias update refreshes exclusions without rebuilding TagIndex when tags didn't change
         engine.apply_delta(
             &[],
-            vec![row4],
+            vec![],
             None,
             None,
             &[],
-            None,
-            Some(vec![(3, "unique_small_v2".into(), 1)]),
-            None,
+            Some(vec!["unique_small_v2".into()]),
         );
-        let (items, _) = engine.suggest_tag_aliases(5, 0, Some("unique_small"));
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].candidates[0].name, "unique_small_v2");
+        assert!(!engine.inner.read().tag_index.dirty);
+        assert!(engine
+            .suggest_tag_aliases(5, 0, Some("unique_small"))
+            .0
+            .is_empty());
     }
 }

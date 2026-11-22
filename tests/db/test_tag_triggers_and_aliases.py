@@ -1,9 +1,8 @@
-"""Layer 2 DB tests: trg_sync_tag_refs triggers, alias guards, retroactive dedup, and Rust tag suggestions."""
+"""Layer 2 DB tests: alias guards, retroactive dedup, and Rust lazy TagIndex sync."""
 
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import select, text
 
 from copixiv.core.draft import build_novel
 from copixiv.core.exceptions import ValidationError
@@ -14,60 +13,101 @@ from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
 
 
-def _tag_count(session, name: str) -> int:
-    row = session.execute(
-        select(models.Tag.reference_count).where(models.Tag.name == name)
-    ).scalar_one_or_none()
-    return int(row or 0)
+def _candidate_counts(tag_repo: SQLAlchemyTagRepository, target_tag: str) -> dict[str, int]:
+    res = tag_repo.suggest_aliases(limit=10, offset=0, target_tag=target_tag)
+    if not res["items"]:
+        return {}
+    item = res["items"][0]
+    counts = {item["target"]["name"]: item["target"]["reference_count"]}
+    for cand in item["candidates"]:
+        counts[cand["name"]] = cand["reference_count"]
+    return counts
 
 
-def test_tag_triggers_track_insert_update_delete(uow: SqlUnitOfWork):
+def test_rust_tag_index_tracks_insert_update_delete_without_pg_tag_table(uow: SqlUnitOfWork):
     with uow.begin():
         persist_novels(
             uow,
             [
-                build_novel(id=1, title="T1", author_id=1, author_name="A", tags=["alpha", "beta"]),
-                build_novel(id=2, title="T2", author_id=1, author_name="A", tags=["alpha"]),
+                build_novel(
+                    id=1,
+                    title="T1",
+                    author_id=1,
+                    author_name="A",
+                    tags=["alpha", "alpha_pair", "beta"],
+                ),
+                build_novel(
+                    id=2,
+                    title="T2",
+                    author_id=1,
+                    author_name="A",
+                    tags=["alpha"],
+                ),
             ],
         )
-        assert _tag_count(uow.session, "alpha") == 2
-        assert _tag_count(uow.session, "beta") == 1
 
-    # Update tags: remove beta, add gamma on novel 1
+    with uow.begin():
+        counts = _candidate_counts(SQLAlchemyTagRepository(uow.session), "alpha")
+        assert counts == {"alpha": 2, "alpha_pair": 1}
+
+    # Update tags: remove beta & alpha_pair, add alpha_extra on novel 1
     with uow.begin():
         repo = SQLAlchemyNovelRepository(uow.session)
-        repo.remove_tags_from_novels([1], {"beta"})
-        repo.add_tags_to_novels([1], {"gamma"})
-        assert _tag_count(uow.session, "alpha") == 2
-        assert _tag_count(uow.session, "beta") == 0
-        assert _tag_count(uow.session, "gamma") == 1
+        repo.remove_tags_from_novels([1], {"beta", "alpha_pair"})
+        repo.add_tags_to_novels([1], {"alpha_extra"})
 
-    # Delete novel 1 -> alpha drops to 1, gamma drops to 0 and is pruned
+    with uow.begin():
+        counts = _candidate_counts(SQLAlchemyTagRepository(uow.session), "alpha")
+        assert counts == {"alpha": 2, "alpha_extra": 1}
+
+    # Delete novel 1 -> alpha drops to 1, alpha_extra drops to 0 and disappears
     with uow.begin():
         SQLAlchemyNovelRepository(uow.session).delete(1)
-        assert _tag_count(uow.session, "alpha") == 1
-        assert _tag_count(uow.session, "gamma") == 0
-        assert (
-            uow.session.execute(select(models.Tag).where(models.Tag.name == "gamma")).scalar_one_or_none()
-            is None
-        )
-        # Trigger must not create any session temp tables (migration 0016+)
-        temp_count = uow.session.execute(
-            text("SELECT COUNT(*) FROM pg_class WHERE relpersistence = 't' AND relname = '_tag_ref_deltas'")
-        ).scalar_one()
-        assert temp_count == 0
 
-    # Non-tag UPDATE leaves reference counts untouched (0017 EXCEPT early exit)
+    with uow.begin():
+        assert (
+            SQLAlchemyTagRepository(uow.session).suggest_aliases(limit=5, offset=0, target_tag="alpha")[
+                "items"
+            ]
+            == []
+        )
+        assert (
+            SQLAlchemyTagRepository(uow.session).suggest_aliases(limit=5, offset=0, target_tag="alpha_extra")[
+                "items"
+            ]
+            == []
+        )
+
+    # Non-tag UPDATE keeps derived tag counts intact
     with uow.begin():
         SQLAlchemyNovelRepository(uow.session).toggle_favourite(2)
-        assert _tag_count(uow.session, "alpha") == 1
+        SQLAlchemyNovelRepository(uow.session).add_tags_to_novels([2], {"alpha_v2"})
+
+    with uow.begin():
+        counts = _candidate_counts(SQLAlchemyTagRepository(uow.session), "alpha")
+        assert counts == {"alpha": 1, "alpha_v2": 1}
 
 
-def test_aliased_zero_ref_tag_survives_until_alias_deleted(uow: SqlUnitOfWork):
+def test_aliased_tags_excluded_until_alias_deleted(uow: SqlUnitOfWork):
     with uow.begin():
         persist_novels(
             uow,
-            [build_novel(id=20, title="Aliased", author_id=1, author_name="A", tags=["src_alias"])],
+            [
+                build_novel(
+                    id=20,
+                    title="Aliased",
+                    author_id=1,
+                    author_name="A",
+                    tags=["src_alias", "dst_alias_pair"],
+                ),
+                build_novel(
+                    id=21,
+                    title="Dest",
+                    author_id=1,
+                    author_name="A",
+                    tags=["dst_alias"],
+                ),
+            ],
         )
 
     with uow.begin():
@@ -75,20 +115,21 @@ def test_aliased_zero_ref_tag_survives_until_alias_deleted(uow: SqlUnitOfWork):
         alias = tag_repo.create_alias({"source": "src_alias", "target": "dst_alias"})
         tag_repo.apply_alias_retroactively("src_alias", "dst_alias")
 
-        # src_alias stays because tag_alias references it, even with reference_count == 0
-        src_row = uow.session.execute(
-            select(models.Tag).where(models.Tag.name == "src_alias")
-        ).scalar_one_or_none()
-        assert src_row is not None
-        assert src_row.reference_count == 0
+    with uow.begin():
+        tag_repo = SQLAlchemyTagRepository(uow.session)
+        assert tag_repo.get_aliases() == [{"id": alias["id"], "source": "src_alias", "target": "dst_alias"}]
+        assert tag_repo.suggest_aliases(limit=5, offset=0, target_tag="src_alias")["items"] == []
+        assert tag_repo.suggest_aliases(limit=5, offset=0, target_tag="dst_alias")["items"] == []
 
-        # Deleting the alias immediately prunes the unreferenced src_alias row
+        # Deleting the alias restores dst_alias suggestions while 0-ref src_alias stays absent
         assert tag_repo.delete_aliases_by_ids([alias["id"]]) == 1
-        assert (
-            uow.session.execute(select(models.Tag).where(models.Tag.name == "src_alias")).scalar_one_or_none()
-            is None
-        )
-        assert _tag_count(uow.session, "dst_alias") == 1
+
+    with uow.begin():
+        tag_repo = SQLAlchemyTagRepository(uow.session)
+        assert tag_repo.get_aliases() == []
+        counts = _candidate_counts(tag_repo, "dst_alias")
+        assert counts == {"dst_alias": 2, "dst_alias_pair": 1}
+        assert tag_repo.suggest_aliases(limit=5, offset=0, target_tag="src_alias")["items"] == []
 
 
 def test_alias_single_hop_and_cycle_guards(uow: SqlUnitOfWork):
@@ -122,7 +163,7 @@ def test_apply_alias_retroactively_deduplicates_tags_and_updates_counts(uow: Sql
                     title="Both",
                     author_id=1,
                     author_name="A",
-                    tags=["old_tag", "new_tag", "other"],
+                    tags=["old_tag", "new_tag", "new_tag_pair", "other"],
                 ),
                 build_novel(
                     id=11,
@@ -142,12 +183,14 @@ def test_apply_alias_retroactively_deduplicates_tags_and_updates_counts(uow: Sql
         n10 = uow.session.get(models.Novel, 10)
         n11 = uow.session.get(models.Novel, 11)
         assert n10 is not None
-        assert sorted(n10.tags) == ["new_tag", "other"]
+        assert sorted(n10.tags) == ["new_tag", "new_tag_pair", "other"]
         assert n11 is not None
         assert n11.tags == ["new_tag"]
-        assert _tag_count(uow.session, "old_tag") == 0
-        assert _tag_count(uow.session, "new_tag") == 2
-        assert _tag_count(uow.session, "other") == 1
+
+    with uow.begin():
+        tag_repo = SQLAlchemyTagRepository(uow.session)
+        assert _candidate_counts(tag_repo, "new_tag") == {"new_tag": 2, "new_tag_pair": 1}
+        assert tag_repo.suggest_aliases(limit=5, offset=0, target_tag="old_tag")["items"] == []
 
 
 def test_suggest_aliases_end_to_end_via_rust_tag_index(uow: SqlUnitOfWork):

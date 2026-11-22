@@ -72,7 +72,8 @@ pub struct EngineState {
     pub tracks: [Vec<u32>; HotTrack::COUNT],
     pub tracks_dirty: [bool; HotTrack::COUNT],
 
-    // In-process tag similarity index (76k tags)
+    // In-process tag similarity index (lazily derived from tag_interner + tag_postings)
+    pub aliased_tag_names: FxHashSet<String>,
     pub tag_index: TagIndex,
 }
 
@@ -127,6 +128,7 @@ impl EngineState {
             text_index: CharBigramIndex::with_capacity(docs.saturating_mul(2)),
             tracks: std::array::from_fn(|_| Vec::new()),
             tracks_dirty: [true; HotTrack::COUNT],
+            aliased_tag_names: FxHashSet::default(),
             tag_index: TagIndex::default(),
         }
     }

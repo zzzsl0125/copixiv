@@ -174,19 +174,6 @@ class Novel(Base):
         return f"<Novel(id={self.id}, title='{self.title}')>"
 
 
-class Tag(Base):
-    __tablename__ = "tag"
-
-    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
-    reference_count: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0, server_default=sa_text("0")
-    )
-
-    def __repr__(self) -> str:
-        return f"<Tag(name='{self.name}')>"
-
-
 class TagPreference(Base):
     __tablename__ = "tag_preference"
 
@@ -217,22 +204,17 @@ class Setting(Base):
 class TagAlias(Base):
     __tablename__ = "tag_alias"
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    source: Mapped[int] = mapped_column(
-        BigInteger,
-        ForeignKey("tag.id"),
-        unique=True,
-        nullable=False,
-    )
-    target: Mapped[int] = mapped_column(
-        BigInteger,
-        ForeignKey("tag.id"),
-        nullable=False,
-    )
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    target: Mapped[str] = mapped_column(Text, nullable=False)
 
-    __table_args__ = (Index("ix_tag_alias_target", "target"),)
+    __table_args__ = (
+        UniqueConstraint("source", name="tag_alias_source_key"),
+        CheckConstraint("source <> target", name="ck_tag_alias_distinct"),
+        Index("ix_tag_alias_target", "target"),
+    )
 
     def __repr__(self) -> str:
-        return f"<TagAlias(source_id={self.source}, target_id={self.target})>"
+        return f"<TagAlias(source={self.source!r}, target={self.target!r})>"
 
 
 class ScheduledTask(Base):

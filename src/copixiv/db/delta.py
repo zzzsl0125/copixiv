@@ -33,7 +33,6 @@ class PendingEngineDelta:
 
     novel_ids: set[int] = field(default_factory=set)
     author_ids: set[int] = field(default_factory=set)
-    tag_names: set[str] = field(default_factory=set)
     aliases_dirty: bool = False
     blocked_tags_dirty: bool = False
     exclude_setting_dirty: bool = False
@@ -42,7 +41,6 @@ class PendingEngineDelta:
         return (
             not self.novel_ids
             and not self.author_ids
-            and not self.tag_names
             and not self.aliases_dirty
             and not self.blocked_tags_dirty
             and not self.exclude_setting_dirty
@@ -159,15 +157,6 @@ def _collect_flushed_orm_deltas(session: Session) -> None:
             if isinstance(obj, models.Novel):
                 if obj.id is not None:
                     pending.novel_ids.add(int(obj.id))
-                if bucket_name in ("new", "deleted"):
-                    if obj.tags:
-                        pending.tag_names.update(str(t) for t in obj.tags if t)
-                else:
-                    hist = sa_inspect(obj).attrs.tags.history
-                    if hist.has_changes():
-                        for seq in (*hist.added, *hist.deleted):
-                            if seq:
-                                pending.tag_names.update(str(t) for t in seq if t)
             elif isinstance(obj, models.Author):
                 if obj.author_id is not None:
                     if bucket_name in ("new", "deleted"):
@@ -176,15 +165,6 @@ def _collect_flushed_orm_deltas(session: Session) -> None:
                         hist = sa_inspect(obj).attrs.is_special_follow.history
                         if hist.has_changes():
                             pending.author_ids.add(int(obj.author_id))
-            elif isinstance(obj, models.Tag):
-                if obj.name:
-                    pending.tag_names.add(str(obj.name))
-                if bucket_name == "dirty":
-                    hist = sa_inspect(obj).attrs.name.history
-                    if hist.has_changes():
-                        for val in (*hist.added, *hist.deleted):
-                            if val:
-                                pending.tag_names.add(str(val))
             elif isinstance(obj, models.TagAlias):
                 pending.aliases_dirty = True
             elif isinstance(obj, models.TagPreference):
@@ -220,12 +200,6 @@ def record_authors_dirty(session: Session | None, author_ids: Iterable[int]) -> 
     pending = get_or_create_pending_delta(session)
     if pending is not None:
         pending.author_ids.update(int(aid) for aid in author_ids)
-
-
-def record_tags_dirty(session: Session | None, tag_names: Iterable[str]) -> None:
-    pending = get_or_create_pending_delta(session)
-    if pending is not None:
-        pending.tag_names.update(str(name) for name in tag_names if name)
 
 
 def record_aliases_dirty(session: Session | None) -> None:
@@ -269,6 +243,5 @@ __all__ = [
     "record_exclude_setting_dirty",
     "record_novel_deletes",
     "record_novel_upserts",
-    "record_tags_dirty",
     "sync_engine_if_needed",
 ]

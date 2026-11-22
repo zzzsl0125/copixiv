@@ -299,6 +299,13 @@ def test_integrity_error_maps_to_chinese_400(db_session_factory, tmp_path: Path)
         assert dup_pref.status_code == 400
         assert "该标签偏好已存在" in dup_pref.json()["detail"]
 
+        # Duplicate tag alias source -> 400 with Chinese detail via tag_alias_source_key
+        alias_payload = {"sources": ["dup_src"], "target": "dup_tgt"}
+        assert client.post("/api/tag-aliases/batch", json=alias_payload).status_code == 200
+        dup_alias = client.post("/api/tag-aliases/batch", json=alias_payload)
+        assert dup_alias.status_code == 400
+        assert "该标签别名已存在" in dup_alias.json()["detail"]
+
 
 def test_task_cancellation_and_uniform_204_deletes(db_session_factory, tmp_path: Path):
     uow = SqlUnitOfWork(db_session_factory)

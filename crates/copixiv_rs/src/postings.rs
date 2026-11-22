@@ -1,8 +1,6 @@
 use std::mem::size_of;
 
 use roaring::RoaringBitmap;
-use rustc_hash::FxHashMap;
-use smallvec::SmallVec;
 
 pub const SMALL_MAX: usize = 64;
 pub const MAX_INLINE_2: u32 = 0x7FFF_FFFF;
@@ -22,7 +20,6 @@ const CAP_SHIFT: u32 = 48;
 const BYTE_MASK: u64 = 0xFF;
 
 const SIZE_CLASSES: [usize; 5] = [4, 8, 16, 32, 64];
-const OVERFLOW_SENTINEL: u32 = u32::MAX;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
@@ -611,128 +608,6 @@ impl PostingSlab {
     }
 }
 
-pub enum TitleBucketRef<'a> {
-    Single(u32),
-    Many(&'a [u32]),
-}
-
-impl<'a> TitleBucketRef<'a> {
-    #[inline]
-    pub fn as_slice(&self) -> &[u32] {
-        match self {
-            Self::Single(d) => std::slice::from_ref(d),
-            Self::Many(s) => s,
-        }
-    }
-}
-
-#[derive(Default)]
-pub struct TitleBuckets {
-    primary: FxHashMap<u64, u32>,
-    overflow: FxHashMap<u64, SmallVec<[u32; 2]>>,
-}
-
-impl TitleBuckets {
-    pub fn with_capacity(approx: usize) -> Self {
-        Self {
-            primary: FxHashMap::with_capacity_and_hasher(approx, Default::default()),
-            overflow: FxHashMap::default(),
-        }
-    }
-
-    pub fn insert(&mut self, hash: u64, doc: u32) {
-        assert!(
-            doc < OVERFLOW_SENTINEL,
-            "doc slot exceeded TitleBuckets range"
-        );
-        use std::collections::hash_map::Entry;
-        match self.primary.entry(hash) {
-            Entry::Vacant(v) => {
-                v.insert(doc);
-            }
-            Entry::Occupied(mut o) => {
-                let cur = *o.get();
-                if cur == doc {
-                    return;
-                }
-                if cur == OVERFLOW_SENTINEL {
-                    let list = self
-                        .overflow
-                        .get_mut(&hash)
-                        .expect("missing overflow entry");
-                    if !list.contains(&doc) {
-                        list.push(doc);
-                    }
-                } else {
-                    *o.get_mut() = OVERFLOW_SENTINEL;
-                    let mut list = SmallVec::new();
-                    list.push(cur);
-                    list.push(doc);
-                    self.overflow.insert(hash, list);
-                }
-            }
-        }
-    }
-
-    pub fn remove(&mut self, hash: u64, doc: u32) {
-        let Some(&cur) = self.primary.get(&hash) else {
-            return;
-        };
-        if cur == doc {
-            self.primary.remove(&hash);
-            return;
-        }
-        if cur == OVERFLOW_SENTINEL {
-            let Some(list) = self.overflow.get_mut(&hash) else {
-                return;
-            };
-            if let Some(pos) = list.iter().position(|&d| d == doc) {
-                list.swap_remove(pos);
-            }
-            if list.len() == 1 {
-                let remaining = list[0];
-                self.overflow.remove(&hash);
-                if let Some(slot) = self.primary.get_mut(&hash) {
-                    *slot = remaining;
-                }
-            } else if list.is_empty() {
-                self.overflow.remove(&hash);
-                self.primary.remove(&hash);
-            }
-        }
-    }
-
-    #[inline]
-    pub fn get(&self, hash: u64) -> Option<TitleBucketRef<'_>> {
-        let &cur = self.primary.get(&hash)?;
-        if cur == OVERFLOW_SENTINEL {
-            self.overflow
-                .get(&hash)
-                .map(|sv| TitleBucketRef::Many(sv.as_slice()))
-        } else {
-            Some(TitleBucketRef::Single(cur))
-        }
-    }
-
-    pub fn shrink_to_fit(&mut self) {
-        self.primary.shrink_to_fit();
-        self.overflow.shrink_to_fit();
-    }
-
-    pub fn approx_heap_bytes(&self) -> usize {
-        let primary_bytes = self.primary.capacity() * (size_of::<u64>() + size_of::<u32>() + 4);
-        let overflow_bytes = self.overflow.capacity()
-            * (size_of::<u64>() + size_of::<SmallVec<[u32; 2]>>())
-            + self
-                .overflow
-                .values()
-                .filter(|v| v.spilled())
-                .map(|v| v.capacity() * size_of::<u32>())
-                .sum::<usize>();
-        primary_bytes + overflow_bytes
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -801,24 +676,5 @@ mod tests {
             DecodedHandle::Small { len: 2, cap: 2, .. }
         ));
         assert_eq!(h.iter(&slab).collect::<Vec<_>>(), vec![5, u32::MAX - 1]);
-    }
-
-    #[test]
-    fn title_buckets_single_and_overflow() {
-        let mut buckets = TitleBuckets::default();
-        buckets.insert(42, 10);
-        assert_eq!(buckets.get(42).unwrap().as_slice(), &[10]);
-        buckets.insert(42, 10);
-        assert_eq!(buckets.get(42).unwrap().as_slice(), &[10]);
-
-        buckets.insert(42, 20);
-        let mut s = buckets.get(42).unwrap().as_slice().to_vec();
-        s.sort_unstable();
-        assert_eq!(s, vec![10, 20]);
-
-        buckets.remove(42, 10);
-        assert_eq!(buckets.get(42).unwrap().as_slice(), &[20]);
-        buckets.remove(42, 20);
-        assert!(buckets.get(42).is_none());
     }
 }

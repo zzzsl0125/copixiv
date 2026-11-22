@@ -14,7 +14,7 @@ from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 
 from copixiv.core.search import EXCLUDE_BLOCKED_SETTING_KEY, resolve_exclude_blocked
-from copixiv.core.snapshot_types import SlimNovelRecord, SlimTagRecord
+from copixiv.core.snapshot_types import SlimNovelRecord
 from copixiv.core.time import datetime_to_us
 from copixiv.db import delta as engine_delta
 from copixiv.db import models
@@ -32,9 +32,7 @@ class SnapshotDeltaPayload:
     blocked_tags: list[str] | None
     exclude_blocked_default: bool | None
     special_follow_changes: list[tuple[int, bool]]
-    delete_tag_names: list[str] | None
-    upsert_tags: list[SlimTagRecord] | None
-    aliased_tag_ids: list[int] | None
+    aliased_tags: list[str] | None
 
 
 def _slim_novel_select():
@@ -159,43 +157,13 @@ def _fetch_author_sf_flags(
     return [(aid, sf_map.get(aid, False)) for aid in unique]
 
 
-def _fetch_all_tags(session: Session) -> list[SlimTagRecord]:
-    rows = session.execute(select(models.Tag.id, models.Tag.name, models.Tag.reference_count)).all()
-    return [SlimTagRecord(int(tid), str(name), int(rc)) for tid, name, rc in rows]
-
-
-def _fetch_tags_by_names(
-    session: Session,
-    names: Sequence[str],
-    chunk_size: int = 2_000,
-) -> tuple[list[SlimTagRecord], list[str]]:
-    unique = list(dict.fromkeys(str(n) for n in names if n))
-    if not unique:
-        return [], []
-    upserts: list[SlimTagRecord] = []
-    found_names: set[str] = set()
-    for i in range(0, len(unique), chunk_size):
-        chunk = unique[i : i + chunk_size]
-        rows = session.execute(
-            select(models.Tag.id, models.Tag.name, models.Tag.reference_count).where(
-                models.Tag.name.in_(chunk)
-            )
-        ).all()
-        for tid, name, rc in rows:
-            tname = str(name)
-            found_names.add(tname)
-            upserts.append(SlimTagRecord(int(tid), tname, int(rc)))
-    deleted = [name for name in unique if name not in found_names]
-    return upserts, deleted
-
-
-def _fetch_aliased_tag_ids(session: Session) -> list[int]:
+def _fetch_aliased_tags(session: Session) -> list[str]:
     rows = session.execute(select(models.TagAlias.source, models.TagAlias.target)).all()
-    ids: set[int] = set()
+    names: set[str] = set()
     for src, tgt in rows:
-        ids.add(int(src))
-        ids.add(int(tgt))
-    return sorted(ids)
+        names.add(str(src))
+        names.add(str(tgt))
+    return sorted(names)
 
 
 class PgSnapshotStore:
@@ -222,17 +190,16 @@ class PgSnapshotStore:
         consume_total: Callable[[int], None],
         consume_batch: Callable[[list[SlimNovelRecord]], None],
         batch_size: int = 2_000,
-    ) -> tuple[list[str], bool, list[SlimTagRecord], list[int]]:
-        """Stream all novels, metadata, and tags under one consistent snapshot."""
+    ) -> tuple[list[str], bool, list[str]]:
+        """Stream all novels, metadata, and aliased tag names under one consistent snapshot."""
         with self._snapshot_session() as session:
             consume_total(_fetch_total_novel_count(session))
             for batch in _iter_all_novel_row_batches(session, batch_size=batch_size):
                 consume_batch(batch)
             blocked_tags = _fetch_blocked_tag_names(session)
             exclude_default = _fetch_exclude_blocked_default(session)
-            all_tags = _fetch_all_tags(session)
-            aliased_tag_ids = _fetch_aliased_tag_ids(session)
-            return blocked_tags, exclude_default, all_tags, aliased_tag_ids
+            aliased_tags = _fetch_aliased_tags(session)
+            return blocked_tags, exclude_default, aliased_tags
 
     def fetch_delta_payload(
         self,
@@ -251,22 +218,14 @@ class PgSnapshotStore:
             exclude_default = (
                 _fetch_exclude_blocked_default(session) if pending.exclude_setting_dirty else None
             )
-
-            upsert_tags: list[SlimTagRecord] | None = None
-            delete_tag_names: list[str] | None = None
-            if pending.tag_names:
-                upsert_tags, delete_tag_names = _fetch_tags_by_names(session, sorted(pending.tag_names))
-
-            aliased_tag_ids = _fetch_aliased_tag_ids(session) if pending.aliases_dirty else None
+            aliased_tags = _fetch_aliased_tags(session) if pending.aliases_dirty else None
             return SnapshotDeltaPayload(
                 delete_ids=delete_ids,
                 upsert_rows=upsert_rows,
                 blocked_tags=blocked_tags,
                 exclude_blocked_default=exclude_default,
                 special_follow_changes=sf_changes,
-                delete_tag_names=delete_tag_names or None,
-                upsert_tags=upsert_tags or None,
-                aliased_tag_ids=aliased_tag_ids,
+                aliased_tags=aliased_tags,
             )
 
     def attach_runtime(

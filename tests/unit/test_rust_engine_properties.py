@@ -345,19 +345,38 @@ def test_rust_engine_incremental_upsert_and_delete_roundtrip(rows, data):
     assert engine.get_novel_rows_by_ids(to_delete) == []
 
 
+def _novel_tuple(novel_id: int, tags: list[str]) -> tuple:
+    return (
+        novel_id,
+        f"Book {novel_id}",
+        1,
+        "Auth1",
+        None,
+        None,
+        None,
+        1000,
+        10,
+        100,
+        0,
+        1_700_000_000_000_000,
+        "pixiv",
+        False,
+        False,
+        tags,
+    )
+
+
 def test_tag_index_incremental_deltas_and_cursor_pagination():
     engine = RustNovelQueryEngine()
-    stg = engine.create_staging(capacity=0)
-    initial_tags = [
-        (1, "Alpha", 100),
-        (2, "AlphaTwo", 80),
-        (3, "AlphaThree", 50),
-        (4, "BetaSource", 90),
-        (5, "BetaTarget", 70),
-        (6, "%PercentTag", 30),
-        (7, "%PercentTagSub", 10),
-    ]
-    engine.swap_from_staging(stg, [], True, tags=initial_tags, aliased_tag_ids=[4, 5])
+    stg = engine.create_staging(capacity=4)
+    stg.push_batch(
+        [
+            _novel_tuple(1, ["Alpha", "AlphaTwo", "AlphaThree"]),
+            _novel_tuple(2, ["Alpha", "BetaSource", "BetaTarget"]),
+            _novel_tuple(3, ["%PercentTag", "%PercentTagSub"]),
+        ]
+    )
+    engine.swap_from_staging(stg, [], True, aliased_tags=["BetaSource", "BetaTarget"])
 
     # Alias source & target excluded as both target and candidate
     assert engine.suggest_tag_aliases(limit=5, offset=0, target_tag="BetaSource")[0] == []
@@ -374,11 +393,13 @@ def test_tag_index_incremental_deltas_and_cursor_pagination():
     p2, _ = engine.suggest_tag_aliases(limit=5, offset=off1, target_tag=None)
     assert not ({x.target.id for x in p1} & {x.target.id for x in p2})
 
-    # Incremental tag delta: delete %PercentTagSub, insert AlphaFour, clear aliases
+    # Incremental delta: remove %PercentTagSub, add novel with AlphaFour, clear aliases
     engine.apply_delta(
-        delete_tag_names=["%PercentTagSub"],
-        upsert_tags=[(8, "AlphaFour", 200)],
-        aliased_tag_ids=[],
+        upsert_rows=[
+            _novel_tuple(3, ["%PercentTag"]),
+            _novel_tuple(4, ["AlphaFour"]),
+        ],
+        aliased_tags=[],
     )
     assert engine.suggest_tag_aliases(limit=5, offset=0, target_tag="%PercentTag")[0] == []
     alpha_items, _ = engine.suggest_tag_aliases(limit=5, offset=0, target_tag="Alpha")

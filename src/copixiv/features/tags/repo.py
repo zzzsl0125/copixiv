@@ -1,4 +1,4 @@
-"""Consolidated tag, preference, alias, and suggestion repository."""
+"""Consolidated tag preference, alias, and suggestion repository."""
 
 from __future__ import annotations
 
@@ -6,11 +6,10 @@ from collections.abc import Iterable, Sequence
 from typing import Any, cast
 
 from sqlalchemy import delete as _delete
-from sqlalchemy import exists, func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy import text as sa_text
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy.orm import Session
 
 from copixiv.core.exceptions import ValidationError
 from copixiv.db import delta as engine_delta
@@ -20,7 +19,7 @@ from copixiv.query_engine.adapter import RustNovelQueryEngine
 
 
 class SQLAlchemyTagRepository:
-    """Repository for tag entities, preferences, aliases, and suggestions."""
+    """Repository for tag preferences, aliases, and suggestions."""
 
     def __init__(
         self,
@@ -32,65 +31,6 @@ class SQLAlchemyTagRepository:
         self._query_engine: RustNovelQueryEngine | None = (
             query_engine if query_engine is not None else session.info.get(engine_delta.SESSION_ENGINE_KEY)
         )
-
-    # ------------------------------------------------------------------
-    # Tag entity & orphan pruning
-    # ------------------------------------------------------------------
-
-    def get_or_create_tag_id(self, name: str) -> int:
-        """Return ``tag.id`` for *name*, inserting a row if missing."""
-        tag = self.session.execute(select(models.Tag).where(models.Tag.name == name)).scalar_one_or_none()
-        if tag:
-            return tag.id
-        self.session.execute(
-            pg_insert(models.Tag)
-            .values(name=name, reference_count=0)
-            .on_conflict_do_nothing(index_elements=["name"])
-        )
-        self.session.flush()
-        engine_delta.record_tags_dirty(self.session, [name])
-        tag = self.session.execute(select(models.Tag).where(models.Tag.name == name)).scalar_one()
-        return tag.id
-
-    @staticmethod
-    def _unaliased_zero_predicate():
-        return (
-            models.Tag.reference_count <= 0,
-            ~exists().where(
-                or_(
-                    models.TagAlias.source == models.Tag.id,
-                    models.TagAlias.target == models.Tag.id,
-                )
-            ),
-        )
-
-    def prune_unused_tags(self, tag_names: Iterable[str] | None = None) -> int:
-        """Delete zero-reference tag rows not referenced by any ``tag_alias``."""
-        stmt = _delete(models.Tag).where(*self._unaliased_zero_predicate())
-        if tag_names is not None:
-            names = sorted({n for n in tag_names if n})
-            if not names:
-                return 0
-            stmt = stmt.where(models.Tag.name.in_(names))
-        deleted = list(self.session.execute(stmt.returning(models.Tag.name)).scalars().all())
-        if deleted:
-            engine_delta.record_tags_dirty(self.session, deleted)
-        return len(deleted)
-
-    def prune_unused_tag_ids(self, tag_ids: Iterable[int]) -> int:
-        """Delete zero-reference tag rows by ID when no ``tag_alias`` references them."""
-        ids = sorted(set(tag_ids))
-        if not ids:
-            return 0
-        stmt = (
-            _delete(models.Tag)
-            .where(*self._unaliased_zero_predicate(), models.Tag.id.in_(ids))
-            .returning(models.Tag.name)
-        )
-        deleted = list(self.session.execute(stmt).scalars().all())
-        if deleted:
-            engine_delta.record_tags_dirty(self.session, deleted)
-        return len(deleted)
 
     # ------------------------------------------------------------------
     # Tag preferences (favourite / blocked)
@@ -137,61 +77,32 @@ class SQLAlchemyTagRepository:
 
     def get_aliases(self) -> Sequence[dict]:
         """Return all tag aliases with source/target as tag names."""
-        src_tag = aliased(models.Tag)
-        tgt_tag = aliased(models.Tag)
-        rows = self.session.execute(
-            select(
-                models.TagAlias.id,
-                src_tag.name,
-                tgt_tag.name,
-            )
-            .select_from(models.TagAlias)
-            .join(src_tag, models.TagAlias.source == src_tag.id)
-            .join(tgt_tag, models.TagAlias.target == tgt_tag.id)
-            .order_by(models.TagAlias.id)
-        ).all()
-        return [{"id": row[0], "source": row[1], "target": row[2]} for row in rows]
-
-    def get_alias_map(self) -> dict[str, str]:
-        """Return ``{source_tag_name: target_tag_name}`` for all aliases."""
-        src_tag = aliased(models.Tag)
-        tgt_tag = aliased(models.Tag)
-        rows = self.session.execute(
-            select(src_tag.name, tgt_tag.name)
-            .select_from(models.TagAlias)
-            .join(src_tag, models.TagAlias.source == src_tag.id)
-            .join(tgt_tag, models.TagAlias.target == tgt_tag.id)
-        ).all()
-        return {src: tgt for src, tgt in rows}
-
-    def get_aliases_by_target(self, target_name: str) -> list[dict]:
-        """Return all alias rows targeting *target_name*, including tag IDs."""
-        src_tag = aliased(models.Tag)
-        tgt_tag = aliased(models.Tag)
         rows = self.session.execute(
             select(
                 models.TagAlias.id,
                 models.TagAlias.source,
                 models.TagAlias.target,
-                src_tag.name,
-                tgt_tag.name,
+            ).order_by(models.TagAlias.id)
+        ).all()
+        return [{"id": row[0], "source": row[1], "target": row[2]} for row in rows]
+
+    def get_alias_map(self) -> dict[str, str]:
+        """Return ``{source_tag_name: target_tag_name}`` for all aliases."""
+        rows = self.session.execute(select(models.TagAlias.source, models.TagAlias.target)).all()
+        return {src: tgt for src, tgt in rows}
+
+    def get_aliases_by_target(self, target_name: str) -> list[dict]:
+        """Return all alias rows targeting *target_name*."""
+        rows = self.session.execute(
+            select(
+                models.TagAlias.id,
+                models.TagAlias.source,
+                models.TagAlias.target,
             )
-            .select_from(models.TagAlias)
-            .join(src_tag, models.TagAlias.source == src_tag.id)
-            .join(tgt_tag, models.TagAlias.target == tgt_tag.id)
-            .where(tgt_tag.name == target_name)
+            .where(models.TagAlias.target == target_name)
             .order_by(models.TagAlias.id)
         ).all()
-        return [
-            {
-                "id": row[0],
-                "source_id": row[1],
-                "target_id": row[2],
-                "source": row[3],
-                "target": row[4],
-            }
-            for row in rows
-        ]
+        return [{"id": row[0], "source": row[1], "target": row[2]} for row in rows]
 
     def create_alias(self, alias_data: dict) -> dict:
         """Create a tag alias enforcing single-hop and acyclic invariants."""
@@ -200,24 +111,21 @@ class SQLAlchemyTagRepository:
         if source_name == target_name:
             raise ValidationError("原标签不能和目标标签相同")
 
-        source_id = self.get_or_create_tag_id(source_name)
-        target_id = self.get_or_create_tag_id(target_name)
-
         existing_reverse = self.session.execute(
-            select(models.TagAlias.target).where(models.TagAlias.source == target_id)
+            select(models.TagAlias.target).where(models.TagAlias.source == target_name)
         ).scalar_one_or_none()
         if existing_reverse is not None:
-            if existing_reverse == source_id:
+            if existing_reverse == source_name:
                 raise ValidationError(f"不能在 '{source_name}' 和 '{target_name}' 之间创建循环别名")
             raise ValidationError(f"目标标签 '{target_name}' 已作为别名指向其他标签（不支持多级别名）")
 
         incoming_source = self.session.execute(
-            select(models.TagAlias.id).where(models.TagAlias.target == source_id).limit(1)
+            select(models.TagAlias.id).where(models.TagAlias.target == source_name).limit(1)
         ).scalar_one_or_none()
         if incoming_source is not None:
             raise ValidationError(f"原标签 '{source_name}' 已被其他别名作为目标标签（不支持多级别名）")
 
-        alias = models.TagAlias(source=source_id, target=target_id)
+        alias = models.TagAlias(source=source_name, target=target_name)
         self.session.add(alias)
         self.session.flush()
 
@@ -228,31 +136,29 @@ class SQLAlchemyTagRepository:
         }
 
     def delete_aliases_by_ids(self, alias_ids: Iterable[int]) -> int:
-        """Delete multiple aliases by ID and prune any resulting orphan tags."""
+        """Delete multiple aliases by ID."""
         ids = sorted(set(alias_ids))
         if not ids:
             return 0
-        rows = self.session.execute(
-            select(models.TagAlias.source, models.TagAlias.target).where(models.TagAlias.id.in_(ids))
-        ).all()
-        if not rows:
-            return 0
-        tag_ids = {tid for pair in rows for tid in pair}
         deleted = cast(
             CursorResult[Any],
             self.session.execute(_delete(models.TagAlias).where(models.TagAlias.id.in_(ids))),
         ).rowcount
         self.session.flush()
-        engine_delta.record_aliases_dirty(self.session)
-        self.prune_unused_tag_ids(tag_ids)
+        if deleted:
+            engine_delta.record_aliases_dirty(self.session)
         return int(deleted or 0)
 
     def delete_aliases_by_target(self, target_name: str) -> int:
-        """Delete all aliases pointing to *target_name* and prune orphan tags."""
-        existing = self.get_aliases_by_target(target_name)
-        if not existing:
-            return 0
-        return self.delete_aliases_by_ids(row["id"] for row in existing)
+        """Delete all aliases pointing to *target_name*."""
+        deleted = cast(
+            CursorResult[Any],
+            self.session.execute(_delete(models.TagAlias).where(models.TagAlias.target == target_name)),
+        ).rowcount
+        self.session.flush()
+        if deleted:
+            engine_delta.record_aliases_dirty(self.session)
+        return int(deleted or 0)
 
     # ------------------------------------------------------------------
     # Suggestions & retroactive application
@@ -342,11 +248,6 @@ def apply_alias_retroactively(session: Session, source: str, target: str) -> int
     """Replace all occurrences of *source* tag with *target* tag across novels."""
     if source == target:
         return 0
-    src_tag = session.execute(select(models.Tag).where(models.Tag.name == source)).scalar_one_or_none()
-    if not src_tag:
-        return 0
-    tag_repo = SQLAlchemyTagRepository(session)
-    tag_repo.get_or_create_tag_id(target)
 
     changed_ids = list(
         session.execute(
@@ -368,7 +269,6 @@ def apply_alias_retroactively(session: Session, source: str, target: str) -> int
     )
     if changed_ids:
         engine_delta.record_novel_upserts(session, changed_ids)
-        engine_delta.record_tags_dirty(session, [source, target])
     return len(changed_ids)
 
 
@@ -429,5 +329,4 @@ def replace_alias_group(
             result.append(create_and_apply_alias(session, source, target))
 
     apply_alias_retroactively(session, old_target, target)
-    tag_repo.prune_unused_tags([old_target])
     return result

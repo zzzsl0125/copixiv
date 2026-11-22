@@ -1,4 +1,4 @@
-"""Layer 2 DB tests: squashed 0001_baseline roundtrip (upgrade/downgrade/upgrade) & drift alignment."""
+"""Layer 2 DB tests: Alembic baseline roundtrip (upgrade/downgrade/upgrade) & schema migrations."""
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ def test_baseline_upgrade_downgrade_upgrade_and_metadata_parity(pg_test_engine):
 
         with isolated_engine.begin() as conn:
             ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-            assert ver == "0005_align_schema_drift"
+            assert ver == "0006_drop_tag_table"
 
             # ORM Base.metadata parity (types & server defaults)
             mc = MigrationContext.configure(
@@ -72,25 +72,67 @@ def test_baseline_upgrade_downgrade_upgrade_and_metadata_parity(pg_test_engine):
             ).scalar_one()
             assert active_idx == 0
 
-            # Custom sequence, analyze tuning, and tag triggers
+            # tag table, tag triggers, and sync_tag_refs_batch are dropped at head
+            assert conn.execute(text("SELECT to_regclass('tag')")).scalar() is None
+            assert (
+                conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM pg_proc p "
+                        "JOIN pg_namespace n ON n.oid = p.pronamespace "
+                        "WHERE n.nspname = :s AND p.proname = 'sync_tag_refs_batch'"
+                    ),
+                    {"s": schema},
+                ).scalar_one()
+                == 0
+            )
+            assert (
+                conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM pg_trigger tg "
+                        "JOIN pg_class c ON c.oid = tg.tgrelid "
+                        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                        "WHERE n.nspname = :s AND c.relname = 'novel' AND NOT tg.tgisinternal"
+                    ),
+                    {"s": schema},
+                ).scalar_one()
+                == 0
+            )
+
+            # tag_alias columns are TEXT with expected constraints & index
+            alias_cols = dict(
+                conn.execute(
+                    text(
+                        "SELECT column_name, data_type FROM information_schema.columns "
+                        "WHERE table_schema = :s AND table_name = 'tag_alias'"
+                    ),
+                    {"s": schema},
+                ).all()
+            )
+            assert alias_cols == {"id": "bigint", "source": "text", "target": "text"}
+            alias_constraints = set(
+                conn.execute(
+                    text(
+                        "SELECT c.conname FROM pg_constraint c "
+                        "JOIN pg_class t ON t.oid = c.conrelid "
+                        "JOIN pg_namespace n ON n.oid = t.relnamespace "
+                        "WHERE n.nspname = :s AND t.relname = 'tag_alias'"
+                    ),
+                    {"s": schema},
+                ).scalars()
+            )
+            assert {"tag_alias_pkey", "tag_alias_source_key", "ck_tag_alias_distinct"} <= alias_constraints
+
+            # Custom sequence, analyze tuning, and basic novel writes without tag table
             assert conn.execute(text("SELECT nextval('novel_local_coord_seq')")).scalar_one() == 1
 
             conn.execute(text("INSERT INTO author (author_id, author_name) VALUES (1, 'A')"))
-
             conn.execute(
                 text("INSERT INTO novel (id, title, author_id, tags) VALUES (1, 'N1', 1, ARRAY['t1', 't2'])")
             )
-            assert conn.execute(text("SELECT reference_count FROM tag WHERE name = 't1'")).scalar_one() == 1
-
             conn.execute(text("UPDATE novel SET tags = ARRAY['t2', 't3'] WHERE id = 1"))
-            assert conn.execute(text("SELECT reference_count FROM tag WHERE name = 't1'")).scalar_one() == 0
-            assert conn.execute(text("SELECT reference_count FROM tag WHERE name = 't2'")).scalar_one() == 1
-            assert conn.execute(text("SELECT reference_count FROM tag WHERE name = 't3'")).scalar_one() == 1
-
             conn.execute(text("DELETE FROM novel WHERE id = 1"))
-            assert conn.execute(text("SELECT reference_count FROM tag WHERE name = 't3'")).scalar_one() == 0
-
             conn.execute(text("INSERT INTO token (name, token, is_follow) VALUES ('acc1', 'tok1', true)"))
+            conn.execute(text("INSERT INTO tag_alias (source, target) VALUES ('src_a', 'tgt_a')"))
 
             novel_relopts = conn.execute(
                 text(
@@ -103,9 +145,13 @@ def test_baseline_upgrade_downgrade_upgrade_and_metadata_parity(pg_test_engine):
             assert novel_relopts is not None
             assert any("autovacuum_analyze_scale_factor=0.02" in opt for opt in novel_relopts)
 
-        # Partial unique index ux_token_follow blocks second is_follow=True row
+        # Unique & distinct constraints on tag_alias and ux_token_follow
         with pytest.raises(IntegrityError), isolated_engine.begin() as conn:
             conn.execute(text("INSERT INTO token (name, token, is_follow) VALUES ('acc2', 'tok2', true)"))
+        with pytest.raises(IntegrityError), isolated_engine.begin() as conn:
+            conn.execute(text("INSERT INTO tag_alias (source, target) VALUES ('src_a', 'other')"))
+        with pytest.raises(IntegrityError), isolated_engine.begin() as conn:
+            conn.execute(text("INSERT INTO tag_alias (source, target) VALUES ('same', 'same')"))
 
         # 2) Downgrade back to base drops all tables, triggers, function, and sequence
         command.downgrade(alembic_cfg, "base")
@@ -145,9 +191,6 @@ def test_baseline_upgrade_downgrade_upgrade_and_metadata_parity(pg_test_engine):
             )
             assert compare_metadata(mc, Base.metadata) == []
             conn.execute(text("INSERT INTO novel (id, title, tags) VALUES (2, 'N2', ARRAY['rebuilt'])"))
-            assert (
-                conn.execute(text("SELECT reference_count FROM tag WHERE name = 'rebuilt'")).scalar_one() == 1
-            )
     finally:
         isolated_engine.dispose()
         with pg_test_engine.begin() as admin_conn:
@@ -212,6 +255,95 @@ def test_0005_align_schema_drift_fixes_legacy_default_and_constraint(pg_test_eng
             )
             assert "ck_tag_preference_value" in constraints
             assert "tag_preference_preference_check" not in constraints
+    finally:
+        isolated_engine.dispose()
+        with pg_test_engine.begin() as admin_conn:
+            admin_conn.execute(text(f"DROP SCHEMA IF EXISTS {schema} CASCADE"))
+
+
+def test_0006_drop_tag_table_preserves_aliases_and_repopulates_on_downgrade(pg_test_engine):
+    schema = "_test_mig_0006_roundtrip"
+    with pg_test_engine.begin() as admin_conn:
+        admin_conn.execute(text(f"DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        admin_conn.execute(text(f"CREATE SCHEMA {schema}"))
+
+    isolated_url = _isolated_schema_url(pg_test_engine.url, schema)
+    isolated_engine = create_engine(isolated_url)
+    alembic_cfg = _alembic_config_for_url(isolated_url)
+    try:
+        command.upgrade(alembic_cfg, "0005_align_schema_drift")
+
+        with isolated_engine.begin() as conn:
+            conn.execute(text("INSERT INTO author (author_id, author_name) VALUES (1, 'A')"))
+            conn.execute(
+                text(
+                    "INSERT INTO novel (id, title, author_id, tags) VALUES "
+                    "(1, 'N1', 1, ARRAY['alpha', 'beta']), "
+                    "(2, 'N2', 1, ARRAY['alpha', 'gamma'])"
+                )
+            )
+            conn.execute(text("INSERT INTO tag (name, reference_count) VALUES ('orphan_src', 0)"))
+            conn.execute(
+                text(
+                    "INSERT INTO tag_alias (source, target) "
+                    "SELECT s.id, t.id FROM tag s, tag t WHERE s.name = 'beta' AND t.name = 'alpha'"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO tag_alias (source, target) "
+                    "SELECT s.id, t.id FROM tag s, tag t WHERE s.name = 'orphan_src' AND t.name = 'alpha'"
+                )
+            )
+
+        # Upgrade 0005 -> 0006 (head)
+        command.upgrade(alembic_cfg, "head")
+        with isolated_engine.begin() as conn:
+            assert conn.execute(text("SELECT to_regclass('tag')")).scalar() is None
+            alias_rows = set(conn.execute(text("SELECT source, target FROM tag_alias ORDER BY id")).all())
+            assert alias_rows == {("beta", "alpha"), ("orphan_src", "alpha")}
+            mc = MigrationContext.configure(
+                conn,
+                opts={"compare_type": True, "compare_server_default": True},
+            )
+            assert compare_metadata(mc, Base.metadata) == []
+
+        # Downgrade 0006 -> 0005 restores tag table counts, tag_alias FKs, and triggers
+        command.downgrade(alembic_cfg, "0005_align_schema_drift")
+        with isolated_engine.begin() as conn:
+            tag_counts = dict(conn.execute(text("SELECT name, reference_count FROM tag")).all())
+            assert tag_counts == {"alpha": 2, "beta": 1, "gamma": 1, "orphan_src": 0}
+            restored_aliases = set(
+                conn.execute(
+                    text(
+                        "SELECT s.name, t.name "
+                        "FROM tag_alias ta "
+                        "JOIN tag s ON s.id = ta.source "
+                        "JOIN tag t ON t.id = ta.target"
+                    )
+                ).all()
+            )
+            assert restored_aliases == {("beta", "alpha"), ("orphan_src", "alpha")}
+
+            # Reinstalled triggers update reference_count on novel insert
+            conn.execute(
+                text(
+                    "INSERT INTO novel (id, title, author_id, tags) VALUES (3, 'N3', 1, ARRAY['alpha', 'delta'])"
+                )
+            )
+            assert (
+                conn.execute(text("SELECT reference_count FROM tag WHERE name = 'alpha'")).scalar_one() == 3
+            )
+            assert (
+                conn.execute(text("SELECT reference_count FROM tag WHERE name = 'delta'")).scalar_one() == 1
+            )
+
+        # Re-upgrade 0005 -> head
+        command.upgrade(alembic_cfg, "head")
+        with isolated_engine.begin() as conn:
+            assert conn.execute(text("SELECT to_regclass('tag')")).scalar() is None
+            alias_rows = set(conn.execute(text("SELECT source, target FROM tag_alias ORDER BY id")).all())
+            assert alias_rows == {("beta", "alpha"), ("orphan_src", "alpha")}
     finally:
         isolated_engine.dispose()
         with pg_test_engine.begin() as admin_conn:

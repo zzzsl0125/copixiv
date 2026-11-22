@@ -19,7 +19,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import desc, select, text
+from sqlalchemy import select, text
 
 from copixiv.config import load_config
 from copixiv.core.search import QuerySpec
@@ -82,10 +82,16 @@ def _pick_probe_inputs(session_factory) -> dict[str, Any]:
     with session_factory() as s:
         total = s.execute(text("SELECT count(*) FROM novel")).scalar_one()
         tags = s.execute(
-            select(models.Tag.name, models.Tag.reference_count)
-            .where(models.Tag.reference_count >= 5)
-            .order_by(desc(models.Tag.reference_count))
-            .limit(200)
+            text(
+                """
+                SELECT tag_name, COUNT(*) AS cnt
+                FROM novel, unnest(tags) AS tag_name
+                GROUP BY tag_name
+                HAVING COUNT(*) >= 5
+                ORDER BY cnt DESC
+                LIMIT 200
+                """
+            )
         ).all()
         common_tag = tags[0][0] if tags else "R-18"
         med_tag = tags[len(tags) // 2][0] if len(tags) > 2 else common_tag

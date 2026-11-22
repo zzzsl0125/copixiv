@@ -1,13 +1,13 @@
-use std::hash::Hasher;
 use std::mem::size_of;
 
 use memchr::memmem::Finder;
 use rayon::prelude::*;
-use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
+use roaring::RoaringBitmap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::arena::PackedArena;
+use crate::interner::StringInterner;
 use crate::model::{TagCandidate, TagSuggestItem};
-use crate::postings::{PostingHandle, PostingSlab, TitleBuckets};
+use crate::postings::{PostingHandle, PostingSlab};
 use crate::text_index::{collect_query_char_bigrams, contains_ascii_ci};
 
 const MAX_CANDIDATES: usize = 50;
@@ -15,32 +15,33 @@ const PREFIX_CANDIDATE_CAP: usize = 200;
 const SCAN_FLOOR: usize = 20;
 const SCAN_CAP: usize = 200;
 
-#[inline]
-fn hash_tag_name(name: &str) -> u64 {
-    let mut hasher = FxHasher::default();
-    hasher.write(name.as_bytes());
-    hasher.finish()
-}
-
-/// In-process tag similarity index (~76k tags), replacing PostgreSQL `pg_bigm`
-/// GIN scans for `/api/tag-aliases/suggest`.
-#[derive(Default)]
+/// In-process tag similarity index (~76k tags), lazily derived from
+/// `EngineState`'s `tag_interner`, `tag_postings`, and `aliased_tag_names`.
 pub struct TagIndex {
-    ids: Vec<i64>,
-    ref_counts: Vec<i32>,
-    alive: Vec<bool>,
-    name_arena: PackedArena,
-    free_slots: Vec<u32>,
-    id_to_slot: FxHashMap<i64, u32>,
-    name_buckets: TitleBuckets,
-    aliased_ids: FxHashSet<i64>,
-    sorted_slots: Vec<u32>,
-    pub sorted_dirty: bool,
+    live_count: usize,
+    aliased_tids: RoaringBitmap,
+    sorted_tids: Vec<u32>,
+    pub dirty: bool,
     first_char_index: FxHashMap<char, Vec<u32>>,
     char_bigrams: FxHashMap<u64, PostingHandle>,
     bigram_slab: PostingSlab,
 }
 
+impl Default for TagIndex {
+    fn default() -> Self {
+        Self {
+            live_count: 0,
+            aliased_tids: RoaringBitmap::new(),
+            sorted_tids: Vec::new(),
+            dirty: true,
+            first_char_index: FxHashMap::default(),
+            char_bigrams: FxHashMap::default(),
+            bigram_slab: PostingSlab::new(),
+        }
+    }
+}
+
+#[inline]
 fn char_bigrams_of_lower(lower: &str, scratch: &mut Vec<u64>) {
     collect_query_char_bigrams(lower, scratch);
 }
@@ -90,56 +91,71 @@ fn contains_raw_needle_ci(haystack_lower: &[u8], needle: &[u8]) -> bool {
 }
 
 impl TagIndex {
-    pub fn from_snapshot(tags: Vec<(i64, String, i32)>, aliased_ids: Vec<i64>) -> Self {
-        let approx_bytes: usize = tags.iter().map(|(_, n, _)| n.len()).sum();
-        let cap = tags.len();
-        let mut idx = Self {
-            ids: Vec::with_capacity(cap),
-            ref_counts: Vec::with_capacity(cap),
-            alive: Vec::with_capacity(cap),
-            name_arena: PackedArena::with_capacity(cap, approx_bytes),
-            free_slots: Vec::new(),
-            id_to_slot: FxHashMap::with_capacity_and_hasher(cap, Default::default()),
-            name_buckets: TitleBuckets::with_capacity(cap),
-            aliased_ids: aliased_ids.into_iter().collect(),
-            sorted_slots: Vec::with_capacity(cap),
-            sorted_dirty: true,
-            first_char_index: FxHashMap::default(),
-            char_bigrams: FxHashMap::default(),
-            bigram_slab: PostingSlab::new(),
-        };
-
+    pub fn build_from_state(
+        tag_interner: &StringInterner,
+        tag_postings: &[PostingHandle],
+        postings_slab: &PostingSlab,
+        aliased_tag_names: &FxHashSet<String>,
+    ) -> Self {
+        let total = tag_postings.len().min(tag_interner.len());
+        let mut live_tids: Vec<(u32, i32)> = Vec::with_capacity(total);
+        let mut char_bigrams: FxHashMap<u64, PostingHandle> = FxHashMap::default();
+        let mut bigram_slab = PostingSlab::new();
         let mut bg_scratch = Vec::with_capacity(32);
-        for (id, name, reference_count) in tags {
-            if idx.id_to_slot.contains_key(&id) || idx.find_slot_by_name(&name).is_some() {
+
+        for (tid_usize, &handle) in tag_postings.iter().enumerate().take(total) {
+            let rc = handle.len(postings_slab) as i32;
+            if rc <= 0 {
                 continue;
             }
-            let slot = idx.ids.len() as u32;
-            idx.ids.push(id);
-            idx.ref_counts.push(reference_count);
-            idx.alive.push(true);
-            idx.name_arena.set_str(slot, &name);
+            let tid = tid_usize as u32;
+            live_tids.push((tid, rc));
 
-            idx.id_to_slot.insert(id, slot);
-            idx.name_buckets.insert(hash_tag_name(&name), slot);
-
-            char_bigrams_of_lower(&name, &mut bg_scratch);
-            idx.insert_bigrams_from_slice(slot, &bg_scratch);
+            let name = tag_interner.get_str(tid);
+            char_bigrams_of_lower(name, &mut bg_scratch);
+            for &bg in &bg_scratch {
+                let h = char_bigrams.entry(bg).or_default();
+                bigram_slab.insert(h, tid);
+            }
         }
 
-        idx.ensure_sorted();
+        // Order by `(reference_count DESC, id DESC)`; since `id = (tid as i64) + 1`,
+        // descending `tid` is equivalent to descending `id`.
+        live_tids.par_sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+        let sorted_tids: Vec<u32> = live_tids.iter().map(|&(tid, _)| tid).collect();
+
+        let mut first_char_index: FxHashMap<char, Vec<u32>> = FxHashMap::default();
+        for &tid in &sorted_tids {
+            if let Some(ch) = tag_interner.get_str(tid).chars().next() {
+                first_char_index
+                    .entry(ch.to_ascii_lowercase())
+                    .or_default()
+                    .push(tid);
+            }
+        }
+
+        let mut aliased_tids = RoaringBitmap::new();
+        for name in aliased_tag_names {
+            if let Some(tid) = tag_interner.get_id(name) {
+                aliased_tids.insert(tid);
+            }
+        }
+
+        let mut idx = Self {
+            live_count: sorted_tids.len(),
+            aliased_tids,
+            sorted_tids,
+            dirty: false,
+            first_char_index,
+            char_bigrams,
+            bigram_slab,
+        };
         idx.compact_and_shrink();
         idx
     }
 
     fn compact_and_shrink(&mut self) {
-        self.ids.shrink_to_fit();
-        self.ref_counts.shrink_to_fit();
-        self.alive.shrink_to_fit();
-        self.name_arena.shrink_to_fit();
-        self.id_to_slot.shrink_to_fit();
-        self.name_buckets.shrink_to_fit();
-        self.sorted_slots.shrink_to_fit();
+        self.sorted_tids.shrink_to_fit();
         for v in self.first_char_index.values_mut() {
             v.shrink_to_fit();
         }
@@ -148,191 +164,26 @@ impl TagIndex {
         self.char_bigrams.shrink_to_fit();
     }
 
-    #[inline]
-    fn find_slot_by_name(&self, name: &str) -> Option<u32> {
-        let hash = hash_tag_name(name);
-        let bucket = self.name_buckets.get(hash)?;
-        bucket
-            .as_slice()
-            .iter()
-            .find(|&&slot| self.alive[slot as usize] && self.name_arena.get_str(slot) == name)
-            .copied()
-    }
-
-    #[inline]
-    fn insert_bigrams_from_slice(&mut self, slot: u32, bigrams: &[u64]) {
-        for &bg in bigrams {
-            let h = self.char_bigrams.entry(bg).or_default();
-            self.bigram_slab.insert(h, slot);
-        }
-    }
-
-    #[inline]
-    fn remove_bigrams_from_slice(&mut self, slot: u32, bigrams: &[u64]) {
-        for &bg in bigrams {
-            if let Some(h) = self.char_bigrams.get_mut(&bg) {
-                self.bigram_slab.remove(h, slot);
-                if h.is_empty() {
-                    self.char_bigrams.remove(&bg);
-                }
-            }
-        }
-    }
-
-    pub fn build_sorted_state(&self) -> (Vec<u32>, FxHashMap<char, Vec<u32>>) {
-        let mut sorted_slots = Vec::with_capacity(self.id_to_slot.len());
-        for (slot_idx, &is_alive) in self.alive.iter().enumerate() {
-            if is_alive {
-                sorted_slots.push(slot_idx as u32);
-            }
-        }
-        let ids = &self.ids;
-        let ref_counts = &self.ref_counts;
-        sorted_slots.par_sort_unstable_by(|&a, &b| {
-            let ua = a as usize;
-            let ub = b as usize;
-            ref_counts[ub]
-                .cmp(&ref_counts[ua])
-                .then_with(|| ids[ub].cmp(&ids[ua]))
-        });
-
-        let mut first_char_index: FxHashMap<char, Vec<u32>> = FxHashMap::default();
-        for &slot in &sorted_slots {
-            if let Some(ch) = self.name_arena.get_str(slot).chars().next() {
-                first_char_index
-                    .entry(ch.to_ascii_lowercase())
-                    .or_default()
-                    .push(slot);
-            }
-        }
-        (sorted_slots, first_char_index)
-    }
-
-    pub fn install_sorted_state(
+    pub fn refresh_aliased(
         &mut self,
-        sorted_slots: Vec<u32>,
-        first_char_index: FxHashMap<char, Vec<u32>>,
+        tag_interner: &StringInterner,
+        aliased_tag_names: &FxHashSet<String>,
     ) {
-        self.sorted_slots = sorted_slots;
-        self.first_char_index = first_char_index;
-        self.sorted_dirty = false;
-    }
-
-    pub fn ensure_sorted(&mut self) {
-        if !self.sorted_dirty {
-            return;
-        }
-        let (sorted_slots, first_char_index) = self.build_sorted_state();
-        self.install_sorted_state(sorted_slots, first_char_index);
-    }
-
-    pub fn apply_delta(
-        &mut self,
-        delete_tag_names: Option<Vec<String>>,
-        upsert_tags: Option<Vec<(i64, String, i32)>>,
-        aliased_tag_ids: Option<Vec<i64>>,
-    ) {
-        if let Some(ids) = aliased_tag_ids {
-            self.aliased_ids = ids.into_iter().collect();
-        }
-
-        let mut scratch = Vec::with_capacity(32);
-
-        if let Some(del_names) = delete_tag_names {
-            for name in del_names {
-                let Some(slot) = self.find_slot_by_name(&name) else {
-                    continue;
-                };
-                let idx = slot as usize;
-                if !self.alive[idx] {
-                    continue;
-                }
-                self.name_buckets.remove(hash_tag_name(&name), slot);
-                self.id_to_slot.remove(&self.ids[idx]);
-                char_bigrams_of_lower(self.name_arena.get_str(slot), &mut scratch);
-                self.remove_bigrams_from_slice(slot, &scratch);
-                self.name_arena.clear_slot(slot);
-                self.alive[idx] = false;
-                self.ref_counts[idx] = 0;
-                self.free_slots.push(slot);
-                self.sorted_dirty = true;
+        self.aliased_tids.clear();
+        for name in aliased_tag_names {
+            if let Some(tid) = tag_interner.get_id(name) {
+                self.aliased_tids.insert(tid);
             }
         }
-
-        if let Some(upserts) = upsert_tags {
-            for (tid, name, rc) in upserts {
-                if let Some(slot) = self.find_slot_by_name(&name) {
-                    let idx = slot as usize;
-                    if self.ids[idx] != tid {
-                        self.id_to_slot.remove(&self.ids[idx]);
-                        self.ids[idx] = tid;
-                        self.id_to_slot.insert(tid, slot);
-                    }
-                    if self.ref_counts[idx] != rc {
-                        self.ref_counts[idx] = rc;
-                        self.sorted_dirty = true;
-                    }
-                    continue;
-                }
-
-                if let Some(&slot) = self.id_to_slot.get(&tid) {
-                    let idx = slot as usize;
-                    let old_hash = hash_tag_name(self.name_arena.get_str(slot));
-                    self.name_buckets.remove(old_hash, slot);
-                    char_bigrams_of_lower(self.name_arena.get_str(slot), &mut scratch);
-                    self.remove_bigrams_from_slice(slot, &scratch);
-
-                    self.name_arena.set_str(slot, &name);
-                    self.ref_counts[idx] = rc;
-                    self.name_buckets.insert(hash_tag_name(&name), slot);
-                    char_bigrams_of_lower(&name, &mut scratch);
-                    self.insert_bigrams_from_slice(slot, &scratch);
-                    self.sorted_dirty = true;
-                    continue;
-                }
-
-                let slot = if let Some(reused) = self.free_slots.pop() {
-                    let idx = reused as usize;
-                    self.ids[idx] = tid;
-                    self.ref_counts[idx] = rc;
-                    self.alive[idx] = true;
-                    reused
-                } else {
-                    let s = self.ids.len() as u32;
-                    self.ids.push(tid);
-                    self.ref_counts.push(rc);
-                    self.alive.push(true);
-                    s
-                };
-                self.name_arena.set_str(slot, &name);
-                self.id_to_slot.insert(tid, slot);
-                self.name_buckets.insert(hash_tag_name(&name), slot);
-                char_bigrams_of_lower(&name, &mut scratch);
-                self.insert_bigrams_from_slice(slot, &scratch);
-                self.sorted_dirty = true;
-            }
-        }
-
-        self.name_arena.maybe_compact();
-        self.bigram_slab
-            .maybe_compact(self.char_bigrams.values_mut());
     }
 
     pub fn tag_count(&self) -> usize {
-        self.id_to_slot.len()
+        self.live_count
     }
 
     pub fn approx_bytes(&self) -> usize {
-        let vec_bytes = self.ids.capacity() * size_of::<i64>()
-            + self.ref_counts.capacity() * size_of::<i32>()
-            + self.alive.capacity() * size_of::<bool>()
-            + self.free_slots.capacity() * size_of::<u32>()
-            + self.sorted_slots.capacity() * size_of::<u32>();
-        let arena_bytes = self.name_arena.data.capacity()
-            + self.name_arena.slots.capacity() * size_of::<(u32, u32)>();
-        let map_bytes = self.id_to_slot.capacity() * (size_of::<i64>() + size_of::<u32>() + 4)
-            + self.name_buckets.approx_heap_bytes()
-            + self.aliased_ids.capacity() * (size_of::<i64>() + 4)
+        let vec_bytes = self.sorted_tids.capacity() * size_of::<u32>();
+        let map_bytes = self.aliased_tids.serialized_size()
             + self.first_char_index.capacity() * (size_of::<char>() + size_of::<Vec<u32>>())
             + self
                 .first_char_index
@@ -341,21 +192,38 @@ impl TagIndex {
                 .sum::<usize>()
             + self.char_bigrams.capacity() * (size_of::<u64>() + size_of::<PostingHandle>() + 1)
             + self.bigram_slab.approx_heap_bytes();
-        vec_bytes + arena_bytes + map_bytes
+        vec_bytes + map_bytes
     }
 
     #[inline]
-    fn to_dto(&self, slot: u32) -> TagCandidate {
-        let idx = slot as usize;
+    fn to_dto(
+        tid: u32,
+        tag_interner: &StringInterner,
+        tag_postings: &[PostingHandle],
+        postings_slab: &PostingSlab,
+    ) -> TagCandidate {
         TagCandidate {
-            id: self.ids[idx],
-            name: self.name_arena.get_str(slot).to_owned(),
-            reference_count: self.ref_counts[idx],
+            id: (tid as i64) + 1,
+            name: tag_interner.get_str(tid).to_owned(),
+            reference_count: tag_postings[tid as usize].len(postings_slab) as i32,
         }
     }
 
-    fn suggest_for_slot(&self, target_slot: u32) -> Vec<TagCandidate> {
-        let tgt_name = self.name_arena.get_str(target_slot);
+    #[inline]
+    fn ref_count_of(tid: u32, tag_postings: &[PostingHandle], postings_slab: &PostingSlab) -> i32 {
+        tag_postings
+            .get(tid as usize)
+            .map_or(0, |h| h.len(postings_slab) as i32)
+    }
+
+    fn suggest_for_tid(
+        &self,
+        target_tid: u32,
+        tag_interner: &StringInterner,
+        tag_postings: &[PostingHandle],
+        postings_slab: &PostingSlab,
+    ) -> Vec<TagCandidate> {
+        let tgt_name = tag_interner.get_str(target_tid);
         if tgt_name.is_empty() {
             return Vec::new();
         }
@@ -364,7 +232,7 @@ impl TagIndex {
         let mut tgt_bigrams = Vec::with_capacity(tgt_chars);
         char_bigrams_of_lower(&tgt_lower, &mut tgt_bigrams);
 
-        // slot -> highest recall tier (3: superstring, 2: substring/jaccard>=0.5, 1: prefix)
+        // tid -> highest recall tier (3: superstring, 2: substring/jaccard>=0.5, 1: prefix)
         let mut matched: FxHashMap<u32, u8> = FxHashMap::default();
         let need_lower = tgt_lower.bytes().any(|b| b.is_ascii_lowercase());
         let finder = Finder::new(tgt_lower.as_bytes());
@@ -396,47 +264,43 @@ impl TagIndex {
                         break;
                     }
                 }
-                for slot in cand_bm.iter() {
-                    if slot == target_slot {
+                for cand_tid in cand_bm.iter() {
+                    if cand_tid == target_tid {
                         continue;
                     }
-                    let c_idx = slot as usize;
-                    if !self.alive[c_idx]
-                        || self.ref_counts[c_idx] <= 0
-                        || self.aliased_ids.contains(&self.ids[c_idx])
+                    if Self::ref_count_of(cand_tid, tag_postings, postings_slab) <= 0
+                        || self.aliased_tids.contains(cand_tid)
                     {
                         continue;
                     }
                     if contains_ascii_ci(
-                        self.name_arena.get_bytes(slot),
+                        tag_interner.get_str(cand_tid).as_bytes(),
                         tgt_lower.len(),
                         &finder,
                         need_lower,
                     ) {
-                        matched.insert(slot, 3);
+                        matched.insert(cand_tid, 3);
                     }
                 }
             }
         } else {
-            // Single-char or whitespace-only target tag: scan sorted slots directly.
-            for &slot in &self.sorted_slots {
-                if slot == target_slot {
+            // Single-char or whitespace-only target tag: scan sorted tids directly.
+            for &cand_tid in &self.sorted_tids {
+                if cand_tid == target_tid {
                     continue;
                 }
-                let c_idx = slot as usize;
-                if !self.alive[c_idx] || self.ref_counts[c_idx] <= 0 {
-                    continue;
-                }
-                if self.aliased_ids.contains(&self.ids[c_idx]) {
+                if Self::ref_count_of(cand_tid, tag_postings, postings_slab) <= 0
+                    || self.aliased_tids.contains(cand_tid)
+                {
                     continue;
                 }
                 if contains_ascii_ci(
-                    self.name_arena.get_bytes(slot),
+                    tag_interner.get_str(cand_tid).as_bytes(),
                     tgt_lower.len(),
                     &finder,
                     need_lower,
                 ) {
-                    matched.insert(slot, 3);
+                    matched.insert(cand_tid, 3);
                 }
             }
         }
@@ -455,22 +319,20 @@ impl TagIndex {
                 .collect();
             by_len.sort_unstable_by_key(|(len, _)| *len);
             let probe_count = ((tgt_bigrams.len() / 2) + 1).min(by_len.len());
-            let mut probe_slots: FxHashSet<u32> = FxHashSet::default();
+            let mut probe_tids: FxHashSet<u32> = FxHashSet::default();
             for &(_, handle) in &by_len[..probe_count] {
-                for slot in handle.iter(&self.bigram_slab) {
-                    if slot != target_slot && !matched.contains_key(&slot) {
-                        probe_slots.insert(slot);
+                for cand_tid in handle.iter(&self.bigram_slab) {
+                    if cand_tid != target_tid && !matched.contains_key(&cand_tid) {
+                        probe_tids.insert(cand_tid);
                     }
                 }
             }
             let mut cand_bgs = Vec::with_capacity(32);
-            for &slot in &probe_slots {
-                let c_idx = slot as usize;
-                let cand_name = self.name_arena.get_str(slot);
-                if !self.alive[c_idx]
-                    || self.ref_counts[c_idx] <= 0
+            for &cand_tid in &probe_tids {
+                let cand_name = tag_interner.get_str(cand_tid);
+                if Self::ref_count_of(cand_tid, tag_postings, postings_slab) <= 0
                     || cand_name.is_empty()
-                    || self.aliased_ids.contains(&self.ids[c_idx])
+                    || self.aliased_tids.contains(cand_tid)
                 {
                     continue;
                 }
@@ -481,9 +343,9 @@ impl TagIndex {
                     || (cand_chars >= 2
                         && contains_raw_needle_ci(tgt_lower.as_bytes(), cand_name.as_bytes()))
                 {
-                    sim_cache.insert(slot, sim);
+                    sim_cache.insert(cand_tid, sim);
                     matched
-                        .entry(slot)
+                        .entry(cand_tid)
                         .and_modify(|t| *t = (*t).max(2))
                         .or_insert(2);
                 }
@@ -491,26 +353,24 @@ impl TagIndex {
             // High-frequency bigrams skipped by `probe_count` can still match short
             // reverse-containment substrings (`tgt.contains(cand)`).
             for &(_, handle) in &by_len[probe_count..] {
-                for slot in handle.iter(&self.bigram_slab) {
-                    if slot == target_slot
-                        || matched.contains_key(&slot)
-                        || probe_slots.contains(&slot)
+                for cand_tid in handle.iter(&self.bigram_slab) {
+                    if cand_tid == target_tid
+                        || matched.contains_key(&cand_tid)
+                        || probe_tids.contains(&cand_tid)
                     {
                         continue;
                     }
-                    let c_idx = slot as usize;
-                    let cand_name = self.name_arena.get_str(slot);
-                    if !self.alive[c_idx]
-                        || self.ref_counts[c_idx] <= 0
+                    let cand_name = tag_interner.get_str(cand_tid);
+                    if Self::ref_count_of(cand_tid, tag_postings, postings_slab) <= 0
                         || cand_name.len() >= tgt_lower.len()
-                        || self.aliased_ids.contains(&self.ids[c_idx])
+                        || self.aliased_tids.contains(cand_tid)
                     {
                         continue;
                     }
                     if cand_name.chars().count() >= 2
                         && contains_raw_needle_ci(tgt_lower.as_bytes(), cand_name.as_bytes())
                     {
-                        matched.insert(slot, 2);
+                        matched.insert(cand_tid, 2);
                     }
                 }
             }
@@ -520,18 +380,16 @@ impl TagIndex {
         if let Some(fc) = tgt_lower.chars().next() {
             if let Some(bucket) = self.first_char_index.get(&fc) {
                 let mut taken = 0usize;
-                for &slot in bucket {
-                    if slot == target_slot {
+                for &cand_tid in bucket {
+                    if cand_tid == target_tid {
                         continue;
                     }
-                    let c_idx = slot as usize;
-                    if !self.alive[c_idx]
-                        || self.ref_counts[c_idx] <= 0
-                        || self.aliased_ids.contains(&self.ids[c_idx])
+                    if Self::ref_count_of(cand_tid, tag_postings, postings_slab) <= 0
+                        || self.aliased_tids.contains(cand_tid)
                     {
                         continue;
                     }
-                    matched.entry(slot).or_insert(1);
+                    matched.entry(cand_tid).or_insert(1);
                     taken += 1;
                     if taken >= PREFIX_CANDIDATE_CAP {
                         break;
@@ -545,13 +403,12 @@ impl TagIndex {
         }
 
         let mut cand_bgs = Vec::with_capacity(32);
-        let mut scored: Vec<(u8, u32, i32, i64, u32)> = Vec::with_capacity(matched.len());
-        for (slot, tier) in matched {
-            let c_idx = slot as usize;
-            let sim = if let Some(&cached) = sim_cache.get(&slot) {
+        let mut scored: Vec<(u8, u32, i32, u32)> = Vec::with_capacity(matched.len());
+        for (cand_tid, tier) in matched {
+            let sim = if let Some(&cached) = sim_cache.get(&cand_tid) {
                 cached
             } else {
-                let cand_name = self.name_arena.get_str(slot);
+                let cand_name = tag_interner.get_str(cand_tid);
                 char_bigrams_of_lower(cand_name, &mut cand_bgs);
                 let (s, _) = jaccard_permille(
                     &tgt_bigrams,
@@ -561,7 +418,8 @@ impl TagIndex {
                 );
                 s
             };
-            scored.push((tier, sim, self.ref_counts[c_idx], self.ids[c_idx], slot));
+            let rc = Self::ref_count_of(cand_tid, tag_postings, postings_slab);
+            scored.push((tier, sim, rc, cand_tid));
         }
 
         scored.sort_unstable_by(|a, b| {
@@ -574,33 +432,37 @@ impl TagIndex {
 
         scored
             .into_iter()
-            .map(|(_, _, _, _, slot)| self.to_dto(slot))
+            .map(|(_, _, _, tid)| Self::to_dto(tid, tag_interner, tag_postings, postings_slab))
             .collect()
     }
 
     pub fn suggest_aliases(
         &self,
+        tag_interner: &StringInterner,
+        tag_postings: &[PostingHandle],
+        postings_slab: &PostingSlab,
         limit: usize,
         offset: i64,
         target_tag: Option<&str>,
     ) -> (Vec<TagSuggestItem>, Option<i64>) {
-        debug_assert!(!self.sorted_dirty);
+        debug_assert!(!self.dirty);
 
         if let Some(name) = target_tag.filter(|s| !s.is_empty()) {
-            let Some(slot) = self.find_slot_by_name(name) else {
+            let Some(tid) = tag_interner.get_id(name) else {
                 return (Vec::new(), None);
             };
-            let idx = slot as usize;
-            if !self.alive[idx] || self.aliased_ids.contains(&self.ids[idx]) {
+            if Self::ref_count_of(tid, tag_postings, postings_slab) <= 0
+                || self.aliased_tids.contains(tid)
+            {
                 return (Vec::new(), None);
             }
-            let candidates = self.suggest_for_slot(slot);
+            let candidates = self.suggest_for_tid(tid, tag_interner, tag_postings, postings_slab);
             if candidates.is_empty() {
                 return (Vec::new(), None);
             }
             return (
                 vec![TagSuggestItem {
-                    target: self.to_dto(slot),
+                    target: Self::to_dto(tid, tag_interner, tag_postings, postings_slab),
                     candidates,
                 }],
                 None,
@@ -611,25 +473,28 @@ impl TagIndex {
             return (Vec::new(), None);
         }
 
+        let total = tag_postings.len().min(tag_interner.len());
         let scan_limit = (limit * 4).clamp(SCAN_FLOOR, SCAN_CAP);
         let start_idx = if offset <= 0 {
             0usize
         } else {
-            let Some(&cur_slot) = self.id_to_slot.get(&offset) else {
+            let Ok(cur_tid_usize) = usize::try_from(offset - 1) else {
                 return (Vec::new(), None);
             };
-            let cur_idx = cur_slot as usize;
-            if !self.alive[cur_idx] || self.ref_counts[cur_idx] <= 0 {
-                // Option 2 zeroed the cursor tag's ref_count (or tag was deleted):
+            if cur_tid_usize >= total {
+                return (Vec::new(), None);
+            }
+            let cur_tid = cur_tid_usize as u32;
+            let cur_rc = Self::ref_count_of(cur_tid, tag_postings, postings_slab);
+            if cur_rc <= 0 {
+                // Option 2 zeroed the cursor tag's ref_count (or tag was removed):
                 // partition_point with cur_rc=0 would jump to the 0-rc tail and
                 // truncate prematurely. Restart from 0 (already-aliased tags are skipped).
                 0usize
             } else {
-                let cur_rc = self.ref_counts[cur_idx];
-                let cur_id = self.ids[cur_idx];
-                self.sorted_slots.partition_point(|&slot| {
-                    let s_idx = slot as usize;
-                    (self.ref_counts[s_idx], self.ids[s_idx]) >= (cur_rc, cur_id)
+                self.sorted_tids.partition_point(|&tid| {
+                    let rc = Self::ref_count_of(tid, tag_postings, postings_slab);
+                    (rc, tid) >= (cur_rc, cur_tid)
                 })
             }
         };
@@ -638,25 +503,25 @@ impl TagIndex {
         let mut scanned = 0usize;
         let mut last_scanned_id: Option<i64> = None;
 
-        for &slot in &self.sorted_slots[start_idx..] {
-            let idx = slot as usize;
-            if !self.alive[idx] || self.ref_counts[idx] <= 0 {
-                break; // `sorted_slots` is descending by reference_count
+        for &tid in &self.sorted_tids[start_idx..] {
+            let rc = Self::ref_count_of(tid, tag_postings, postings_slab);
+            if rc <= 0 {
+                break; // `sorted_tids` is descending by reference_count
             }
-            let tid = self.ids[idx];
-            if self.aliased_ids.contains(&tid) {
+            if self.aliased_tids.contains(tid) {
                 continue;
             }
+            let ext_id = (tid as i64) + 1;
             scanned += 1;
-            last_scanned_id = Some(tid);
-            let candidates = self.suggest_for_slot(slot);
+            last_scanned_id = Some(ext_id);
+            let candidates = self.suggest_for_tid(tid, tag_interner, tag_postings, postings_slab);
             if !candidates.is_empty() {
                 items.push(TagSuggestItem {
-                    target: self.to_dto(slot),
+                    target: Self::to_dto(tid, tag_interner, tag_postings, postings_slab),
                     candidates,
                 });
                 if items.len() >= limit {
-                    return (items, Some(tid));
+                    return (items, Some(ext_id));
                 }
             }
             if scanned >= scan_limit {
@@ -677,22 +542,71 @@ impl TagIndex {
 mod tests {
     use super::*;
 
+    struct TestTagState {
+        interner: StringInterner,
+        postings: Vec<PostingHandle>,
+        slab: PostingSlab,
+        aliased: FxHashSet<String>,
+    }
+
+    impl TestTagState {
+        fn from_counts(tags: &[(&str, i32)], aliased: &[&str]) -> Self {
+            let mut interner = StringInterner::new();
+            let mut postings = Vec::new();
+            let mut slab = PostingSlab::new();
+            for &(name, rc) in tags {
+                let tid = interner.intern(name) as usize;
+                if tid >= postings.len() {
+                    postings.resize(tid + 1, PostingHandle::EMPTY);
+                }
+                for doc in 0..rc {
+                    slab.insert(&mut postings[tid], doc as u32);
+                }
+            }
+            Self {
+                interner,
+                postings,
+                slab,
+                aliased: aliased.iter().map(|s| (*s).to_string()).collect(),
+            }
+        }
+
+        fn set_count(&mut self, name: &str, rc: i32) {
+            let tid = self.interner.intern(name) as usize;
+            if tid >= self.postings.len() {
+                self.postings.resize(tid + 1, PostingHandle::EMPTY);
+            }
+            self.postings[tid] = PostingHandle::EMPTY;
+            for doc in 0..rc {
+                self.slab.insert(&mut self.postings[tid], doc as u32);
+            }
+        }
+
+        fn build_index(&self) -> TagIndex {
+            TagIndex::build_from_state(&self.interner, &self.postings, &self.slab, &self.aliased)
+        }
+    }
+
     #[test]
     fn tag_index_suggests_substring_similarity_prefix_and_respects_aliases_and_special_chars() {
-        let tags = vec![
-            (1, "百合".into(), 100),
-            (2, "百合漫画".into(), 50),
-            (3, "真百合小説".into(), 10),
-            (4, "日常".into(), 80),
-            (5, "%高中生".into(), 40),
-            (6, "%高中生女子".into(), 5),
-            (7, "aliased_src".into(), 90),
-            (8, "BanG_Dream!".into(), 60),
-            (9, "BanG_Dream_Live".into(), 15),
-        ];
-        let mut idx = TagIndex::from_snapshot(tags, vec![7]);
+        let mut st = TestTagState::from_counts(
+            &[
+                ("百合", 100),
+                ("百合漫画", 50),
+                ("真百合小説", 10),
+                ("日常", 80),
+                ("%高中生", 40),
+                ("%高中生女子", 5),
+                ("aliased_src", 90),
+                ("BanG_Dream!", 60),
+                ("BanG_Dream_Live", 15),
+            ],
+            &["aliased_src"],
+        );
+        let idx = st.build_index();
 
-        let (items, next_off) = idx.suggest_aliases(5, 0, Some("%高中生"));
+        let (items, next_off) =
+            idx.suggest_aliases(&st.interner, &st.postings, &st.slab, 5, 0, Some("%高中生"));
         assert_eq!(next_off, None);
         assert_eq!(items.len(), 1);
         let cand_names: Vec<&str> = items[0]
@@ -703,9 +617,20 @@ mod tests {
         assert!(cand_names.contains(&"%高中生女子"));
         assert!(!cand_names.contains(&"日常"));
 
-        assert!(idx.suggest_aliases(5, 0, Some("aliased_src")).0.is_empty());
+        assert!(idx
+            .suggest_aliases(
+                &st.interner,
+                &st.postings,
+                &st.slab,
+                5,
+                0,
+                Some("aliased_src")
+            )
+            .0
+            .is_empty());
 
-        let (yuri_items, _) = idx.suggest_aliases(5, 0, Some("百合"));
+        let (yuri_items, _) =
+            idx.suggest_aliases(&st.interner, &st.postings, &st.slab, 5, 0, Some("百合"));
         let yuri_cands: Vec<&str> = yuri_items[0]
             .candidates
             .iter()
@@ -714,10 +639,10 @@ mod tests {
         assert_eq!(yuri_cands[0], "百合漫画");
         assert!(yuri_cands.contains(&"真百合小説"));
 
-        let (p1, cur1) = idx.suggest_aliases(2, 0, None);
+        let (p1, cur1) = idx.suggest_aliases(&st.interner, &st.postings, &st.slab, 2, 0, None);
         assert_eq!(p1.len(), 2);
         let cur1 = cur1.expect("first page should return a cursor");
-        let (p2, cur2) = idx.suggest_aliases(10, cur1, None);
+        let (p2, cur2) = idx.suggest_aliases(&st.interner, &st.postings, &st.slab, 10, cur1, None);
         assert!(!p2.is_empty());
         assert_eq!(cur2, None, "exhausted last batch must return None");
         let ids1: Vec<i64> = p1.iter().map(|i| i.target.id).collect();
@@ -726,47 +651,54 @@ mod tests {
             assert!(!ids1.contains(id));
         }
 
-        assert_eq!(idx.suggest_aliases(5, 999999, None), (Vec::new(), None));
+        assert_eq!(
+            idx.suggest_aliases(&st.interner, &st.postings, &st.slab, 5, 999999, None),
+            (Vec::new(), None)
+        );
 
         // Simulate Option 2 zeroing the cursor tag's ref_count + marking it aliased:
         // scanning from cur1 must not jump to the 0-rc tail and truncate prematurely.
         let cursor_name = p1.last().unwrap().target.name.clone();
-        idx.apply_delta(
-            None,
-            Some(vec![(cur1, cursor_name, 0)]),
-            Some(vec![7, cur1]),
-        );
-        idx.ensure_sorted();
-        let (after_zero, _) = idx.suggest_aliases(5, cur1, None);
+        st.set_count(&cursor_name, 0);
+        st.aliased.insert(cursor_name);
+        let idx_zeroed = st.build_index();
+        let (after_zero, _) =
+            idx_zeroed.suggest_aliases(&st.interner, &st.postings, &st.slab, 5, cur1, None);
         assert!(!after_zero.is_empty());
         assert!(after_zero.iter().all(|i| i.target.id != cur1));
 
-        idx.apply_delta(
-            Some(vec!["日常".into()]),
-            Some(vec![(10, "百合小説".into(), 200)]),
-            Some(vec![7]),
-        );
-        idx.ensure_sorted();
-        let (after, _) = idx.suggest_aliases(5, 0, Some("百合"));
+        // Removing "日常" and adding "百合小説" updates derived TagIndex cleanly
+        st.set_count("日常", 0);
+        st.set_count("百合小説", 200);
+        let idx_updated = st.build_index();
+        let (after, _) =
+            idx_updated.suggest_aliases(&st.interner, &st.postings, &st.slab, 5, 0, Some("百合"));
         assert!(after[0].candidates.iter().any(|c| c.name == "百合小説"));
     }
 
     #[test]
     fn tag_index_finds_high_freq_short_substring_on_long_target_and_ignores_single_cjk_char() {
-        // Make bigram "ab" very high frequency compared to the rest of "abcdefghij"
-        let mut tags: Vec<(i64, String, i32)> = vec![
-            (1, "abcdefghij".into(), 500),
-            (2, "ab".into(), 200),
-            (3, "空".into(), 300),
-            (4, "星空物語".into(), 400),
+        let mut pairs: Vec<(String, i32)> = vec![
+            ("abcdefghij".into(), 500),
+            ("ab".into(), 200),
+            ("空".into(), 300),
+            ("星空物語".into(), 400),
         ];
         for i in 10..40 {
-            tags.push((i, format!("ab_{i}"), 10));
+            pairs.push((format!("ab_{i}"), 10));
         }
-        let mut idx = TagIndex::from_snapshot(tags, vec![]);
-        idx.ensure_sorted();
+        let borrowed: Vec<(&str, i32)> = pairs.iter().map(|(s, c)| (s.as_str(), *c)).collect();
+        let st = TestTagState::from_counts(&borrowed, &[]);
+        let idx = st.build_index();
 
-        let (long_items, _) = idx.suggest_aliases(5, 0, Some("abcdefghij"));
+        let (long_items, _) = idx.suggest_aliases(
+            &st.interner,
+            &st.postings,
+            &st.slab,
+            5,
+            0,
+            Some("abcdefghij"),
+        );
         let long_cands: Vec<&str> = long_items[0]
             .candidates
             .iter()
@@ -775,7 +707,8 @@ mod tests {
         assert!(long_cands.contains(&"ab"));
 
         // Single CJK char "空" (3 UTF-8 bytes, 1 char) must NOT match via `cand_chars >= 2`
-        let (cjk_items, _) = idx.suggest_aliases(5, 0, Some("星空物語"));
+        let (cjk_items, _) =
+            idx.suggest_aliases(&st.interner, &st.postings, &st.slab, 5, 0, Some("星空物語"));
         assert!(cjk_items.is_empty());
     }
 }

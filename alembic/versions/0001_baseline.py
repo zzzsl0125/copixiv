@@ -226,13 +226,144 @@ _DROP_TABLE_ORDER: tuple[str, ...] = (
 )
 
 
+_TAG_TRIGGER_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE OR REPLACE FUNCTION sync_tag_refs_batch() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF TG_OP = 'INSERT' THEN
+        INSERT INTO tag(name, reference_count)
+          SELECT DISTINCT t.tag_name, 0
+          FROM new_rows AS r, unnest(r.tags) AS t(tag_name)
+          WHERE NOT EXISTS (SELECT 1 FROM tag AS e WHERE e.name = t.tag_name)
+          ORDER BY t.tag_name
+          ON CONFLICT (name) DO NOTHING;
+
+        WITH deltas AS MATERIALIZED (
+          SELECT tag_name, COUNT(*)::INTEGER AS delta
+          FROM (
+            SELECT DISTINCT r.id, t.tag_name
+            FROM new_rows AS r, unnest(r.tags) AS t(tag_name)
+          ) x
+          GROUP BY tag_name
+        ),
+        locked AS (
+          SELECT t.id, d.delta
+          FROM tag AS t
+          JOIN deltas AS d ON d.tag_name = t.name
+          ORDER BY t.id
+          FOR NO KEY UPDATE OF t
+        )
+        UPDATE tag
+          SET reference_count = tag.reference_count + locked.delta
+          FROM locked
+          WHERE tag.id = locked.id;
+
+      ELSIF TG_OP = 'DELETE' THEN
+        WITH deltas AS MATERIALIZED (
+          SELECT tag_name, COUNT(*)::INTEGER AS cnt
+          FROM (
+            SELECT DISTINCT r.id, t.tag_name
+            FROM old_rows AS r, unnest(r.tags) AS t(tag_name)
+          ) x
+          GROUP BY tag_name
+        ),
+        locked AS (
+          SELECT t.id, d.cnt
+          FROM tag AS t
+          JOIN deltas AS d ON d.tag_name = t.name
+          ORDER BY t.id
+          FOR NO KEY UPDATE OF t
+        )
+        UPDATE tag
+          SET reference_count = GREATEST(0, tag.reference_count - locked.cnt)
+          FROM locked
+          WHERE tag.id = locked.id;
+
+      ELSE -- UPDATE
+        IF NOT EXISTS (
+          SELECT id, tags FROM new_rows
+          EXCEPT
+          SELECT id, tags FROM old_rows
+        ) THEN
+          RETURN NULL;
+        END IF;
+
+        INSERT INTO tag(name, reference_count)
+          SELECT DISTINCT t.tag_name, 0
+          FROM new_rows AS r, unnest(r.tags) AS t(tag_name)
+          WHERE NOT EXISTS (SELECT 1 FROM tag AS e WHERE e.name = t.tag_name)
+          ORDER BY t.tag_name
+          ON CONFLICT (name) DO NOTHING;
+
+        WITH deltas AS MATERIALIZED (
+          SELECT tag_name, SUM(delta)::INTEGER AS delta
+          FROM (
+            SELECT DISTINCT r.id, t.tag_name, 1::BIGINT AS delta
+              FROM new_rows AS r, unnest(r.tags) AS t(tag_name)
+            UNION ALL
+            SELECT DISTINCT r.id, t.tag_name, -1::BIGINT AS delta
+              FROM old_rows AS r, unnest(r.tags) AS t(tag_name)
+          ) raw
+          GROUP BY tag_name
+          HAVING SUM(delta) <> 0
+        ),
+        locked AS (
+          SELECT t.id, d.delta
+          FROM tag AS t
+          JOIN deltas AS d ON d.tag_name = t.name
+          ORDER BY t.id
+          FOR NO KEY UPDATE OF t
+        )
+        UPDATE tag
+          SET reference_count = GREATEST(0, tag.reference_count + locked.delta)
+          FROM locked
+          WHERE tag.id = locked.id;
+      END IF;
+
+      RETURN NULL;
+    END; $$;
+    """,
+    """
+    CREATE TRIGGER trg_sync_tag_refs_insert
+      AFTER INSERT ON novel
+      REFERENCING NEW TABLE AS new_rows
+      FOR EACH STATEMENT
+      EXECUTE FUNCTION sync_tag_refs_batch()
+    """,
+    """
+    CREATE TRIGGER trg_sync_tag_refs_update
+      AFTER UPDATE ON novel
+      REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows
+      FOR EACH STATEMENT
+      EXECUTE FUNCTION sync_tag_refs_batch()
+    """,
+    """
+    CREATE TRIGGER trg_sync_tag_refs_delete
+      AFTER DELETE ON novel
+      REFERENCING OLD TABLE AS old_rows
+      FOR EACH STATEMENT
+      EXECUTE FUNCTION sync_tag_refs_batch()
+    """,
+    "ALTER TABLE tag SET (autovacuum_analyze_scale_factor = 0.05, autovacuum_analyze_threshold = 500)",
+)
+
+
 def upgrade() -> None:
     for stmt in _DDL_STATEMENTS:
         op.execute(stmt)
     install_pg_objects(op.get_bind())
+    for stmt in _TAG_TRIGGER_STATEMENTS:
+        op.execute(stmt)
 
 
 def downgrade() -> None:
+    for trg in (
+        "trg_sync_tag_refs_insert",
+        "trg_sync_tag_refs_update",
+        "trg_sync_tag_refs_delete",
+    ):
+        op.execute(f"DROP TRIGGER IF EXISTS {trg} ON novel")
+    op.execute("DROP FUNCTION IF EXISTS sync_tag_refs_batch()")
     uninstall_pg_objects(op.get_bind())
     for table in _DROP_TABLE_ORDER:
         op.execute(f"DROP TABLE IF EXISTS {table} CASCADE")

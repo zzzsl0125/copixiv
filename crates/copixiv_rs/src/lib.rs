@@ -191,18 +191,15 @@ impl PyNovelQueryEngine {
         staging,
         blocked_tags = vec![],
         exclude_blocked_default = true,
-        tags = vec![],
-        aliased_tag_ids = vec![],
+        aliased_tags = vec![],
     ))]
-    #[allow(clippy::too_many_arguments)]
     fn swap_from_staging(
         &self,
         py: Python<'_>,
         staging: &PyStagingEngine,
         blocked_tags: Vec<String>,
         exclude_blocked_default: bool,
-        tags: Vec<(i64, String, i32)>,
-        aliased_tag_ids: Vec<i64>,
+        aliased_tags: Vec<String>,
     ) -> PyResult<()> {
         let builder = staging
             .builder
@@ -210,8 +207,7 @@ impl PyNovelQueryEngine {
             .take()
             .ok_or_else(|| PyValueError::new_err("StagingEngine already finalized"))?;
         py.allow_threads(|| {
-            let state =
-                builder.finalize(blocked_tags, exclude_blocked_default, tags, aliased_tag_ids);
+            let state = builder.finalize(blocked_tags, exclude_blocked_default, aliased_tags);
             self.index.swap_state(state);
         });
         Ok(())
@@ -223,9 +219,7 @@ impl PyNovelQueryEngine {
         blocked_tags = None,
         exclude_blocked_default = None,
         special_follow_changes = vec![],
-        delete_tag_names = None,
-        upsert_tags = None,
-        aliased_tag_ids = None,
+        aliased_tags = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn apply_delta(
@@ -236,9 +230,7 @@ impl PyNovelQueryEngine {
         blocked_tags: Option<Vec<String>>,
         exclude_blocked_default: Option<bool>,
         special_follow_changes: Vec<(i64, bool)>,
-        delete_tag_names: Option<Vec<String>>,
-        upsert_tags: Option<Vec<(i64, String, i32)>>,
-        aliased_tag_ids: Option<Vec<i64>>,
+        aliased_tags: Option<Vec<String>>,
     ) -> PyResult<()> {
         let parsed_rows = match upsert_rows {
             Some(rows) => extract_rows(rows)?,
@@ -251,9 +243,7 @@ impl PyNovelQueryEngine {
                 blocked_tags,
                 exclude_blocked_default,
                 &special_follow_changes,
-                delete_tag_names,
-                upsert_tags,
-                aliased_tag_ids,
+                aliased_tags,
             );
         });
         Ok(())

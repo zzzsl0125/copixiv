@@ -1,5 +1,6 @@
 use roaring::RoaringBitmap;
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
 use crate::filter::HotTrack;
 use crate::interner::StringInterner;
@@ -307,7 +308,7 @@ impl EngineState {
         mask
     }
 
-    pub fn delete_ids(&mut self, novel_ids: &[i64]) {
+    pub fn delete_ids(&mut self, novel_ids: &[i64]) -> bool {
         let mut docs: Vec<u32> = novel_ids
             .iter()
             .filter_map(|nid| self.id_to_doc.get(nid).copied())
@@ -316,14 +317,18 @@ impl EngineState {
         docs.sort_unstable();
         docs.dedup();
         if docs.is_empty() {
-            return;
+            return false;
         }
 
         // O(1) track invalidation instead of O(N) Vec::remove inside the write lock.
         self.invalidate_hot_tracks(u8::MAX);
 
+        let mut tags_affected = false;
         let mut bigram_scratch = Vec::with_capacity(256);
         for doc in docs {
+            if !tags_affected && !self.doc_tags.get(doc).is_empty() {
+                tags_affected = true;
+            }
             let nid = self.doc_ids[doc as usize];
             self.clear_doc_postings(doc, &mut bigram_scratch, true);
             self.alive.remove(doc);
@@ -334,11 +339,12 @@ impl EngineState {
         self.doc_tags.maybe_compact();
         self.maybe_compact_postings();
         self.text_index.maybe_compact();
+        tags_affected
     }
 
-    pub fn upsert_batch(&mut self, rows: Vec<NovelRecord>) {
+    pub fn upsert_batch(&mut self, rows: Vec<NovelRecord>) -> bool {
         if rows.is_empty() {
-            return;
+            return false;
         }
         let mut dedup: Vec<NovelRecord> = Vec::with_capacity(rows.len());
         let mut seen: FxHashMap<i64, usize> =
@@ -365,20 +371,36 @@ impl EngineState {
             self.invalidate_hot_tracks(dirty_mask);
         }
 
+        let mut tags_changed = false;
+        let mut old_tags_scratch: SmallVec<[u32; 16]> = SmallVec::new();
         let mut bigram_scratch = Vec::with_capacity(256);
         let mut tag_ids_scratch = Vec::with_capacity(32);
         for row in &dedup {
             let (doc, is_new) = self.alloc_doc(row.id);
             if !is_new {
+                if !tags_changed {
+                    old_tags_scratch.clear();
+                    old_tags_scratch.extend_from_slice(self.doc_tags.get(doc));
+                }
                 self.clear_doc_postings(doc, &mut bigram_scratch, false);
             }
             self.write_row_into_doc(doc, row, false, &mut bigram_scratch, &mut tag_ids_scratch);
+            if !tags_changed {
+                if is_new {
+                    if !tag_ids_scratch.is_empty() {
+                        tags_changed = true;
+                    }
+                } else if old_tags_scratch.as_slice() != tag_ids_scratch.as_slice() {
+                    tags_changed = true;
+                }
+            }
         }
 
         self.title_arena.maybe_compact();
         self.doc_tags.maybe_compact();
         self.maybe_compact_postings();
         self.text_index.maybe_compact();
+        tags_changed
     }
 
     pub fn toggle_special_follow(&mut self, author_id: i64, is_special_follow: bool) {
@@ -396,7 +418,6 @@ impl EngineState {
         self.recompute_blocked_bitmap();
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn apply_delta(
         &mut self,
         delete_ids: &[i64],
@@ -404,15 +425,14 @@ impl EngineState {
         blocked_tags: Option<Vec<String>>,
         exclude_blocked_default: Option<bool>,
         special_follow_changes: &[(i64, bool)],
-        delete_tag_names: Option<Vec<String>>,
-        upsert_tags: Option<Vec<(i64, String, i32)>>,
-        aliased_tag_ids: Option<Vec<i64>>,
+        aliased_tags: Option<Vec<String>>,
     ) {
-        if !delete_ids.is_empty() {
-            self.delete_ids(delete_ids);
+        let mut tags_dirty = false;
+        if !delete_ids.is_empty() && self.delete_ids(delete_ids) {
+            tags_dirty = true;
         }
-        if !upsert_rows.is_empty() {
-            self.upsert_batch(upsert_rows);
+        if !upsert_rows.is_empty() && self.upsert_batch(upsert_rows) {
+            tags_dirty = true;
         }
         if let Some(tags) = blocked_tags {
             self.set_blocked_tags(tags);
@@ -423,9 +443,15 @@ impl EngineState {
         for &(author_id, flag) in special_follow_changes {
             self.toggle_special_follow(author_id, flag);
         }
-        if delete_tag_names.is_some() || upsert_tags.is_some() || aliased_tag_ids.is_some() {
-            self.tag_index
-                .apply_delta(delete_tag_names, upsert_tags, aliased_tag_ids);
+        if let Some(names) = aliased_tags {
+            self.aliased_tag_names = names.into_iter().collect();
+            if !self.tag_index.dirty && !tags_dirty {
+                self.tag_index
+                    .refresh_aliased(&self.tag_interner, &self.aliased_tag_names);
+            }
+        }
+        if tags_dirty {
+            self.tag_index.dirty = true;
         }
     }
 }
@@ -468,7 +494,7 @@ mod tests {
             novel(4, vec!["normal"]),
         ]);
         let engine = NovelIndex::new();
-        engine.swap_state(b.finalize(vec!["gay".into(), "BL".into()], true, vec![], vec![]));
+        engine.swap_state(b.finalize(vec!["gay".into(), "BL".into()], true, vec![]));
 
         let f = QueryFilter::default();
         assert_eq!(engine.count_novels(&f, 100), (1, false));
@@ -481,8 +507,6 @@ mod tests {
             None,
             &[],
             None,
-            None,
-            None,
         );
         assert_eq!(engine.count_novels(&f, 100), (2, false));
 
@@ -493,8 +517,6 @@ mod tests {
             Some(vec!["NTR".into()]),
             None,
             &[],
-            None,
-            None,
             None,
         );
         assert_eq!(engine.count_novels(&f, 100), (6, false));

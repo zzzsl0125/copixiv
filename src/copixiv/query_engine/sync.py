@@ -31,7 +31,7 @@ def build_engine_from_store(
         staging_holder[0].push_batch(batch)
         loaded += len(batch)
 
-    blocked_tags, exclude_default, all_tags, aliased_tag_ids = store.stream_snapshot(
+    blocked_tags, exclude_default, aliased_tags = store.stream_snapshot(
         _on_total,
         _on_batch,
         batch_size=2_000,
@@ -40,10 +40,9 @@ def build_engine_from_store(
         staging_holder.pop(),
         blocked_tags,
         exclude_default,
-        all_tags,
-        aliased_tag_ids,
+        aliased_tags,
     )
-    del blocked_tags, all_tags, aliased_tag_ids
+    del blocked_tags, aliased_tags
     gc.collect()
     elapsed_ms = (time.perf_counter() - t0) * 1_000
     logger.info(
@@ -80,9 +79,7 @@ def make_post_commit_hook(
                     or payload.blocked_tags is not None
                     or payload.exclude_blocked_default is not None
                     or payload.special_follow_changes
-                    or payload.delete_tag_names is not None
-                    or payload.upsert_tags is not None
-                    or payload.aliased_tag_ids is not None
+                    or payload.aliased_tags is not None
                 )
                 if has_changes:
                     engine.apply_delta(
@@ -91,9 +88,7 @@ def make_post_commit_hook(
                         blocked_tags=payload.blocked_tags,
                         exclude_blocked_default=payload.exclude_blocked_default,
                         special_follow_changes=payload.special_follow_changes,
-                        delete_tag_names=payload.delete_tag_names,
-                        upsert_tags=payload.upsert_tags,
-                        aliased_tag_ids=payload.aliased_tag_ids,
+                        aliased_tags=payload.aliased_tags,
                     )
             except Exception:
                 logger.exception("Post-commit delta sync failed; attempting full engine rebuild")
