@@ -195,16 +195,20 @@ def test_local_ingest_rollback_discards_created_files(
 
 
 @pytest.mark.asyncio
-async def test_batch_download_truncation_sorts_by_abs_id(
-    uow: SqlUnitOfWork,
+async def test_batch_export_packages_local_and_pixiv_novels(
+    committed_session_factory,
     tmp_path: Path,
 ):
+    import zipfile
     from datetime import UTC, datetime
 
     from copixiv.db.base import ensure_parent_rows
-    from copixiv.features.novels.use_cases.batch_download import BatchDownloadUseCase
+    from copixiv.features.novels.repo import SQLAlchemyNovelRepository
+    from copixiv.tasks.batch import BatchExportArgs, batch_export
+    from copixiv.tasks.executor import TaskContext
 
     storage = FileStorage(str(tmp_path))
+    uow = SqlUnitOfWork(committed_session_factory)
     with uow.begin():
         ensure_parent_rows(uow.session, author_ids={1})
         p1 = storage.save_novel_text(10_000_000, "PixivOld", "old body")
@@ -264,17 +268,38 @@ async def test_batch_download_truncation_sorts_by_abs_id(
                 ),
             ]
         )
+        task_row = models.TaskHistory(
+            name="mixed_export",
+            task_func="batch_export",
+            status="running",
+            start_time=now,
+        )
+        uow.session.add(task_row)
+        uow.session.flush()
+        task_id = task_row.id
 
-    uc = BatchDownloadUseCase(uow, download_dir=str(tmp_path))
-    result = await uc.execute(novel_ids=[10_000_000, 25_000_000, -30_000_000], limit=2)
-    try:
-        assert result.added_count == 2
-        import zipfile
+    with uow.begin(read_only=True):
+        latest = SQLAlchemyNovelRepository(uow.session).get_latest_novel_by_ids(
+            [10_000_000, 25_000_000, -30_000_000]
+        )
+        assert latest is not None
+        assert latest.id == 25_000_000
 
-        with zipfile.ZipFile(result.zip_buffer) as zf:
-            names = "\n".join(zf.namelist())
-        assert "-30000000" in names
-        assert "25000000" in names
-        assert "10000000" not in names
-    finally:
-        result.zip_buffer.close()
+    ctx = TaskContext(
+        uow=uow,
+        session_factory=committed_session_factory,
+        file_storage=storage,
+        task_id=task_id,
+    )
+    res = await batch_export(
+        BatchExportArgs(novel_ids=[10_000_000, 25_000_000, -30_000_000]),
+        ctx,
+    )
+    assert "共 3 篇" in res.summary
+    zip_path = tmp_path / f"batch_export_{task_id}.zip"
+    assert zip_path.is_file()
+    with zipfile.ZipFile(zip_path) as zf:
+        names = "\n".join(zf.namelist())
+    assert "-30000000" in names
+    assert "25000000" in names
+    assert "10000000" in names

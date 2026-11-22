@@ -4,37 +4,23 @@ import { useDebounceFn } from '@vueuse/core'
 import { RadioGroupIndicator, RadioGroupItem, RadioGroupRoot } from 'reka-ui'
 import BaseModal from '../ui/BaseModal.vue'
 import { getApiErrorMessage, isAbortError, novelApi } from '../../api'
-import type { FormatMode, OrderBy, OrderDirection } from '../../types'
-import { downloadBlob, filenameFromContentDisposition } from '../../lib/utils'
-import { excludeBlockedOverride } from '../../config'
-import { useSystem, useToast } from '../../composables'
+import type { FormatMode } from '../../types'
+import { useSystem } from '../../composables'
 
 const props = defineProps<{
   isOpen: boolean
-  keyword: string
-  order_by: OrderBy
-  order_direction: OrderDirection
-  min_like?: number
-  min_text?: number
-  novelIds?: number[]
+  novelIds: number[]
 }>()
 
 const emit = defineEmits<{
   close: []
-  'download-success': [filename: string]
   'download-error': [message: string]
   'task-submitted': [payload: { task_id: number; matched: number }]
 }>()
 
-const EXPORT_TASK_THRESHOLD = 1000
-
 const loading = ref(false)
-const countLoading = ref(false)
-const totalCount = ref(0)
-const totalTruncated = ref(false)
 const formatMode = ref<FormatMode>('txt')
 const { systemConfig } = useSystem()
-const toast = useToast()
 
 const zipName = ref('')
 const namingTemplate = ref('')
@@ -46,10 +32,14 @@ let previewSeq = 0
 let previewAbort: AbortController | null = null
 let suppressPreviewWatch = false
 
-const isIdsMode = computed(() => (props.novelIds?.length ?? 0) > 0)
-const useTaskExport = computed(() => isIdsMode.value && totalCount.value > EXPORT_TASK_THRESHOLD)
+const totalCount = computed(() => props.novelIds.length)
 
 async function fetchPreview() {
+  if (props.novelIds.length === 0) {
+    previewPath.value = null
+    previewError.value = ''
+    return
+  }
   const seq = ++previewSeq
   previewAbort?.abort()
   const controller = new AbortController()
@@ -57,16 +47,11 @@ async function fetchPreview() {
   previewLoading.value = true
   previewError.value = ''
   try {
-    const result = await novelApi.batchDownloadPreview(
+    const result = await novelApi.batchExportPreview(
       {
-        keyword: props.keyword.trim() || undefined,
-        order_by: props.order_by,
-        order_direction: props.order_direction,
-        min_like: props.min_like,
-        min_text: props.min_text,
+        novel_ids: props.novelIds,
         format_mode: formatMode.value,
         naming_template: namingTemplate.value || undefined,
-        novel_ids: props.novelIds,
       },
       controller.signal,
     )
@@ -86,71 +71,18 @@ const debouncedFetchPreview = useDebounceFn(() => {
   if (props.isOpen) void fetchPreview()
 }, 300)
 
-watch(
-  [
-    namingTemplate,
-    formatMode,
-    () => props.keyword,
-    () => props.order_by,
-    () => props.order_direction,
-    () => props.min_like,
-    () => props.min_text,
-    () => props.novelIds,
-  ],
-  () => {
-    if (suppressPreviewWatch || !props.isOpen) return
-    void debouncedFetchPreview()
-  },
-)
+watch([namingTemplate, formatMode, () => props.novelIds], () => {
+  if (suppressPreviewWatch || !props.isOpen) return
+  if (totalCount.value === 0) {
+    previewPath.value = null
+    previewError.value = ''
+    return
+  }
+  void debouncedFetchPreview()
+})
 
 onUnmounted(() => {
   previewAbort?.abort()
-})
-
-const keywordDisplay = computed(() => {
-  if (!props.keyword.trim()) return '（无）'
-  const parts = props.keyword.split(/[;；]/).filter(Boolean)
-  const keywords = parts
-    .map((p) => {
-      const idx = p.indexOf(':')
-      if (idx > 0) return { type: p.substring(0, idx).trim(), value: p.substring(idx + 1).trim() }
-      return { type: 'keyword', value: p.trim() }
-    })
-    .filter((k) => k.type === 'keyword')
-    .map((k) => k.value)
-  return keywords.length > 0 ? keywords.join(', ') : props.keyword
-})
-
-const searchValues = computed(() => {
-  if (!props.keyword.trim()) return [] as string[]
-  const parts = props.keyword.split(/[;；]/).filter(Boolean)
-  return parts
-    .map((p) => {
-      const idx = p.indexOf(':')
-      if (idx > 0) return p.substring(idx + 1).trim()
-      return p.trim()
-    })
-    .filter(Boolean)
-})
-
-function defaultZipName(): string {
-  if (searchValues.value.length > 0) {
-    return searchValues.value.slice(0, 3).join('_')
-  }
-  return '批量下载'
-}
-
-const orderByDisplay = computed(() => {
-  const map: Record<string, string> = {
-    id: '默认排序',
-    like: '按赞数',
-    view: '按浏览数',
-    text: '按字数',
-    random: '随机',
-    create_time: '按创建时间',
-  }
-  const dir = props.order_direction === 'ASC' ? '↑' : '↓'
-  return `${map[props.order_by] || props.order_by} ${dir}`
 })
 
 watch(
@@ -158,35 +90,16 @@ watch(
   async (open) => {
     if (!open) return
     suppressPreviewWatch = true
-    totalCount.value = 0
-    totalTruncated.value = false
     formatMode.value = 'txt'
-    zipName.value = defaultZipName()
+    zipName.value = '批量导出'
     namingTemplate.value = systemConfig.value?.batch_download_naming || ''
     await nextTick()
     suppressPreviewWatch = false
-    if (isIdsMode.value) {
-      totalCount.value = props.novelIds?.length ?? 0
+    if (totalCount.value > 0) {
       void fetchPreview()
-      return
-    }
-    countLoading.value = true
-    try {
-      const result = await novelApi.countNovels({
-        keyword: props.keyword.trim() || undefined,
-        min_like: props.min_like,
-        min_text: props.min_text,
-        exclude_blocked: excludeBlockedOverride(props.keyword),
-      })
-      totalCount.value = result.total
-      totalTruncated.value = result.truncated ?? false
-      zipName.value = defaultZipName()
-      void fetchPreview()
-    } catch (err: unknown) {
-      totalCount.value = 0
-      emit('download-error', getApiErrorMessage(err, '统计匹配数量失败'))
-    } finally {
-      countLoading.value = false
+    } else {
+      previewPath.value = null
+      previewError.value = ''
     }
   },
   { immediate: true },
@@ -196,43 +109,16 @@ async function handleConfirm() {
   if (loading.value || totalCount.value === 0) return
   loading.value = true
   try {
-    if (useTaskExport.value) {
-      const res = await novelApi.submitBatchExport({
-        novel_ids: props.novelIds ?? [],
-        format_mode: formatMode.value,
-        zip_name: zipName.value || undefined,
-        naming_template: namingTemplate.value || undefined,
-      })
-      emit('task-submitted', res)
-      emit('close')
-      return
-    }
-
-    const { blob, contentDisposition, missingIds } = await novelApi.batchDownload({
-      keyword: props.keyword.trim() || undefined,
-      order_by: props.order_by,
-      order_direction: props.order_direction,
-      min_like: props.min_like,
-      min_text: props.min_text,
-      limit: totalCount.value,
-      format_mode: formatMode.value,
-      zip_name: zipName.value || undefined,
-      naming_template: namingTemplate.value || undefined,
+    const res = await novelApi.submitBatchExport({
       novel_ids: props.novelIds,
+      format_mode: formatMode.value,
+      zip_name: zipName.value.trim() || undefined,
+      naming_template: namingTemplate.value || undefined,
     })
-
-    const filename = filenameFromContentDisposition(contentDisposition, 'batch_download.zip')
-    downloadBlob(blob, filename)
-    if (missingIds.length > 0) {
-      toast.warning(
-        `有 ${missingIds.length} 篇小说文件缺失或已删除，已跳过（ID: ${missingIds.slice(0, 5).join(', ')}${missingIds.length > 5 ? '…' : ''}）`,
-      )
-    }
-
-    emit('download-success', filename)
+    emit('task-submitted', res)
     emit('close')
   } catch (err: unknown) {
-    emit('download-error', getApiErrorMessage(err, '下载失败'))
+    emit('download-error', getApiErrorMessage(err, '提交导出任务失败'))
   } finally {
     loading.value = false
   }
@@ -242,54 +128,23 @@ async function handleConfirm() {
 <template>
   <BaseModal
     :is-open="isOpen"
-    title="📦 打包下载"
+    title="📦 批量导出"
     :loading="loading"
-    confirm-text="确认下载"
+    confirm-text="确认导出"
+    :confirm-disabled="totalCount === 0"
     @close="$emit('close')"
     @confirm="handleConfirm"
   >
     <div class="text-sm text-gray-600 space-y-1">
-      <div v-if="isIdsMode" class="flex items-center gap-2">
+      <div class="flex items-center gap-2">
         <span class="font-medium text-gray-700 w-16 shrink-0">范围：</span>
-        <span class="truncate text-gray-900">已勾选 {{ novelIds?.length ?? 0 }} 篇</span>
-      </div>
-      <div v-else class="flex items-center gap-2">
-        <span class="font-medium text-gray-700 w-16 shrink-0">关键词：</span>
-        <span class="truncate text-gray-900">{{ keywordDisplay }}</span>
-      </div>
-      <div v-if="!isIdsMode" class="flex items-center gap-2">
-        <span class="font-medium text-gray-700 w-16 shrink-0">排序：</span>
-        <span class="text-gray-900">{{ orderByDisplay }}</span>
-      </div>
-      <div v-if="!isIdsMode && (min_like || min_text)" class="flex items-center gap-2">
-        <span class="font-medium text-gray-700 w-16 shrink-0">筛选：</span>
-        <span class="text-gray-900">
-          <template v-if="min_like">≥ {{ min_like }} 赞</template>
-          <template v-if="min_like && min_text"> · </template>
-          <template v-if="min_text">≥ {{ min_text }} 字</template>
+        <span class="text-lg font-bold" :class="totalCount > 0 ? 'text-blue-600' : 'text-gray-400'">
+          {{ totalCount > 0 ? `已勾选 ${totalCount} 篇` : '未勾选小说' }}
         </span>
       </div>
     </div>
-    <hr class="border-gray-200" />
-    <div class="flex items-center gap-2 text-sm">
-      <span class="font-medium text-gray-700">本地匹配：</span>
-      <span v-if="countLoading" class="text-gray-400">正在统计…</span>
-      <span
-        v-else
-        class="text-lg font-bold"
-        :class="totalCount > 0 ? 'text-blue-600' : 'text-gray-400'"
-      >
-        {{ totalCount > 0 ? `${totalTruncated ? '≥ ' : ''}${totalCount} 篇` : '无匹配结果' }}
-      </span>
-    </div>
-    <p
-      v-if="useTaskExport"
-      class="text-xs bg-blue-50 border border-blue-200 text-blue-700 rounded-md px-3 py-2"
-    >
-      选择超过 {{ EXPORT_TASK_THRESHOLD }} 篇，将作为后台任务打包——提交后可关闭页面，进度与下载入口在「任务管理」页。
-    </p>
-    <p v-else-if="totalCount > 500" class="text-xs text-gray-400">
-      打包生成可能需要一些时间，请稍候。
+    <p class="text-xs bg-blue-50 border border-blue-200 text-blue-700 rounded-md px-3 py-2">
+      将作为后台任务打包——提交后可关闭页面，进度与下载入口在「任务管理」页。
     </p>
     <div v-if="totalCount > 0" class="space-y-3">
       <div>

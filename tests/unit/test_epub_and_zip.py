@@ -15,7 +15,7 @@ from copixiv.core.draft import build_novel
 from copixiv.core.models import EpubStatus
 from copixiv.storage.epub import reader, state
 from copixiv.storage.epub.builder import EpubBuilder, EpubBuildResult
-from copixiv.storage.zip import build_batch_zip, build_batch_zip_to_file
+from copixiv.storage.zip import build_batch_zip_to_file, zip_entry_path
 
 
 def test_epub_builder_epub3_structure_spine_roundtrip_and_missing_images(tmp_path: Path):
@@ -125,7 +125,37 @@ def test_epub_reader_reads_spine_order_and_blocks_xxe_and_size(monkeypatch):
         reader.read_epub(valid)
 
 
-def test_build_batch_zip_formats_compression_root_guard_and_progress(tmp_path: Path):
+def test_zip_entry_path_formats_sanitization_and_validation():
+    epub_ready = SimpleNamespace(
+        id=1,
+        title="One",
+        author_name="A",
+        series_id=None,
+        series_name=None,
+        series_index=None,
+        has_epub=EpubStatus.DONE,
+    )
+    txt_fallback = SimpleNamespace(
+        id=2,
+        title="Two",
+        author_name="A",
+        series_id=None,
+        series_name=None,
+        series_index=None,
+        has_epub=EpubStatus.PENDING,
+    )
+
+    assert zip_entry_path(epub_ready, "prefer_epub", "{author_name}/{title}_{id}") == "A/One_1.epub"
+    assert zip_entry_path(epub_ready, "txt", "{author_name}/{title}_{id}") == "A/One_1.txt"
+    assert zip_entry_path(txt_fallback, "prefer_epub", "{author_name}/{title}_{id}") == "A/Two_2.txt"
+    assert zip_entry_path(epub_ready, "txt", "//escape/{title}_{id}") == "escape/One_1.txt"
+    assert zip_entry_path(epub_ready, "txt", "/../escape/{title}_{id}") == "untitled/escape/One_1.txt"
+
+    with pytest.raises(ValueError, match=r"\{id\}"):
+        zip_entry_path(epub_ready, "txt", "{title}")
+
+
+def test_build_batch_zip_to_file_formats_compression_root_guard_and_progress(tmp_path: Path):
     dl_root = tmp_path / "dl"
     dl_root.mkdir()
     outside = tmp_path / "secret_4.txt"
@@ -182,25 +212,24 @@ def test_build_batch_zip_formats_compression_root_guard_and_progress(tmp_path: P
         ),
     ]
     progress_calls: list[tuple[int, int]] = []
-    buf, added, missing = build_batch_zip(
+    out_path = tmp_path / "batch_export_formats.zip"
+    size_bytes, added, missing = build_batch_zip_to_file(
         novels,
+        out_path,
         format_mode="prefer_epub",
         naming_template="{author_name}/{title}_{id}",
         progress=lambda done, total: progress_calls.append((done, total)),
         download_root=dl_root,
     )
-    try:
-        assert added == 2
-        assert missing == ["3", "4"]
-        assert progress_calls == []
-        buf.seek(0)
-        with zipfile.ZipFile(buf) as zf:
-            names = set(zf.namelist())
-            assert names == {"A/One_1.epub", "A/Two_2.txt"}
-            assert zf.getinfo("A/One_1.epub").compress_type == zipfile.ZIP_STORED
-            assert zf.getinfo("A/Two_2.txt").compress_type == zipfile.ZIP_DEFLATED
-    finally:
-        buf.close()
+    assert size_bytes > 0
+    assert added == 2
+    assert missing == ["3", "4"]
+    assert progress_calls == []
+    with zipfile.ZipFile(out_path) as zf:
+        names = set(zf.namelist())
+        assert names == {"A/One_1.epub", "A/Two_2.txt"}
+        assert zf.getinfo("A/One_1.epub").compress_type == zipfile.ZIP_STORED
+        assert zf.getinfo("A/Two_2.txt").compress_type == zipfile.ZIP_DEFLATED
 
 
 def test_build_batch_zip_to_file_direct_and_empty_guard(tmp_path: Path):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,7 +16,6 @@ from copixiv.db import models
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.novels.field_policy import editable_fields
 from copixiv.features.novels.ingest import ingest
-from copixiv.features.novels.use_cases.batch_download import BatchDownloadUseCase
 from copixiv.features.novels.use_cases.batch_operations import (
     batch_delete,
     batch_tag,
@@ -25,6 +25,8 @@ from copixiv.features.novels.use_cases.update_metadata import (
 )
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
 from copixiv.storage.file_storage import FileStorage
+from copixiv.tasks.batch import BatchExportArgs, batch_export
+from copixiv.tasks.executor import TaskContext
 
 
 def _fake_webview(novel_id: int, *, title: str, author_id: int = 10, text: str = "这是中文正文内容"):
@@ -276,17 +278,36 @@ async def test_batch_tag_delete_and_download_by_ids(
         assert "alias_dst" in tags_1001
         assert "old" not in tags_1001
 
-    # Batch download by explicit IDs
-    dl_uc = BatchDownloadUseCase(uow)
-    dl_res = await dl_uc.execute(novel_ids=[1001, 1002, 999999], format_mode="txt")
-    try:
-        assert dl_res.added_count == 2
-        assert dl_res.missing_ids == []
-    finally:
-        dl_res.zip_buffer.close()
+    # Batch export by explicit IDs (missing IDs ignored; unknown-only fails with ValidationError)
+    with uow.begin():
+        task_row = models.TaskHistory(
+            name="export_by_ids",
+            task_func="batch_export",
+            status="running",
+            start_time=datetime.now(UTC),
+        )
+        uow.session.add(task_row)
+        uow.session.flush()
+        exp_task_id = task_row.id
 
-    with pytest.raises(NotFoundError):
-        await dl_uc.execute(novel_ids=[999999])
+    ctx = TaskContext(
+        uow=uow,
+        session_factory=committed_session_factory,
+        file_storage=storage,
+        task_id=exp_task_id,
+    )
+    export_res = await batch_export(
+        BatchExportArgs(novel_ids=[1001, 1002, 999999], format_mode="txt"),
+        ctx,
+    )
+    assert "批量导出完成" in export_res.summary
+    zip_path = tmp_path / f"batch_export_{exp_task_id}.zip"
+    assert zip_path.is_file()
+    with zipfile.ZipFile(zip_path) as zf:
+        assert len(zf.namelist()) == 2
+
+    with pytest.raises(ValidationError):
+        await batch_export(BatchExportArgs(novel_ids=[999999]), ctx)
 
     # Batch delete cleans DB rows, failed_novel ledger, and files on disk
     affected = batch_delete([1001, 1002, 999999], uow=uow, file_storage=storage)

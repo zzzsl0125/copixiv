@@ -4,15 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const apiMocks = vi.hoisted(() => ({
   batchOperation: vi.fn(),
-  batchDownloadPreview: vi.fn(),
-  batchDownload: vi.fn(),
-}))
-
-const toastMocks = vi.hoisted(() => ({
-  warning: vi.fn(),
-  success: vi.fn(),
-  error: vi.fn(),
-  info: vi.fn(),
+  batchExportPreview: vi.fn(),
+  submitBatchExport: vi.fn(),
 }))
 
 vi.mock('../../api', async (importOriginal) => {
@@ -22,8 +15,8 @@ vi.mock('../../api', async (importOriginal) => {
     novelApi: {
       ...actual.novelApi,
       batchOperation: apiMocks.batchOperation,
-      batchDownloadPreview: apiMocks.batchDownloadPreview,
-      batchDownload: apiMocks.batchDownload,
+      batchExportPreview: apiMocks.batchExportPreview,
+      submitBatchExport: apiMocks.submitBatchExport,
     },
   }
 })
@@ -32,18 +25,9 @@ vi.mock('../../composables', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../composables')>()
   return {
     ...actual,
-    useToast: () => toastMocks,
     useSystem: () => ({
       systemConfig: ref({ batch_download_naming: '{title}' }),
     }),
-  }
-})
-
-vi.mock('../../lib/utils', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../lib/utils')>()
-  return {
-    ...actual,
-    downloadBlob: vi.fn(),
   }
 })
 
@@ -65,7 +49,7 @@ describe('BatchTagModal & BatchDownloadModal', () => {
       props: {
         isOpen: true,
         operation: 'add_tags',
-        scope: { mode: 'ids', novel_ids: [1], excluded_ids: [] },
+        scope: { novel_ids: [1] },
         scopeLabel: '已勾选的 1 篇',
       },
       global: {
@@ -90,22 +74,13 @@ describe('BatchTagModal & BatchDownloadModal', () => {
     wrapper.unmount()
   })
 
-  it('BatchDownloadModal sends a single preview request on open and warns on missingIds', async () => {
-    apiMocks.batchDownloadPreview.mockResolvedValue({ path: 'preview.txt' })
-    apiMocks.batchDownload.mockResolvedValue({
-      blob: new Blob(['zip']),
-      contentDisposition: 'attachment; filename="test.zip"',
-      missingIds: ['101', '102'],
-    })
+  it('BatchDownloadModal sends a single preview request on open and submits batch export task', async () => {
+    apiMocks.batchExportPreview.mockResolvedValue({ path: 'preview.txt' })
+    apiMocks.submitBatchExport.mockResolvedValue({ task_id: 42, matched: 3 })
 
     const wrapper = mount(BatchDownloadModal, {
       props: {
         isOpen: true,
-        keyword: '百合',
-        order_by: 'like',
-        order_direction: 'DESC',
-        min_like: 500,
-        min_text: 3000,
         novelIds: [101, 102, 103],
       },
       global: {
@@ -118,15 +93,51 @@ describe('BatchTagModal & BatchDownloadModal', () => {
     await nextTick()
 
     // Must fire only once on open (not twice from watch + debounce)
-    expect(apiMocks.batchDownloadPreview).toHaveBeenCalledTimes(1)
-    // Misleading sort/filter rows are hidden in ids mode
+    expect(apiMocks.batchExportPreview).toHaveBeenCalledTimes(1)
+    expect(apiMocks.batchExportPreview).toHaveBeenCalledWith(
+      {
+        novel_ids: [101, 102, 103],
+        format_mode: 'txt',
+        naming_template: '{title}',
+      },
+      expect.any(AbortSignal),
+    )
+    expect(wrapper.text()).toContain('preview.txt')
     expect(wrapper.text()).not.toContain('排序：')
     expect(wrapper.text()).not.toContain('筛选：')
 
     await wrapper.get('[data-testid="base-modal"] form').trigger('submit')
     await flushPromises()
 
-    expect(toastMocks.warning).toHaveBeenCalledWith(expect.stringContaining('2 篇小说文件缺失'))
+    expect(apiMocks.submitBatchExport).toHaveBeenCalledWith({
+      novel_ids: [101, 102, 103],
+      format_mode: 'txt',
+      zip_name: '批量导出',
+      naming_template: '{title}',
+    })
+    expect(wrapper.emitted('task-submitted')).toEqual([[{ task_id: 42, matched: 3 }]])
+    expect(wrapper.emitted('close')).toEqual([[]])
+    wrapper.unmount()
+  })
+
+  it('BatchDownloadModal disables submit and skips preview when novelIds is empty', async () => {
+    const wrapper = mount(BatchDownloadModal, {
+      props: {
+        isOpen: true,
+        novelIds: [],
+      },
+      global: {
+        stubs: { teleport: true },
+      },
+    })
+
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(400)
+    await nextTick()
+
+    expect(apiMocks.batchExportPreview).not.toHaveBeenCalled()
+    const submitBtn = wrapper.get('button[type="submit"]')
+    expect((submitBtn.element as HTMLButtonElement).disabled).toBe(true)
     wrapper.unmount()
   })
 })

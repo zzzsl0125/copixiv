@@ -41,64 +41,12 @@
         "title": "AuthorLookupResponse",
         "type": "object"
       },
-      "BatchDownloadRequest": {
+      "BatchExportPreviewRequest": {
+        "description": "Live preview of the ZIP entry path for selected novels.",
         "properties": {
-          "excluded_ids": {
-            "anyOf": [
-              {
-                "items": {
-                  "type": "integer"
-                },
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Excluded Ids"
-          },
           "format_mode": {
             "$ref": "#/components/schemas/FormatMode",
             "default": "txt"
-          },
-          "keyword": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Keyword"
-          },
-          "limit": {
-            "default": 500,
-            "minimum": 1.0,
-            "title": "Limit",
-            "type": "integer"
-          },
-          "min_like": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Min Like"
-          },
-          "min_text": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Min Text"
           },
           "naming_template": {
             "anyOf": [
@@ -112,28 +60,22 @@
             "title": "Naming Template"
           },
           "novel_ids": {
-            "anyOf": [
-              {
-                "items": {
-                  "type": "integer"
-                },
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Novel Ids"
-          },
-          "order_by": {
-            "$ref": "#/components/schemas/OrderBy",
-            "default": "id"
-          },
-          "order_direction": {
-            "$ref": "#/components/schemas/OrderDirection",
-            "default": "DESC"
-          },
-          "zip_name": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Novel Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "novel_ids"
+        ],
+        "title": "BatchExportPreviewRequest",
+        "type": "object"
+      },
+      "BatchExportPreviewResponse": {
+        "properties": {
+          "path": {
             "anyOf": [
               {
                 "type": "string"
@@ -142,14 +84,17 @@
                 "type": "null"
               }
             ],
-            "title": "Zip Name"
+            "title": "Path"
           }
         },
-        "title": "BatchDownloadRequest",
+        "required": [
+          "path"
+        ],
+        "title": "BatchExportPreviewResponse",
         "type": "object"
       },
       "BatchExportRequest": {
-        "description": "Background-task export (large selections — the ZIP is built offline).",
+        "description": "Background-task export (the ZIP is built offline).",
         "properties": {
           "format_mode": {
             "$ref": "#/components/schemas/FormatMode",
@@ -328,58 +273,8 @@
         "type": "object"
       },
       "BatchScope": {
-        "description": "Which novels a batch operation applies to.\n\nTwo modes mirror the frontend selection model:\n- ``ids``: an explicit list of selected novel IDs.\n- ``all_matched``: the full filter-matched set (optionally minus\n  ``excluded_ids`` — the \"select all, then uncheck a few\" case).",
+        "description": "Which novels a batch operation applies to (explicit IDs only).",
         "properties": {
-          "excluded_ids": {
-            "default": [],
-            "items": {
-              "type": "integer"
-            },
-            "title": "Excluded Ids",
-            "type": "array"
-          },
-          "keyword": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Keyword"
-          },
-          "min_like": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Min Like"
-          },
-          "min_text": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Min Text"
-          },
-          "mode": {
-            "default": "all_matched",
-            "enum": [
-              "ids",
-              "all_matched"
-            ],
-            "title": "Mode",
-            "type": "string"
-          },
           "novel_ids": {
             "default": [],
             "items": {
@@ -2618,94 +2513,6 @@
         ]
       }
     },
-    "/api/novels/batch-download": {
-      "post": {
-        "operationId": "batch_download_novels_api_novels_batch_download_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/BatchDownloadRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "APIKeyHeader": []
-          }
-        ],
-        "summary": "Batch Download Novels",
-        "tags": [
-          "novels"
-        ]
-      }
-    },
-    "/api/novels/batch-download/preview": {
-      "post": {
-        "operationId": "batch_download_preview_api_novels_batch_download_preview_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/BatchDownloadRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "APIKeyHeader": []
-          }
-        ],
-        "summary": "Batch Download Preview",
-        "tags": [
-          "novels"
-        ]
-      }
-    },
     "/api/novels/batch-export": {
       "post": {
         "description": "Enqueue a batch export into the background task system.\n\nThe ZIP is built offline (progress in 「任务管理」) and downloaded via\n``GET /api/novels/export/{task_id}/download`` — the page can be closed\nwhile it runs.",
@@ -2748,6 +2555,53 @@
           }
         ],
         "summary": "Batch Export Task",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
+    "/api/novels/batch-export/preview": {
+      "post": {
+        "description": "Preview the ZIP entry path for the highest-ID selected novel.",
+        "operationId": "batch_export_preview_api_novels_batch_export_preview_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchExportPreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchExportPreviewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Batch Export Preview",
         "tags": [
           "novels"
         ]

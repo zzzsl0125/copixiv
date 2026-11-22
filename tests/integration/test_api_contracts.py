@@ -475,3 +475,94 @@ def test_failed_novels_list_join_and_removed_endpoints(
         assert client.get("/api/failed-novels/count").status_code == 404
         assert client.delete("/api/failed-novels/501").status_code == 404
         assert client.delete("/api/failed-novels").status_code == 405
+
+
+def test_batch_scope_ids_only_and_export_contracts(
+    db_session_factory,
+    uow: SqlUnitOfWork,
+    tmp_path: Path,
+):
+    from tests.factories import make_local_novel
+
+    with uow.begin():
+        persist_novels(
+            uow,
+            [
+                build_novel(
+                    id=501,
+                    title="PixivBook",
+                    author_id=7,
+                    author_name="Auth7",
+                    download_dir=str(tmp_path),
+                )
+            ],
+        )
+        uow.session.add(
+            make_local_novel(
+                -501,
+                title="LocalBook",
+                author_id=7,
+                author_name="Auth7",
+                path=str(tmp_path / "download" / "local" / "LocalBook_-501.txt"),
+            )
+        )
+
+    app = _build_test_app(db_session_factory, tmp_path)
+    with TestClient(app, base_url="http://localhost") as client:
+        # Empty scope rejected with 400 across batch, batch-metadata, and batch-export
+        assert (
+            client.post(
+                "/api/novels/batch",
+                json={"operation": "add_tags", "scope": {"novel_ids": []}, "tags": ["t"]},
+            ).status_code
+            == 400
+        )
+        assert (
+            client.post(
+                "/api/novels/batch-metadata",
+                json={"scope": {"novel_ids": []}, "apply": False},
+            ).status_code
+            == 400
+        )
+        assert client.post("/api/novels/batch-export", json={"novel_ids": []}).status_code == 400
+
+        # Duplicate IDs are deduplicated and resolved cleanly
+        op_res = client.post(
+            "/api/novels/batch",
+            json={"operation": "add_tags", "scope": {"novel_ids": [501, 501]}, "tags": ["batch_ok"]},
+        )
+        assert op_res.status_code == 200
+        assert op_res.json() == {"matched": 1, "affected": 1}
+
+        meta_res = client.post(
+            "/api/novels/batch-metadata",
+            json={"scope": {"novel_ids": [-501, 501, 501]}, "apply": False},
+        )
+        assert meta_res.status_code == 200
+        assert meta_res.json() == {"matched": 2, "applicable": 1, "skipped": 1, "affected": 0}
+
+        # Invalid naming template rejected synchronously on both preview and export enqueue
+        assert (
+            client.post(
+                "/api/novels/batch-export/preview",
+                json={"novel_ids": [501], "naming_template": "{title}"},
+            ).status_code
+            == 400
+        )
+        assert (
+            client.post(
+                "/api/novels/batch-export",
+                json={"novel_ids": [501], "naming_template": "{title}"},
+            ).status_code
+            == 400
+        )
+
+        # Default naming template fallback from config works when naming_template is omitted
+        prev_res = client.post("/api/novels/batch-export/preview", json={"novel_ids": [501]})
+        assert prev_res.status_code == 200
+        assert prev_res.json() == {"path": "Auth7/PixivBook_501.txt"}
+
+        exp_res = client.post("/api/novels/batch-export", json={"novel_ids": [501, -501, 501]})
+        assert exp_res.status_code == 200
+        assert exp_res.json()["matched"] == 2
+        assert isinstance(exp_res.json()["task_id"], int)

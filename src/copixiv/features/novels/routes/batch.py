@@ -1,15 +1,9 @@
 """Novel batch operation and export endpoints."""
 
-import re
-from collections.abc import Iterator
-from urllib.parse import quote
-
 from fastapi import APIRouter, BackgroundTasks, Depends
-from fastapi.responses import StreamingResponse
 
 from copixiv.core.exceptions import ValidationError
-from copixiv.core.naming import safe_filename
-from copixiv.core.search import parse_search_keyword
+from copixiv.core.naming import NovelNamingTemplate
 from copixiv.db.tx import read_transaction
 from copixiv.deps import (
     AppConfigDep,
@@ -21,7 +15,8 @@ from copixiv.deps import (
 )
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.features.novels.schemas import (
-    BatchDownloadRequest,
+    BatchExportPreviewRequest,
+    BatchExportPreviewResponse,
     BatchExportRequest,
     BatchExportResponse,
     BatchMetadataRequest,
@@ -29,7 +24,6 @@ from copixiv.features.novels.schemas import (
     BatchOperationRequest,
     BatchOperationResponse,
 )
-from copixiv.features.novels.use_cases.batch_download import BatchDownloadUseCase
 from copixiv.features.novels.use_cases.batch_edit_metadata import (
     batch_edit_metadata,
 )
@@ -39,88 +33,9 @@ from copixiv.features.novels.use_cases.batch_operations import (
     delete_novel_paths,
     resolve_batch_scope,
 )
+from copixiv.storage.zip import zip_entry_path
 
 router = APIRouter(dependencies=[Depends(require_api_key)])
-
-_ZIP_SUFFIX_RE = re.compile(r"(?i)(?:\.zip)+$")
-
-
-def _strip_zip_suffix(name: str) -> str:
-    """Strip trailing ``.zip`` extensions case-insensitively without stripping characters."""
-    return _ZIP_SUFFIX_RE.sub("", name.strip())
-
-
-def _iter_zip(buffer) -> Iterator[bytes]:
-    """Stream a ZIP buffer in chunks, closing it when done."""
-    try:
-        while chunk := buffer.read(1 << 16):
-            yield chunk
-    finally:
-        buffer.close()
-
-
-@router.post("/batch-download")
-async def batch_download_novels(
-    body: BatchDownloadRequest,
-    app_config: AppConfigDep,
-    file_storage: FileStorageDep,
-    uow: UowDep,
-):
-    conditions = parse_search_keyword(body.keyword) if body.keyword else None
-    naming = app_config.batch_download.naming
-    use_case = BatchDownloadUseCase(
-        uow,
-        naming,
-        download_dir=file_storage.download_dir,
-    )
-    result = await use_case.execute(
-        conditions,
-        order_by=body.order_by,
-        order_direction=body.order_direction,
-        limit=body.limit,
-        min_like=body.min_like,
-        min_text=body.min_text,
-        format_mode=body.format_mode,
-        zip_name=body.zip_name,
-        naming_template=body.naming_template,
-        novel_ids=body.novel_ids,
-    )
-
-    base_desc = _strip_zip_suffix(result.search_desc) or "批量下载"
-    desc = safe_filename(base_desc)
-    headers = {
-        "Content-Disposition": (f"attachment; filename*=UTF-8''{quote(desc + '.zip')}"),
-    }
-    if result.missing_ids:
-        headers["X-Batch-Missing-Ids"] = ",".join(result.missing_ids)
-
-    return StreamingResponse(
-        _iter_zip(result.zip_buffer),
-        media_type="application/zip",
-        headers=headers,
-    )
-
-
-@router.post("/batch-download/preview")
-def batch_download_preview(
-    body: BatchDownloadRequest,
-    app_config: AppConfigDep,
-    uow: UowDep,
-):
-    conditions = parse_search_keyword(body.keyword) if body.keyword else None
-    naming = app_config.batch_download.naming
-    use_case = BatchDownloadUseCase(uow, naming)
-    path = use_case.preview(
-        conditions,
-        order_by=body.order_by,
-        order_direction=body.order_direction,
-        min_like=body.min_like,
-        min_text=body.min_text,
-        format_mode=body.format_mode,
-        naming_template=body.naming_template,
-        novel_ids=body.novel_ids,
-    )
-    return {"path": path}
 
 
 @router.post("/batch", response_model=BatchOperationResponse)
@@ -130,16 +45,7 @@ def batch_operation(
     file_storage: FileStorageDep,
     uow: UowDep,
 ):
-    with uow.begin(read_only=True):
-        ids = resolve_batch_scope(
-            SQLAlchemyNovelRepository(uow.session),
-            mode=body.scope.mode,
-            novel_ids=body.scope.novel_ids,
-            keyword=body.scope.keyword,
-            min_like=body.scope.min_like,
-            min_text=body.scope.min_text,
-            excluded_ids=body.scope.excluded_ids,
-        )
+    ids = resolve_batch_scope(body.scope.novel_ids)
     if body.operation == "delete":
         affected = batch_delete(
             ids,
@@ -178,18 +84,7 @@ async def batch_metadata_operation(
     同形：``POST /{novel_id}/...`` 那几条都要第二段路径，所以不会把
     ``batch-metadata`` 当成 ``novel_id``（``batch-export`` 早已是同样的形状）。
     """
-    ids = await read_transaction(
-        uow,
-        lambda tx: resolve_batch_scope(
-            SQLAlchemyNovelRepository(tx.session),
-            mode=body.scope.mode,
-            novel_ids=body.scope.novel_ids,
-            keyword=body.scope.keyword,
-            min_like=body.scope.min_like,
-            min_text=body.scope.min_text,
-            excluded_ids=body.scope.excluded_ids,
-        ),
-    )
+    ids = resolve_batch_scope(body.scope.novel_ids)
 
     changes = body.model_dump(exclude_unset=True)
     field_changes = {name: changes[name] for name in ("author_id", "series_id") if name in changes}
@@ -204,9 +99,38 @@ async def batch_metadata_operation(
     return BatchMetadataResponse(**counts)
 
 
+@router.post("/batch-export/preview", response_model=BatchExportPreviewResponse)
+async def batch_export_preview(
+    body: BatchExportPreviewRequest,
+    app_config: AppConfigDep,
+    uow: UowDep,
+):
+    """Preview the ZIP entry path for the highest-ID selected novel."""
+    naming = body.naming_template or app_config.batch_download.naming
+    try:
+        template = NovelNamingTemplate(naming)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+
+    ids = sorted({int(i) for i in body.novel_ids})
+    if not ids:
+        return BatchExportPreviewResponse(path=None)
+
+    novel = await read_transaction(
+        uow,
+        lambda tx: SQLAlchemyNovelRepository(tx.session).get_latest_novel_by_ids(ids),
+    )
+    if novel is None:
+        return BatchExportPreviewResponse(path=None)
+    return BatchExportPreviewResponse(
+        path=zip_entry_path(novel, body.format_mode, template),
+    )
+
+
 @router.post("/batch-export", response_model=BatchExportResponse)
 def batch_export_task(
     body: BatchExportRequest,
+    app_config: AppConfigDep,
     task_manager: TaskManagerDep,
 ):
     """Enqueue a batch export into the background task system.
@@ -215,17 +139,20 @@ def batch_export_task(
     ``GET /api/novels/export/{task_id}/download`` — the page can be closed
     while it runs.
     """
-    ids = sorted({int(i) for i in body.novel_ids})
-    if not ids:
-        raise ValidationError("请先勾选要导出的小说")
+    ids = resolve_batch_scope(body.novel_ids, empty_message="请先勾选要导出的小说")
+    naming = body.naming_template or app_config.batch_download.naming
+    try:
+        NovelNamingTemplate(naming)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
 
     task_id = task_manager.run_task(
         "batch_export",
         params={
             "novel_ids": ids,
-            "format_mode": body.format_mode,
+            "format_mode": body.format_mode.value,
             "zip_name": body.zip_name,
-            "naming_template": body.naming_template,
+            "naming_template": naming,
         },
     )
     return BatchExportResponse(task_id=task_id, matched=len(ids))

@@ -27,8 +27,8 @@
 （``skipped``），与 400 一样是**可见**的；两者的差别只是"整批拒绝"还是"报数后
 继续"，而不是"说"与"不说"。
 
-**③ 计数契约。** ``matched`` = 调用方给的整个选择集（``all_matched`` 模式下就是
-解析出的匹配集），``applicable`` = 其中**本地书**的数量（走
+**③ 计数契约。** ``matched`` = 调用方给的整个选择集（去重后的
+``novel_ids``），``applicable`` = 其中**本地书**的数量（走
 ``filter_ids_by_source(..., {SOURCE_LOCAL})``，来源常量取自
 ``copixiv.core.models``），``skipped = matched - applicable``，
 ``affected`` = 本次真正被 UPDATE 改动的行数（预演恒为 0）。四个键**恒定存在**

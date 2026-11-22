@@ -59,9 +59,7 @@ export function useBatchMode(
   const scope = computed<BatchScope | null>(() => {
     if (!hasSelection.value) return null
     return {
-      mode: 'ids',
       novel_ids: [...selectedIds.value],
-      excluded_ids: [],
     }
   })
 

@@ -171,25 +171,8 @@ class NovelUpdateRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Batch Download
+# Query filters
 # ---------------------------------------------------------------------------
-
-
-class BatchDownloadRequest(BaseModel):
-    keyword: str | None = None
-    order_by: OrderBy = OrderBy.ID
-    order_direction: OrderDirection = OrderDirection.DESC
-    min_like: int | None = None
-    min_text: int | None = None
-    limit: int = Field(default=500, ge=1)
-    format_mode: FormatMode = FormatMode.TXT
-    zip_name: str | None = None
-    naming_template: str | None = None
-    # Batch-mode selection scope — when ``novel_ids`` is set, the download
-    # is restricted to exactly those novels (filters are ignored).
-    novel_ids: list[int] | None = None
-    # IDs to skip — only applies to the filter-based path (novel_ids=None).
-    excluded_ids: list[int] | None = None
 
 
 class NovelFilterParams(BaseModel):
@@ -217,20 +200,9 @@ class NovelListParams(NovelFilterParams):
 
 
 class BatchScope(BaseModel):
-    """Which novels a batch operation applies to.
+    """Which novels a batch operation applies to (explicit IDs only)."""
 
-    Two modes mirror the frontend selection model:
-    - ``ids``: an explicit list of selected novel IDs.
-    - ``all_matched``: the full filter-matched set (optionally minus
-      ``excluded_ids`` — the "select all, then uncheck a few" case).
-    """
-
-    mode: Literal["ids", "all_matched"] = "all_matched"
     novel_ids: list[int] = []
-    keyword: str | None = None
-    min_like: int | None = None
-    min_text: int | None = None
-    excluded_ids: list[int] = []
 
 
 class BatchOperationRequest(BaseModel):
@@ -335,8 +307,20 @@ class MatchIdsResponse(BaseModel):
     matching_ids: list[int]
 
 
+class BatchExportPreviewRequest(BaseModel):
+    """Live preview of the ZIP entry path for selected novels."""
+
+    novel_ids: list[int]
+    format_mode: FormatMode = FormatMode.TXT
+    naming_template: str | None = None
+
+
+class BatchExportPreviewResponse(BaseModel):
+    path: str | None
+
+
 class BatchExportRequest(BaseModel):
-    """Background-task export (large selections — the ZIP is built offline)."""
+    """Background-task export (the ZIP is built offline)."""
 
     novel_ids: list[int]
     format_mode: FormatMode = FormatMode.TXT
@@ -350,7 +334,8 @@ class BatchExportResponse(BaseModel):
 
 
 __all__ = [
-    "BatchDownloadRequest",
+    "BatchExportPreviewRequest",
+    "BatchExportPreviewResponse",
     "BatchExportRequest",
     "BatchExportResponse",
     "BatchMetadataRequest",

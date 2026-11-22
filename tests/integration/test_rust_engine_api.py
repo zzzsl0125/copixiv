@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import zipfile
@@ -13,6 +14,9 @@ from tests.factories import make_test_app
 from copixiv.core.draft import NovelDraft
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
+from copixiv.storage.file_storage import FileStorage
+from copixiv.tasks.batch import BatchExportArgs, batch_export
+from copixiv.tasks.executor import TaskContext
 
 
 def test_http_endpoints_rust_engine_and_live_mutations(
@@ -181,16 +185,55 @@ def test_http_endpoints_rust_engine_and_live_mutations(
         bad_caption = client.patch("/api/novels/-5", json={"caption": "nope"})
         assert bad_caption.status_code == 422
 
-        # Condition-based batch-download in Rust mode hydrates paths & strips only trailing .zip
-        dl = client.post(
-            "/api/novels/batch-download",
-            json={"keyword": "One", "zip_name": "top.zip", "format_mode": "txt"},
+        # Legacy sync batch-download endpoints are removed; unified export runs via preview + batch-export + download
+        # /batch-download matches /{novel_id} path shape (PATCH/DELETE) -> 405; /batch-download/preview -> 404
+        assert client.post("/api/novels/batch-download", json={"novel_ids": [1]}).status_code == 405
+        assert client.post("/api/novels/batch-download/preview", json={"novel_ids": [1]}).status_code == 404
+
+        prev = client.post(
+            "/api/novels/batch-export/preview",
+            json={"novel_ids": [1, 2], "format_mode": "txt", "naming_template": "{title}_{id}"},
         )
+        assert prev.status_code == 200
+        assert prev.json() == {"path": "Two_2.txt"}
+
+        exp = client.post(
+            "/api/novels/batch-export",
+            json={
+                "novel_ids": [1],
+                "zip_name": "my.top.zip",
+                "format_mode": "txt",
+                "naming_template": "{author_name}/{title}_{id}",
+            },
+        )
+        assert exp.status_code == 200
+        exp_body = exp.json()
+        assert exp_body["matched"] == 1
+        task_id = exp_body["task_id"]
+
+        asyncio.run(
+            batch_export(
+                BatchExportArgs(
+                    novel_ids=[1],
+                    zip_name="my.top.zip",
+                    format_mode="txt",
+                    naming_template="{author_name}/{title}_{id}",
+                ),
+                TaskContext(
+                    uow=uow,
+                    session_factory=committed_session_factory,
+                    file_storage=FileStorage(str(tmp_path / "download")),
+                    task_id=task_id,
+                ),
+            )
+        )
+
+        dl = client.get(f"/api/novels/export/{task_id}/download")
         assert dl.status_code == 200
-        assert "top.zip" in dl.headers.get("content-disposition", "")
+        assert "my.top.zip" in dl.headers.get("content-disposition", "")
         with zipfile.ZipFile(io.BytesIO(dl.content)) as zf:
-            assert len(zf.namelist()) == 1
-            assert zf.read(zf.namelist()[0]) == b"Novel One Body"
+            assert zf.namelist() == ["Auth10/One_1.txt"]
+            assert zf.read("Auth10/One_1.txt") == b"Novel One Body"
 
         # PATCH returns NovelBase serialized directly from StoredNovel (no caption/source_key/path)
         patched = client.patch("/api/novels/-5", json={"title": "LocalFiveEdited"})

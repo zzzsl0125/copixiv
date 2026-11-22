@@ -227,40 +227,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/novels/batch-download": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Batch Download Novels */
-        post: operations["batch_download_novels_api_novels_batch_download_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/novels/batch-download/preview": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Batch Download Preview */
-        post: operations["batch_download_preview_api_novels_batch_download_preview_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/novels/batch-export": {
         parameters: {
             query?: never;
@@ -279,6 +245,26 @@ export interface paths {
          *     while it runs.
          */
         post: operations["batch_export_task_api_novels_batch_export_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/novels/batch-export/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Batch Export Preview
+         * @description Preview the ZIP entry path for the highest-ID selected novel.
+         */
+        post: operations["batch_export_preview_api_novels_batch_export_preview_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1002,37 +988,26 @@ export interface components {
              */
             source: "local" | "pixiv" | "unknown";
         };
-        /** BatchDownloadRequest */
-        BatchDownloadRequest: {
-            /** Excluded Ids */
-            excluded_ids?: number[] | null;
+        /**
+         * BatchExportPreviewRequest
+         * @description Live preview of the ZIP entry path for selected novels.
+         */
+        BatchExportPreviewRequest: {
             /** @default txt */
             format_mode: components["schemas"]["FormatMode"];
-            /** Keyword */
-            keyword?: string | null;
-            /**
-             * Limit
-             * @default 500
-             */
-            limit: number;
-            /** Min Like */
-            min_like?: number | null;
-            /** Min Text */
-            min_text?: number | null;
             /** Naming Template */
             naming_template?: string | null;
             /** Novel Ids */
-            novel_ids?: number[] | null;
-            /** @default id */
-            order_by: components["schemas"]["OrderBy"];
-            /** @default DESC */
-            order_direction: components["schemas"]["OrderDirection"];
-            /** Zip Name */
-            zip_name?: string | null;
+            novel_ids: number[];
+        };
+        /** BatchExportPreviewResponse */
+        BatchExportPreviewResponse: {
+            /** Path */
+            path: string | null;
         };
         /**
          * BatchExportRequest
-         * @description Background-task export (large selections — the ZIP is built offline).
+         * @description Background-task export (the ZIP is built offline).
          */
         BatchExportRequest: {
             /** @default txt */
@@ -1124,31 +1099,9 @@ export interface components {
         };
         /**
          * BatchScope
-         * @description Which novels a batch operation applies to.
-         *
-         *     Two modes mirror the frontend selection model:
-         *     - ``ids``: an explicit list of selected novel IDs.
-         *     - ``all_matched``: the full filter-matched set (optionally minus
-         *       ``excluded_ids`` — the "select all, then uncheck a few" case).
+         * @description Which novels a batch operation applies to (explicit IDs only).
          */
         BatchScope: {
-            /**
-             * Excluded Ids
-             * @default []
-             */
-            excluded_ids: number[];
-            /** Keyword */
-            keyword?: string | null;
-            /** Min Like */
-            min_like?: number | null;
-            /** Min Text */
-            min_text?: number | null;
-            /**
-             * Mode
-             * @default all_matched
-             * @enum {string}
-             */
-            mode: "ids" | "all_matched";
             /**
              * Novel Ids
              * @default []
@@ -2218,72 +2171,6 @@ export interface operations {
             };
         };
     };
-    batch_download_novels_api_novels_batch_download_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["BatchDownloadRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    batch_download_preview_api_novels_batch_download_preview_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["BatchDownloadRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     batch_export_task_api_novels_batch_export_post: {
         parameters: {
             query?: never;
@@ -2304,6 +2191,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BatchExportResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    batch_export_preview_api_novels_batch_export_preview_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BatchExportPreviewRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BatchExportPreviewResponse"];
                 };
             };
             /** @description Validation Error */

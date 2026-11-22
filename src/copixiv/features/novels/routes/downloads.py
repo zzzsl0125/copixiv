@@ -1,5 +1,6 @@
 """Browser-navigable file download endpoints (header OR query API key auth)."""
 
+import re
 from pathlib import Path
 from urllib.parse import quote
 
@@ -15,10 +16,16 @@ from copixiv.deps import (
     require_download_api_key,
 )
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
-from copixiv.features.novels.routes.batch import _strip_zip_suffix
 from copixiv.features.novels.use_cases.get_novel_file import get_novel_file
 
 router = APIRouter(dependencies=[Depends(require_download_api_key)])
+
+_ZIP_SUFFIX_RE = re.compile(r"(?i)(?:\.zip)+$")
+
+
+def _strip_zip_suffix(name: str) -> str:
+    """Strip trailing ``.zip`` extensions case-insensitively without stripping characters."""
+    return _ZIP_SUFFIX_RE.sub("", name.strip())
 
 
 @router.get("/export/{task_id}/download")

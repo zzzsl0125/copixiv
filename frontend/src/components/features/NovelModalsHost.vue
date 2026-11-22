@@ -10,7 +10,6 @@ import type {
   BatchOperationResult,
   BatchScope,
   Novel,
-  NovelFilters,
 } from '../../types'
 
 defineProps<{
@@ -23,7 +22,6 @@ defineProps<{
   uploadOpen: boolean
   batchScope: BatchScope | null
   scopeLabel: string
-  filters: NovelFilters
 }>()
 
 const emit = defineEmits<{
@@ -35,7 +33,6 @@ const emit = defineEmits<{
   'close-upload': []
   'batch-success': [payload: { operation: string; result: BatchOperationResult | BatchMetadataResult }]
   'export-task-submitted': [payload: { task_id: number; matched: number }]
-  'download-success': [filename: string]
   'novel-updated': [novel: Novel]
   'novel-deleted': [novelId: number]
   uploaded: [summary: { created: number; duplicate: number; failed: number }]
@@ -72,14 +69,8 @@ const emit = defineEmits<{
   <BatchDownloadModal
     v-if="exportOpen"
     :is-open="exportOpen"
-    :keyword="filters.keyword"
-    :order_by="filters.order_by"
-    :order_direction="filters.order_direction"
-    :min_like="filters.min_like"
-    :min_text="filters.min_text"
-    :novel-ids="batchScope?.novel_ids"
+    :novel-ids="batchScope?.novel_ids ?? []"
     @close="emit('close-export')"
-    @download-success="emit('download-success', $event)"
     @download-error="emit('error', $event)"
     @task-submitted="emit('export-task-submitted', $event)"
   />

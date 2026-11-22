@@ -426,9 +426,13 @@ async def test_fetch_author_novels_skips_updated_today_and_processes_stale(
     assert ("user_detail", 102) not in fake_pixiv_client.calls
 
 
-@pytest.mark.asyncio
-async def test_batch_download_preview_uses_highest_id_limit_1(uow: SqlUnitOfWork):
-    from copixiv.features.novels.use_cases.batch_download import BatchDownloadUseCase
+def test_batch_export_preview_uses_highest_id_limit_1(
+    db_session_factory,
+    uow: SqlUnitOfWork,
+    tmp_path: Path,
+):
+    from fastapi.testclient import TestClient
+    from tests.factories import make_test_app
 
     with uow.begin():
         persist_novels(
@@ -440,9 +444,34 @@ async def test_batch_download_preview_uses_highest_id_limit_1(uow: SqlUnitOfWork
             ],
         )
 
-    uc = BatchDownloadUseCase(uow, naming_template="{title}_{id}")
-    assert uc.preview(novel_ids=[10, 50, 30]) == "Fifty_50.txt"
-    assert uc.preview(novel_ids=[9999]) is None
+    app = make_test_app(db_session_factory, tmp_path)
+    with TestClient(app, base_url="http://localhost") as client:
+        ok = client.post(
+            "/api/novels/batch-export/preview",
+            json={"novel_ids": [10, 50, 30], "naming_template": "{title}_{id}"},
+        )
+        assert ok.status_code == 200
+        assert ok.json() == {"path": "Fifty_50.txt"}
+
+        missing = client.post(
+            "/api/novels/batch-export/preview",
+            json={"novel_ids": [9999], "naming_template": "{title}_{id}"},
+        )
+        assert missing.status_code == 200
+        assert missing.json() == {"path": None}
+
+        empty = client.post(
+            "/api/novels/batch-export/preview",
+            json={"novel_ids": []},
+        )
+        assert empty.status_code == 200
+        assert empty.json() == {"path": None}
+
+        invalid_tpl = client.post(
+            "/api/novels/batch-export/preview",
+            json={"novel_ids": [10], "naming_template": "{title}"},
+        )
+        assert invalid_tpl.status_code == 400
 
 
 @pytest.mark.asyncio

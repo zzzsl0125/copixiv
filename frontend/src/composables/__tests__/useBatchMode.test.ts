@@ -125,9 +125,7 @@ describe('useBatchMode (Vue Query & selected collection view)', () => {
     expect(batch.selectedCount.value).toBe(2)
     expect(batch.hasSelection.value).toBe(true)
     expect(batch.scope.value).toEqual({
-      mode: 'ids',
       novel_ids: [1, 2],
-      excluded_ids: [],
     })
     batch.removeCard(2)
     expect(batch.selectedIds.value).toEqual(new Set([1]))

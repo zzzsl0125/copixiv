@@ -1,5 +1,4 @@
 import { apiClient, buildApiUrl, unwrap, unwrapVoid } from './client'
-import { ApiError, extractFastApiDetail } from './errors'
 import type {
   AuthorLookup,
   BatchMetadataRequest,
@@ -16,7 +15,6 @@ import type {
   NovelListResult,
   NovelsByIdsResponse,
   NovelUpdatePayload,
-  OrderBy,
   OrderDirection,
   SeriesLookup,
   SortableOrderBy,
@@ -120,85 +118,6 @@ export const novelApi = {
     return unwrap(res, '统计小说数量失败')
   },
 
-  async batchDownload(params: {
-    keyword?: string
-    order_by?: OrderBy
-    order_direction?: OrderDirection
-    min_like?: number
-    min_text?: number
-    limit?: number
-    format_mode?: FormatMode
-    zip_name?: string
-    naming_template?: string
-    novel_ids?: number[]
-  }): Promise<{ blob: Blob; contentDisposition?: string; missingIds: string[] }> {
-    const { data, error, response } = await apiClient.POST('/api/novels/batch-download', {
-      body: {
-        keyword: params.keyword,
-        order_by: params.order_by ?? 'id',
-        order_direction: params.order_direction ?? 'DESC',
-        min_like: params.min_like,
-        min_text: params.min_text,
-        limit: params.limit ?? 500,
-        format_mode: params.format_mode ?? 'txt',
-        zip_name: params.zip_name,
-        naming_template: params.naming_template,
-        novel_ids: params.novel_ids,
-      },
-      parseAs: 'blob',
-    })
-    if (error !== undefined || !response.ok || !(data instanceof Blob)) {
-      let body: unknown = error
-      if (error instanceof Blob) {
-        try {
-          body = JSON.parse(await error.text())
-        } catch {
-          body = null
-        }
-      }
-      throw new ApiError(response.status, body, extractFastApiDetail(body) || '下载失败')
-    }
-    const missingIdsHeader = response.headers.get('x-batch-missing-ids')
-    const missingIds = missingIdsHeader
-      ? missingIdsHeader.split(',').map((s) => s.trim()).filter(Boolean)
-      : []
-    return {
-      blob: data,
-      contentDisposition: response.headers.get('content-disposition') ?? undefined,
-      missingIds,
-    }
-  },
-
-  async batchDownloadPreview(
-    params: {
-      keyword?: string
-      order_by?: OrderBy
-      order_direction?: OrderDirection
-      min_like?: number
-      min_text?: number
-      format_mode?: FormatMode
-      naming_template?: string
-      novel_ids?: number[]
-    },
-    signal?: AbortSignal,
-  ): Promise<{ path: string | null }> {
-    const res = await apiClient.POST('/api/novels/batch-download/preview', {
-      body: {
-        keyword: params.keyword,
-        order_by: params.order_by ?? 'id',
-        order_direction: params.order_direction ?? 'DESC',
-        min_like: params.min_like,
-        min_text: params.min_text,
-        limit: 500,
-        format_mode: params.format_mode ?? 'txt',
-        naming_template: params.naming_template,
-        novel_ids: params.novel_ids,
-      },
-      signal,
-    })
-    return unwrap(res, '预览失败') as { path: string | null }
-  },
-
   async batchOperation(params: {
     operation: BatchOperation
     scope: BatchScope
@@ -274,6 +193,25 @@ export const novelApi = {
       body,
     })
     return unwrap(res, '匹配选中范围失败')
+  },
+
+  async batchExportPreview(
+    params: {
+      novel_ids: number[]
+      format_mode?: FormatMode
+      naming_template?: string
+    },
+    signal?: AbortSignal,
+  ): Promise<{ path: string | null }> {
+    const res = await apiClient.POST('/api/novels/batch-export/preview', {
+      body: {
+        novel_ids: params.novel_ids,
+        format_mode: params.format_mode ?? 'txt',
+        naming_template: params.naming_template,
+      },
+      signal,
+    })
+    return unwrap(res, '预览失败')
   },
 
   async submitBatchExport(params: {

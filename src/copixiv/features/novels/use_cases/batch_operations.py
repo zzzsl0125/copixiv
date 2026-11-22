@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 
-from copixiv.core.exceptions import NotFoundError, ValidationError
-from copixiv.core.search import QuerySpec, parse_search_keyword
+from copixiv.core.exceptions import ValidationError
 from copixiv.core.text import MAX_TAG_LENGTH, validate_tags
 from copixiv.db.tx import run_write_transaction_sync
 from copixiv.db.uow import SqlUnitOfWork
@@ -22,38 +21,18 @@ BATCH_ID_CHUNK_SIZE = 30_000
 
 
 def resolve_batch_scope(
-    novel_repo: SQLAlchemyNovelRepository,
+    novel_ids: Sequence[int],
     *,
-    mode: str,
-    novel_ids: list[int],
-    keyword: str | None,
-    min_like: int | None,
-    min_text: int | None,
-    excluded_ids: list[int],
+    empty_message: str = "请先勾选要操作的小说",
 ) -> list[int]:
-    """Resolve the effective novel ID list for a batch operation.
+    """Deduplicate, sort, and validate non-empty explicit novel IDs.
 
     Raises:
-        ValidationError: Empty ``ids`` selection.
-        NotFoundError: Filter-matched scope contains no novels.
+        ValidationError: Empty selection.
     """
-    if mode == "ids":
-        ids = sorted({int(i) for i in novel_ids})
-        if not ids:
-            raise ValidationError("请先勾选要操作的小说")
-        return ids
-
-    conditions = parse_search_keyword(keyword) if keyword else None
-    ids = novel_repo.list_matching_ids(
-        QuerySpec(
-            conditions=conditions or [],
-            min_like=min_like,
-            min_text=min_text,
-            exclude_ids=excluded_ids or [],
-        )
-    )
+    ids = sorted({int(i) for i in novel_ids})
     if not ids:
-        raise NotFoundError("当前范围内没有可操作的小说")
+        raise ValidationError(empty_message)
     return ids
 
 

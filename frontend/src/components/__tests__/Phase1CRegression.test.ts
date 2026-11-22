@@ -65,7 +65,7 @@ describe('Phase 1C regression fixes', () => {
     const wrapper = mount(BatchEditModal, {
       props: {
         isOpen: true,
-        scope: { mode: 'ids', novel_ids: [1, 2], excluded_ids: [] },
+        scope: { novel_ids: [1, 2] },
         scopeLabel: '已勾选的 2 篇',
       },
     })
@@ -85,7 +85,7 @@ describe('Phase 1C regression fixes', () => {
     const wrapper = mount(BatchDeleteModal, {
       props: {
         isOpen: true,
-        scope: { mode: 'ids', novel_ids: [1, 2], excluded_ids: [] },
+        scope: { novel_ids: [1, 2] },
         scopeLabel: '已勾选的 2 篇',
       },
     })
