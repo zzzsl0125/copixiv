@@ -1,6 +1,6 @@
 import { computed } from 'vue'
 import { useRoute, useRouter, type LocationQuery, type LocationQueryRaw } from 'vue-router'
-import { resolveSection, sectionFor, SECTIONS, type SectionId } from '../config'
+import { resolveSection, SECTIONS, type SectionId } from '../config'
 import { isOrderBy, isOrderDirection, type NovelFilters } from '../types'
 import { useNovelShellState } from './useNovelShellState'
 
@@ -55,10 +55,10 @@ export function computeSearchFilters(keyword: string): NovelFilters {
     const colonIndex = condition.indexOf(':')
     if (colonIndex > 0) {
       const type = condition.substring(0, colonIndex).trim()
-      if (type === 'id' || type === 'author_id' || type === 'author') {
+      if (type === 'id' || type === 'author_id') {
         orderBy = 'id'
         orderDirection = 'DESC'
-      } else if (type === 'series_id' || type === 'series') {
+      } else if (type === 'series_id') {
         orderBy = 'id'
         orderDirection = 'ASC'
       }
@@ -79,12 +79,12 @@ export function computeSearchFilters(keyword: string): NovelFilters {
 
 /**
  * Canonicalize `NovelFilters` into a minimal `LocationQueryRaw` object.
- * Keys equal to `sectionFor(filters.keyword)` defaults are omitted so `/`
- * and shelf links stay clean, while explicit overrides (e.g. `min_like=0`
+ * Keys equal to `computeSearchFilters(filters.keyword)` defaults are omitted so `/`
+ * and search/shelf links stay clean, while explicit overrides (e.g. `min_like=0`
  * under browse mode) are preserved in the URL.
  */
 export function buildNovelQuery(filters: NovelFilters): LocationQueryRaw {
-  const defaults = sectionFor(filters.keyword)
+  const defaults = computeSearchFilters(filters.keyword)
   const query: LocationQueryRaw = {}
 
   if (filters.keyword) query.keyword = filters.keyword
@@ -104,7 +104,7 @@ export function buildNovelQuery(filters: NovelFilters): LocationQueryRaw {
 /** Derive validated `NovelFilters` from a raw `vue-router` query map. */
 export function parseNovelQuery(query: LocationQuery): NovelFilters {
   const keyword = readQueryString(query.keyword) ?? ''
-  const defaults = sectionFor(keyword)
+  const defaults = computeSearchFilters(keyword)
 
   const rawOrderBy = readQueryString(query.order_by)
   const rawOrderDir = readQueryString(query.order_direction)
@@ -162,17 +162,8 @@ export function useNovelQueryState() {
     })
   }
 
-  async function navigateSearch(keyword: string, options?: { setOrdering?: boolean }) {
-    if (options?.setOrdering) {
-      await commitFilters(computeSearchFilters(keyword))
-      return
-    }
-    const def = resolveSection(keyword)
-    if (def) {
-      await navigateToSection(def)
-      return
-    }
-    await commitFilters({ ...filters.value, keyword })
+  async function navigateSearch(keyword: string) {
+    await commitFilters(computeSearchFilters(keyword))
   }
 
   async function updateFilters(patch: Partial<NovelFilters>) {
@@ -185,9 +176,7 @@ export function useNovelQueryState() {
     if (type === 'series') field = 'series_id'
     if (type === 'tag') field = 'tags'
 
-    const formattedValue =
-      typeof value === 'string' && value.toString().includes(' ') ? `"${value}"` : value
-    await navigateSearch(`${field}:${formattedValue};`, { setOrdering: true })
+    await navigateSearch(`${field}:${value};`)
   }
 
   return {

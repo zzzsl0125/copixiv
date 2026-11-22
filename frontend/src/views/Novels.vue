@@ -15,7 +15,6 @@ import {
   useBatchMode,
   useCollectionViews,
   useNovels,
-  useNovelQueryState,
   useNovelShellState,
   useToast,
   useVirtualMasonry,
@@ -26,7 +25,6 @@ import type {
   BatchMetadataResult,
   BatchOperationResult,
   Novel,
-  NovelFilters,
   TagPreference,
 } from '../types'
 
@@ -37,7 +35,7 @@ const emit = defineEmits<{
 const toast = useToast()
 const queryClient = useQueryClient()
 const shell = useNovelShellState()
-const { updateFilters, navigateToSection } = useNovelQueryState()
+const viewingExcluded = ref(false)
 
 const {
   novels,
@@ -55,7 +53,7 @@ const {
   patchNovelInCache,
   patchNovelStateInCache,
   removeNovelFromCache,
-} = useNovels()
+} = useNovels({ onlyBlocked: viewingExcluded })
 
 const {
   isBatchMode: batchMode,
@@ -65,7 +63,6 @@ const {
   selectAllLoading,
   selectedCount,
   hasSelection,
-  hasFilter,
   scope: batchScope,
   toggleCard: toggleBatchCard,
   removeCard: removeBatchCard,
@@ -108,10 +105,9 @@ const exportOpen = ref(false)
 const batchEditOpen = ref(false)
 const editingNovel = ref<Novel | null>(null)
 
-// ---- 「查看已选」/「查看被排除」集合视图编排 ----
+// ---- 「查看已选」集合视图编排 ----
 const {
   viewingSelected,
-  viewingExcluded,
   selectedView,
   displayNovels,
   viewLoading,
@@ -120,7 +116,6 @@ const {
   viewShownCount,
   viewTotalCount,
   toggleViewSelected,
-  toggleViewExcluded,
   handleViewLoadMore,
   patchNovel,
   patchNovelState,
@@ -136,6 +131,22 @@ const {
   },
   afterLayout: () => measure(),
 })
+
+function toggleViewExcluded() {
+  viewingExcluded.value = !viewingExcluded.value
+  window.scrollTo({ top: 0 })
+}
+
+watch(batchMode, (on) => {
+  if (on) viewingExcluded.value = false
+})
+
+watch(
+  () => filters.value.keyword,
+  (keyword) => {
+    if (!keyword.trim()) viewingExcluded.value = false
+  },
+)
 
 const {
   columnCount,
@@ -161,21 +172,12 @@ watch(
   },
 )
 
-const handleUpdateFilters = (patch: Partial<NovelFilters>) => {
-  void updateFilters(patch)
-}
-
 const handleLogoClick = () => {
   void resetFilters()
 }
 
 const handleUploaded = () => {
   void invalidateNovels()
-  if (activeSection.value === 'uploads') {
-    void navigateToSection('uploads')
-  } else {
-    toast.info('已入库，可在侧边栏「我的上传」查看')
-  }
 }
 
 // ---- Batch bar & modal handlers ----
@@ -184,14 +186,7 @@ const scopeLabel = computed(() => `已勾选的 ${selectedCount.value} 篇`)
 const handleBatchSelectAll = async () => {
   const result = await selectAllMatched()
   if (!result) return
-  if (result.truncated) {
-    toast.warning(
-      `已全选匹配中的前 ${result.added} 篇（共匹配 ${result.total} 篇，` +
-        `超过单次操作上限）。可继续搜索细分后再次全选，已选不会丢失。`,
-    )
-  } else {
-    toast.success(`已将 ${result.added} 篇匹配小说加入选择（当前已选 ${selectedCount.value} 篇）`)
-  }
+  toast.success(`已将 ${result.added} 篇匹配小说加入选择（当前已选 ${selectedCount.value} 篇）`)
 }
 
 const handleBatchClearScope = async () => {
@@ -246,25 +241,12 @@ const handleBatchOperationSuccess = async (payload: {
   }
   clearBatchSelection()
   await invalidateNovels()
-  void queryClient.invalidateQueries({ queryKey: ['novels', 'count'] })
+  void queryClient.invalidateQueries({ queryKey: queryKeys.novelsAll() })
 }
 
-const handleBatchTaskSubmitted = (payload: {
-  operation: string
-  task_id: number
-  matched: number
-}) => {
-  const labels: Record<string, string> = {
-    delete: '批量删除',
-    add_tags: '批量添加标签',
-    remove_tags: '批量移除标签',
-    export: '批量导出',
-  }
-  const isExport = payload.operation === 'export'
+const handleExportTaskSubmitted = (payload: { task_id: number; matched: number }) => {
   toast.info(
-    `${labels[payload.operation] ?? '批量操作'}已提交为后台任务 #${payload.task_id}` +
-      `（共 ${payload.matched} 篇）。可关闭页面，到「任务管理」查看进度` +
-      (isExport ? '，完成后在任务队列中点击下载。' : '。'),
+    `批量导出已提交为后台任务 #${payload.task_id}（共 ${payload.matched} 篇）。可关闭页面，到「任务管理」查看进度，完成后在任务队列中点击下载。`,
   )
   clearBatchSelection()
 }
@@ -289,7 +271,7 @@ const handleToggleFavourite = async (novel: Novel) => {
     applyNovelStateChange({
       id: novel.id,
       field: 'is_favourite',
-      value: novel.is_favourite ? 0 : 1,
+      value: !novel.is_favourite,
     })
   } catch (err: unknown) {
     toast.error(getApiErrorMessage(err, '收藏操作失败'))
@@ -304,7 +286,7 @@ const handleToggleFollow = async (novel: Novel) => {
       {
         id: novel.id,
         field: 'is_special_follow',
-        value: novel.is_special_follow ? 0 : 1,
+        value: !novel.is_special_follow,
       },
       novel.author_id,
     )
@@ -339,13 +321,12 @@ const handleNovelDeleted = (novelId: number) => {
     <div ref="stickyHeaderRef" class="sticky top-0 z-20">
       <NovelHeader
         :filters="filters"
-        @search="(keyword?: string) => void handleSearch(keyword, { setOrdering: true })"
-        @update:filters="handleUpdateFilters"
+        @search="(keyword?: string) => void handleSearch(keyword)"
         @toggle-sidebar="emit('toggle-sidebar')"
         @logo-click="handleLogoClick"
       />
       <ExclusionBar
-        v-if="filters.keyword.trim() !== '' && hasExcluded"
+        v-if="filters.keyword.trim() !== '' && (hasExcluded || viewingExcluded)"
         :is-viewing-excluded="viewingExcluded"
         :interactive="!batchMode"
         @toggle-view-excluded="toggleViewExcluded"
@@ -358,7 +339,6 @@ const handleNovelDeleted = (novelId: number) => {
         :select-all-loading="selectAllLoading"
         :selected-count="selectedCount"
         :has-selection="hasSelection"
-        :has-filter="hasFilter"
         :is-viewing-selected="viewingSelected"
         @select-all="handleBatchSelectAll"
         @clear="handleBarClear"
@@ -393,9 +373,9 @@ const handleNovelDeleted = (novelId: number) => {
         v-if="viewingExcluded"
         class="mb-4 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2"
       >
-        <template v-if="viewLoading">正在加载被排除的小说…</template>
+        <template v-if="loading && novels.length === 0">正在加载被排除的小说…</template>
         <template v-else>
-          正在查看本次搜索中被排除的小说（已展示 {{ viewShownCount }} / 共 {{ viewTotalCount }} 篇）。
+          正在查看本次搜索中被排除的小说（已加载 {{ novels.length }} 篇）。
           点「返回浏览列表」回到筛选列表。
         </template>
       </div>
@@ -441,10 +421,10 @@ const handleNovelDeleted = (novelId: number) => {
         <CardSkeleton v-for="n in columnCount * 2" :key="n" />
       </div>
 
-      <EmptyState v-else-if="!loading && !viewLoading" :loading="loading" />
+      <EmptyState v-else-if="!loading && !viewLoading" />
 
       <LoadMore
-        v-if="!viewingSelected && !viewingExcluded"
+        v-if="!viewingSelected"
         :loading="loading"
         :no-more-data="noMoreData"
         :has-data="novels.length > 0"
@@ -477,7 +457,7 @@ const handleNovelDeleted = (novelId: number) => {
       @close-edit="editingNovel = null"
       @close-upload="isUploadModalOpen = false"
       @batch-success="(payload) => void handleBatchOperationSuccess(payload)"
-      @batch-task-submitted="handleBatchTaskSubmitted"
+      @export-task-submitted="handleExportTaskSubmitted"
       @download-success="toast.success(`已开始下载：${$event}`)"
       @novel-updated="handleNovelUpdated"
       @novel-deleted="handleNovelDeleted"

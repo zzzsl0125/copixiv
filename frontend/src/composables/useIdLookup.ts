@@ -41,7 +41,7 @@ export interface UseIdLookupOptions<T> {
   /** 这本书当前挂的 id——相同就不查：卡片手里已经有名字，打开弹窗零请求 */
   currentId: () => number | null
   /** 真正的查询（作者 / 系列各一个端点） */
-  fetch: (id: number) => Promise<T>
+  fetch: (id: number, signal?: AbortSignal) => Promise<T>
   /** 允许查询吗（字段只读时不该发请求：pixiv 书的作者 / 系列都不可改） */
   enabled?: () => boolean
 }
@@ -60,8 +60,17 @@ export function useIdLookup<T>(options: UseIdLookupOptions<T>): IdLookup<T> {
   const result = ref<T | null>(null) as Ref<T | null>
   const loading = ref(false)
   const failed = ref(false)
-  // 过期响应的丢弃依据：输入每变一次就 +1，慢回来的旧响应直接扔掉。
+  // 过期响应的丢弃依据：输入每变一次就 +1，慢回来的旧响应直接扔掉；
+  // 同时用 AbortController 取消被新输入或卸载取代的在途请求。
   let seq = 0
+  let controller: AbortController | null = null
+
+  function abortInFlight() {
+    if (controller) {
+      controller.abort()
+      controller = null
+    }
+  }
 
   const idNumber = computed(() => parseIdInput(options.input.value))
 
@@ -71,6 +80,7 @@ export function useIdLookup<T>(options: UseIdLookupOptions<T>): IdLookup<T> {
 
   function schedule() {
     debouncedRun.cancel()
+    abortInFlight()
     seq += 1
     failed.value = false
 
@@ -90,22 +100,29 @@ export function useIdLookup<T>(options: UseIdLookupOptions<T>): IdLookup<T> {
   }
 
   async function run(wanted: number) {
+    abortInFlight()
     const mine = ++seq
+    const nextController = new AbortController()
+    controller = nextController
     try {
-      const fetched = await options.fetch(wanted)
-      if (mine !== seq) return          // 用户又改了输入，这份结果作废
+      const fetched = await options.fetch(wanted, nextController.signal)
+      if (mine !== seq || nextController.signal.aborted) return          // 用户又改了输入，这份结果作废
       result.value = fetched
     } catch {
-      if (mine !== seq) return
+      if (mine !== seq || nextController.signal.aborted) return
       failed.value = true
       result.value = null
     } finally {
+      if (controller === nextController) controller = null
       if (mine === seq) loading.value = false
     }
   }
 
   watch(options.input, schedule)
-  onUnmounted(() => debouncedRun.cancel())
+  onUnmounted(() => {
+    debouncedRun.cancel()
+    abortInFlight()
+  })
 
   return { idNumber, result, loading, failed, schedule }
 }
@@ -113,6 +130,13 @@ export function useIdLookup<T>(options: UseIdLookupOptions<T>): IdLookup<T> {
 export interface IdLookupHint {
   tone: 'muted' | 'ok' | 'warn' | 'error'
   text: string
+}
+
+export const HINT_TONE_CLASSES: Record<IdLookupHint['tone'], string> = {
+  muted: 'text-gray-400',
+  ok: 'text-green-600',
+  warn: 'text-amber-600',
+  error: 'text-red-600',
 }
 
 export interface IdHintContext {
@@ -123,6 +147,8 @@ export interface IdHintContext {
   /** 当前挂的 id 与它的显示名（卡片手里的值） */
   currentId: number | null
   currentName: string
+  /** 是否显式勾选了解除关联（批量编辑没有单个 currentId，靠此标志切到 unlinkNote） */
+  unlinking?: boolean
   loading: boolean
   failed: boolean
   /** 预览结果（`null` = 还没查过） */
@@ -151,6 +177,9 @@ export interface IdHintContext {
  * 所以这里不替它们承诺任何一句。
  */
 export function formatIdLookupHint(ctx: IdHintContext): IdLookupHint {
+  if (ctx.unlinking) {
+    return { tone: 'muted', text: ctx.unlinkNote }
+  }
   if (ctx.idNumber === undefined) {
     return { tone: 'error', text: `只能填数字 ID（pixiv ${ctx.entity} ID）` }
   }
@@ -163,7 +192,7 @@ export function formatIdLookupHint(ctx: IdHintContext): IdLookupHint {
   }
   if (ctx.loading) return { tone: 'muted', text: '查询中…' }
   if (ctx.failed) {
-    return { tone: 'warn', text: '查询失败；仍可保存，名字之后自动补齐' }
+    return { tone: 'warn', text: '查询失败；仍可保存，保存时将再次尝试解析' }
   }
   if (!ctx.found) return { tone: 'muted', text: `将按此 ID 关联 pixiv ${ctx.entity}` }
   if (ctx.found.name) {
@@ -172,6 +201,6 @@ export function formatIdLookupHint(ctx: IdHintContext): IdLookupHint {
   }
   return {
     tone: 'warn',
-    text: `未查到该${ctx.entity}（ID 不存在或 pixiv 暂不可达）；仍可保存，名字之后自动补齐`,
+    text: `未查到该${ctx.entity}（ID 不存在或 pixiv 暂不可达）；仍可保存，保存时将再次尝试解析`,
   }
 }

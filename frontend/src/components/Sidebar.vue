@@ -45,7 +45,7 @@ const handleBatchClick = () => {
 }
 
 const btnClass = (isActive: boolean, pxClass = 'px-3') => [
-  `py-2 ${pxClass} text-sm font-medium rounded-md transition-colors`,
+  `py-2 ${pxClass} text-sm font-medium rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed`,
   isActive ? 'bg-blue-500 text-white' : 'bg-gray-50 text-gray-700 hover:bg-gray-100',
 ]
 
@@ -129,6 +129,7 @@ const navIconClass = 'mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500'
           失败记录
         </router-link>
         <button
+          type="button"
           @click="handleBatchClick"
           data-testid="nav-batch-mode"
           class="group w-full flex items-center justify-center px-3 py-2 text-sm font-medium rounded-md transition-colors"
@@ -145,14 +146,14 @@ const navIconClass = 'mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500'
         <h3 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">排序</h3>
         <div class="space-y-3 mb-8">
           <div class="grid grid-cols-3 gap-2">
-            <button @click="updateFilter('order_by', 'like')" :class="btnClass(filters.order_by === 'like')">点赞</button>
-            <button @click="updateFilter('order_by', 'id')" :class="btnClass(filters.order_by === 'create_time' || filters.order_by === 'id')">时间</button>
-            <button @click="updateFilter('order_by', 'random')" :class="btnClass(filters.order_by === 'random')" :disabled="isInCollectionView" :style="isInCollectionView ? 'opacity: 0.5; cursor: not-allowed;' : ''">随机</button>
+            <button type="button" @click="updateFilter('order_by', 'like')" :class="btnClass(filters.order_by === 'like')">点赞</button>
+            <button type="button" @click="updateFilter('order_by', 'id')" :class="btnClass(filters.order_by === 'id')">时间</button>
+            <button type="button" @click="updateFilter('order_by', 'random')" :class="btnClass(filters.order_by === 'random')" :disabled="isInCollectionView">随机</button>
           </div>
           <div class="grid grid-cols-3 gap-2">
-            <button @click="updateFilter('order_direction', 'ASC')" :class="btnClass(filters.order_direction === 'ASC')" :disabled="filters.order_by === 'random'" :style="filters.order_by === 'random' ? 'opacity: 0.5; cursor: not-allowed;' : ''">升序</button>
-            <button @click="updateFilter('order_direction', 'DESC')" :class="btnClass(filters.order_direction === 'DESC')" :disabled="filters.order_by === 'random'" :style="filters.order_by === 'random' ? 'opacity: 0.5; cursor: not-allowed;' : ''">降序</button>
-            <button @click="handleSectionClick('novels')" :class="btnClass(false)">重置</button>
+            <button type="button" @click="updateFilter('order_direction', 'ASC')" :class="btnClass(filters.order_direction === 'ASC')" :disabled="filters.order_by === 'random'">升序</button>
+            <button type="button" @click="updateFilter('order_direction', 'DESC')" :class="btnClass(filters.order_direction === 'DESC')" :disabled="filters.order_by === 'random'">降序</button>
+            <button type="button" @click="handleSectionClick('novels')" :class="btnClass(false)">重置</button>
           </div>
         </div>
 
@@ -161,19 +162,19 @@ const navIconClass = 'mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500'
           <div>
             <label class="block text-sm text-gray-700 mb-2">最低字数</label>
             <div class="grid grid-cols-4 gap-2">
-              <button @click="updateFilter('min_text', 0)" :class="btnClass(filters.min_text === undefined || filters.min_text === 0, 'px-1')">不限</button>
-              <button @click="updateFilter('min_text', 3000)" :class="btnClass(filters.min_text === 3000, 'px-1')">3.0k</button>
-              <button @click="updateFilter('min_text', 10000)" :class="btnClass(filters.min_text === 10000, 'px-1')">10.0k</button>
-              <button @click="updateFilter('min_text', 30000)" :class="btnClass(filters.min_text === 30000, 'px-1')">30.0k</button>
+              <button type="button" @click="updateFilter('min_text', 0)" :class="btnClass(filters.min_text === undefined || filters.min_text === 0, 'px-1')">不限</button>
+              <button type="button" @click="updateFilter('min_text', 3000)" :class="btnClass(filters.min_text === 3000, 'px-1')">3.0k</button>
+              <button type="button" @click="updateFilter('min_text', 10000)" :class="btnClass(filters.min_text === 10000, 'px-1')">10.0k</button>
+              <button type="button" @click="updateFilter('min_text', 30000)" :class="btnClass(filters.min_text === 30000, 'px-1')">30.0k</button>
             </div>
           </div>
           <div>
             <label class="block text-sm text-gray-700 mb-2">最低点赞</label>
             <div class="grid grid-cols-4 gap-2">
-              <button @click="updateFilter('min_like', 0)" :class="btnClass(filters.min_like === undefined || filters.min_like === 0, 'px-1')">不限</button>
-              <button @click="updateFilter('min_like', 500)" :class="btnClass(filters.min_like === 500, 'px-1')">500</button>
-              <button @click="updateFilter('min_like', 2500)" :class="btnClass(filters.min_like === 2500, 'px-1')">2.5k</button>
-              <button @click="updateFilter('min_like', 5000)" :class="btnClass(filters.min_like === 5000, 'px-1')">5.0k</button>
+              <button type="button" @click="updateFilter('min_like', 0)" :class="btnClass(filters.min_like === undefined || filters.min_like === 0, 'px-1')">不限</button>
+              <button type="button" @click="updateFilter('min_like', 500)" :class="btnClass(filters.min_like === 500, 'px-1')">500</button>
+              <button type="button" @click="updateFilter('min_like', 2500)" :class="btnClass(filters.min_like === 2500, 'px-1')">2.5k</button>
+              <button type="button" @click="updateFilter('min_like', 5000)" :class="btnClass(filters.min_like === 5000, 'px-1')">5.0k</button>
             </div>
           </div>
         </div>

@@ -9,7 +9,6 @@ export interface TabItem {
 defineProps<{
   tabs: TabItem[]
   modelValue: string
-  ariaLabel?: string
 }>()
 
 const emit = defineEmits<{
@@ -22,7 +21,7 @@ const emit = defineEmits<{
     :model-value="modelValue"
     @update:model-value="emit('update:modelValue', String($event))"
   >
-    <TabsList class="-mb-[1px] flex space-x-8" :aria-label="ariaLabel || 'Tabs'">
+    <TabsList class="-mb-[1px] flex space-x-8" aria-label="Tabs">
       <TabsTrigger
         v-for="tab in tabs"
         :key="tab.name"

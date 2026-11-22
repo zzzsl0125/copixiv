@@ -2,7 +2,7 @@ import createClient, { type Middleware } from 'openapi-fetch'
 import type { paths } from '../types/api.generated'
 import { ApiError, extractFastApiDetail } from './errors'
 
-export const apiBaseUrl = '/api'
+const apiBaseUrl = '/api'
 
 // Optional backend API key (config.yaml `security.api_key`). Empty means
 // disabled; when configured at build time every proxied /api request carries
@@ -79,7 +79,7 @@ export function uploadWithProgress<T>(
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const xhr = new XMLHttpRequest()
-    xhr.open('POST', path)
+    xhr.open('POST', `${apiBaseUrl}${path}`)
     if (apiKey) xhr.setRequestHeader('X-API-Key', apiKey)
 
     const onAbort = () => xhr.abort()

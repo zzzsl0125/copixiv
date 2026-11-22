@@ -4,14 +4,11 @@ import DraggableTable, { type TableColumn } from './DraggableTable.vue'
 import { formatCronZh } from '../../lib/cron'
 import type { ScheduledTask } from '../../types'
 
-const props = withDefaults(defineProps<{
+const props = defineProps<{
   tasks: ScheduledTask[]
   loading: boolean
-  /** Registered task functions that already have a pending/running history row. */
-  busyTaskNames?: string[]
-}>(), {
-  busyTaskNames: () => [],
-})
+  runningIds?: ReadonlySet<number>
+}>()
 
 const emit = defineEmits<{
   edit: [task: ScheduledTask]
@@ -28,11 +25,7 @@ const columns: TableColumn[] = [
   { key: 'actions', label: '操作', align: 'right' },
 ]
 
-/** 同函数已有 pending/running 行时禁止再次入队（去 409 后唯一防护）。 */
-const isTaskBusy = (task: ScheduledTask) => props.busyTaskNames.includes(task.task)
-
-const runTitle = (task: ScheduledTask) =>
-  isTaskBusy(task) ? '该任务已有待执行或执行中的记录，请稍候' : '立即运行'
+const isRunning = (task: ScheduledTask) => props.runningIds?.has(task.id) ?? false
 </script>
 
 <template>
@@ -57,7 +50,7 @@ const runTitle = (task: ScheduledTask) =>
         <button
           @click="emit('toggle', task)"
           :class="task.is_enabled ? 'bg-green-100 text-green-800 border-green-200' : 'bg-gray-100 text-gray-800 border-gray-200'"
-          class="px-3 py-1 inline-flex items-center text-xs leading-5 font-semibold rounded-full border transition-colors hover:shadow-sm cursor-pointer"
+          class="px-3 py-1 inline-flex items-center text-xs leading-5 font-semibold rounded-full border transition-colors cursor-pointer"
         >
           <span v-if="task.is_enabled" class="flex items-center"><Play class="w-3 h-3 mr-1" /> 已启用</span>
           <span v-else class="flex items-center"><Square class="w-3 h-3 mr-1" /> 已停用</span>
@@ -67,8 +60,8 @@ const runTitle = (task: ScheduledTask) =>
         <div class="flex items-center justify-end space-x-2">
           <button
             @click="emit('run', task)"
-            :disabled="isTaskBusy(task)"
-            :title="runTitle(task)"
+            :disabled="isRunning(task)"
+            :title="isRunning(task) ? '入队中…' : '立即运行'"
             class="inline-flex items-center px-2.5 py-1.5 border border-orange-200 shadow-sm text-xs font-medium rounded text-orange-700 bg-orange-50 hover:bg-orange-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
           >
             <Zap class="w-4 h-4 mr-1" /> 运行

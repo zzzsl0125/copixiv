@@ -6,10 +6,8 @@ export const queryKeys = {
   tagPreferences: () => ['tag-preferences'] as const,
   tagAliases: () => ['tag-aliases'] as const,
   searchHistory: () => ['search-history'] as const,
-  tasksBusy: () => ['tasks', 'busy'] as const,
   tasksScheduled: () => ['tasks', 'scheduled'] as const,
   tasksHistory: () => ['tasks', 'history'] as const,
-  tasksMethods: () => ['tasks', 'methods'] as const,
   failedNovels: () => ['failed-novels'] as const,
   novelsAll: () => ['novels'] as const,
   novelsList: (

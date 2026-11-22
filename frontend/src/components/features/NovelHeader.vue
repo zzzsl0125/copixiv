@@ -14,7 +14,6 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'search', keyword?: string): void
-  (e: 'update:filters', filters: Partial<NovelFilters>): void
   (e: 'toggle-sidebar'): void
   (e: 'logo-click'): void
 }>()
@@ -32,6 +31,7 @@ watch(
 
 const performSearch = () => {
   showHistory.value = false
+  void queryClient.invalidateQueries({ queryKey: queryKeys.searchHistory() })
   emit('search', localKeyword.value)
 }
 
@@ -103,7 +103,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <header class="w-full bg-white shadow-sm sticky top-0 z-10">
+  <header class="w-full bg-white shadow-sm">
     <h1 class="sr-only">小说列表</h1>
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
       <div class="flex flex-row gap-4 items-center justify-between">
@@ -115,7 +115,7 @@ onBeforeUnmount(() => {
           >
             <Menu class="h-6 w-6" aria-hidden="true" />
           </button>
-          <AppLogo className="flex-shrink-0" @click="$emit('logo-click')" />
+          <AppLogo class="flex-shrink-0" @click="$emit('logo-click')" />
         </div>
 
         <div class="flex flex-row gap-4 items-center justify-end flex-grow min-w-0">

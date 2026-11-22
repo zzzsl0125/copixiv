@@ -22,9 +22,6 @@ import type {
   SortableOrderBy,
 } from '../types'
 
-/** 同步批量操作上限（与后端 BATCH_MAX_NOVELS 一致）；超过走后台任务。 */
-export const BATCH_MAX_NOVELS = 5000
-
 export const novelApi = {
   async getNovels(params: GetNovelsParams, signal?: AbortSignal): Promise<NovelListResult> {
     const res = await apiClient.GET('/api/novels', {
@@ -34,6 +31,7 @@ export const novelApi = {
           min_like: params.min_like,
           min_text: params.min_text,
           exclude_blocked: params.exclude_blocked,
+          only_blocked: params.only_blocked,
           order_by: params.order_by,
           order_direction: params.order_direction,
           cursor: params.cursor ? JSON.stringify(params.cursor) : undefined,
@@ -115,7 +113,6 @@ export const novelApi = {
           min_like: params.min_like,
           min_text: params.min_text,
           exclude_blocked: params.exclude_blocked,
-          excluded_ids: params.excluded_ids,
         },
       },
       signal,
@@ -134,8 +131,7 @@ export const novelApi = {
     zip_name?: string
     naming_template?: string
     novel_ids?: number[]
-    excluded_ids?: number[]
-  }): Promise<{ blob: Blob; contentDisposition?: string }> {
+  }): Promise<{ blob: Blob; contentDisposition?: string; missingIds: string[] }> {
     const { data, error, response } = await apiClient.POST('/api/novels/batch-download', {
       body: {
         keyword: params.keyword,
@@ -148,7 +144,6 @@ export const novelApi = {
         zip_name: params.zip_name,
         naming_template: params.naming_template,
         novel_ids: params.novel_ids,
-        excluded_ids: params.excluded_ids,
       },
       parseAs: 'blob',
     })
@@ -163,9 +158,14 @@ export const novelApi = {
       }
       throw new ApiError(response.status, body, extractFastApiDetail(body) || '下载失败')
     }
+    const missingIdsHeader = response.headers.get('x-batch-missing-ids')
+    const missingIds = missingIdsHeader
+      ? missingIdsHeader.split(',').map((s) => s.trim()).filter(Boolean)
+      : []
     return {
       blob: data,
       contentDisposition: response.headers.get('content-disposition') ?? undefined,
+      missingIds,
     }
   },
 
@@ -179,7 +179,6 @@ export const novelApi = {
       format_mode?: FormatMode
       naming_template?: string
       novel_ids?: number[]
-      excluded_ids?: number[]
     },
     signal?: AbortSignal,
   ): Promise<{ path: string | null }> {
@@ -194,7 +193,6 @@ export const novelApi = {
         format_mode: params.format_mode ?? 'txt',
         naming_template: params.naming_template,
         novel_ids: params.novel_ids,
-        excluded_ids: params.excluded_ids,
       },
       signal,
     })
@@ -234,25 +232,6 @@ export const novelApi = {
       signal,
     })
     return unwrap(res, '获取匹配 ID 列表失败')
-  },
-
-  async getBlockedNovelIds(
-    params: GetNovelsParams,
-    signal?: AbortSignal,
-  ): Promise<NovelIdsResponse> {
-    const res = await apiClient.GET('/api/novels/blocked-ids', {
-      params: {
-        query: {
-          keyword: params.keyword,
-          min_like: params.min_like,
-          min_text: params.min_text,
-          order_by: params.order_by,
-          order_direction: params.order_direction,
-        },
-      },
-      signal,
-    })
-    return unwrap(res, '获取被排除小说列表失败')
   },
 
   async sortNovelIds(
@@ -295,21 +274,6 @@ export const novelApi = {
       body,
     })
     return unwrap(res, '匹配选中范围失败')
-  },
-
-  async submitBatchTask(params: {
-    operation: BatchOperation
-    scope: BatchScope
-    tags?: string[]
-  }): Promise<{ task_id: number; matched: number }> {
-    const res = await apiClient.POST('/api/novels/batch-task', {
-      body: {
-        operation: params.operation,
-        scope: params.scope,
-        tags: params.tags ?? [],
-      },
-    })
-    return unwrap(res, '提交批量任务失败')
   },
 
   async submitBatchExport(params: {

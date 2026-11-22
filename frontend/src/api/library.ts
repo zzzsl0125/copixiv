@@ -11,15 +11,13 @@ export const libraryApi = {
     files: File[],
     onUploadProgress?: (percent: number) => void,
     authorId?: number | null,
-    signal?: AbortSignal,
   ): Promise<UploadResponse> {
     const form = new FormData()
     for (const file of files) form.append('files', file)
     if (authorId != null) form.append('author_id', String(authorId))
 
-    return uploadWithProgress<UploadResponse>('/api/library/uploads', form, {
+    return uploadWithProgress<UploadResponse>('/library/uploads', form, {
       onUploadProgress,
-      signal,
     })
   },
 }

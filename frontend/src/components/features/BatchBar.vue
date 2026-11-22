@@ -9,7 +9,6 @@ defineProps<{
   countLoading: boolean
   selectedCount: number
   hasSelection: boolean
-  hasFilter: boolean
   selectAllLoading: boolean
   /** True while the main grid is showing the selected novels (查看已选). */
   isViewingSelected: boolean

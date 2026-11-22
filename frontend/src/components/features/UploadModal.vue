@@ -3,10 +3,9 @@ import { computed, ref, watch } from 'vue'
 import { CollapsibleContent, CollapsibleRoot, CollapsibleTrigger } from 'reka-ui'
 import { AlertCircle, CheckCircle2, FileUp as FileUpIcon, X } from '@lucide/vue'
 import BaseModal from '../ui/BaseModal.vue'
-import FormField from '../ui/FormField.vue'
 import PixivIdLookupField from './PixivIdLookupField.vue'
 import { getApiErrorMessage, libraryApi, novelApi } from '../../api'
-import { useToast } from '../../composables'
+import { parseIdInput, useToast } from '../../composables'
 import { UPLOAD_STATUS_LABEL, formatFileSize } from '../../types'
 import type { UploadItemResult } from '../../types'
 
@@ -32,9 +31,9 @@ const batchTotal = ref(0)
 
 const presetOpen = ref(false)
 const presetAuthorId = ref('')
-const presetIdNumber = ref<number | null | undefined>(null)
 const presetFieldRef = ref<InstanceType<typeof PixivIdLookupField> | null>(null)
 
+const presetIdNumber = computed(() => parseIdInput(presetAuthorId.value))
 const presetInvalid = computed(() => presetIdNumber.value === undefined)
 const presetAuthor = computed(() =>
   typeof presetIdNumber.value === 'number' ? presetIdNumber.value : null,
@@ -52,7 +51,7 @@ const summary = computed(() => ({
   failed: results.value.filter((r) => r.status === 'failed').length,
 }))
 
-const progressLabel = computed(() => `${results.value.length}/${batchTotal.value}`)
+const progressLabel = computed(() => `${batchTotal.value} 个文件`)
 
 const reset = (options: { keepPreset?: boolean } = {}) => {
   files.value = []
@@ -117,9 +116,9 @@ const handleUpload = async () => {
     hasUploaded.value = true
 
     const counts = {
-      created: batch.filter((r) => r.status === 'created').length,
-      duplicate: batch.filter((r) => r.status === 'duplicate').length,
-      failed: batch.filter((r) => r.status === 'failed').length,
+      created: res.created,
+      duplicate: res.duplicate,
+      failed: res.failed,
     }
     const attached = batch.filter((r) => r.epub_attached).length
     if (counts.created > 0) {
@@ -133,7 +132,7 @@ const handleUpload = async () => {
       )
     }
     if (counts.failed > 0) toast.warning(`${counts.failed} 个文件上传失败，详见结果列表`)
-    if (counts.created > 0 || attached > 0) {
+    if (counts.created > 0 || attached > 0 || (presetAuthor.value !== null && counts.duplicate > 0)) {
       emit('uploaded', counts)
     }
     if (counts.created === 0 && counts.duplicate === 0 && counts.failed === 0) {
@@ -204,46 +203,19 @@ const uploadMore = () => {
           {{ presetToggleLabel }}
         </CollapsibleTrigger>
 
-        <CollapsibleContent class="mt-2 grid gap-x-3 gap-y-2 sm:grid-cols-2">
-          <div>
-            <PixivIdLookupField
-              ref="presetFieldRef"
-              v-model="presetAuthorId"
-              entity="作者"
-              label="作者 ID"
-              :fetch="novelApi.lookupAuthor"
-              placeholder="如 1234567"
-              empty-note="留空 = 按文件名解析作者"
-              unlink-note="留空 = 按文件名解析作者"
-              input-test-id="upload-preset-author-input"
-              hint-test-id="upload-preset-author-hint"
-              @update:id-number="presetIdNumber = $event"
-            />
-            <p
-              v-if="presetInvalid"
-              class="mt-0.5 text-xs text-red-600"
-              data-testid="upload-preset-author-error"
-            >
-              作者 ID 必须是正整数
-            </p>
-          </div>
-
-          <FormField
-            label="系列 ID"
-            :disabled="true"
-            hint="系列：后续版本支持"
-            data-testid="upload-preset-series-disabled"
-          >
-            <template #default="{ id }">
-              <input
-                :id="id"
-                type="text"
-                disabled
-                placeholder="—"
-                class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm sm:text-sm disabled:bg-gray-100 disabled:text-gray-500 disabled:cursor-not-allowed"
-              />
-            </template>
-          </FormField>
+        <CollapsibleContent class="mt-2">
+          <PixivIdLookupField
+            ref="presetFieldRef"
+            v-model="presetAuthorId"
+            entity="作者"
+            label="作者 ID"
+            :fetch="novelApi.lookupAuthor"
+            placeholder="如 1234567"
+            empty-note="留空 = 按文件名解析作者"
+            unlink-note="留空 = 按文件名解析作者"
+            input-test-id="upload-preset-author-input"
+            hint-test-id="upload-preset-author-hint"
+          />
         </CollapsibleContent>
       </CollapsibleRoot>
 

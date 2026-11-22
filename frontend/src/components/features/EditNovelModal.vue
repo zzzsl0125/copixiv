@@ -6,6 +6,7 @@ import PixivIdLookupField from './PixivIdLookupField.vue'
 import TagChipInput from './TagChipInput.vue'
 import { getApiErrorMessage, novelApi } from '../../api'
 import { useConfirm } from '../../composables'
+import { HINT_TONE_CLASSES } from '../../composables/useIdLookup'
 import type { Novel, NovelUpdatePayload } from '../../types'
 
 const props = defineProps<{
@@ -147,14 +148,18 @@ function buildPayload(): NovelUpdatePayload {
   return payload
 }
 
-const hasChanges = computed(() => Object.keys(buildPayload()).length > 0)
+const hasChanges = computed(
+  () => Object.keys(buildPayload()).length > 0 || (tagInputRef.value?.hasDraft ?? false),
+)
 const confirmDisabled = computed(
   () => !!validationError.value || !hasChanges.value || syncing.value || deleting.value,
 )
 
 async function handleConfirm() {
   const novel = props.novel
-  if (!novel || loading.value || syncing.value || deleting.value || confirmDisabled.value) return
+  if (!novel || loading.value || syncing.value || deleting.value) return
+  tagInputRef.value?.flush()
+  if (confirmDisabled.value) return
 
   loading.value = true
   try {
@@ -269,12 +274,7 @@ async function handleDelete() {
       <p
         v-if="canEdit('author_id') && authorFieldRef?.hint?.text"
         class="-mt-2 text-xs"
-        :class="{
-          'text-gray-400': authorFieldRef.hint.tone === 'muted',
-          'text-green-600': authorFieldRef.hint.tone === 'ok',
-          'text-amber-600': authorFieldRef.hint.tone === 'warn',
-          'text-red-600': authorFieldRef.hint.tone === 'error',
-        }"
+        :class="HINT_TONE_CLASSES[authorFieldRef.hint.tone]"
         data-testid="edit-author-hint"
       >
         {{ authorFieldRef.hint.text }}
@@ -320,7 +320,7 @@ async function handleDelete() {
         v-model="tags"
         label="标签"
         mode="chips"
-        placeholder="输入标签后回车添加（可用 / # 、 分隔多个）"
+        placeholder="输入标签后回车添加（可用逗号、空格、/、# 等分隔多个）"
         input-test-id="edit-tag-input"
         tags-test-id="edit-tags"
         tag-remove-test-id-prefix="edit-tag-remove-"

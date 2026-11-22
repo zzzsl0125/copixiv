@@ -2,7 +2,6 @@
 import { Search } from '@lucide/vue'
 
 withDefaults(defineProps<{
-  loading: boolean
   title?: string
   description?: string
 }>(), {
@@ -12,7 +11,7 @@ withDefaults(defineProps<{
 </script>
 
 <template>
-  <div v-if="!loading" class="text-center py-20">
+  <div class="text-center py-20">
     <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-gray-100 mb-4">
       <Search class="h-8 w-8 text-gray-400" />
     </div>

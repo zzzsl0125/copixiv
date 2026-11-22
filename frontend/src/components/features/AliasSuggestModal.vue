@@ -5,7 +5,7 @@ import AppInput from '../ui/AppInput.vue'
 import AppCheckbox from '../ui/AppCheckbox.vue'
 import { tagAliasApi, getApiErrorMessage } from '../../api'
 import { useToast } from '../../composables'
-import type { TagAliasSuggest } from '../../types'
+import type { TagAliasSuggest, TagAliasSuggestList } from '../../types'
 
 const props = defineProps<{
   isOpen: boolean
@@ -22,6 +22,7 @@ const loading = ref(false)
 const saving = ref(false)
 const suggestions = ref<TagAliasSuggest[]>([])
 const currentOffset = ref(0)
+const hasMore = ref(true)
 const currentSuggestion = computed(() => suggestions.value[0] || null)
 const selectedCandidates = ref<Set<number>>(new Set())
 const customTarget = ref('')
@@ -32,7 +33,11 @@ const fetchSuggestions = async () => {
   try {
     const data = await tagAliasApi.suggestTagAliases(5, currentOffset.value, props.targetTag)
     suggestions.value = data.items
-    currentOffset.value = data.next_offset
+    const nextCursor =
+      (data as TagAliasSuggestList & { next_cursor?: number | null }).next_cursor ??
+      (data.next_offset > 0 ? data.next_offset : null)
+    currentOffset.value = nextCursor ?? 0
+    hasMore.value = nextCursor !== null
     resetForm()
   } catch (err: unknown) {
     toast.error(getApiErrorMessage(err, '别名建议加载失败'))
@@ -45,7 +50,12 @@ const resetForm = () => {
 }
 
 watch(() => props.isOpen, (newVal) => {
-  if (newVal) { suggestions.value = []; currentOffset.value = 0; fetchSuggestions() }
+  if (newVal) {
+    suggestions.value = []
+    currentOffset.value = 0
+    hasMore.value = true
+    fetchSuggestions()
+  }
 })
 
 const nextSuggestion = () => {
@@ -53,7 +63,7 @@ const nextSuggestion = () => {
   resetForm()
   if (suggestions.value.length === 0) {
     if (props.targetTag) emit('close')
-    else fetchSuggestions()
+    else if (hasMore.value) fetchSuggestions()
   }
 }
 

@@ -3,16 +3,12 @@ import { ref } from 'vue'
 import { Toaster } from 'vue-sonner'
 import Sidebar from './components/Sidebar.vue'
 import ConfirmDialog from './components/ui/ConfirmDialog.vue'
-import { useProvideNovelShellState, useTaskStatus } from './composables'
+import { useProvideNovelShellState } from './composables'
 
 const isSidebarOpen = ref(false)
 
 // Cross-shell UI state (batch mode toggle, persistent selectedIds, random refresh nonce)
 useProvideNovelShellState()
-
-// Global busy-task polling singleton backed by Vue Query: automatically fetches on
-// mount and polls every 5s only while busyFuncs is non-empty.
-useTaskStatus()
 </script>
 
 <template>

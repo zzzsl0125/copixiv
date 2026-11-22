@@ -4,9 +4,8 @@ import { type InfiniteData, useInfiniteQuery, useQueryClient } from '@tanstack/v
 import { AlertTriangle, ExternalLink, RefreshCw, RotateCcw } from '@lucide/vue'
 import type { FailedNovel, FailedNovelListResponse } from '../types'
 import { FAILED_NOVELS_PAGE_SIZE, failedNovelApi, getApiErrorMessage, queryKeys } from '../api'
-import { useConfirm, useTaskStatus, useToast } from '../composables'
+import { useConfirm, useToast } from '../composables'
 import PageHeader from '../components/features/PageHeader.vue'
-import DraggableTable, { type TableColumn } from '../components/features/DraggableTable.vue'
 import EmptyState from '../components/ui/EmptyState.vue'
 import ErrorAlert from '../components/ui/ErrorAlert.vue'
 
@@ -16,7 +15,6 @@ defineEmits<{ (e: 'toggle-sidebar'): void }>()
 const toast = useToast()
 const { confirm } = useConfirm()
 const queryClient = useQueryClient()
-const { isBusy, notifyTaskEnqueued } = useTaskStatus()
 
 const retryingIds = ref<Set<number>>(new Set())
 const retryingAll = ref(false)
@@ -54,17 +52,12 @@ const loadError = computed(() =>
   listQuery.error.value ? getApiErrorMessage(listQuery.error.value, '加载失败记录失败') : null,
 )
 
-const failedTimesCutoff = 3 // 与后端 _MAX_RETRIES 一致：达到后自动跳过
+const failedTimesCutoff = 3 // 与后端 MAX_RETRIES 一致：达到后自动跳过
 const pixivNovelUrl = (id: number) => `https://www.pixiv.net/novel/show.php?id=${id}`
 const anyRetrying = computed(() => retryingAll.value || retryingIds.value.size > 0)
 
-const columns: TableColumn[] = [
-  { key: 'novel', label: '小说', tdClass: '' },
-  { key: 'failed_times', label: '失败次数' },
-  { key: 'last_failed_at', label: '最近失败时间', tdClass: 'text-sm text-gray-500 whitespace-nowrap' },
-  { key: 'error_message', label: '错误原因', tdClass: 'text-sm text-gray-500 max-w-md' },
-  { key: 'actions', label: '操作', align: 'right' },
-]
+const formatDate = (dateStr?: string | null): string =>
+  dateStr ? new Date(dateStr).toLocaleString() : '—'
 
 function loadMore() {
   if (loading.value || loadingMore.value || !hasMore.value) return
@@ -103,11 +96,10 @@ async function resetOne(novel: FailedNovel) {
 }
 
 async function retryOne(novel: FailedNovel) {
-  if (anyRetrying.value || isBusy('failed_retry')) return
+  if (anyRetrying.value) return
   retryingIds.value = new Set([novel.novel_id])
   try {
     const { task_id } = await failedNovelApi.retry([novel.novel_id])
-    notifyTaskEnqueued('failed_retry')
     toast.success(`已入队重试 #${novel.novel_id}（任务 #${task_id}，可在任务管理查看进度）`)
   } catch (err) {
     toast.error(getApiErrorMessage(err, '入队重试失败'))
@@ -117,7 +109,7 @@ async function retryOne(novel: FailedNovel) {
 }
 
 async function retryAll() {
-  if (anyRetrying.value || isBusy('failed_retry') || total.value === 0) return
+  if (anyRetrying.value || total.value === 0) return
   const confirmed = await confirm({
     title: '全部重试',
     description: `入队重试全部 ${total.value} 条失败记录？（所有失败项，不只当前页）`,
@@ -128,7 +120,6 @@ async function retryAll() {
   retryingAll.value = true
   try {
     const { task_id, matched } = await failedNovelApi.retryAll()
-    notifyTaskEnqueued('failed_retry')
     toast.success(`已入队重试 ${matched} 条记录（任务 #${task_id}，可在任务管理查看进度）`)
   } catch (err) {
     toast.error(getApiErrorMessage(err, '入队重试失败'))
@@ -184,7 +175,7 @@ async function resetAll() {
         <div class="flex gap-2">
           <button
             class="inline-flex items-center px-3 py-1.5 text-sm font-medium rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-            :disabled="anyRetrying || isBusy('failed_retry') || total === 0"
+            :disabled="anyRetrying || total === 0"
             @click="retryAll"
           >
             <RefreshCw class="mr-1.5 h-4 w-4" />
@@ -205,89 +196,115 @@ async function resetAll() {
 
       <EmptyState
         v-if="!loading && items.length === 0"
-        :loading="false"
         title="暂无失败记录"
         description="当前没有下载失败的小说记录"
       />
 
-      <DraggableTable
-        v-else
-        :items="items"
-        :columns="columns"
-        item-key="novel_id"
-        :disabled="true"
-        :loading="loading"
-        empty-text="暂无失败记录"
-      >
-        <template #novel="{ item }">
-          <div class="flex items-start gap-2">
-            <a
-              :href="pixivNovelUrl(item.novel_id)"
-              target="_blank"
-              rel="noopener noreferrer"
-              class="inline-flex items-center text-sm font-medium text-blue-600 hover:text-blue-800 shrink-0"
-              :title="`#${item.novel_id} · 在 Pixiv 打开`"
-            >
-              #{{ item.novel_id }}
-              <ExternalLink class="ml-1 h-3.5 w-3.5" />
-            </a>
-            <span class="text-sm text-gray-800 break-all" :title="item.title ?? undefined">
-              {{ item.title || '（无标题记录）' }}
-            </span>
-          </div>
-        </template>
-        <template #failed_times="{ item }">
-          <span
-            class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium"
-            :class="item.failed_times >= failedTimesCutoff ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'"
+      <div v-else class="bg-white rounded-lg shadow overflow-hidden border border-gray-200">
+        <div class="overflow-x-auto">
+          <table class="min-w-full divide-y divide-gray-200">
+            <thead class="bg-gray-50">
+              <tr>
+                <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  小说
+                </th>
+                <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  失败次数
+                </th>
+                <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  最近失败时间
+                </th>
+                <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  错误原因
+                </th>
+                <th scope="col" class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  操作
+                </th>
+              </tr>
+            </thead>
+            <tbody v-if="loading && items.length === 0" class="bg-white">
+              <tr>
+                <td colspan="5" class="px-6 py-12 text-center text-gray-500">
+                  <div class="flex flex-col items-center justify-center">
+                    <RefreshCw class="w-6 h-6 animate-spin text-blue-500 mb-2" />
+                    <span>加载中...</span>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+            <tbody v-else class="bg-white divide-y divide-gray-200">
+              <tr v-for="item in items" :key="item.novel_id" class="hover:bg-gray-50">
+                <td class="px-6 py-4">
+                  <div class="flex items-start gap-2">
+                    <a
+                      :href="pixivNovelUrl(item.novel_id)"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="inline-flex items-center text-sm font-medium text-blue-600 hover:text-blue-800 shrink-0"
+                      :title="`#${item.novel_id} · 在 Pixiv 打开`"
+                    >
+                      #{{ item.novel_id }}
+                      <ExternalLink class="ml-1 h-3.5 w-3.5" />
+                    </a>
+                    <span class="text-sm text-gray-800 break-all" :title="item.title ?? undefined">
+                      {{ item.title || '（无标题记录）' }}
+                    </span>
+                  </div>
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap">
+                  <span
+                    class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium"
+                    :class="item.failed_times >= failedTimesCutoff ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'"
+                  >
+                    <AlertTriangle v-if="item.failed_times >= failedTimesCutoff" class="mr-1 h-3 w-3" />
+                    {{ item.failed_times }}
+                  </span>
+                </td>
+                <td class="px-6 py-4 text-sm text-gray-500 whitespace-nowrap" :title="item.last_failed_at ?? undefined">
+                  {{ formatDate(item.last_failed_at) }}
+                </td>
+                <td class="px-6 py-4 text-sm text-gray-500 max-w-md">
+                  <span class="block truncate" :title="item.error_message ?? undefined">
+                    {{ item.error_message || '—' }}
+                  </span>
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap text-right">
+                  <div class="flex justify-end gap-2">
+                    <button
+                      class="inline-flex items-center px-2.5 py-1 text-xs font-medium rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                      :disabled="anyRetrying"
+                      @click="retryOne(item)"
+                    >
+                      <RefreshCw
+                        class="mr-1 h-3.5 w-3.5"
+                        :class="{ 'animate-spin': retryingIds.has(item.novel_id) }"
+                      />
+                      重试
+                    </button>
+                    <button
+                      class="inline-flex items-center px-2.5 py-1 text-xs font-medium rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 cursor-pointer"
+                      @click="resetOne(item)"
+                    >
+                      <RotateCcw class="mr-1 h-3.5 w-3.5" />
+                      重置计数
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-if="hasMore" class="border-t border-gray-200 px-4 py-3 text-center">
+          <button
+            class="inline-flex items-center px-4 py-2 text-sm font-medium rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50 cursor-pointer"
+            :disabled="loadingMore"
+            @click="loadMore"
           >
-            <AlertTriangle v-if="item.failed_times >= failedTimesCutoff" class="mr-1 h-3 w-3" />
-            {{ item.failed_times }}
-          </span>
-        </template>
-        <template #last_failed_at="{ item }">
-          {{ item.last_failed_at || '—' }}
-        </template>
-        <template #error_message="{ item }">
-          <span class="block truncate" :title="item.error_message ?? undefined">
-            {{ item.error_message || '—' }}
-          </span>
-        </template>
-        <template #actions="{ item }">
-          <div class="flex justify-end gap-2">
-            <button
-              class="inline-flex items-center px-2.5 py-1 text-xs font-medium rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-              :disabled="anyRetrying || isBusy('failed_retry')"
-              @click="retryOne(item)"
-            >
-              <RefreshCw
-                class="mr-1 h-3.5 w-3.5"
-                :class="{ 'animate-spin': retryingIds.has(item.novel_id) }"
-              />
-              重试
-            </button>
-            <button
-              class="inline-flex items-center px-2.5 py-1 text-xs font-medium rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 cursor-pointer"
-              @click="resetOne(item)"
-            >
-              <RotateCcw class="mr-1 h-3.5 w-3.5" />
-              重置计数
-            </button>
-          </div>
-        </template>
-        <template v-if="hasMore" #footer>
-          <div class="border-t border-gray-200 px-4 py-3 text-center">
-            <button
-              class="inline-flex items-center px-4 py-2 text-sm font-medium rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50 cursor-pointer"
-              :disabled="loadingMore"
-              @click="loadMore"
-            >
-              <RefreshCw class="mr-1.5 h-4 w-4" :class="{ 'animate-spin': loadingMore }" />
-              {{ loadingMore ? '加载中…' : `加载更多（已显示 ${items.length} / ${total}）` }}
-            </button>
-          </div>
-        </template>
-      </DraggableTable>
+            <RefreshCw class="mr-1.5 h-4 w-4" :class="{ 'animate-spin': loadingMore }" />
+            {{ loadingMore ? '加载中…' : `加载更多（已显示 ${items.length} / ${total}）` }}
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 </template>

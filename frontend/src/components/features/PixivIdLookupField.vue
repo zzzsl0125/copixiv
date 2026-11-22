@@ -10,14 +10,12 @@ export interface LookupResult {
   novel_count: number
 }
 
-const UNLINK_PLACEHOLDER_ID = 1
-
 const props = withDefaults(
   defineProps<{
     modelValue: string
     entity: '作者' | '系列'
     label: string
-    fetch: (id: number) => Promise<LookupResult>
+    fetch: (id: number, signal?: AbortSignal) => Promise<LookupResult>
     currentId?: number | null
     currentName?: string
     disabled?: boolean
@@ -79,13 +77,13 @@ watch(
 )
 
 const hint = computed(() => {
-  if (!props.showHint) return undefined
   const unlinking = props.allowUnlink && props.unlinked
   return formatIdLookupHint({
     entity: props.entity,
-    idNumber: unlinking ? null : lookup.idNumber.value,
-    currentId: unlinking ? UNLINK_PLACEHOLDER_ID : (props.currentId ?? null),
+    idNumber: lookup.idNumber.value,
+    currentId: props.currentId ?? null,
     currentName: props.currentName || '未知',
+    unlinking,
     loading: lookup.loading.value,
     failed: lookup.failed.value,
     found: lookup.result.value
@@ -121,8 +119,8 @@ defineExpose({
   <FormField
     :label="label"
     :disabled="disabled"
-    :hint="hint?.text"
-    :hint-tone="hint?.tone"
+    :hint="showHint ? hint?.text : undefined"
+    :hint-tone="showHint ? hint?.tone : undefined"
     :hint-test-id="hintTestId"
   >
     <template #default="{ id }">

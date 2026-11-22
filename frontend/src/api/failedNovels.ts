@@ -1,4 +1,4 @@
-import { apiClient, unwrap } from './client'
+import { apiClient, unwrap, unwrapVoid } from './client'
 import type { FailedNovelListResponse } from '../types'
 
 /** 分页大小，与后端默认 limit 一致。 */
@@ -17,23 +17,18 @@ export const failedNovelApi = {
     return unwrap(res, '加载失败记录失败')
   },
 
-  async count(signal?: AbortSignal): Promise<number> {
-    const res = await apiClient.GET('/api/failed-novels/count', { signal })
-    return unwrap(res, '统计失败记录失败').count
-  },
-
   /** 重置单条失败记录计数（记录保留，解封后下次批量任务自动重试）。 */
   async resetCount(novelId: number): Promise<void> {
     const res = await apiClient.POST('/api/failed-novels/{novel_id}/reset-count', {
       params: { path: { novel_id: novelId } },
     })
-    unwrap(res, '重置失败')
+    unwrapVoid(res, '重置失败')
   },
 
   /** 重置全部失败计数（记录保留）。 */
   async resetAll(): Promise<void> {
     const res = await apiClient.POST('/api/failed-novels/reset-count')
-    unwrap(res, '重置失败')
+    unwrapVoid(res, '重置失败')
   },
 
   /** 入队后台重试任务（任务管理页可见进度）。 */

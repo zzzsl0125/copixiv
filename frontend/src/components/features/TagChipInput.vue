@@ -8,7 +8,6 @@ const props = withDefaults(
     label?: string
     placeholder?: string
     mode?: 'chips' | 'live'
-    splitPattern?: RegExp
     helperText?: string
     inputTestId?: string
     tagsTestId?: string
@@ -26,19 +25,19 @@ const emit = defineEmits<{
 
 const rawInput = ref('')
 
-const effectivePattern = computed(
-  () => props.splitPattern ?? (props.mode === 'live' ? /[,，\s]+/ : /[/|#、\\]/),
-)
+const TAG_SPLIT_PATTERN = /[,，\s/|#、\\]+/
 
 function parseLiveInput(value: string) {
-  const unique = Array.from(
-    new Set(
-      value
-        .split(effectivePattern.value)
-        .map((t) => t.trim())
-        .filter(Boolean),
-    ),
-  )
+  const seen = new Set<string>()
+  const unique: string[] = []
+  for (const raw of value.split(TAG_SPLIT_PATTERN)) {
+    const part = raw.trim()
+    if (!part) continue
+    const key = part.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    unique.push(part)
+  }
   emit('update:modelValue', unique)
 }
 
@@ -53,7 +52,7 @@ function onInput(event: Event) {
 function commitChipInput() {
   if (props.mode !== 'chips') return
   const parts = rawInput.value
-    .split(effectivePattern.value)
+    .split(TAG_SPLIT_PATTERN)
     .map((t) => t.trim())
     .filter(Boolean)
   if (parts.length === 0) return
@@ -76,6 +75,8 @@ function removeTag(tag: string) {
   )
 }
 
+const hasDraft = computed(() => props.mode === 'chips' && rawInput.value.trim().length > 0)
+
 function reset() {
   rawInput.value = ''
   if (props.mode === 'live') {
@@ -83,7 +84,11 @@ function reset() {
   }
 }
 
-defineExpose({ reset })
+function flush() {
+  commitChipInput()
+}
+
+defineExpose({ reset, flush, hasDraft })
 </script>
 
 <template>
@@ -121,6 +126,7 @@ defineExpose({ reset })
         :data-testid="inputTestId"
         class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
         @input="onInput"
+        @blur="commitChipInput"
         @keydown.enter="
           (e) => {
             if (mode === 'chips') {

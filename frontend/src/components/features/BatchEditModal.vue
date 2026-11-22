@@ -51,7 +51,12 @@ const validationError = computed<string | null>(() => {
 })
 
 const confirmDisabled = computed(
-  () => !props.scope || !hasChanges.value || !!validationError.value || loading.value,
+  () =>
+    !props.scope ||
+    !hasChanges.value ||
+    !!validationError.value ||
+    loading.value ||
+    preview.value?.applicable === 0,
 )
 
 const previewText = computed(() => {

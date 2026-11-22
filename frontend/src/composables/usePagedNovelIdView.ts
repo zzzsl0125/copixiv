@@ -21,11 +21,13 @@ export function usePagedNovelIdView() {
   const offset = ref(0)
   const loading = ref(false)
   const loadingMore = ref(false)
+  let currentSeq = 0
 
   const totalIds = computed(() => ids.value.length)
   const hasMore = computed(() => offset.value < ids.value.length)
 
   function reset() {
+    currentSeq++
     ids.value = []
     novels.value = []
     offset.value = 0
@@ -33,37 +35,39 @@ export function usePagedNovelIdView() {
     loadingMore.value = false
   }
 
-  async function fetchPage() {
+  async function fetchPage(seq: number) {
     const pageIds = ids.value.slice(offset.value, offset.value + DEFAULT_PAGE_SIZE)
     if (pageIds.length === 0) return
     const result = await novelApi.getNovelsByIds(pageIds)
+    if (seq !== currentSeq) return
     offset.value += pageIds.length
     novels.value.push(...result.novels)
   }
 
   /** 取一页并把给定的 loading 标志包起来（start / loadMore 共用）。
    * 只有标志位不同：守卫（首屏 vs 有更多/已在翻页）留在各自调用处。 */
-  async function runPage(flag: Ref<boolean>) {
+  async function runPage(flag: Ref<boolean>, seq: number) {
     flag.value = true
     try {
-      await fetchPage()
+      await fetchPage(seq)
     } finally {
-      flag.value = false
+      if (seq === currentSeq) flag.value = false
     }
   }
 
   /** 从第一页开始展示 *idList*（重置旧状态；loading 覆盖首屏加载）。 */
   async function start(idList: number[]) {
     reset()
+    const seq = currentSeq
     ids.value = [...idList]
     if (ids.value.length === 0) return
-    await runPage(loading)
+    await runPage(loading, seq)
   }
 
   /** 加载下一页（惰性，无更多时 no-op）。 */
   async function loadMore() {
-    if (!hasMore.value || loadingMore.value) return
-    await runPage(loadingMore)
+    if (!hasMore.value || loadingMore.value || loading.value) return
+    await runPage(loadingMore, currentSeq)
   }
 
   /**

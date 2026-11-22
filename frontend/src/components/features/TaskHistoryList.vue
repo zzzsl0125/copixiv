@@ -20,31 +20,14 @@ const emit = defineEmits<{
   cancel: [taskId: number]
 }>()
 
-interface ParsedTaskResult {
-  log: string
-  summary: string
-  new_novels_count: number | null | undefined
-  new_novel_titles: string[]
-}
-
-interface RowStaticCache {
-  result: TaskHistory['result']
-  arguments: TaskHistory['arguments']
-  startTime: TaskHistory['start_time']
-  parsedResult: ParsedTaskResult
-  argsText: string
-  batchLabel: string
-  startTimeText: string
-}
-
 interface TaskHistoryRow {
   item: TaskHistory
-  isBatch: boolean
+  isExport: boolean
   argsText: string
-  batchLabel: string
+  exportLabel: string
   progressText: string
   startTimeText: string
-  newNovelsCount: number | null | undefined
+  newNovelsCount: number | null
   newNovelTitles: string[]
 }
 
@@ -58,106 +41,48 @@ const drawerLogTitle = computed(() =>
   drawerMode.value === 'log' ? 'Log Output' : 'Novel Titles',
 )
 
-const parseResult = (resultStr?: string | Record<string, any> | null): ParsedTaskResult => {
-  if (!resultStr) return { log: '', summary: '', new_novels_count: null, new_novel_titles: [] }
-  if (typeof resultStr === 'object') {
-    return {
-      log: typeof resultStr.log === 'string' ? resultStr.log : '',
-      summary: typeof resultStr.summary === 'string' ? resultStr.summary : '',
-      new_novels_count: resultStr.new_novels_count ?? null,
-      new_novel_titles: resultStr.new_novel_titles || [],
-    }
-  }
-  try {
-    const parsed = JSON.parse(resultStr)
-    if (parsed && typeof parsed === 'object') {
-      return {
-        log: typeof parsed.log === 'string' ? parsed.log : '',
-        summary: typeof parsed.summary === 'string' ? parsed.summary : '',
-        new_novels_count: parsed.new_novels_count,
-        new_novel_titles: parsed.new_novel_titles || [],
-      }
-    }
-  } catch { /* legacy plain text log */ }
-  return { log: resultStr, summary: '', new_novels_count: null, new_novel_titles: [] }
-}
+const isExportTask = (item: TaskHistory): boolean =>
+  item.task_func === 'batch_export' || item.name === 'batch_export'
 
-const batchArgsLabel = (item: TaskHistory) => {
-  let args: Record<string, unknown> | null = null
-  try {
-    args = typeof item.arguments === 'object'
-      ? (item.arguments as Record<string, unknown>)
-      : JSON.parse(item.arguments || 'null')
-  } catch { /* ignore */ }
+const exportLabel = (item: TaskHistory): string => {
+  const args = item.arguments
   if (!args) return ''
-  if (item.name === 'batch_export') {
-    const ids = Array.isArray(args.novel_ids) ? args.novel_ids.length : 0
-    const fmt = args.format_mode === 'prefer_epub' ? '优先 epub' : 'txt'
-    return `批量导出 · ${ids} 篇 · ${fmt}`
-  }
-  const labels: Record<string, string> = {
-    delete: '批量删除',
-    add_tags: '批量添加标签',
-    remove_tags: '批量移除标签',
-  }
-  const op = labels[String(args.operation)] ?? String(args.operation)
   const ids = Array.isArray(args.novel_ids) ? args.novel_ids.length : 0
-  const tags = Array.isArray(args.tags) && args.tags.length
-    ? ` · 标签：${args.tags.join('、')}`
-    : ''
-  return `${op} · ${ids} 篇${tags}`
+  const fmt = args.format_mode === 'prefer_epub' ? '优先 epub' : 'txt'
+  return `批量导出 · ${ids} 篇 · ${fmt}`
 }
 
-const isBatchTask = (item: TaskHistory) =>
-  item.name === 'batch_operation' || item.name === 'batch_export'
-
-const formatDate = (dateStr?: string | null) => {
-  if (!dateStr) return '-'
-  return new Date(dateStr).toLocaleString()
+const progressText = (item: TaskHistory): string => {
+  if (typeof item.progress === 'string' && item.progress) return item.progress
+  return typeof item.result?.summary === 'string' ? item.result.summary : ''
 }
 
-const rowCache = new WeakMap<TaskHistory, RowStaticCache>()
+const newNovelsCount = (item: TaskHistory): number | null =>
+  typeof item.result?.new_novels_count === 'number' ? item.result.new_novels_count : null
 
-const getStaticFields = (item: TaskHistory, isBatch: boolean): RowStaticCache => {
-  const cached = rowCache.get(item)
-  if (
-    cached &&
-    cached.result === item.result &&
-    cached.arguments === item.arguments &&
-    cached.startTime === item.start_time
-  ) {
-    return cached
-  }
-  const next: RowStaticCache = {
-    result: item.result,
-    arguments: item.arguments,
-    startTime: item.start_time,
-    parsedResult: parseResult(item.result),
-    argsText: isBatch ? '' : (item.arguments ? JSON.stringify(item.arguments) : 'None'),
-    batchLabel: isBatch ? batchArgsLabel(item) : '',
-    startTimeText: formatDate(item.start_time),
-  }
-  rowCache.set(item, next)
-  return next
-}
+const newNovelTitles = (item: TaskHistory): string[] =>
+  Array.isArray(item.result?.new_novel_titles)
+    ? (item.result.new_novel_titles as string[])
+    : []
+
+const argsText = (item: TaskHistory): string =>
+  item.arguments ? JSON.stringify(item.arguments) : 'None'
+
+const formatDate = (dateStr?: string | null): string =>
+  dateStr ? new Date(dateStr).toLocaleString() : '-'
 
 const rows = computed<TaskHistoryRow[]>(() =>
   props.history.map((item) => {
-    const isBatch = isBatchTask(item)
-    const fields = getStaticFields(item, isBatch)
-    const progressText =
-      typeof item.progress === 'string' && item.progress
-        ? item.progress
-        : fields.parsedResult.summary || ''
+    const isExport = isExportTask(item)
     return {
       item,
-      isBatch,
-      argsText: fields.argsText,
-      batchLabel: fields.batchLabel,
-      progressText,
-      startTimeText: fields.startTimeText,
-      newNovelsCount: fields.parsedResult.new_novels_count,
-      newNovelTitles: fields.parsedResult.new_novel_titles,
+      isExport,
+      argsText: isExport ? '' : argsText(item),
+      exportLabel: isExport ? exportLabel(item) : '',
+      progressText: progressText(item),
+      startTimeText: formatDate(item.start_time),
+      newNovelsCount: newNovelsCount(item),
+      newNovelTitles: newNovelTitles(item),
     }
   }),
 )
@@ -214,8 +139,8 @@ const statusIs = (status: string, ...names: string[]) =>
               <div class="min-w-0 flex-1 ml-4 grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-4 items-center">
                 <div class="col-span-1 min-w-0">
                   <p class="text-sm font-medium text-gray-900 truncate">{{ row.item.name }}</p>
-                  <template v-if="row.isBatch">
-                    <p class="text-xs text-gray-500 mt-1 truncate">{{ row.batchLabel }}</p>
+                  <template v-if="row.isExport">
+                    <p class="text-xs text-gray-500 mt-1 truncate">{{ row.exportLabel }}</p>
                     <p
                       v-if="statusIs(row.item.status, 'running', 'pending') && row.progressText"
                       class="text-xs text-blue-600 mt-0.5 truncate"
@@ -230,7 +155,7 @@ const statusIs = (status: string, ...names: string[]) =>
                 </div>
                 <div class="col-span-1 text-xs text-gray-500 flex flex-col justify-center">
                   <span>开始: {{ row.startTimeText }}</span>
-                  <span v-if="row.newNovelsCount !== null && row.newNovelsCount !== undefined" class="text-green-600 font-medium mt-0.5">
+                  <span v-if="row.newNovelsCount !== null" class="text-green-600 font-medium mt-0.5">
                     新增小说: {{ row.newNovelsCount }}
                   </span>
                   <span v-if="typeof row.item.duration === 'number'" class="mt-0.5">耗时: {{ row.item.duration.toFixed(2) }}s</span>
@@ -247,7 +172,7 @@ const statusIs = (status: string, ...names: string[]) =>
                       {{ cancellingIds?.has(row.item.id) ? '取消中…' : '取消' }}
                     </button>
                     <button
-                      v-if="row.item.name === 'batch_export' && statusIs(row.item.status, 'success')"
+                      v-if="row.isExport && statusIs(row.item.status, 'success')"
                       @click="handleDownloadExport(row.item)"
                       class="inline-flex items-center px-2.5 py-1.5 border border-blue-300 shadow-sm text-xs font-medium rounded text-blue-700 bg-blue-50 hover:bg-blue-100 focus:outline-none transition-colors cursor-pointer"
                     >

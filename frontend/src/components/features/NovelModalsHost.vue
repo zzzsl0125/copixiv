@@ -34,7 +34,7 @@ const emit = defineEmits<{
   'close-edit': []
   'close-upload': []
   'batch-success': [payload: { operation: string; result: BatchOperationResult | BatchMetadataResult }]
-  'batch-task-submitted': [payload: { operation: string; task_id: number; matched: number }]
+  'export-task-submitted': [payload: { task_id: number; matched: number }]
   'download-success': [filename: string]
   'novel-updated': [novel: Novel]
   'novel-deleted': [novelId: number]
@@ -50,7 +50,6 @@ const emit = defineEmits<{
     :scope-label="scopeLabel"
     @close="emit('close-delete')"
     @success="(payload) => emit('batch-success', { operation: 'delete', result: payload })"
-    @task-submitted="(payload) => emit('batch-task-submitted', { operation: 'delete', ...payload })"
     @error="emit('error', $event)"
   />
   <BatchTagModal
@@ -60,7 +59,6 @@ const emit = defineEmits<{
     :scope-label="scopeLabel"
     @close="emit('close-tag')"
     @success="(payload) => emit('batch-success', { operation: tagOperation, result: payload })"
-    @task-submitted="(payload) => emit('batch-task-submitted', { operation: tagOperation, ...payload })"
     @error="emit('error', $event)"
   />
   <BatchEditModal
@@ -72,6 +70,7 @@ const emit = defineEmits<{
     @error="emit('error', $event)"
   />
   <BatchDownloadModal
+    v-if="exportOpen"
     :is-open="exportOpen"
     :keyword="filters.keyword"
     :order_by="filters.order_by"
@@ -82,7 +81,7 @@ const emit = defineEmits<{
     @close="emit('close-export')"
     @download-success="emit('download-success', $event)"
     @download-error="emit('error', $event)"
-    @task-submitted="(payload) => emit('batch-task-submitted', { operation: 'export', ...payload })"
+    @task-submitted="emit('export-task-submitted', $event)"
   />
   <EditNovelModal
     :is-open="editingNovel !== null"

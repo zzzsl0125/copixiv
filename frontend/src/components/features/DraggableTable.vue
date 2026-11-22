@@ -17,7 +17,6 @@ const props = defineProps<{
   loading?: boolean
   itemKey?: keyof T & string
   emptyText?: string
-  columnsCount?: number
   disabled?: boolean
 }>()
 
@@ -101,7 +100,7 @@ const getAlignClass = (align?: 'left' | 'center' | 'right') => {
           <tr
             v-for="(element, index) in localItems"
             :key="resolvedKey(element, index)"
-            class="hover:bg-gray-50 transition-colors group"
+            class="hover:bg-gray-50 group"
           >
             <td
               v-if="!disabled"
@@ -137,7 +136,7 @@ const getAlignClass = (align?: 'left' | 'center' | 'right') => {
         <tbody v-if="(loading && localItems.length === 0) || (!loading && localItems.length === 0)" class="bg-white">
           <tr v-if="loading && localItems.length === 0">
             <td
-              :colspan="columnsCount || (columns ? columns.length + (disabled ? 0 : 1) : 10)"
+              :colspan="columns ? columns.length + (disabled ? 0 : 1) : 10"
               class="px-6 py-12 text-center text-gray-500"
             >
               <slot name="loading">
@@ -150,7 +149,7 @@ const getAlignClass = (align?: 'left' | 'center' | 'right') => {
           </tr>
           <tr v-else>
             <td
-              :colspan="columnsCount || (columns ? columns.length + (disabled ? 0 : 1) : 10)"
+              :colspan="columns ? columns.length + (disabled ? 0 : 1) : 10"
               class="px-6 py-12 text-center text-gray-500"
             >
               <slot name="empty">{{ emptyText || '暂无数据' }}</slot>

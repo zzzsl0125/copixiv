@@ -5,4 +5,3 @@ type S = components['schemas']
 
 export type FailedNovel = S['FailedNovelItem']
 export type FailedNovelListResponse = S['FailedNovelListResponse']
-export type FailedNovelCountResponse = S['FailedNovelCountResponse']

@@ -23,12 +23,10 @@ function onOpenChange(open: boolean) {
         data-testid="confirm-dialog-overlay"
         aria-hidden="true"
         class="absolute inset-0 bg-gray-500/75 transition-opacity"
-        @click="resolveConfirm(false)"
       />
       <AlertDialogContent
         data-testid="confirm-dialog"
         class="relative bg-white rounded-lg text-left overflow-hidden shadow-xl transform transition-all max-w-md w-full mx-4 focus:outline-none"
-        @escape-key-down="resolveConfirm(false)"
       >
         <div class="bg-white px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
           <AlertDialogTitle class="text-lg leading-6 font-medium text-gray-900">
@@ -55,7 +53,6 @@ function onOpenChange(open: boolean) {
           <AlertDialogCancel
             data-testid="confirm-dialog-cancel"
             class="mt-2 sm:mt-0 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 sm:w-auto sm:text-sm transition-colors cursor-pointer"
-            @click="resolveConfirm(false)"
           >
             {{ state.cancelText }}
           </AlertDialogCancel>

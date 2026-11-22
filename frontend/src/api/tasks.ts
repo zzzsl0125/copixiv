@@ -10,7 +10,7 @@ import type {
 export const taskApi = {
   async getTaskMethods(signal?: AbortSignal): Promise<TaskMethod[]> {
     const res = await apiClient.GET('/api/tasks/methods', { signal })
-    return unwrap(res, '获取任务函数列表失败') as TaskMethod[]
+    return unwrap(res, '获取任务函数列表失败')
   },
 
   async getScheduledTasks(signal?: AbortSignal): Promise<ScheduledTask[]> {
@@ -60,11 +60,6 @@ export const taskApi = {
       signal,
     })
     return unwrap(res, '获取任务历史失败')
-  },
-
-  async getBusyTasks(signal?: AbortSignal): Promise<{ funcs: string[] }> {
-    const res = await apiClient.GET('/api/tasks/busy', { signal })
-    return unwrap(res, '获取活跃任务失败')
   },
 
   async getTaskLog(taskId: number, signal?: AbortSignal): Promise<{ id: number; log: string }> {

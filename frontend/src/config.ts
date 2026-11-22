@@ -45,30 +45,18 @@ export interface SectionDef {
    */
   order_by: OrderBy
   order_direction: OrderDirection
-  /**
-   * 这个 section 是否跟随全局「排除厌恶标签」开关。
-   *
-   * 书架类（`false`）不排除：它们语义是「**我的完整清单**」——我的收藏、我追的
-   * 作者、我上传的书。被厌恶标签命中的一本，仍然是我收藏的，不该从我的书架里
-   * 消失（那和 `min_like` 门槛把本地书筛没是同一类错误：用浏览态规则处理清单）。
-   *
-   * 除了语义，这条还省掉一次服务端存在性查询：`exclude_blocked=true` 时后端要
-   * 额外来一遍 `has_excluded`（`SELECT EXISTS(...)` 半连接），实测在书架 scope 下
-   * 多 **9.2ms**（15.0 vs 5.8ms 中位），而书架的答案几乎恒定 false。
-   */
-  exclude_blocked: boolean
 }
 
 export const SECTIONS = {
-  novels: { keyword: '', min_like: DEFAULT_MIN_LIKE, min_text: DEFAULT_MIN_TEXT, order_by: 'random', order_direction: 'DESC', exclude_blocked: true },
+  novels: { keyword: '', min_like: DEFAULT_MIN_LIKE, min_text: DEFAULT_MIN_TEXT, order_by: 'random', order_direction: 'DESC' },
   // 书架态（我的清单）：阈值 0/0，服务端 `min_like > 0` 不成立即不加条件——
   // 点开即完整清单，门槛交给用户自己点筛选条（applySection 只是把表里的值抄进 filters）。
-  favourites: { keyword: 'is_favourite:true;', min_like: 0, min_text: 0, order_by: 'id', order_direction: 'DESC', exclude_blocked: false },
-  special_follow: { keyword: 'is_special_follow:true;', min_like: 0, min_text: 0, order_by: 'id', order_direction: 'DESC', exclude_blocked: false },
+  favourites: { keyword: 'is_favourite:true;', min_like: 0, min_text: 0, order_by: 'id', order_direction: 'DESC' },
+  special_follow: { keyword: 'is_special_follow:true;', min_like: 0, min_text: 0, order_by: 'id', order_direction: 'DESC' },
   // 本地书：like/view 一律 0（LIBRARY_DESIGN.md §3.3），阈值必须为 0；
   // id 是**负的时间坐标**（§3.1），时间在模上：服务端按 `abs(id)` 排序，
   // 所以 `order_by: 'id'` + DESC 仍是「最新上传在前」。
-  uploads: { keyword: 'source:local;', min_like: 0, min_text: 0, order_by: 'id', order_direction: 'DESC', exclude_blocked: false },
+  uploads: { keyword: 'source:local;', min_like: 0, min_text: 0, order_by: 'id', order_direction: 'DESC' },
 } satisfies Record<string, SectionDef>
 
 export type SectionId = keyof typeof SECTIONS
@@ -100,18 +88,17 @@ export function sectionFor(keyword: string): SectionDef {
 }
 
 /**
- * Resolve whether blocked-tag exclusion applies for *keyword* and *systemConfig*.
+ * Return an explicit `exclude_blocked` query override for *sectionOrKeyword*.
  *
- * Shelf sections marked ``exclude_blocked: false`` always keep blocked items
- * visible; browse/search views follow the global system config flag (default true).
+ * Shelf sections (`favourites`, `special_follow`, `uploads`) return `false` so
+ * personal lists never hide blocked-tag novels; browse/search views return
+ * `undefined` so the backend applies its own `exclude_blocked_tag_novels` setting.
  */
-export function shouldExcludeBlocked(
-  keyword: string,
-  systemConfig: { exclude_blocked_tag_novels?: boolean | null } | null,
-): boolean {
-  const section = resolveSection(keyword.trim())
-  if (section) return SECTIONS[section].exclude_blocked
-  return systemConfig ? (systemConfig.exclude_blocked_tag_novels ?? true) : true
+export function excludeBlockedOverride(sectionOrKeyword: string): false | undefined {
+  const trimmed = sectionOrKeyword.trim()
+  const section = trimmed in SECTIONS ? (trimmed as SectionId) : resolveSection(trimmed)
+  if (section && section !== 'novels') return false
+  return undefined
 }
 
 /** 分页页大小：浏览列表（useNovels per_page）与「查看已选/被排除」集合视图

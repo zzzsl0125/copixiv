@@ -1,19 +1,16 @@
 <script setup lang="ts">
-import { computed, useId } from 'vue'
+import { useId } from 'vue'
 import { Label } from 'reka-ui'
 
-const props = defineProps<{
+defineProps<{
   label?: string
-  forId?: string
   hint?: string
   hintTone?: 'muted' | 'ok' | 'warn' | 'error'
-  error?: string | null
   disabled?: boolean
   hintTestId?: string
 }>()
 
-const generatedId = useId()
-const fieldId = computed(() => props.forId || generatedId)
+const fieldId = useId()
 </script>
 
 <template>
@@ -39,9 +36,6 @@ const fieldId = computed(() => props.forId || generatedId)
       :data-testid="hintTestId"
     >
       {{ hint }}
-    </p>
-    <p v-if="error" class="mt-0.5 text-xs text-red-600">
-      {{ error }}
     </p>
   </div>
 </template>

@@ -7,7 +7,7 @@ export const systemApi = {
     return unwrap(res, '获取系统配置失败')
   },
 
-  async updateConfig(patch: Partial<SystemConfig>): Promise<SystemConfig> {
+  async updateConfig(patch: { exclude_blocked_tag_novels: boolean }): Promise<SystemConfig> {
     const res = await apiClient.PUT('/api/system/config', { body: patch })
     return unwrap(res, '保存系统配置失败')
   },

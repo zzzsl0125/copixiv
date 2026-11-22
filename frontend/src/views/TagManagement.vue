@@ -42,7 +42,6 @@ async function toggleExclude(nextValue: boolean) {
 const activeTab = ref<'favourite' | 'blocked' | 'alias'>('favourite')
 const showModal = ref(false)
 const showSuggestModal = ref(false)
-const suggestTarget = ref<string | undefined>(undefined)
 const saving = ref(false)
 const currentTag = ref('')
 const aliasSource = ref('')
@@ -115,12 +114,20 @@ async function fetchData() {
   }
 }
 
-async function invalidateAfterTagChange() {
-  await Promise.all([
-    queryClient.invalidateQueries({ queryKey: queryKeys.tagPreferences() }),
-    queryClient.invalidateQueries({ queryKey: queryKeys.tagAliases() }),
-    queryClient.invalidateQueries({ queryKey: queryKeys.novelsAll() }),
-  ])
+async function invalidateAfterTagChange({
+  prefs = false,
+  aliases = false,
+  novels = false,
+}: {
+  prefs?: boolean
+  aliases?: boolean
+  novels?: boolean
+} = {}) {
+  const tasks: Promise<void>[] = []
+  if (prefs) tasks.push(queryClient.invalidateQueries({ queryKey: queryKeys.tagPreferences() }))
+  if (aliases) tasks.push(queryClient.invalidateQueries({ queryKey: queryKeys.tagAliases() }))
+  if (novels) tasks.push(queryClient.invalidateQueries({ queryKey: queryKeys.novelsAll() }))
+  await Promise.all(tasks)
 }
 
 async function saveTag() {
@@ -157,7 +164,7 @@ async function saveTag() {
       } else {
         for (const s of newSources) await tagAliasApi.createTagAlias(s, target)
       }
-      await invalidateAfterTagChange()
+      await invalidateAfterTagChange({ prefs: true, aliases: true, novels: true })
       closeModal()
     } catch (err: unknown) {
       toast.error(getApiErrorMessage(err, '保存失败'))
@@ -167,12 +174,10 @@ async function saveTag() {
   } else {
     if (!currentTag.value.trim()) return
     saving.value = true
+    const pref = activeTab.value as 'favourite' | 'blocked'
     try {
-      await tagPreferenceApi.setTagPreference(
-        currentTag.value.trim(),
-        activeTab.value as 'favourite' | 'blocked',
-      )
-      await invalidateAfterTagChange()
+      await tagPreferenceApi.setTagPreference(currentTag.value.trim(), pref)
+      await invalidateAfterTagChange({ prefs: true, novels: pref === 'blocked' })
       closeModal()
     } catch (err: unknown) {
       toast.error(getApiErrorMessage(err, '添加失败'))
@@ -192,7 +197,7 @@ async function removeTag(tag: TagPreference) {
   if (!confirmed) return
   try {
     await tagPreferenceApi.deleteTagPreference(tag.id)
-    await invalidateAfterTagChange()
+    await invalidateAfterTagChange({ prefs: true, novels: tag.preference === 'blocked' })
   } catch (err: unknown) {
     toast.error(getApiErrorMessage(err, '删除失败'))
   }
@@ -208,7 +213,7 @@ async function removeAliasGroup(group: GroupedAlias) {
   if (!confirmed) return
   try {
     for (const alias of group.aliases) await tagAliasApi.deleteTagAlias(alias.id)
-    await invalidateAfterTagChange()
+    await invalidateAfterTagChange({ aliases: true })
   } catch (err: unknown) {
     toast.error(getApiErrorMessage(err, '删除失败'))
   }
@@ -220,10 +225,11 @@ async function onDragEnd(updatedPrefTags: TagPreference[]) {
   const otherTags = allTags.value
     .filter((t) => t.preference !== preference)
     .sort((a, b) => a.sort_index - b.sort_index)
-  const newOrderedTags =
+  const newOrderedTags = (
     preference === 'favourite'
       ? [...updatedPrefTags, ...otherTags]
       : [...otherTags, ...updatedPrefTags]
+  ).map((t, idx) => ({ ...t, sort_index: idx }))
   queryClient.setQueryData(queryKeys.tagPreferences(), newOrderedTags)
   try {
     await tagPreferenceApi.reorderTagPreferences(newOrderedTags.map((t) => t.id))
@@ -287,7 +293,7 @@ const aliasColumns: TableColumn[] = [
       >
         <template #actions v-if="activeTab === 'alias'">
           <button
-            @click="suggestTarget = undefined; showSuggestModal = true"
+            @click="showSuggestModal = true"
             class="flex items-center px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 transition-colors shadow-sm text-sm font-medium whitespace-nowrap cursor-pointer"
           >
             <Sparkles class="w-4 h-4 mr-2" /> 别名建议
@@ -412,9 +418,8 @@ const aliasColumns: TableColumn[] = [
 
     <AliasSuggestModal
       :is-open="showSuggestModal"
-      :target-tag="suggestTarget"
       @close="showSuggestModal = false"
-      @updated="invalidateAfterTagChange"
+      @updated="invalidateAfterTagChange({ prefs: true, aliases: true, novels: true })"
     />
   </div>
 </template>

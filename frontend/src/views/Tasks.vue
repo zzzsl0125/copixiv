@@ -3,7 +3,7 @@ import { computed, ref } from 'vue'
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/vue-query'
 import { getApiErrorMessage, queryKeys, taskApi } from '../api'
 import type { ScheduledTask } from '../types'
-import { useConfirm, useTaskStatus, useToast } from '../composables'
+import { useConfirm, useToast } from '../composables'
 import ScheduledTaskList from '../components/features/ScheduledTaskList.vue'
 import TaskHistoryList from '../components/features/TaskHistoryList.vue'
 import TaskEditModal from '../components/features/TaskEditModal.vue'
@@ -17,8 +17,8 @@ defineEmits<{ (e: 'toggle-sidebar'): void }>()
 const toast = useToast()
 const { confirm } = useConfirm()
 const queryClient = useQueryClient()
-const { busyFuncNames, notifyTaskEnqueued } = useTaskStatus()
 const activeTab = ref<'scheduled' | 'history'>('scheduled')
+const runningIds = ref<Set<number>>(new Set())
 const cancellingIds = ref<Set<number>>(new Set())
 
 const scheduledQuery = useQuery({
@@ -31,13 +31,19 @@ const historyQuery = useInfiniteQuery({
   queryKey: queryKeys.tasksHistory(),
   queryFn: ({ pageParam, signal }) => taskApi.getTaskHistory(historyPageSize, pageParam, signal),
   initialPageParam: 0,
+  enabled: computed(() => activeTab.value === 'history'),
   getNextPageParam: (lastPage, allPages) => {
     const loaded = allPages.reduce((sum, p) => sum + p.items.length, 0)
     return loaded < lastPage.total ? loaded : undefined
   },
-  // Refresh history progress on the same 5s rhythm only while active tab is history and a task is busy.
-  refetchInterval: () =>
-    activeTab.value === 'history' && busyFuncNames.value.length > 0 ? 5000 : false,
+  // Refresh history progress every 5s while on history tab and any loaded row is still active.
+  refetchInterval: (q) => {
+    if (activeTab.value !== 'history') return false
+    const hasActive = q.state.data?.pages.some((p) =>
+      p.items.some((i) => i.status === 'pending' || i.status === 'running'),
+    )
+    return hasActive ? 5000 : false
+  },
   refetchIntervalInBackground: false,
 })
 
@@ -138,12 +144,20 @@ const deleteTask = async (id: number) => {
 }
 
 const runTask = async (task: ScheduledTask) => {
+  if (runningIds.value.has(task.id)) return
+  const next = new Set(runningIds.value)
+  next.add(task.id)
+  runningIds.value = next
   try {
     await taskApi.runScheduledTask(task.id)
-    notifyTaskEnqueued(task.task)
+    void queryClient.invalidateQueries({ queryKey: queryKeys.tasksHistory() })
     toast.success(`任务 "${task.name}" 已加入队列`)
   } catch (err: unknown) {
     toast.error(getApiErrorMessage(err, '运行失败'))
+  } finally {
+    const remaining = new Set(runningIds.value)
+    remaining.delete(task.id)
+    runningIds.value = remaining
   }
 }
 
@@ -155,10 +169,7 @@ const cancelTask = async (taskId: number) => {
   try {
     const res = await taskApi.cancelTask(taskId)
     toast.info(res.status === 'cancelled' ? '已取消任务' : '已发送取消请求')
-    await Promise.all([
-      queryClient.invalidateQueries({ queryKey: queryKeys.tasksHistory() }),
-      queryClient.invalidateQueries({ queryKey: queryKeys.tasksBusy() }),
-    ])
+    await queryClient.invalidateQueries({ queryKey: queryKeys.tasksHistory() })
   } catch (err: unknown) {
     toast.error(getApiErrorMessage(err, '取消任务失败'))
   } finally {
@@ -206,7 +217,7 @@ const reorderTasks = async (newTasks: ScheduledTask[]) => {
         <ScheduledTaskList
           :tasks="tasks"
           :loading="loadingTasks"
-          :busy-task-names="busyFuncNames"
+          :running-ids="runningIds"
           @edit="openModal"
           @delete="deleteTask"
           @toggle="toggleTask"

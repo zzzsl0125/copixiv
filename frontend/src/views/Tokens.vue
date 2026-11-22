@@ -51,8 +51,7 @@ const handleReorder = async (newTokens: Token[]) => {
   try {
     await reorder(newTokens)
   } catch {
-    toast.error('排序保存失败，即将重新加载数据')
-    await loadTokens()
+    toast.error('排序保存失败')
   }
 }
 

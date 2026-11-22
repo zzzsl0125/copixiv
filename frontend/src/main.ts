@@ -3,12 +3,18 @@ import { createApp } from 'vue'
 import './style.css'
 import 'vue-sonner/style.css'
 import App from './App.vue'
+import { ApiError } from './api/errors'
 import router from './router'
 
 export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      retry: 1,
+      retry: (failureCount, error) => {
+        if (error instanceof ApiError && error.status >= 400 && error.status < 500) {
+          return false
+        }
+        return failureCount < 1
+      },
       refetchOnWindowFocus: false,
     },
   },

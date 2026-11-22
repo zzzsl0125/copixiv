@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { getApiErrorMessage, taskApi } from '../../api'
-import type { JsonSchemaProperty, ScheduledTask, TaskMethod } from '../../types'
+import type { ScheduledTask, TaskArgumentField, TaskMethod } from '../../types'
 import { useToast } from '../../composables'
 import BaseModal from '../ui/BaseModal.vue'
 import AppInput from '../ui/AppInput.vue'
@@ -27,41 +27,40 @@ const formState = ref({
   name: '',
   task: '',
   cron: '',
-  params: '{}',
   is_enabled: true,
 })
 
-onMounted(async () => {
-  try {
-    availableMethods.value = await taskApi.getTaskMethods()
-  } catch (err: unknown) {
-    toast.error(getApiErrorMessage(err, '任务方法加载失败'))
-  }
-})
+let methodsLoaded = false
+let methodsLoadingPromise: Promise<void> | null = null
 
-const jsonType = (prop?: JsonSchemaProperty): string => {
-  if (!prop) return 'string'
-  if (prop.anyOf && prop.anyOf.length > 0) {
-    const branch = prop.anyOf.find((p) => jsonType(p) !== 'null')
-    return branch ? jsonType(branch) : 'null'
-  }
-  if (Array.isArray(prop.type)) {
-    return prop.type.find((t) => t !== 'null') || 'null'
-  }
-  return prop.type || 'string'
+const ensureMethodsLoaded = async () => {
+  if (methodsLoaded || methodsLoadingPromise) return methodsLoadingPromise
+  methodsLoadingPromise = (async () => {
+    try {
+      availableMethods.value = await taskApi.getTaskMethods()
+      methodsLoaded = true
+    } catch (err: unknown) {
+      toast.error(getApiErrorMessage(err, '任务方法加载失败'))
+    } finally {
+      methodsLoadingPromise = null
+    }
+  })()
+  return methodsLoadingPromise
 }
 
-const isNullable = (prop?: JsonSchemaProperty): boolean => {
-  if (!prop) return false
-  if (prop.type === 'null') return true
-  if (Array.isArray(prop.type) && prop.type.includes('null')) return true
-  return (prop.anyOf || []).some(isNullable)
-}
+const selectedMethod = computed(() =>
+  availableMethods.value.find((m) => m.name === formState.value.task),
+)
+const selectedMethodArgs = computed<TaskArgumentField[]>(
+  () => selectedMethod.value?.arguments ?? [],
+)
 
-const hasDefault = (prop: JsonSchemaProperty): boolean =>
-  Object.prototype.hasOwnProperty.call(prop, 'default')
+const savedParams = (): Record<string, unknown> =>
+  props.task && formState.value.task === props.task.task && props.task.params
+    ? props.task.params
+    : {}
 
-const toFormValue = (value: unknown, type: string): unknown => {
+const toFormValue = (value: unknown, type: TaskArgumentField['type']): unknown => {
   if (type === 'array') {
     if (value == null) return ''
     return typeof value === 'string' ? value : JSON.stringify(value)
@@ -70,30 +69,24 @@ const toFormValue = (value: unknown, type: string): unknown => {
   return value == null ? '' : value
 }
 
-const defaultFormValue = (prop: JsonSchemaProperty, type: string): unknown => {
-  if (hasDefault(prop)) return toFormValue(prop.default, type)
-  if (type === 'boolean') return false
-  if (type === 'array') return '[]'
+const defaultFormValue = (arg: TaskArgumentField): unknown => {
+  if (arg.default != null) return toFormValue(arg.default, arg.type)
+  if (arg.type === 'boolean') return false
+  if (arg.type === 'array') return '[]'
   return ''
 }
 
 const initialDynamicParams = (taskName: string): Record<string, unknown> => {
   const method = availableMethods.value.find((m) => m.name === taskName)
   if (!method) return {}
-  let currentParams: Record<string, unknown> = {}
-  try {
-    currentParams = JSON.parse(formState.value.params || '{}')
-  } catch {
-    currentParams = {}
-  }
+  const current = savedParams()
   const next: Record<string, unknown> = {}
-  Object.entries(method.arguments?.properties || {}).forEach(([name, prop]) => {
-    const type = jsonType(prop)
-    next[name] =
-      currentParams[name] !== undefined
-        ? toFormValue(currentParams[name], type)
-        : defaultFormValue(prop, type)
-  })
+  for (const arg of method.arguments) {
+    next[arg.name] =
+      current[arg.name] !== undefined
+        ? toFormValue(current[arg.name], arg.type)
+        : defaultFormValue(arg)
+  }
   return next
 }
 
@@ -111,49 +104,38 @@ watch(availableMethods, () => {
 })
 
 watch(
-  dynamicParams,
-  (newVal) => {
-    if (!availableMethods.value.some((m) => m.name === formState.value.task)) return
-    formState.value.params = JSON.stringify(newVal, null, 2)
-  },
-  { deep: true },
-)
-
-watch(
   () => props.isOpen,
   (newVal) => {
-    if (newVal) {
-      if (props.task) {
-        formState.value = {
-          name: props.task.name,
-          task: props.task.task,
-          cron: props.task.cron,
-          params: props.task.params ? JSON.stringify(props.task.params, null, 2) : '{}',
-          is_enabled: props.task.is_enabled,
-        }
-        dynamicParams.value = initialDynamicParams(props.task.task)
-      } else {
-        formState.value = { name: '', task: '', cron: '0 0 * * *', params: '{}', is_enabled: true }
-        dynamicParams.value = {}
+    if (!newVal) return
+    void ensureMethodsLoaded()
+    if (props.task) {
+      formState.value = {
+        name: props.task.name,
+        task: props.task.task,
+        cron: props.task.cron,
+        is_enabled: props.task.is_enabled,
       }
+      dynamicParams.value = initialDynamicParams(props.task.task)
+    } else {
+      formState.value = { name: '', task: '', cron: '0 0 * * *', is_enabled: true }
+      dynamicParams.value = {}
     }
   },
   { immediate: true },
 )
 
-const coerceFormValue = (name: string, value: unknown, prop: JsonSchemaProperty): unknown => {
-  const type = jsonType(prop)
-  if (type === 'array') {
+const coerceFormValue = (arg: TaskArgumentField, value: unknown): unknown => {
+  if (arg.type === 'array') {
     if (Array.isArray(value)) return value
     const text = typeof value === 'string' ? value.trim() : ''
     return text === '' ? [] : JSON.parse(text)
   }
-  if (type === 'boolean') return !!value
+  if (arg.type === 'boolean') return !!value
   const text = value == null ? '' : String(value)
-  if (text === '' && isNullable(prop)) return null
-  if (type === 'integer' || type === 'number') {
-    const parsed = type === 'integer' ? parseInt(text, 10) : parseFloat(text)
-    if (Number.isNaN(parsed)) throw new Error(`参数 ${name} 必须是数字`)
+  if (text === '' && arg.nullable) return null
+  if (arg.type === 'integer' || arg.type === 'number') {
+    const parsed = arg.type === 'integer' ? parseInt(text, 10) : parseFloat(text)
+    if (Number.isNaN(parsed)) throw new Error(`参数 ${arg.name} 必须是数字`)
     return parsed
   }
   return value ?? ''
@@ -161,13 +143,17 @@ const coerceFormValue = (name: string, value: unknown, prop: JsonSchemaProperty)
 
 const handleSave = () => {
   try {
-    const paramsObj = JSON.parse(formState.value.params || '{}')
-    const method = availableMethods.value.find((m) => m.name === formState.value.task)
-    Object.entries(method?.arguments?.properties || {}).forEach(([name, prop]) => {
-      if (name in dynamicParams.value) {
-        paramsObj[name] = coerceFormValue(name, dynamicParams.value[name], prop)
+    let paramsObj: Record<string, unknown>
+    if (selectedMethod.value) {
+      paramsObj = {}
+      for (const arg of selectedMethodArgs.value) {
+        if (arg.name in dynamicParams.value) {
+          paramsObj[arg.name] = coerceFormValue(arg, dynamicParams.value[arg.name])
+        }
       }
-    })
+    } else {
+      paramsObj = { ...savedParams() }
+    }
     emit('save', {
       name: formState.value.name,
       task: formState.value.task,
@@ -176,20 +162,9 @@ const handleSave = () => {
       is_enabled: formState.value.is_enabled,
     })
   } catch (err: unknown) {
-    toast.error(getApiErrorMessage(err, '参数格式错误，请检查 JSON'))
+    toast.error(getApiErrorMessage(err, '参数格式错误，请检查参数'))
   }
 }
-
-const selectedMethodArgs = computed(() => {
-  const method = availableMethods.value.find((m) => m.name === formState.value.task)
-  const schema = method?.arguments
-  const required = new Set(schema?.required || [])
-  return Object.entries(schema?.properties || {}).map(([name, prop]) => ({
-    name,
-    type: jsonType(prop),
-    required: required.has(name),
-  }))
-})
 </script>
 
 <template>
@@ -213,7 +188,7 @@ const selectedMethodArgs = computed(() => {
         </option>
       </select>
       <p v-if="formState.task" class="mt-1 text-xs text-gray-500">
-        {{ availableMethods.find((m) => m.name === formState.task)?.description || '无描述' }}
+        {{ selectedMethod?.description || '无描述' }}
       </p>
     </div>
 
@@ -225,12 +200,15 @@ const selectedMethodArgs = computed(() => {
       <div
         v-for="arg in selectedMethodArgs"
         :key="arg.name"
-        class="flex items-center mb-3 last:mb-0"
+        class="flex items-start mb-3 last:mb-0"
       >
-        <label class="w-1/3 text-sm font-medium text-gray-700">
-          {{ arg.name }} <span class="text-xs text-gray-400 font-normal">({{ arg.type }})</span>
-          <span v-if="arg.required" class="text-red-500">*</span>
-        </label>
+        <div class="w-1/3 pr-2">
+          <label class="block text-sm font-medium text-gray-700">
+            {{ arg.name }} <span class="text-xs text-gray-400 font-normal">({{ arg.type }})</span>
+            <span v-if="arg.required" class="text-red-500">*</span>
+          </label>
+          <p v-if="arg.description" class="mt-0.5 text-xs text-gray-500">{{ arg.description }}</p>
+        </div>
         <div class="w-2/3">
           <div v-if="arg.type === 'boolean'" class="flex items-center">
             <AppCheckbox

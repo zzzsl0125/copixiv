@@ -28,6 +28,10 @@ export const routes = [
     name: 'failed-novels',
     component: () => import('../views/FailedNovels.vue'),
   },
+  {
+    path: '/:pathMatch(.*)*',
+    redirect: '/',
+  },
 ]
 
 const router = createRouter({

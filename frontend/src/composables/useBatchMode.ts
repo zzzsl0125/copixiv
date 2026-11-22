@@ -1,17 +1,15 @@
 import { computed, ref, toValue, type MaybeRefOrGetter } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { getApiErrorMessage, novelApi, queryKeys } from '../api'
-import { shouldExcludeBlocked } from '../config'
+import { excludeBlockedOverride } from '../config'
 import type { BatchScope, NovelFilters } from '../types'
 import { useNovelShellState } from './useNovelShellState'
-import { useSystem } from './useSystem'
 import { useToast } from './useToast'
 
 /**
  * Batch-mode state machine backed by shared shell UI state + Vue Query count.
  */
 export function useBatchMode(filtersInput: MaybeRefOrGetter<NovelFilters>) {
-  const { systemConfig } = useSystem()
   const shell = useNovelShellState()
   const toast = useToast()
 
@@ -20,7 +18,7 @@ export function useBatchMode(filtersInput: MaybeRefOrGetter<NovelFilters>) {
   const selectedIds = shell.selectedIds
   const selectAllLoading = ref(false)
 
-  const excludeBlocked = () => shouldExcludeBlocked(filters.value.keyword, systemConfig.value)
+  const excludeBlocked = () => excludeBlockedOverride(filters.value.keyword)
 
   const countParams = computed(() => ({
     keyword: filters.value.keyword.trim() || undefined,
@@ -57,10 +55,6 @@ export function useBatchMode(filtersInput: MaybeRefOrGetter<NovelFilters>) {
       excluded_ids: [],
     }
   })
-
-  function refreshMatchedCount() {
-    return countQuery.refetch()
-  }
 
   function enter() {
     shell.enterBatchMode()
@@ -123,7 +117,7 @@ export function useBatchMode(filtersInput: MaybeRefOrGetter<NovelFilters>) {
         }
       }
       selectedIds.value = next
-      return { added, total: result.total, truncated: result.truncated }
+      return { added, total: result.total }
     } catch (err: unknown) {
       toast.error(getApiErrorMessage(err, '全选匹配失败'))
       return null
@@ -169,7 +163,6 @@ export function useBatchMode(filtersInput: MaybeRefOrGetter<NovelFilters>) {
     selectAllMatched,
     clearSelection,
     clearSelectionInScope,
-    refreshMatchedCount,
   }
 }
 

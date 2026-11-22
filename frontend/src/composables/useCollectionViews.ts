@@ -9,7 +9,7 @@ export interface UseCollectionViewsOptions {
   filters: Readonly<Ref<NovelFilters>>
   /** 批量范围（selected 视图的 id 集来源）。 */
   batchScope: Ref<BatchScope | null>
-  /** 批量模式开关（离开批量模式 → 关闭已选视图；进入 → 关闭被排除视图）。 */
+  /** 批量模式开关（离开批量模式 → 关闭已选视图）。 */
   batchMode: Ref<boolean>
   /** 是否已有勾选（选集清空 → 关闭已选视图）。 */
   hasSelection: Ref<boolean>
@@ -22,18 +22,10 @@ export interface UseCollectionViewsOptions {
 }
 
 /**
- * 「查看已选」/「查看被排除」两个集合视图的编排（自 Novels.vue L68–307
- * 逐行搬移，语义不变）：
- *
- * - 内部实例化两个 usePagedNovelIdView（selectedView / excludedView），
- *   二者互斥：进入一个先 reset 另一个（批量模式优先）；
- * - 视图重算/重排/回顶的时序（含大量 `await nextTick(); relayout()`）原样保留，
- *   布局重排经注入的 afterLayout 回调交给页面；
- * - 5 类 watch 全部内聚：batchMode 互斥关闭 / hasSelection 清空关闭 /
- *   viewing 活跃上报（immediate 首报 false）/ 筛选变化触发被排除视图重算 /
- *   排序变化触发两个集合视图重排重取；
- * - excluded 侧重取带 seq 防竞态（loadExcludedView），error toast 走模块级
- *   useToast 单例，与现有风格一致。
+ * 「查看已选」集合视图编排：
+ * - 实例化 `selectedView` (`usePagedNovelIdView`)；
+ * - 带 `selectedSorting` + `selectedSeq` 防竞态与首屏 `EmptyState`/`0 / 0` 闪烁；
+ * - 离开批量模式 / 选集清空 / 排序变化时自动同步。
  */
 export function useCollectionViews(options: UseCollectionViewsOptions) {
   const {
@@ -47,261 +39,175 @@ export function useCollectionViews(options: UseCollectionViewsOptions) {
   } = options
   const toast = useToast()
 
-  // ---- 「查看已选」/「查看被排除」views: the grid swaps to an explicit
-  // id list, fetched in pages so huge lists stay smooth (infinite scroll).
-  // Shared paging lives in usePagedNovelIdView; the two views are mutually
-  // exclusive (批量模式优先) and exit on new searches. ----
   const selectedView = usePagedNovelIdView()
-  const excludedView = usePagedNovelIdView()
   const viewingSelected = ref(false)
-  const viewingExcluded = ref(false)
+  const selectedSorting = ref(false)
+  let selectedSeq = 0
 
   const displayNovels = computed<Novel[]>(() =>
-    viewingSelected.value
-      ? selectedView.novels.value
-      : viewingExcluded.value
-        ? excludedView.novels.value
-        : novels.value,
+    viewingSelected.value ? selectedView.novels.value : novels.value,
   )
 
-  // LoadMore / 提示框用的「当前激活视图」聚合状态。
-  // activeView 返回的是**实例本身**（实例字段都是 ref，下游 computed 既随
-  // 实例切换重算，也随实例内部状态响应式更新）。未进入任何视图时回退到
-  // excludedView —— 与原先逐项三元式一致：Novels.vue 空闲时也会读这些状态。
-  const activeView = computed(() =>
-    viewingSelected.value ? selectedView : excludedView,
-  )
-  const viewLoading = computed(() => activeView.value.loading.value)
-  const viewLoadingMore = computed(() => activeView.value.loadingMore.value)
-  const viewHasMore = computed(() => activeView.value.hasMore.value)
-  const viewShownCount = computed(() => activeView.value.novels.value.length)
-  const viewTotalCount = computed(() => activeView.value.totalIds.value)
+  const viewLoading = computed(() => selectedSorting.value || selectedView.loading.value)
+  const viewLoadingMore = computed(() => selectedView.loadingMore.value)
+  const viewHasMore = computed(() => selectedView.hasMore.value)
+  const viewShownCount = computed(() => selectedView.novels.value.length)
+  const viewTotalCount = computed(() => selectedView.totalIds.value)
 
   function resetSelectedView() {
+    selectedSeq++
+    selectedSorting.value = false
     viewingSelected.value = false
     selectedView.reset()
   }
 
-  function resetExcludedView() {
-    viewingExcluded.value = false
-    excludedView.reset()
-  }
-
-  /** 关闭某个集合视图的统一收尾：先 reset（同步清标志+分页状态），
-   * 再等 DOM 更新后重排——退出视图 / 集合为空 / 加载出错 / 各 watcher 共用。 */
-  async function closeView(reset: () => void) {
-    reset()
+  /** 关闭集合视图的统一收尾：先 reset，再等 DOM 更新后重排。 */
+  async function closeView() {
+    resetSelectedView()
     await nextTick()
     afterLayout()
   }
 
-  // ---- 视图的集合顺序：随机在集合视图内禁用，其余按当前排序条件取序 ----
   /**
-   * 集合视图可用的排序子集：`random` 在集合内禁用（保持范围/勾选顺序），
+   * 集合视图可用的排序子集：`random` 在集合内禁用（保持勾选顺序），
    * 其余原样透传。
-   *
-   * 返回类型是 `OrderBy | undefined`，不是 `string | undefined`：后者曾让这个
-   * 函数变成一个**手写白名单**，而且白名单本身是漏的（旧实现只放行
-   * id/like/text，`view` / `create_time` 被静默丢弃）。现在只有「random → undefined」
-   * 一条规则，未来新增排序字段不必回来改这里。
    */
   function scopeOrderBy(): Exclude<OrderBy, 'random'> | undefined {
     const o = filters.value.order_by
     return o === 'random' ? undefined : o
   }
 
-  async function reloadSelectedIds() {
+  async function reloadSelectedIds(): Promise<boolean> {
+    const seq = ++selectedSeq
     const ids = batchScope.value?.novel_ids ?? []
-    if (ids.length === 0) return
+    if (ids.length === 0) return false
     const orderBy = scopeOrderBy()
-    if (orderBy === 'id') {
-      // id 排序本地完成（id 列表本来就在内存里）。本地书 id 是**负的时间坐标**
-      // （docs/LIBRARY_DESIGN.md §3.1），时间在模上 —— 必须取绝对值，与服务端
-      // 的 `ORDER BY abs(id)` 同一语义；裸比大小会把本地书整体排到一端。
-      const dir = filters.value.order_direction === 'ASC' ? 1 : -1
-      await selectedView.start(
-        [...ids].sort((a, b) => dir * (Math.abs(a) - Math.abs(b))),
-      )
-      return
-    }
-    if (orderBy) {
-      const result = await novelApi.sortNovelIds(
-        ids, orderBy, filters.value.order_direction,
-      )
-      await selectedView.start(result.ids)
-      return
-    }
-    await selectedView.start(ids)  // 随机 → 勾选顺序
-  }
-
-  let excludedSeq = 0
-
-  /** 按当前筛选+排序重取被排除集合并从头展示（进入视图与原地重算共用）。 */
-  async function loadExcludedView() {
-    const seq = ++excludedSeq
+    selectedSorting.value = true
     try {
-      const result = await novelApi.getBlockedNovelIds({
-        keyword: filters.value.keyword.trim() || undefined,
-        min_like: filters.value.min_like,
-        min_text: filters.value.min_text,
-        order_by: scopeOrderBy(),
-        order_direction: filters.value.order_direction,
-      })
-      if (seq !== excludedSeq) return  // 已有更新的请求，丢弃本次结果
-      if (result.ids.length === 0) {
-        // 新范围没有被排除的小说 → 退回浏览列表
-        await closeView(resetExcludedView)
-        return
+      let sortedIds = ids
+      if (orderBy === 'id') {
+        const dir = filters.value.order_direction === 'ASC' ? 1 : -1
+        sortedIds = [...ids].sort((a, b) => dir * (Math.abs(a) - Math.abs(b)))
+      } else if (orderBy) {
+        const result = await novelApi.sortNovelIds(
+          ids,
+          orderBy,
+          filters.value.order_direction,
+        )
+        if (seq !== selectedSeq) return false
+        sortedIds = result.ids
       }
-      await excludedView.start(result.ids)
-      window.scrollTo({ top: 0 })  // 新集合从头看起，阻断自动翻页级联
-      await nextTick()
-      afterLayout()
-    } catch (err: unknown) {
-      if (seq !== excludedSeq) return
-      toast.error(getApiErrorMessage(err, '加载被排除小说失败'))
-      await closeView(resetExcludedView)
+      await selectedView.start(sortedIds)
+      return seq === selectedSeq
+    } finally {
+      if (seq === selectedSeq) selectedSorting.value = false
     }
   }
 
   async function toggleViewSelected() {
     if (viewingSelected.value) {
-      await closeView(resetSelectedView)
+      await closeView()
       return
     }
     const ids = batchScope.value?.novel_ids ?? []
     if (ids.length === 0) return
-    resetExcludedView()  // 互斥：进入已选视图时退出被排除视图
     viewingSelected.value = true
+    const seqSnapshot = selectedSeq + 1
     try {
-      await reloadSelectedIds()
-      window.scrollTo({ top: 0 })  // 新视图从头看起，阻断自动翻页级联
+      const active = await reloadSelectedIds()
+      if (!active) return
+      window.scrollTo({ top: 0 })
       await nextTick()
       afterLayout()
     } catch (err: unknown) {
+      if (seqSnapshot !== selectedSeq) return
       toast.error(getApiErrorMessage(err, '加载已选小说失败'))
-      await closeView(resetSelectedView)
+      await closeView()
     }
-  }
-
-  async function toggleViewExcluded() {
-    if (viewingExcluded.value) {
-      await closeView(resetExcludedView)
-      return
-    }
-    resetSelectedView()  // 互斥：进入被排除视图时退出已选视图
-    viewingExcluded.value = true
-    await loadExcludedView()
   }
 
   function handleViewLoadMore() {
     if (viewingSelected.value) void selectedView.loadMore()
-    else if (viewingExcluded.value) void excludedView.loadMore()
   }
 
-  /** 元数据编辑保存后**原地替换**集合视图里的那一本（不重取）。
-   *
-   * 「查看已选 / 被排除」两份列表是页面自己持有的副本：主列表的更新由 App
-   * 负责（``novel-updated``），这一份只有页面能改。两边都不整页重取——编辑是
-   * 单本操作，重取会让瀑布流跳动、还多打一次列表请求（§6.3）。 */
+  /** 元数据编辑保存后原地替换集合视图里的那一本（不重取）。 */
   function patchNovel(updated: Novel) {
-    for (const view of [selectedView, excludedView]) {
-      const list = view.novels.value
-      const index = list.findIndex((novel) => novel.id === updated.id)
-      if (index >= 0) list[index] = updated
-    }
+    const list = selectedView.novels.value
+    const index = list.findIndex((novel) => novel.id === updated.id)
+    if (index >= 0) list[index] = updated
   }
 
-  /** Toggle a novel's state field (or author-wide special follow) in active views. */
+  /** Toggle a novel's state field (or author-wide special follow) in active view. */
   function patchNovelState(
-    payload: { id: number; field: 'is_favourite' | 'is_special_follow'; value: number },
+    payload: { id: number; field: 'is_favourite' | 'is_special_follow'; value: boolean },
     authorId?: number,
   ) {
-    for (const view of [selectedView, excludedView]) {
-      for (const novel of view.novels.value) {
-        if (payload.field === 'is_special_follow' && authorId !== undefined) {
-          if (novel.author_id === authorId) {
-            novel.is_special_follow = payload.value
-          }
-        } else if (novel.id === payload.id) {
-          novel[payload.field] = payload.value
+    for (const novel of selectedView.novels.value) {
+      if (payload.field === 'is_special_follow' && authorId !== undefined) {
+        if (novel.author_id === authorId) {
+          novel.is_special_follow = payload.value
         }
+      } else if (novel.id === payload.id) {
+        novel[payload.field] = payload.value
       }
     }
   }
 
-  /** Remove a deleted novel from both collection views cleanly. */
+  /** Remove a deleted novel from the selected collection view cleanly. */
   function removeNovel(novelId: number) {
     selectedView.removeId(novelId)
-    excludedView.removeId(novelId)
   }
 
-  // Leaving batch mode (or an emptied selection) closes the selected view;
-  // entering batch mode closes the excluded view (批量模式优先互斥).
-  watch(() => batchMode.value, (on) => {
-    // 进入批量模式但本就没开被排除视图时，原本也只重排、不 reset
-    if (on && !viewingExcluded.value) {
-      void nextTick().then(afterLayout)
-      return
-    }
-    void closeView(on ? resetExcludedView : resetSelectedView)
-  })
-
-  watch(() => hasSelection.value, (has) => {
-    if (!has && viewingSelected.value) void closeView(resetSelectedView)
-  })
-
-  // 视图活跃状态上报给 App → 侧边栏在集合视图内禁用「随机」排序
-  // immediate：组件挂载/重挂时立即上报 false，避免离开页面后残留 true
-  watch([viewingSelected, viewingExcluded], ([s, e]) => {
-    onActiveChange(s || e)
-  }, { immediate: true })
-
-  // 筛选条件变化 → 被排除视图原地重算（集合始终与当前范围一致）；
-  // 关键词清空后该视图无展示意义（条已消失）→ 退回浏览列表。
   watch(
-    [
-      () => filters.value.keyword,
-      () => filters.value.min_like,
-      () => filters.value.min_text,
-    ],
-    () => {
-      if (!viewingExcluded.value) return
-      if (!filters.value.keyword.trim()) {
-        void closeView(resetExcludedView)
+    () => batchMode.value,
+    (on) => {
+      if (on) {
+        void nextTick().then(afterLayout)
         return
       }
-      void loadExcludedView()
+      void closeView()
     },
   )
 
-  // 排序条件变化 → 两个集合视图各自按新排序重排/重取
+  watch(
+    () => hasSelection.value,
+    (has) => {
+      if (!has && viewingSelected.value) void closeView()
+    },
+  )
+
+  watch(
+    viewingSelected,
+    (active) => {
+      onActiveChange(active)
+    },
+    { immediate: true },
+  )
+
   watch(
     [() => filters.value.order_by, () => filters.value.order_direction],
     ([o, d], [po, pd]) => {
       if (o === po && d === pd) return
-      if (viewingSelected.value) {
-        reloadSelectedIds()
-          .then(async () => {
-            window.scrollTo({ top: 0 })
-            await nextTick()
-            afterLayout()
-          })
-          .catch((err: unknown) => {
-            toast.error(getApiErrorMessage(err, '重新排序失败'))
-            void closeView(resetSelectedView)
-          })
-      } else if (viewingExcluded.value) {
-        void loadExcludedView()
-      }
+      if (!viewingSelected.value) return
+      const seqSnapshot = selectedSeq + 1
+      reloadSelectedIds()
+        .then(async (active) => {
+          if (!active) return
+          window.scrollTo({ top: 0 })
+          await nextTick()
+          afterLayout()
+        })
+        .catch((err: unknown) => {
+          if (seqSnapshot !== selectedSeq) return
+          toast.error(getApiErrorMessage(err, '重新排序失败'))
+          void closeView()
+        })
     },
   )
 
   return {
     viewingSelected,
-    viewingExcluded,
     selectedView,
-    excludedView,
     displayNovels,
     viewLoading,
     viewLoadingMore,
@@ -309,7 +215,6 @@ export function useCollectionViews(options: UseCollectionViewsOptions) {
     viewShownCount,
     viewTotalCount,
     toggleViewSelected,
-    toggleViewExcluded,
     handleViewLoadMore,
     patchNovel,
     patchNovelState,

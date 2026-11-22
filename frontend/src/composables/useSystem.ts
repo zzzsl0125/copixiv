@@ -13,32 +13,20 @@ export function useSystem() {
   })
 
   const systemConfig = computed<SystemConfig | null>(() => query.data.value ?? null)
-  const loading = computed(() => query.isPending.value)
-  const error = computed(() => query.error.value ?? null)
-  const isConfigReady = computed(() => !query.isPending.value)
 
   const updateConfigMutation = useMutation({
-    mutationFn: (patch: Partial<SystemConfig>) => systemApi.updateConfig(patch),
+    mutationFn: (patch: { exclude_blocked_tag_novels: boolean }) => systemApi.updateConfig(patch),
     onSuccess: (updated) => {
       queryClient.setQueryData(queryKeys.systemConfig(), updated)
       void queryClient.invalidateQueries({ queryKey: queryKeys.novelsAll() })
     },
   })
 
-  const fetchConfig = async (): Promise<SystemConfig | null> => {
-    if (query.data.value) return query.data.value
-    const result = await query.refetch()
-    return result.data ?? null
-  }
-
-  const updateConfig = (patch: Partial<SystemConfig>) => updateConfigMutation.mutateAsync(patch)
+  const updateConfig = (patch: { exclude_blocked_tag_novels: boolean }) =>
+    updateConfigMutation.mutateAsync(patch)
 
   return {
     systemConfig,
-    loading,
-    error,
-    isConfigReady,
-    fetchConfig,
     updateConfig,
     isUpdatingConfig: computed(() => updateConfigMutation.isPending.value),
   }

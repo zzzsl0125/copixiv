@@ -15,25 +15,22 @@
     <Label v-if="label" :for="id" class="ml-2 block text-sm text-gray-900">
       {{ label }}
     </Label>
-    <slot name="label-after"></slot>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, useId } from 'vue'
+import { useId } from 'vue'
 import { CheckboxIndicator, CheckboxRoot, Label } from 'reka-ui'
 import { Check } from '@lucide/vue'
 
-const props = defineProps<{
+defineProps<{
   modelValue: boolean
   label?: string
-  id?: string
 }>()
 
 const emit = defineEmits<{
   (e: 'update:modelValue', value: boolean): void
 }>()
 
-const generatedId = useId()
-const id = computed(() => props.id || generatedId)
+const id = useId()
 </script>

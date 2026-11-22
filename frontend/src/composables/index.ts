@@ -23,7 +23,6 @@ export { useToast } from './useToast'
 export { useConfirm, type ConfirmOptions } from './useConfirm'
 export { useCollectionViews, type UseCollectionViewsOptions } from './useCollectionViews'
 export { useBatchMode, type BatchMode } from './useBatchMode'
-export { useTaskStatus } from './useTaskStatus'
 export {
   useIdLookup,
   parseIdInput,

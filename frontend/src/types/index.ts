@@ -6,12 +6,12 @@ export type {
   OrderBy, SortableOrderBy, OrderDirection, FormatMode,
 } from './novels'
 // 运行时函数（不是类型）：查询参数解析要过它才能进 filters，见 novels.ts 的注释。
-export { parseOrderBy, parseOrderDirection, isOrderBy, isOrderDirection } from './novels'
-export type { JsonSchemaProperty, TaskArgumentsSchema, TaskMethod, ScheduledTask, ScheduledTaskCreate, ScheduledTaskUpdate, TaskHistory } from './tasks'
+export { isOrderBy, isOrderDirection } from './novels'
+export type { TaskArgumentField, TaskMethod, ScheduledTask, ScheduledTaskCreate, ScheduledTaskUpdate, TaskHistory } from './tasks'
 export type { TagPreference, TagAlias, TagCandidate, TagAliasSuggest, TagAliasSuggestList } from './tags'
 export type { Token, TokenCreate, TokenUpdate } from './tokens'
 export type { SystemConfig, SearchHistory } from './system'
-export type { FailedNovel, FailedNovelListResponse, FailedNovelCountResponse } from './failedNovels'
+export type { FailedNovel, FailedNovelListResponse } from './failedNovels'
 export type {
   UploadItemStatus, UploadItemResult, UploadResponse,
 } from './uploads'

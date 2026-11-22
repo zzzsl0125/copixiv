@@ -6,7 +6,7 @@ import type { Novel, TagPreference } from '../../types'
 export interface NovelStateChange {
   id: number
   field: 'is_favourite' | 'is_special_follow'
-  value: number
+  value: boolean
 }
 
 const props = defineProps<{
@@ -107,8 +107,19 @@ const likeBorderClass = computed(() => {
   return 'border-gray-100'
 })
 
+const normalizedTagPreferenceMap = computed(() => {
+  const map = props.tagPreferenceMap
+  if (!map || map.size === 0) return null
+  const next = new Map<string, TagPreference['preference']>()
+  for (const [k, v] of map.entries()) {
+    next.set(k.toLowerCase(), v)
+  }
+  return next
+})
+
 const getTagClass = (tag: string) => {
-  const preference = props.tagPreferenceMap?.get(tag)
+  const preference =
+    props.tagPreferenceMap?.get(tag) ?? normalizedTagPreferenceMap.value?.get(tag.toLowerCase())
   if (preference === 'favourite') return 'bg-blue-100 text-blue-800 font-bold'
   if (preference === 'blocked') return 'line-through text-red-400 bg-gray-50'
   return 'bg-gray-100 text-gray-800'
@@ -151,13 +162,13 @@ const getTagClass = (tag: string) => {
           {{ novel.title }}
         </a>
       </div>
-      <div v-if="novel.series_name" class="text-sm text-gray-500 mb-1 flex items-start">
+      <div v-if="novel.series_name || novel.series_id" class="text-sm text-gray-500 mb-1 flex items-start">
         <span class="shrink-0 whitespace-nowrap">系列：</span>
         <span
           :class="[{ 'cursor-pointer hover:text-blue-600': novel.series_id }, 'wrap-break-word']"
           @click="handleSeriesClick"
         >
-          {{ novel.series_name }}<template v-if="novel.series_index"> #{{ novel.series_index }}</template>
+          {{ novel.series_name || `系列 #${novel.series_id}` }}<template v-if="novel.series_index"> #{{ novel.series_index }}</template>
         </span>
       </div>
       <div class="text-sm text-gray-500 mb-3 flex items-start">
@@ -237,6 +248,7 @@ const getTagClass = (tag: string) => {
             {{ novel.is_favourite ? '已收藏' : '收藏' }}
           </button>
           <button
+            v-if="novel.author_id != null"
             class="flex-1 flex items-center justify-center text-xs font-medium rounded-lg transition-colors cursor-pointer"
             :class="novel.is_special_follow ? 'text-white bg-purple-500 hover:bg-purple-600' : 'text-gray-700 bg-gray-100 hover:bg-gray-200'"
             data-testid="novel-follow"

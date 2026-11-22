@@ -18,7 +18,7 @@ export type AuthorLookup = S['AuthorLookupResponse']
 /** 系列 ID 预览（`GET /api/novels/series/{series_id}`）—— 与作者那份同构。 */
 export type SeriesLookup = S['SeriesLookupResponse']
 
-/** `/api/novels/count` 响应：total 可见数，excluded 被厌恶标签隐藏数。 */
+/** `/api/novels/count` 响应：total 可见数，truncated 是否达到服务端计数上限。 */
 export type NovelCountResult = S['NovelCountResponse']
 
 /** Which novels a batch operation applies to (mirrors backend BatchScope). */
@@ -65,22 +65,6 @@ export function isOrderDirection(value: string): value is OrderDirection {
   return value === 'ASC' || value === 'DESC'
 }
 
-/**
- * 从查询参数解析排序，**非法值一律回落到缺省**。
- *
- * 三处调用点（首屏、popstate 回退、测试夹具）此前各写一遍
- * `params.get('order_by') || 'random'`，那只能兜住「缺省」、兜不住「乱写」：
- * `?order_by=lkke` 会原样进入 filters → 发到后端 → `getattr(..., None)` →
- * 静默无排序。收到这个函数里，一处修好三处生效。
- */
-export function parseOrderBy(raw: string | null): OrderBy {
-  return raw !== null && isOrderBy(raw) ? raw : 'random'
-}
-
-export function parseOrderDirection(raw: string | null): OrderDirection {
-  return raw !== null && isOrderDirection(raw) ? raw : 'DESC'
-}
-
 export interface NovelFilters {
   keyword: string
   order_by: OrderBy
@@ -97,7 +81,8 @@ export interface GetNovelsParams {
   per_page?: number
   min_like?: number
   min_text?: number
-  excluded_ids?: number[]
   /** 排除厌恶标签小说：true/undefined → 排除；false → 本次不排除 */
   exclude_blocked?: boolean
+  /** 仅返回被厌恶标签排除的小说 */
+  only_blocked?: boolean
 }

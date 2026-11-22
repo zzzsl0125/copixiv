@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch } from 'vue'
-import { watchDebounced } from '@vueuse/core'
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
+import { useDebounceFn } from '@vueuse/core'
 import { RadioGroupIndicator, RadioGroupItem, RadioGroupRoot } from 'reka-ui'
 import BaseModal from '../ui/BaseModal.vue'
 import { getApiErrorMessage, isAbortError, novelApi } from '../../api'
 import type { FormatMode, OrderBy, OrderDirection } from '../../types'
 import { downloadBlob, filenameFromContentDisposition } from '../../lib/utils'
-import { shouldExcludeBlocked } from '../../config'
-import { useSystem, useTaskStatus } from '../../composables'
+import { excludeBlockedOverride } from '../../config'
+import { useSystem, useToast } from '../../composables'
 
 const props = defineProps<{
   isOpen: boolean
@@ -34,7 +34,7 @@ const totalCount = ref(0)
 const totalTruncated = ref(false)
 const formatMode = ref<FormatMode>('txt')
 const { systemConfig } = useSystem()
-const { isBusy, notifyTaskEnqueued } = useTaskStatus()
+const toast = useToast()
 
 const zipName = ref('')
 const namingTemplate = ref('')
@@ -44,9 +44,10 @@ const previewLoading = ref(false)
 const previewError = ref('')
 let previewSeq = 0
 let previewAbort: AbortController | null = null
+let suppressPreviewWatch = false
 
 const isIdsMode = computed(() => (props.novelIds?.length ?? 0) > 0)
-const useTaskExport = computed(() => totalCount.value > EXPORT_TASK_THRESHOLD)
+const useTaskExport = computed(() => isIdsMode.value && totalCount.value > EXPORT_TASK_THRESHOLD)
 
 async function fetchPreview() {
   const seq = ++previewSeq
@@ -81,7 +82,11 @@ async function fetchPreview() {
   }
 }
 
-watchDebounced(
+const debouncedFetchPreview = useDebounceFn(() => {
+  if (props.isOpen) void fetchPreview()
+}, 300)
+
+watch(
   [
     namingTemplate,
     formatMode,
@@ -93,9 +98,9 @@ watchDebounced(
     () => props.novelIds,
   ],
   () => {
-    if (props.isOpen) void fetchPreview()
+    if (suppressPreviewWatch || !props.isOpen) return
+    void debouncedFetchPreview()
   },
-  { debounce: 300 },
 )
 
 onUnmounted(() => {
@@ -152,11 +157,14 @@ watch(
   () => props.isOpen,
   async (open) => {
     if (!open) return
+    suppressPreviewWatch = true
     totalCount.value = 0
     totalTruncated.value = false
     formatMode.value = 'txt'
     zipName.value = defaultZipName()
     namingTemplate.value = systemConfig.value?.batch_download_naming || ''
+    await nextTick()
+    suppressPreviewWatch = false
     if (isIdsMode.value) {
       totalCount.value = props.novelIds?.length ?? 0
       void fetchPreview()
@@ -168,7 +176,7 @@ watch(
         keyword: props.keyword.trim() || undefined,
         min_like: props.min_like,
         min_text: props.min_text,
-        exclude_blocked: shouldExcludeBlocked(props.keyword, systemConfig.value),
+        exclude_blocked: excludeBlockedOverride(props.keyword),
       })
       totalCount.value = result.total
       totalTruncated.value = result.truncated ?? false
@@ -181,10 +189,11 @@ watch(
       countLoading.value = false
     }
   },
+  { immediate: true },
 )
 
 async function handleConfirm() {
-  if (loading.value || isBusy('batch_export') || totalCount.value === 0) return
+  if (loading.value || totalCount.value === 0) return
   loading.value = true
   try {
     if (useTaskExport.value) {
@@ -194,13 +203,12 @@ async function handleConfirm() {
         zip_name: zipName.value || undefined,
         naming_template: namingTemplate.value || undefined,
       })
-      notifyTaskEnqueued('batch_export')
       emit('task-submitted', res)
       emit('close')
       return
     }
 
-    const { blob, contentDisposition } = await novelApi.batchDownload({
+    const { blob, contentDisposition, missingIds } = await novelApi.batchDownload({
       keyword: props.keyword.trim() || undefined,
       order_by: props.order_by,
       order_direction: props.order_direction,
@@ -215,6 +223,11 @@ async function handleConfirm() {
 
     const filename = filenameFromContentDisposition(contentDisposition, 'batch_download.zip')
     downloadBlob(blob, filename)
+    if (missingIds.length > 0) {
+      toast.warning(
+        `有 ${missingIds.length} 篇小说文件缺失或已删除，已跳过（ID: ${missingIds.slice(0, 5).join(', ')}${missingIds.length > 5 ? '…' : ''}）`,
+      )
+    }
 
     emit('download-success', filename)
     emit('close')
@@ -232,7 +245,6 @@ async function handleConfirm() {
     title="📦 打包下载"
     :loading="loading"
     confirm-text="确认下载"
-    :confirm-disabled="isBusy('batch_export')"
     @close="$emit('close')"
     @confirm="handleConfirm"
   >
@@ -245,11 +257,11 @@ async function handleConfirm() {
         <span class="font-medium text-gray-700 w-16 shrink-0">关键词：</span>
         <span class="truncate text-gray-900">{{ keywordDisplay }}</span>
       </div>
-      <div class="flex items-center gap-2">
+      <div v-if="!isIdsMode" class="flex items-center gap-2">
         <span class="font-medium text-gray-700 w-16 shrink-0">排序：</span>
         <span class="text-gray-900">{{ orderByDisplay }}</span>
       </div>
-      <div v-if="min_like || min_text" class="flex items-center gap-2">
+      <div v-if="!isIdsMode && (min_like || min_text)" class="flex items-center gap-2">
         <span class="font-medium text-gray-700 w-16 shrink-0">筛选：</span>
         <span class="text-gray-900">
           <template v-if="min_like">≥ {{ min_like }} 赞</template>
