@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import update
 
 from copixiv.core.models import TaskResult
 from copixiv.db import models
@@ -99,7 +99,6 @@ class TaskHistoryRecorder:
 
     def __init__(self, session_factory):
         self._session_factory = session_factory
-        self._live_pending: set[int] = set()
 
     def enqueue(self, name: str, params: dict, task_func: str) -> int:
         """Insert the pending row; returns the new task id."""
@@ -107,7 +106,6 @@ class TaskHistoryRecorder:
             repo = SQLAlchemyTaskRepository(session)
             task_id = repo.add_task(name, params, task_func)
             session.commit()
-        self._live_pending.add(task_id)
         logger.info("Task '{}' (id={}) enqueued.", name, task_id)
         return task_id
 
@@ -115,7 +113,7 @@ class TaskHistoryRecorder:
         self,
         task_id: int,
         status: str | None,
-        result: dict[str, Any] | str | None = None,
+        result: dict[str, Any] | None = None,
         duration: float | None = None,
         progress: Any | None = None,
     ) -> None:
@@ -128,14 +126,12 @@ class TaskHistoryRecorder:
             duration=duration,
             progress=progress,
         )
-        if status is not None and status != "pending":
-            self._live_pending.discard(task_id)
 
     def _update_sync(
         self,
         task_id: int,
         status: str | None,
-        result: dict[str, Any] | str | None = None,
+        result: dict[str, Any] | None = None,
         duration: float | None = None,
         progress: Any | None = None,
     ) -> None:
@@ -151,55 +147,26 @@ class TaskHistoryRecorder:
             )
             session.commit()
 
-    def _prune_live_pending(self) -> None:
-        """Drop ids this process no longer owns from ``_live_pending``."""
-        if not self._live_pending:
-            return
+    def recover_stale(self) -> None:
+        """Mark tasks stuck in pending/running as interrupted."""
         try:
             with self._session_factory() as session:
-                alive = set(
+                stale_ids = (
                     session.execute(
-                        select(models.TaskHistory.id).where(
-                            models.TaskHistory.id.in_(self._live_pending),
-                            models.TaskHistory.status == "pending",
+                        update(models.TaskHistory)
+                        .where(models.TaskHistory.status.in_(("pending", "running")))
+                        .values(
+                            status="interrupted",
+                            end_time=datetime.now(UTC),
+                            result={"summary": "服务重启导致中断"},
                         )
+                        .returning(models.TaskHistory.id)
                     )
                     .scalars()
                     .all()
                 )
-        except Exception:
-            logger.exception("Failed to prune live pending task ids.")
-            return
-        dropped = self._live_pending - alive
-        if dropped:
-            self._live_pending.difference_update(dropped)
-            logger.info(
-                "Pruned {} abandoned live-pending task id(s).",
-                len(dropped),
-            )
-
-    def recover_stale(self) -> None:
-        """Mark tasks stuck in pending/running as interrupted."""
-        try:
-            self._prune_live_pending()
-            with self._session_factory() as session:
-                stmt = select(models.TaskHistory.id).where(
-                    models.TaskHistory.status.in_(("pending", "running"))
-                )
-                if self._live_pending:
-                    stmt = stmt.where(models.TaskHistory.id.not_in(self._live_pending))
-                stale_ids = session.execute(stmt).scalars().all()
                 if not stale_ids:
                     return
-                session.execute(
-                    update(models.TaskHistory)
-                    .where(models.TaskHistory.id.in_(stale_ids))
-                    .values(
-                        status="interrupted",
-                        end_time=datetime.now(UTC),
-                        result={"summary": "服务重启导致中断"},
-                    )
-                )
                 session.commit()
                 logger.warning(
                     "Recovered {} stale task history rows → interrupted.",

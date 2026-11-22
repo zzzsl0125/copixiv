@@ -1,16 +1,12 @@
 """``backup_database`` — the weekly ``pg_dump``, as a scheduled task.
 
-**Why this is a task and not startup work.**  The backup used to run inside
-``create_app()``: the first startup of each ISO week shelled out to
-``pg_dump`` before the app was even listening.  On this host that is a 590 MB
-read plus a ~71 MB write — a real I/O spike, and one that lands at an
-arbitrary time (whenever the unit happens to restart) instead of a quiet
-window.  As a task it gets the same schedule machinery as every other
-maintenance job: a cron row, history, progress, and a Telegram notification.
-
-The startup fallback in :mod:`copixiv.app` stays for installs that have not
-scheduled this task yet, and switches itself off as soon as an enabled
-``backup_database`` row exists (``_has_enabled_backup_schedule``).
+**Why this is a task.**  The backup used to run inside ``create_app()``:
+the first startup of each ISO week shelled out to ``pg_dump`` before the
+app was even listening.  On this host that is a 590 MB read plus a ~71 MB
+write — a real I/O spike, and one that lands at an arbitrary time (whenever
+the unit happens to restart) instead of a quiet window.  As a task it gets
+the same schedule machinery as every other maintenance job: a cron row,
+history, progress, and a Telegram notification.
 
 **Format and naming are owned by** :mod:`copixiv.db.backup` — custom-format
 ``pg_dump``, one file per ISO week (``2026-W45.dump``), retention by
@@ -82,7 +78,6 @@ async def backup_database(
     dest = await asyncio.to_thread(_dump_database, url, backup_dir)
     removed = await asyncio.to_thread(
         cleanup_old_backups,
-        url,
         args.keep_count,
         backup_dir,
     )

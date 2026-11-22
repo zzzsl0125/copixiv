@@ -10,7 +10,6 @@ from copixiv.features.novels.use_cases.epub_reconcile import (
     _no_images_ever_and_stale,
     _scan_placeholder,
     _sweep,
-    _txt_has_images,
     reconcile_epub_status,
 )
 from copixiv.tasks.executor import TaskContext
@@ -30,6 +29,5 @@ __all__ = [
     "_no_images_ever_and_stale",
     "_scan_placeholder",
     "_sweep",
-    "_txt_has_images",
     "check_epub",
 ]

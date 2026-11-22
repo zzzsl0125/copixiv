@@ -17,7 +17,6 @@ from copixiv.tasks.schemas import (
     ScheduledTaskCreate,
     ScheduledTaskResponse,
     ScheduledTaskUpdate,
-    TaskBusyResponse,
     TaskCancelResponse,
     TaskHistoryListResponse,
     TaskHistoryLogResponse,
@@ -50,19 +49,12 @@ def _validate_task_params(task_name: str, params: dict | None) -> None:
 
 @router.get("/methods", response_model=list[TaskMethod])
 def get_task_methods():
-    return [
-        TaskMethod(
-            name=m["name"],
-            description=m["description"],
-            arguments=m["arguments"],
-        )
-        for m in describe_tasks()
-    ]
+    return [TaskMethod.model_validate(m) for m in describe_tasks()]
 
 
 @router.get("/scheduled", response_model=list[ScheduledTaskResponse])
 def get_scheduled_tasks(uow: UowDep):
-    with uow.begin():
+    with uow.begin(read_only=True):
         return [
             ScheduledTaskResponse.model_validate(t)
             for t in SQLAlchemyTaskRepository(uow.session).get_scheduled_tasks()
@@ -139,9 +131,7 @@ def delete_scheduled_task(
 
 @router.post("/scheduled/reorder")
 def reorder_scheduled_tasks(
-    background_tasks: BackgroundTasks,
     task_ids: list[int],
-    task_manager: TaskManagerDep,
     uow: UowDep,
 ):
     def _write(tx: SqlUnitOfWork):
@@ -149,7 +139,6 @@ def reorder_scheduled_tasks(
             raise NotFoundError("Failed to reorder tasks")
 
     run_write_transaction_sync(uow, _write)
-    background_tasks.add_task(task_manager.reload_cron_jobs)
     return {"ok": True}
 
 
@@ -162,13 +151,6 @@ def run_scheduled_task(
     return {"ok": True}
 
 
-@router.get("/busy", response_model=TaskBusyResponse)
-def get_busy_tasks(uow: UowDep):
-    """Task functions with a pending/running row — the front-end busy set."""
-    with uow.begin():
-        return {"funcs": SQLAlchemyTaskRepository(uow.session).get_busy_funcs()}
-
-
 @router.get("/history", response_model=TaskHistoryListResponse)
 def get_task_history(
     uow: UowDep,
@@ -176,7 +158,7 @@ def get_task_history(
     offset: Annotated[int, Query(ge=0)] = 0,
 ):
     """List task-history rows **without** their log payload."""
-    with uow.begin():
+    with uow.begin(read_only=True):
         repo = SQLAlchemyTaskRepository(uow.session)
         rows = repo.get_history_rows(limit=limit, offset=offset)
         total = repo.count_history()
@@ -192,7 +174,7 @@ def get_task_log(
     uow: UowDep,
 ):
     """Return the stored execution log for one task-history row."""
-    with uow.begin():
+    with uow.begin(read_only=True):
         log = SQLAlchemyTaskRepository(uow.session).get_task_log(task_id)
         if log is None:
             raise NotFoundError(f"Task {task_id} 没有日志")

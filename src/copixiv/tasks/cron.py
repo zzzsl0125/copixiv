@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, tzinfo
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
@@ -44,6 +46,21 @@ def _resolve_cron_timezone() -> tzinfo:
 CRON_TIMEZONE: tzinfo = _resolve_cron_timezone()
 CRON_TICK_SECONDS = 30
 CRON_MISFIRE_GRACE_SECONDS = 60
+
+
+def call_on_loop(loop: asyncio.AbstractEventLoop | None, fn: Callable[[], Any]) -> None:
+    """Invoke *fn* on *loop*, marshalling via ``call_soon_threadsafe`` from other threads."""
+    if loop is None or loop.is_closed():
+        return
+    try:
+        running = asyncio.get_running_loop()
+    except RuntimeError:
+        running = None
+    if running is loop:
+        fn()
+        return
+    with suppress(RuntimeError):
+        loop.call_soon_threadsafe(fn)
 
 
 def next_occurrence(cron: str, after: datetime) -> datetime:
@@ -103,22 +120,8 @@ class CronTicker:
 
     def _signal_reload(self) -> None:
         """Wake the sleep loop immediately when schedules change."""
-        event = self._reload_event
-        if event is None:
-            return
-        loop = self._loop
-        if loop is None or loop.is_closed():
-            return
-        try:
-            running_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            running_loop = None
-
-        if running_loop is loop:
-            event.set()
-            return
-        with suppress(RuntimeError):
-            loop.call_soon_threadsafe(event.set)
+        if self._reload_event is not None:
+            call_on_loop(self._loop, self._reload_event.set)
 
     def _next_sleep_seconds(self, now: datetime) -> float:
         """Compute bounded seconds until the next due entry (never busy-loops)."""

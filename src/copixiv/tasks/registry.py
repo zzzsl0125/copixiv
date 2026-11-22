@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import types
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
 from pydantic import BaseModel
 
@@ -86,7 +87,57 @@ def task_names_for_lane(lane: TaskLane) -> tuple[str, ...]:
     return tuple(name for name, spec in _registry.items() if spec.lane == lane)
 
 
-def describe_tasks() -> list[dict]:
+def _unwrap_annotation(annotation: Any) -> tuple[Any, bool]:
+    """Unwrap Annotated / Optional / Union annotations into ``(inner_type, nullable)``."""
+    while get_origin(annotation) is Annotated:
+        annotation = get_args(annotation)[0]
+    origin = get_origin(annotation)
+    if origin is Union or origin is types.UnionType:
+        args = get_args(annotation)
+        nullable = type(None) in args
+        non_none = [a for a in args if a is not type(None)]
+        inner = non_none[0] if non_none else str
+        while get_origin(inner) is Annotated:
+            inner = get_args(inner)[0]
+        return inner, nullable
+    return annotation, False
+
+
+def _map_arg_type(annotation: Any) -> str:
+    """Map a Python annotation to the flat task argument type."""
+    if annotation is bool:
+        return "boolean"
+    if annotation is int:
+        return "integer"
+    if annotation is float:
+        return "number"
+    origin = get_origin(annotation)
+    if annotation is list or origin in (list, tuple, set):
+        return "array"
+    return "string"
+
+
+def _describe_args_model(args_model: type[BaseModel]) -> list[dict[str, Any]]:
+    """Flatten a Pydantic args model into field descriptors for the UI."""
+    fields: list[dict[str, Any]] = []
+    for field_name, field_info in args_model.model_fields.items():
+        inner, nullable = _unwrap_annotation(field_info.annotation)
+        required = field_info.is_required()
+        default = None if required else field_info.get_default(call_default_factory=True)
+        fields.append(
+            {
+                "name": field_name,
+                "type": _map_arg_type(inner),
+                "required": required,
+                "nullable": nullable,
+                "default": default,
+                "description": field_info.description,
+            }
+        )
+    return fields
+
+
+def describe_tasks() -> list[dict[str, Any]]:
     """Return task descriptors for the ``/api/tasks/methods`` contract."""
     discover_tasks()
     methods = []
@@ -95,7 +146,7 @@ def describe_tasks() -> list[dict]:
             {
                 "name": spec.name,
                 "description": spec.description,
-                "arguments": (spec.args_model.model_json_schema() if spec.args_model is not None else None),
+                "arguments": _describe_args_model(spec.args_model) if spec.args_model is not None else [],
             }
         )
     return methods

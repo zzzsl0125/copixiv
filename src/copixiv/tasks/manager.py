@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
@@ -12,7 +11,7 @@ from copixiv.core.exceptions import NotFoundError, ValidationError
 from copixiv.log import logger
 from copixiv.tasks.history_repo import SQLAlchemyTaskRepository
 
-from .cron import CronTicker
+from .cron import CronTicker, call_on_loop
 from .executor import TaskExecutor, TaskHistoryRecorder
 from .registry import TaskLane, TaskSpec, discover_tasks, get_spec, task_names_for_lane
 
@@ -24,7 +23,7 @@ class _PendingTask:
     task_id: int
     name: str
     task_func: str | None
-    arguments: str | None
+    arguments: dict[str, Any] | None
 
 
 @dataclass(frozen=True)
@@ -122,7 +121,6 @@ class TaskManagerSystem:
 
         self._active_tasks.clear()
         self._cancelled_ids.clear()
-        self._recorder._live_pending.clear()
         self._started = False
         logger.info("TaskManagerSystem stopped.")
 
@@ -189,14 +187,9 @@ class TaskManagerSystem:
             )
             return
 
-        params: Any = {}
-        if pending.arguments:
-            try:
-                params = json.loads(pending.arguments)
-            except json.JSONDecodeError:
-                params = None
+        params = {} if pending.arguments is None else pending.arguments
         if not isinstance(params, dict):
-            summary = "任务参数解析失败：arguments 不是合法的 JSON 对象"
+            summary = "任务参数格式无效：arguments 必须是 JSON 对象"
             logger.error(
                 "Task '{}' (id={}) cannot run: {}",
                 pending.name,
@@ -238,27 +231,8 @@ class TaskManagerSystem:
     def _wake_worker(self, lane: TaskLane) -> None:
         """Wake the worker for *lane* from sync code (loop thread or threadpool)."""
         event = self._wake.get(lane)
-        if event is None:
-            return
-        loop = self._loop
-        if loop is None or loop.is_closed():
-            event.set()
-            return
-
-        try:
-            running_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            running_loop = None
-
-        if running_loop is loop:
-            event.set()
-            return
-
-        try:
-            loop.call_soon_threadsafe(event.set)
-        except RuntimeError:
-            with suppress(RuntimeError):
-                event.set()
+        if event is not None:
+            call_on_loop(self._loop, event.set)
 
     def reload_cron_jobs(self) -> None:
         """Reload cron entries from the database (no ticker restart)."""
@@ -317,22 +291,13 @@ class TaskManagerSystem:
         active = self._active_tasks.get(task_id)
         if active is not None and not active.done():
             self._cancelled_ids.add(task_id)
-            loop = self._loop
-            try:
-                running_loop = asyncio.get_running_loop()
-            except RuntimeError:
-                running_loop = None
-            if loop is not None and not loop.is_closed() and running_loop is not loop:
-                loop.call_soon_threadsafe(active.cancel)
-            else:
-                active.cancel()
+            call_on_loop(self._loop, active.cancel)
             return "cancelling"
 
         with self._session_factory() as session:
             repo = SQLAlchemyTaskRepository(session)
             if repo.cancel_pending(task_id):
                 session.commit()
-                self._recorder._live_pending.discard(task_id)
                 return "cancelled"
             status_row = repo.get_task_status(task_id)
         if status_row is None:
@@ -346,16 +311,7 @@ class TaskManagerSystem:
         if status_row is None:
             return None
         status, task_func, raw_args = status_row
-        parsed_args: dict[str, Any] = {}
-        if isinstance(raw_args, dict):
-            parsed_args = raw_args
-        elif isinstance(raw_args, str) and raw_args:
-            try:
-                loaded = json.loads(raw_args)
-                if isinstance(loaded, dict):
-                    parsed_args = loaded
-            except (json.JSONDecodeError, TypeError):
-                pass
+        parsed_args = raw_args if isinstance(raw_args, dict) else {}
         return ExportTaskInfo(
             task_id=task_id,
             status=status,

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from copixiv.core import naming as formats
 from copixiv.core.models import TaskResult
 from copixiv.db.tx import read_transaction
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
@@ -56,10 +57,18 @@ async def prune_orphan_files(
     if not root.is_dir():
         return TaskResult(summary=f"孤儿文件清理: 下载目录不存在 {root}")
 
-    known_ids = await read_transaction(
+    id_paths = await read_transaction(
         ctx.require_uow(),
-        lambda uw: SQLAlchemyNovelRepository(uw.session).list_all_ids(),
+        lambda uw: SQLAlchemyNovelRepository(uw.session).list_all_id_paths(),
     )
+    known_ids: set[int] = set()
+    known_paths: set[Path] = set()
+    for nid, raw_path in id_paths:
+        known_ids.add(nid)
+        if raw_path:
+            resolved = Path(raw_path).resolve()
+            known_paths.add(resolved)
+            known_paths.add(formats.sibling_path(resolved, formats.EPUB))
 
     now = time.time()
     orphans = await asyncio.to_thread(
@@ -68,6 +77,7 @@ async def prune_orphan_files(
         known_ids,
         args.min_age_days,
         now,
+        known_paths,
     )
     total_bytes = sum(size for _path, size in orphans)
     size_mb = total_bytes / (1024 * 1024)
@@ -90,7 +100,7 @@ async def prune_orphan_files(
 
     deleted, freed = await asyncio.to_thread(
         unlink_files,
-        [p for p, _size in orphans],
+        orphans,
     )
     logger.info(
         f"prune_orphan_files: 删除 {deleted}/{len(orphans)} 个孤儿文件，释放 {freed / (1024 * 1024):.1f} MB"
