@@ -44,12 +44,11 @@ describe('Phase 1 UI fixes', () => {
   })
 
   it('EmptyState supports custom title and description', () => {
-    const def = mount(EmptyState, { props: { loading: false } })
+    const def = mount(EmptyState)
     expect(def.text()).toContain('未找到相关小说')
 
     const custom = mount(EmptyState, {
       props: {
-        loading: false,
         title: '暂无失败记录',
         description: '当前没有下载失败的小说记录',
       },
@@ -73,17 +72,6 @@ describe('Phase 1 UI fixes', () => {
     expect(submitBtn.text()).toBe('确认保存中…')
     expect((submitBtn.element as HTMLButtonElement).disabled).toBe(true)
     expect((cancelBtn.element as HTMLButtonElement).disabled).toBe(true)
-
-    const customLoading = mount(BaseModal, {
-      props: {
-        isOpen: true,
-        title: '删除',
-        confirmText: '确认删除',
-        loadingText: '正在删除…',
-        loading: true,
-      },
-    })
-    expect(customLoading.get('button[type="submit"]').text()).toBe('正在删除…')
   })
 
   it('TaskEditModal keeps step cron in custom mode without NaN and preserves params across async method load', async () => {
@@ -106,13 +94,18 @@ describe('Phase 1 UI fixes', () => {
 
     const wrapper = mount(TaskEditModal, {
       props: {
-        isOpen: true,
+        isOpen: false,
         task,
         loading: false,
       },
     })
 
     await nextTick()
+    expect(mocks.getTaskMethods).not.toHaveBeenCalled()
+
+    await wrapper.setProps({ isOpen: true })
+    await nextTick()
+    expect(mocks.getTaskMethods).toHaveBeenCalledTimes(1)
     // */5 * * * * must fall into custom mode and keep the raw cron text without NaN
     const inputs = wrapper.findAll('input')
     expect(inputs.some((i) => (i.element as HTMLInputElement).value === '*/5 * * * *')).toBe(true)
@@ -123,16 +116,22 @@ describe('Phase 1 UI fixes', () => {
       {
         name: 'novel_fetch',
         description: '抓取单本小说',
-        arguments: {
-          properties: {
-            id: { type: 'integer' },
+        arguments: [
+          {
+            name: 'id',
+            type: 'integer',
+            required: true,
+            nullable: false,
+            default: null,
+            description: '小说 ID',
           },
-          required: ['id'],
-        },
+        ],
       },
     ])
     await flushPromises()
     await nextTick()
+
+    expect(wrapper.text()).toContain('小说 ID')
 
     await wrapper.get('form').trigger('submit')
     const emitted = wrapper.emitted('save')
@@ -165,8 +164,8 @@ describe('Phase 1 UI fixes', () => {
           has_epub: 0,
           create_time: null,
           source: 'local',
-          is_favourite: 0,
-          is_special_follow: 0,
+          is_favourite: false,
+          is_special_follow: false,
           tags: ['favTag', 'badTag'],
           editable_fields: ['title', 'author_id', 'series_id', 'series_index', 'tags', 'create_time'],
         },

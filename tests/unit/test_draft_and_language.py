@@ -26,6 +26,7 @@ def test_is_chinese_and_filter_chinese():
     assert is_chinese(title="海") is True
     assert is_chinese(title="日本語の小説", caption="テスト") is False
     assert is_chinese(title="日本語", tags=["中文"]) is True
+    assert is_chinese(title="English", tags=["CHINESE"]) is True
     assert (
         is_chinese(
             title="第一章",
@@ -88,20 +89,25 @@ def test_build_from_webview_and_novel_info():
     )
     info_draft = build_from_novel_info(info_payload)
     assert info_draft.author_name == "作者甲"
+    assert info_draft.path == ""
     assert info_draft.series_index == 4
     assert info_draft.has_epub is None
-    assert info_draft.create_time == "2026-06-02"
+    assert info_draft.create_time == "2026-06-02T00:00:00+09:00"
 
 
 def test_guess_series_order_and_time_and_placeholders():
     assert guess_series_order({"prevNovel": {"contentOrder": 5}}) == 6
     assert guess_series_order({"prevNovel": {}, "nextNovel": {"contentOrder": 3}}) == 2
+    assert guess_series_order({"nextNovel": {"contentOrder": 1}}) is None
+    assert guess_series_order({"nextNovel": {"contentOrder": 0}}) is None
     assert guess_series_order(None) is None
 
     dt_date = parse_pixiv_time("2026-01-02")
-    assert dt_date is not None
-    assert dt_date.tzinfo == UTC
-    assert dt_date.hour == 15  # 00:00 JST == 15:00 previous day UTC
+    assert dt_date == datetime(2026, 1, 2, 0, 0, tzinfo=UTC)
+    dt_jst = parse_pixiv_time("2026-01-02T00:00:00+09:00")
+    assert dt_jst == datetime(2026, 1, 1, 15, 0, tzinfo=UTC)
+    dt_naive_dt = parse_pixiv_time("2026-01-02T12:00:00")
+    assert dt_naive_dt == datetime(2026, 1, 2, 3, 0, tzinfo=UTC)
     assert parse_pixiv_time("") is None
 
     assert has_image_placeholders("hello [uploadedimage:123] world") is True
@@ -123,10 +129,10 @@ def test_text_language_symbols_body_hash_month_ranges_and_models():
     end = datetime(2026, 2, 15, 18, 30, tzinfo=jst)
     windows = list(month_ranges(end, 4))
     assert windows == [
-        (datetime(2026, 2, 1, 18, 30, tzinfo=jst), end),
-        (datetime(2026, 1, 1, tzinfo=jst), datetime(2026, 1, 31, tzinfo=jst)),
-        (datetime(2025, 12, 1, tzinfo=jst), datetime(2025, 12, 31, tzinfo=jst)),
-        (datetime(2025, 11, 1, tzinfo=jst), datetime(2025, 11, 30, tzinfo=jst)),
+        (datetime(2026, 2, 1, tzinfo=jst), end),
+        (datetime(2026, 1, 1, tzinfo=jst), datetime(2026, 1, 31, 23, 59, 59, tzinfo=jst)),
+        (datetime(2025, 12, 1, tzinfo=jst), datetime(2025, 12, 31, 23, 59, 59, tzinfo=jst)),
+        (datetime(2025, 11, 1, tzinfo=jst), datetime(2025, 11, 30, 23, 59, 59, tzinfo=jst)),
     ]
     assert all(start.tzinfo == jst and stop.tzinfo == jst for start, stop in windows)
 

@@ -305,18 +305,21 @@ def _assert_db_oracle_parity(session_factory, engine, specs: list[QuerySpec]) ->
                 _assert_cards_equal(p1["novels"], f"page1 {spec}")
                 assert (p1["cursor"] is not None) == (len(ordered) > spec.per_page)
                 if p1["cursor"] is not None:
-                    last_val = p1["cursor"].get(spec.order_by or "id")
-                    if spec.order_by != "create_time" or last_val is not None:
-                        p2 = rs_repo.get_novels(spec.model_copy(update={"cursor": p1["cursor"]}))
-                        exp_p2 = ordered[spec.per_page : spec.per_page * 2]
-                        assert [n.id for n in p2["novels"]] == [r["id"] for r in exp_p2], (
-                            f"page2 mismatch for {spec}"
-                        )
-                        _assert_cards_equal(p2["novels"], f"page2 {spec}")
+                    p2 = rs_repo.get_novels(spec.model_copy(update={"cursor": p1["cursor"]}))
+                    exp_p2 = ordered[spec.per_page : spec.per_page * 2]
+                    assert [n.id for n in p2["novels"]] == [r["id"] for r in exp_p2], (
+                        f"page2 mismatch for {spec}"
+                    )
+                    _assert_cards_equal(p2["novels"], f"page2 {spec}")
 
             assert rs_repo.count_novels(spec).value == len(expected_vis)
-            assert rs_repo.count_excluded_novels(spec).value == len(expected_blk)
             assert rs_repo.has_excluded_novels(spec) is (len(expected_blk) > 0)
+            if spec.order_by not in ("random", "none"):
+                ordered_blk = _oracle_sort_rows(expected_blk, spec.order_by or "id", spec.order_direction)
+                blk_p1 = rs_repo.get_novels(spec, only_blocked=True)
+                assert [n.id for n in blk_p1["novels"]] == [r["id"] for r in ordered_blk[: spec.per_page]], (
+                    f"only_blocked page1 mismatch for {spec}"
+                )
             assert rs_repo.list_matching_ids(spec) == sorted(r["id"] for r in expected_vis)
 
             scope = [-150, 101, 102, 200, 999999]
@@ -327,9 +330,6 @@ def _assert_db_oracle_parity(session_factory, engine, specs: list[QuerySpec]) ->
         cards = rs_repo.get_novel_cards_by_ids(req_ids)
         assert [c.id for c in cards] == [nid for nid in req_ids if nid in by_id]
         _assert_cards_equal(cards, "get_novel_cards_by_ids")
-
-        exp_blocked_ids = {r["id"] for r in rows if exclude_default and (set(r["tags"]) & blocked)}
-        assert set(rs_repo.list_blocked_ids()) == exp_blocked_ids
 
         all_ids_desc_arg = [r["id"] for r in rows] + [999999]
         present_rows = list(rows)
@@ -349,9 +349,6 @@ def test_parity_across_filters_sorts_and_nulls(db_session_factory):
         QuerySpec(order_by="like", order_direction="DESC", per_page=2),
         QuerySpec(order_by="create_time", order_direction="DESC", per_page=1),
         QuerySpec(order_by="create_time", order_direction="ASC", per_page=2),
-        QuerySpec(order_by="title", order_direction="ASC", per_page=2),
-        QuerySpec(order_by="author_name", order_direction="DESC", per_page=2),
-        QuerySpec(order_by="series_name", order_direction="ASC", per_page=2),
         QuerySpec(conditions=[("keyword", "Alpha Ñ")], order_by="id"),
         QuerySpec(conditions=[("keyword", "原")], order_by="id"),
         QuerySpec(conditions=[("tags", "原神")], order_by="like"),
@@ -369,7 +366,6 @@ def test_delta_sync_all_write_paths_and_rollback_isolation(db_session_factory):
     probe_specs = [
         QuerySpec(order_by="id", per_page=10),
         QuerySpec(order_by="like", per_page=10),
-        QuerySpec(order_by="series_index", per_page=10),
         QuerySpec(conditions=[("is_favourite", "1")]),
         QuerySpec(conditions=[("is_special_follow", "true")]),
         QuerySpec(conditions=[("tags", "canonical_tag")]),

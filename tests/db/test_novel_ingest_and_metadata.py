@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,7 +15,6 @@ from copixiv.db import models
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.novels.field_policy import editable_fields
 from copixiv.features.novels.ingest import ingest
-from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.features.novels.use_cases.batch_download import BatchDownloadUseCase
 from copixiv.features.novels.use_cases.batch_operations import (
     BatchDeleteUseCase,
@@ -114,7 +114,7 @@ async def test_ingest_persists_new_updates_existing_metadata_and_records_failure
         assert Path(n101.path).is_file()
         author10 = session.get(models.Author, 10)
         assert author10 is not None
-        assert author10.novel_count == 1
+        assert author10.author_name == "AuthorTen"
         assert session.get(models.FailedNovel, 102) is not None
 
         # Mark 101 DONE manually; a metadata-only ingest via novelInfo must preserve DONE
@@ -189,12 +189,15 @@ async def test_update_novel_metadata_policy_and_unlink_semantics(
             "series_id": 88,
             "series_index": 3,
             "tags": ["TagA", "TagB/TagC"],
+            "create_time": "2026-10-19",
         },
     )
     assert updated.title == "LocalRenamed"
     assert updated.series_name == "LocalSeries"
     assert updated.series_index == 3
     assert set(updated.tags) == {"taga", "tagb", "tagc"}
+    assert updated.create_time is not None
+    assert updated.create_time.astimezone(UTC) == datetime(2026, 10, 19, 0, 0, tzinfo=UTC)
 
     unlinked = await uc.execute(-501, {"author_id": None, "series_id": None})
     # Unlinking author preserves display name; unlinking series clears id, name, and index
@@ -249,28 +252,26 @@ async def test_batch_tag_delete_and_download_by_ids(
                 ),
             ]
         )
-        uow.session.add(models.FailedNovel(novel_id=1001, failure_type="download", error_message="err"))
+        uow.session.add(models.FailedNovel(novel_id=1001, error_message="err"))
         tag_repo = SQLAlchemyTagRepository(uow.session)
         tag_repo.create_alias({"source": "alias_src", "target": "alias_dst"})
 
-    with uow.begin():
-        tag_uc = BatchTagUseCase(
-            SQLAlchemyNovelRepository(uow.session),
-            SQLAlchemyTagRepository(uow.session),
-        )
-        added = tag_uc.execute("add_tags", [1001, 1002], ["alias_src"])
-        assert added == 2
-        assert "alias_dst" in uow.session.get(models.Novel, 1001).tags
+    tag_uc = BatchTagUseCase(uow)
+    added = tag_uc.execute("add_tags", [1001, 1002], ["alias_src"])
+    assert added == 2
+    removed = tag_uc.execute("remove_tags", [1001], ["old"])
+    assert removed == 1
 
-        removed = tag_uc.execute("remove_tags", [1001], ["old"])
-        assert removed == 1
-        assert "old" not in uow.session.get(models.Novel, 1001).tags
+    with uow.begin():
+        tags_1001 = uow.session.get(models.Novel, 1001).tags
+        assert "alias_dst" in tags_1001
+        assert "old" not in tags_1001
 
     # Batch download by explicit IDs
     dl_uc = BatchDownloadUseCase(uow)
     dl_res = await dl_uc.execute(novel_ids=[1001, 1002, 999999], format_mode="txt")
     try:
-        assert len(dl_res.titles) == 2
+        assert dl_res.added_count == 2
         assert dl_res.missing_ids == []
     finally:
         dl_res.zip_buffer.close()
@@ -280,7 +281,8 @@ async def test_batch_tag_delete_and_download_by_ids(
 
     # Batch delete cleans DB rows, failed_novel ledger, and files on disk
     del_uc = BatchDeleteUseCase(uow, storage)
-    del_uc.execute([1001, 1002])
+    affected = del_uc.execute([1001, 1002, 999999])
+    assert affected == 2
     assert not p1.exists()
     assert not p2.exists()
     with uow.begin():
@@ -288,4 +290,144 @@ async def test_batch_tag_delete_and_download_by_ids(
         assert uow.session.get(models.FailedNovel, 1001) is None
         author = uow.session.get(models.Author, 10)
         assert author is not None
-        assert author.novel_count == 0
+
+
+@pytest.mark.asyncio
+async def test_sync_novel_preserves_author_name_on_fetch_failure_and_clears_series_index(
+    committed_session_factory,
+    fake_pixiv_client,
+    tmp_path: Path,
+):
+    from copixiv.features.novels.use_cases.sync_novel import SyncNovelUseCase
+
+    uow = SqlUnitOfWork(committed_session_factory)
+    with uow.begin():
+        uow.session.add(models.Author(author_id=20, author_name=None))
+        uow.session.add(models.Series(series_id=300, series_name="OldSeries", author_id=20))
+        uow.session.flush()
+        uow.session.add(
+            models.Novel(
+                id=2001,
+                title="OldTitle",
+                author_id=20,
+                author_name="KeepMe",
+                series_id=300,
+                series_name="OldSeries",
+                series_index=5,
+                path=str(tmp_path / "2001.txt"),
+                source="pixiv",
+            )
+        )
+
+    fake_pixiv_client.user_detail_responses[20] = None
+    # Novel 2001 was removed from series on Pixiv (series_id=None)
+    fake_pixiv_client.webview_responses[2001] = _fake_webview(
+        2001,
+        title="NewTitle",
+        author_id=20,
+    )
+
+    uc = SyncNovelUseCase(uow, fake_pixiv_client, str(tmp_path))
+    updated = await uc.execute(2001)
+    assert updated.title == "NewTitle"
+    assert updated.author_name == "KeepMe"
+    assert updated.series_id is None
+    assert updated.series_index is None
+
+
+def test_delete_novel_single_lookup_and_oserror_resilience(
+    committed_session_factory,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from copixiv.features.novels.use_cases.delete_novel import DeleteNovelUseCase
+
+    uow = SqlUnitOfWork(committed_session_factory)
+    storage = FileStorage(str(tmp_path))
+    file_path = storage.save_novel_text(3001, "ToDel", "body")
+
+    with uow.begin():
+        uow.session.add(models.Author(author_id=30, author_name="Auth30"))
+        uow.session.flush()
+        uow.session.add(
+            models.Novel(
+                id=3001,
+                title="ToDel",
+                author_id=30,
+                author_name="Auth30",
+                path=str(file_path),
+                source="pixiv",
+            )
+        )
+
+    def _boom(_path: str) -> None:
+        raise OSError("disk read-only")
+
+    monkeypatch.setattr(storage, "delete_novel_files", _boom)
+
+    del_uc = DeleteNovelUseCase(uow, storage)
+    del_uc.execute(3001)  # Must not raise OSError after DB commit
+
+    with uow.begin():
+        assert uow.session.get(models.Novel, 3001) is None
+
+    with pytest.raises(NotFoundError):
+        del_uc.execute(3001)
+
+
+@pytest.mark.asyncio
+async def test_ingest_merges_done_ids_and_skips_get_skip_ids_on_redownload(
+    committed_session_factory,
+    fake_pixiv_client,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from copixiv.features.failures.repo import FailedNovelRepository
+
+    class _DoneBatch:
+        def __init__(self) -> None:
+            self.outcomes: dict[int, str] = {}
+
+        async def await_all(self) -> list[tuple[int, str]]:
+            return []
+
+        def drain_outcomes(self) -> dict[int, str]:
+            out, self.outcomes = self.outcomes, {}
+            return out
+
+    class _DoneImageDownloader:
+        def new_batch(self) -> _DoneBatch:
+            return _DoneBatch()
+
+        async def process_novel_assets(self, data, *, force: bool = False, batch=None) -> None:
+            del force
+            batch.outcomes[data.id] = "done"
+
+    def _forbid_get_skip_ids(self, ids):
+        del self, ids
+        raise AssertionError("get_skip_ids must not be called when redownload=True")
+
+    monkeypatch.setattr(FailedNovelRepository, "get_skip_ids", _forbid_get_skip_ids)
+
+    storage = FileStorage(str(tmp_path))
+    fake_pixiv_client.webview_responses[4001] = _fake_webview(
+        4001,
+        title="WithImg",
+        author_id=40,
+        text="正文 [uploadedimage:1]",
+    )
+    fake_pixiv_client.user_detail_responses[40] = {"user": {"id": 40, "name": "Auth40"}}
+
+    outcome = await ingest(
+        novels=[_fake_novel_info(4001, title="WithImg", author_id=40, author_name="Auth40")],
+        session_factory=committed_session_factory,
+        client=fake_pixiv_client,
+        file_storage=storage,
+        image_downloader=_DoneImageDownloader(),
+        force=True,
+    )
+    assert outcome.new_count == 1
+    with committed_session_factory() as session:
+        n4001 = session.get(models.Novel, 4001)
+        assert n4001 is not None
+        assert n4001.has_epub == EpubStatus.DONE

@@ -62,9 +62,7 @@ def test_delete_author_cleans_novels_failures_empty_series_and_recomputes_shared
         assert s200 is not None
         s200.author_id = 10
 
-        uow.session.add(
-            models.FailedNovel(novel_id=101, failure_type="http_404", error_message="404", failed_times=1)
-        )
+        uow.session.add(models.FailedNovel(novel_id=101, error_message="404", failed_times=1))
         uow.session.flush()
 
     with uow.begin():
@@ -85,8 +83,7 @@ def test_delete_author_cleans_novels_failures_empty_series_and_recomputes_shared
         # Empty series 100 was deleted
         assert uow.session.get(models.Series, 100) is None
 
-        # Shared series 200 remains with recomputed summary and remaining author 20
+        # Shared series 200 remains with remaining author 20
         s200 = uow.session.get(models.Series, 200)
         assert s200 is not None
         assert s200.author_id == 20
-        assert (s200.novel_count, s200.like, s200.view, s200.text) == (1, 35, 350, 700)

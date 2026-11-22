@@ -27,8 +27,8 @@ function makeSampleNovel(overrides: Partial<Novel> = {}): Novel {
     view: 4500,
     create_time: '2026-01-15T10:00:00Z',
     has_epub: 1,
-    is_favourite: 0,
-    is_special_follow: 0,
+    is_favourite: false,
+    is_special_follow: false,
     source: 'pixiv',
     editable_fields: ['tags'],
     ...overrides,
@@ -209,7 +209,7 @@ describe('Phase 5 UI components', () => {
     await flushPromises()
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(fetchMock).toHaveBeenCalledWith(12345)
+    expect(fetchMock).toHaveBeenCalledWith(12345, expect.any(AbortSignal))
     expect(wrapper.get('[data-testid="author-id-hint"]').text()).toContain('✓ 作者-12345 · 库内已有 3 本')
 
     // Unlink flag disables input and displays unlink note
@@ -310,5 +310,112 @@ describe('Phase 5 UI components', () => {
     triggerIntersection(false)
     triggerIntersection(true)
     expect(wrapper.emitted('load-more')).toHaveLength(2)
+  })
+
+  it('NovelCard renders unnamed series fallback, hides follow button when author_id is missing, and matches tag preferences case-insensitively', async () => {
+    const novel = makeSampleNovel({
+      author_id: null as unknown as number,
+      series_id: 4242,
+      series_name: null,
+      series_index: 3,
+      tags: ['GAY', 'BlockedTag'],
+    })
+
+    const wrapper = mount(NovelCard, {
+      props: {
+        novel,
+        isActive: false,
+        tagPreferenceMap: new Map([
+          ['gay', 'favourite' as const],
+          ['blockedtag', 'blocked' as const],
+        ]),
+      },
+    })
+
+    expect(wrapper.text()).toContain('系列 #4242 #3')
+    expect(wrapper.find('[data-testid="novel-follow"]').exists()).toBe(false)
+
+    const gayTag = wrapper.findAll('span').find((s) => s.text() === 'GAY')
+    expect(gayTag?.classes()).toContain('bg-blue-100')
+    const blockedTag = wrapper.findAll('span').find((s) => s.text() === 'BlockedTag')
+    expect(blockedTag?.classes()).toContain('line-through')
+  })
+
+  it('TagChipInput flushes draft input on blur and via exposed flush()', async () => {
+    const Host = defineComponent({
+      components: { TagChipInput },
+      setup() {
+        const tags = ref(['现有'])
+        const chipRef = ref<InstanceType<typeof TagChipInput> | null>(null)
+        return { tags, chipRef }
+      },
+      template: `
+        <TagChipInput
+          ref="chipRef"
+          v-model="tags"
+          mode="chips"
+          label="标签"
+          input-test-id="flush-chip-input"
+        />
+      `,
+    })
+
+    const wrapper = mount(Host)
+    const input = wrapper.get('[data-testid="flush-chip-input"]')
+
+    await input.setValue('失焦提交')
+    await input.trigger('blur')
+    await nextTick()
+    expect(wrapper.vm.tags).toEqual(['现有', '失焦提交'])
+
+    await input.setValue('保存前提交')
+    expect(wrapper.vm.chipRef?.hasDraft).toBe(true)
+    wrapper.vm.chipRef?.flush()
+    await nextTick()
+    expect(wrapper.vm.tags).toEqual(['现有', '失焦提交', '保存前提交'])
+    expect(wrapper.vm.chipRef?.hasDraft).toBe(false)
+  })
+
+  it('PixivIdLookupField computes and exposes hint even when showHint is false', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn(async (id: number) => ({
+      name: `作者-${id}`,
+      novel_count: 5,
+    }))
+
+    const Host = defineComponent({
+      components: { PixivIdLookupField },
+      setup() {
+        const idText = ref('')
+        const fieldRef = ref<InstanceType<typeof PixivIdLookupField> | null>(null)
+        return { idText, fieldRef, fetchMock }
+      },
+      template: `
+        <PixivIdLookupField
+          ref="fieldRef"
+          v-model="idText"
+          entity="作者"
+          label="作者 ID"
+          :fetch="fetchMock"
+          :show-hint="false"
+          empty-note="留空 = 不改作者"
+          unlink-note="解除作者关联"
+          input-test-id="hidden-hint-input"
+          hint-test-id="hidden-hint-el"
+        />
+      `,
+    })
+
+    const wrapper = mount(Host)
+    await nextTick()
+    expect(wrapper.find('[data-testid="hidden-hint-el"]').exists()).toBe(false)
+    expect(wrapper.vm.fieldRef?.hint?.text).toBe('留空 = 不改作者')
+
+    await wrapper.get('[data-testid="hidden-hint-input"]').setValue('777')
+    await vi.advanceTimersByTimeAsync(350)
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="hidden-hint-el"]').exists()).toBe(false)
+    expect(wrapper.vm.fieldRef?.hint?.text).toContain('✓ 作者-777 · 库内已有 5 本')
   })
 })

@@ -94,21 +94,21 @@ def test_aliased_zero_ref_tag_survives_until_alias_deleted(uow: SqlUnitOfWork):
 def test_alias_single_hop_and_cycle_guards(uow: SqlUnitOfWork):
     with uow.begin():
         tag_repo = SQLAlchemyTagRepository(uow.session)
-        with pytest.raises(ValidationError, match="cannot be the same"):
+        with pytest.raises(ValidationError, match="不能和目标标签相同"):
             tag_repo.create_alias({"source": "a", "target": "a"})
 
         tag_repo.create_alias({"source": "a", "target": "b"})
 
         # Reverse cycle: b -> a
-        with pytest.raises(ValidationError, match="cycle"):
+        with pytest.raises(ValidationError, match="循环别名"):
             tag_repo.create_alias({"source": "b", "target": "a"})
 
-        # Multi-hop: b -> c (target already source? wait: b is target, trying b as source)
-        with pytest.raises(ValidationError, match="multi-hop"):
+        # Multi-hop: b -> c
+        with pytest.raises(ValidationError, match="多级别名"):
             tag_repo.create_alias({"source": "b", "target": "c"})
 
-        # Multi-hop: x -> a (source 'a' is already source -> wait: a is source, trying c -> a makes a a target!)
-        with pytest.raises(ValidationError, match="multi-hop"):
+        # Multi-hop: c -> a
+        with pytest.raises(ValidationError, match="多级别名"):
             tag_repo.create_alias({"source": "c", "target": "a"})
 
 
@@ -160,13 +160,18 @@ def test_suggest_aliases_end_to_end_via_rust_tag_index(uow: SqlUnitOfWork):
                     id=102, title="N2", author_id=1, author_name="A", tags=["日常", "%高中生", "%高中生女子"]
                 ),
                 build_novel(
-                    id=103, title="N3", author_id=1, author_name="A", tags=["aliased_src", "aliased_tgt"]
+                    id=103,
+                    title="N3",
+                    author_id=1,
+                    author_name="A",
+                    tags=["aliased_src", "aliased_tgt", "aliased_tgt_pair"],
                 ),
             ],
         )
     with uow.begin():
         tag_repo = SQLAlchemyTagRepository(uow.session)
-        tag_repo.create_alias({"source": "aliased_src", "target": "aliased_tgt"})
+        created_alias = tag_repo.create_alias({"source": "aliased_src", "target": "aliased_tgt"})
+        alias_id = created_alias["id"]
 
     with uow.begin():
         tag_repo = SQLAlchemyTagRepository(uow.session)
@@ -191,3 +196,31 @@ def test_suggest_aliases_end_to_end_via_rust_tag_index(uow: SqlUnitOfWork):
         cand_names = [c["name"] for c in yuri["items"][0]["candidates"]]
         assert "百合漫画" in cand_names
         assert "百合小説" in cand_names
+
+        # Core bulk delete via delete_aliases_by_ids marks aliases_dirty so TagIndex refreshes
+        deleted_count = SQLAlchemyTagRepository(uow.session).delete_aliases_by_ids([alias_id])
+        assert deleted_count == 1
+
+    with uow.begin():
+        tgt_after = SQLAlchemyTagRepository(uow.session).suggest_aliases(
+            limit=5, offset=0, target_tag="aliased_tgt"
+        )
+        assert len(tgt_after["items"]) == 1
+        assert [c["name"] for c in tgt_after["items"][0]["candidates"]] == [
+            "aliased_tgt_pair",
+            "aliased_src",
+        ]
+
+        # needs_rebuild() self-heals on an empty committed transaction and on read entrypoints
+        eng = uow.session.info["query_engine"]
+        eng.mark_needs_rebuild()
+        assert eng.needs_rebuild() is True
+
+    assert eng.needs_rebuild() is False
+
+    with uow.begin():
+        eng.mark_needs_rebuild()
+        assert eng.needs_rebuild() is True
+        res = SQLAlchemyTagRepository(uow.session).suggest_aliases(limit=5, offset=0, target_tag="百合")
+        assert len(res["items"]) == 1
+        assert eng.needs_rebuild() is False

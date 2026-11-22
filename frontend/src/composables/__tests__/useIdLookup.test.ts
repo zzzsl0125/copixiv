@@ -80,9 +80,14 @@ describe('formatIdLookupHint', () => {
       text: '查询中…',
     })
 
+    expect(formatIdLookupHint({ ...base, unlinking: true, currentId: null, idNumber: null })).toEqual({
+      tone: 'muted',
+      text: '清空将解除关联',
+    })
+
     expect(formatIdLookupHint({ ...base, idNumber: 9, failed: true })).toEqual({
       tone: 'warn',
-      text: '查询失败；仍可保存，名字之后自动补齐',
+      text: '查询失败；仍可保存，保存时将再次尝试解析',
     })
 
     expect(formatIdLookupHint({ ...base, idNumber: 9, found: null })).toEqual({
@@ -108,7 +113,7 @@ describe('formatIdLookupHint', () => {
       formatIdLookupHint({ ...base, idNumber: 9, found: { name: null, novelCount: 0 } }),
     ).toEqual({
       tone: 'warn',
-      text: '未查到该作者（ID 不存在或 pixiv 暂不可达）；仍可保存，名字之后自动补齐',
+      text: '未查到该作者（ID 不存在或 pixiv 暂不可达）；仍可保存，保存时将再次尝试解析',
     })
   })
 })
@@ -126,7 +131,7 @@ describe('useIdLookup', () => {
     initial?: string
     currentId?: () => number | null
     enabled?: () => boolean
-    fetch: (id: number) => Promise<LookupResult>
+    fetch: (id: number, signal?: AbortSignal) => Promise<LookupResult>
   }) {
     const input = ref(opts.initial ?? '')
     let lookup!: IdLookup<LookupResult>
@@ -193,14 +198,14 @@ describe('useIdLookup', () => {
 
     await vi.advanceTimersByTimeAsync(ID_LOOKUP_DEBOUNCE_MS)
     expect(fetchSpy).toHaveBeenCalledTimes(1)
-    expect(fetchSpy).toHaveBeenCalledWith(123)
+    expect(fetchSpy).toHaveBeenCalledWith(123, expect.any(AbortSignal))
 
     // Change input before first in-flight request resolves
     input.value = '456'
     await nextTick()
     await vi.advanceTimersByTimeAsync(ID_LOOKUP_DEBOUNCE_MS)
     expect(fetchSpy).toHaveBeenCalledTimes(2)
-    expect(fetchSpy).toHaveBeenLastCalledWith(456)
+    expect(fetchSpy).toHaveBeenLastCalledWith(456, expect.any(AbortSignal))
 
     // Newer request resolves first, then older stale request resolves
     pending.get(456)!.resolve({ name: 'Fresh Author', novelCount: 3 })
@@ -239,5 +244,43 @@ describe('useIdLookup', () => {
     wrapper.unmount()
     await vi.advanceTimersByTimeAsync(ID_LOOKUP_DEBOUNCE_MS)
     expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('aborts superseded in-flight requests and aborts active request on unmount', async () => {
+    const signals: AbortSignal[] = []
+    const rejectors: Array<(err: unknown) => void> = []
+    const fetchSpy = vi.fn((_id: number, signal?: AbortSignal) => {
+      if (signal) signals.push(signal)
+      return new Promise<LookupResult>((_res, rej) => {
+        rejectors.push(rej)
+      })
+    })
+
+    const { input, lookup, wrapper } = mountLookup({ fetch: fetchSpy })
+
+    input.value = '101'
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(ID_LOOKUP_DEBOUNCE_MS)
+    expect(signals).toHaveLength(1)
+    expect(signals[0]!.aborted).toBe(false)
+
+    // Superseding input aborts the first in-flight request
+    input.value = '202'
+    await nextTick()
+    expect(signals[0]!.aborted).toBe(true)
+
+    // Rejecting the aborted request does not flip failed=true
+    rejectors[0]!(new DOMException('Aborted', 'AbortError'))
+    await nextTick()
+    await Promise.resolve()
+    expect(lookup.failed.value).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(ID_LOOKUP_DEBOUNCE_MS)
+    expect(signals).toHaveLength(2)
+    expect(signals[1]!.aborted).toBe(false)
+
+    // Unmounting aborts the second in-flight request
+    wrapper.unmount()
+    expect(signals[1]!.aborted).toBe(true)
   })
 })

@@ -20,7 +20,7 @@ def test_env_overrides_yaml_deep_merge_lists_and_ignores_unrelated_env(
 ):
     cfg_file = tmp_path / "app.yaml"
     cfg_file.write_text(
-        "backup:\n  dir: from_yaml\n  keep_count: 10\n",
+        "backup:\n  dir: from_yaml\npath:\n  download: yaml_dl\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("COPIXIV_PROXY__URL", "http://127.0.0.1:7890")
@@ -32,32 +32,29 @@ def test_env_overrides_yaml_deep_merge_lists_and_ignores_unrelated_env(
     cfg = load_config(str(cfg_file))
     assert cfg.proxy.url == "http://127.0.0.1:7890"
     assert cfg.backup.dir == "/tmp/from_env"
-    assert cfg.backup.keep_count == 10  # preserved from YAML
+    assert cfg.path.download == "yaml_dl"  # preserved from YAML
     assert cfg.security.allowed_hosts == ["nas.local", "box.local"]
     assert cfg.database_url == "postgresql+psycopg2://u@localhost:5433/db"
 
     # Direct AppConfig() does not implicitly read config.yaml from CWD
     direct = AppConfig()
     assert direct.backup.dir == "/tmp/from_env"
-    assert direct.backup.keep_count == 4
+    assert direct.path.download == "download"
 
 
 @pytest.mark.parametrize(
     ("yaml_body", "expected_fragment"),
     [
         ("telegram:\n  token: abc\n", "telegram"),
-        ("notifications:\n  - type: webhook\n    token: x\n", "webhook"),
-        ("proxy:\n  http: http://127.0.0.1:7890\n", "proxy"),
+        ("notifications:\n  - type: webhook\n    token: x\n", "telegram"),
+        ("proxy:\n  http: http://127.0.0.1:7890\n", "http"),
     ],
 )
-def test_legacy_config_fails_fast_with_migration_hint(
+def test_unknown_or_legacy_config_fails_fast(
     tmp_path: Path,
-    monkeypatch,
     yaml_body: str,
     expected_fragment: str,
 ):
-    monkeypatch.delenv("COPIXIV_PROXY_HTTP", raising=False)
-    monkeypatch.delenv("COPIXIV_PROXY_HTTPS", raising=False)
     cfg_file = tmp_path / "legacy.yaml"
     cfg_file.write_text(yaml_body, encoding="utf-8")
 
@@ -66,19 +63,14 @@ def test_legacy_config_fails_fast_with_migration_hint(
     assert expected_fragment in str(exc_info.value)
 
 
-def test_removed_query_engine_setting_fails_fast(tmp_path: Path, monkeypatch):
+def test_removed_query_engine_setting_fails_fast(tmp_path: Path):
     with pytest.raises(ValidationError, match="query_engine"):
         AppConfig.model_validate({"query_engine": "pg"})
 
     cfg_file = tmp_path / "with_engine.yaml"
     cfg_file.write_text("query_engine: pg\n", encoding="utf-8")
-    monkeypatch.delenv("COPIXIV_QUERY_ENGINE", raising=False)
     with pytest.raises(SystemExit, match="query_engine"):
         load_config(str(cfg_file))
-
-    monkeypatch.setenv("COPIXIV_QUERY_ENGINE", "pg")
-    with pytest.raises(ValueError, match="COPIXIV_QUERY_ENGINE"):
-        load_config("/nonexistent-path-for-test.yaml")
 
 
 def test_security_config_derives_allowed_origins():

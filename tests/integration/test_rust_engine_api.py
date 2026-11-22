@@ -130,16 +130,18 @@ def test_http_endpoints_rust_engine_and_live_mutations(
         assert set(rand_ids) == {-5, 1, 2, 4}
         assert len(rand_ids) == 4
 
-        # Block tag via HTTP API -> immediate exclusion in /count, /blocked-ids, has_excluded
+        # Block tag via HTTP API -> immediate exclusion in /count, only_blocked, has_excluded
         rp = client.post(
             "/api/tag-preferences",
             json={"tag": "spoiler", "preference": "blocked", "sort_index": 0},
         )
         assert rp.status_code in (200, 201)
-        assert client.get("/api/novels/blocked-ids").json()["ids"] == [2]
-        rc = client.get("/api/novels/count", params={"with_excluded": True}).json()
+        assert client.get("/api/novels/blocked-ids").status_code == 405
+        r_blk = client.get("/api/novels", params={"only_blocked": True}).json()
+        assert [n["id"] for n in r_blk["novels"]] == [2]
+        rc = client.get("/api/novels/count").json()
         assert rc["total"] == 3
-        assert rc["excluded"] == 1
+        assert "excluded" not in rc
         r_search = client.get("/api/novels", params={"keyword": "spoiler"}).json()
         assert r_search["novels"] == []
         assert r_search["has_excluded"] is True
@@ -147,26 +149,32 @@ def test_http_endpoints_rust_engine_and_live_mutations(
         # Toggle system exclude_blocked_tag_novels=false -> all 4 visible immediately
         r_sys = client.put("/api/system/config", json={"exclude_blocked_tag_novels": False})
         assert r_sys.status_code == 200
-        rc2 = client.get("/api/novels/count", params={"with_excluded": True}).json()
+        rc2 = client.get("/api/novels/count").json()
         assert rc2["total"] == 4
-        assert rc2["excluded"] == 0
+        r_blk2 = client.get("/api/novels", params={"only_blocked": True}).json()
+        assert r_blk2["novels"] == []
 
         # Toggle favourite + special follow -> filtered search reflects immediately
         assert client.post("/api/novels/1/favourite").status_code == 204
         assert client.post("/api/novels/author/10/follow").status_code == 204
         rfav = client.get("/api/novels/ids", params={"keyword": "is_favourite:1"}).json()
         assert rfav["ids"] == [1]
+        assert "truncated" not in rfav
         rsf = client.get("/api/novels/ids", params={"keyword": "is_special_follow:1"}).json()
         assert rsf["ids"] == [-5, 1, 2]
 
-        # Direct Rust-hydrated /by-ids card projection preserves order, reflects flags,
+        # Direct Rust-hydrated /by-ids card projection preserves order, reflects bool flags,
         # and excludes removed `caption` field across both listing and PATCH contracts.
         by_ids = client.post("/api/novels/by-ids", json={"novel_ids": [4, 1, -5, 999999]})
         assert by_ids.status_code == 200
-        by_ids_novels = by_ids.json()["novels"]
+        by_ids_body = by_ids.json()
+        assert "truncated" not in by_ids_body
+        by_ids_novels = by_ids_body["novels"]
         assert [n["id"] for n in by_ids_novels] == [4, 1, -5]
-        assert by_ids_novels[1]["is_favourite"] == 1
-        assert by_ids_novels[1]["is_special_follow"] == 1
+        assert by_ids_novels[1]["is_favourite"] is True
+        assert by_ids_novels[1]["is_special_follow"] is True
+        assert by_ids_novels[0]["is_favourite"] is False
+        assert by_ids_novels[0]["is_special_follow"] is False
         assert all("caption" not in n for n in by_ids_novels)
         assert all("caption" not in n for n in body["novels"])
 

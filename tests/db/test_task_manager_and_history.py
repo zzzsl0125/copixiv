@@ -15,9 +15,8 @@ from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.novels.use_cases.refetch_missing import find_refetch_candidates
 from copixiv.storage.file_storage import FileStorage
 from copixiv.tasks import registry
-from copixiv.tasks.batch import BatchExportArgs, BatchOperationArgs, batch_export, batch_operation
+from copixiv.tasks.batch import BatchExportArgs, batch_export
 from copixiv.tasks.executor import TaskContext
-from copixiv.tasks.history_repo import SQLAlchemyTaskRepository
 from copixiv.tasks.manager import TaskManagerSystem
 
 
@@ -52,20 +51,20 @@ async def test_task_manager_recovers_stale_runs_both_lanes_and_records_invalid_r
     monkeypatch.setitem(registry._registry, "_test_fetch_lane", registry._registry["_test_fetch_lane"])
     monkeypatch.setitem(registry._registry, "_test_general_lane", registry._registry["_test_general_lane"])
 
-    # Seed two stale rows (should become interrupted on start) + one unknown task + one bad-JSON task
+    # Seed two stale rows (should become interrupted on start)
     now = datetime.now(UTC)
     with committed_session_factory() as session:
         stale_pending = models.TaskHistory(
             name="stale_p",
             task_func="_test_general_lane",
-            arguments="{}",
+            arguments={},
             status="pending",
             start_time=now,
         )
         stale_running = models.TaskHistory(
             name="stale_r",
             task_func="_test_fetch_lane",
-            arguments="{}",
+            arguments={},
             status="running",
             start_time=now,
         )
@@ -82,25 +81,25 @@ async def test_task_manager_recovers_stale_runs_both_lanes_and_records_invalid_r
                 assert row is not None
                 assert row.status == "interrupted"
 
-        # Insert a bad JSON row and an unknown func row after start, then enqueue valid tasks
+        # Insert a non-dict arguments row and an unknown func row after start, then enqueue valid tasks
         with committed_session_factory() as session:
-            bad_json = models.TaskHistory(
-                name="bad_json",
+            bad_args = models.TaskHistory(
+                name="bad_args",
                 task_func="_test_general_lane",
-                arguments="{not-json",
+                arguments=["not-a-dict"],  # type: ignore[arg-type]
                 status="pending",
                 start_time=now,
             )
             unknown_fn = models.TaskHistory(
                 name="unknown_fn",
                 task_func="no_such_task_xyz",
-                arguments="{}",
+                arguments={},
                 status="pending",
                 start_time=now,
             )
-            session.add_all([bad_json, unknown_fn])
+            session.add_all([bad_args, unknown_fn])
             session.commit()
-            bad_json_id, unknown_id = bad_json.id, unknown_fn.id
+            bad_args_id, unknown_id = bad_args.id, unknown_fn.id
 
         fetch_id = mgr.run_task("_test_fetch_lane", {"value": "A"})
         general_id = mgr.run_task("_test_general_lane", {"value": "B"})
@@ -111,14 +110,14 @@ async def test_task_manager_recovers_stale_runs_both_lanes_and_records_invalid_r
             with committed_session_factory() as session:
                 statuses = [
                     session.get(models.TaskHistory, tid).status
-                    for tid in (bad_json_id, unknown_id, fetch_id, general_id)
+                    for tid in (bad_args_id, unknown_id, fetch_id, general_id)
                 ]
                 if all(s in ("success", "failed") for s in statuses):
                     break
             await asyncio.sleep(0.05)
 
         with committed_session_factory() as session:
-            assert session.get(models.TaskHistory, bad_json_id).status == "failed"
+            assert session.get(models.TaskHistory, bad_args_id).status == "failed"
             assert session.get(models.TaskHistory, unknown_id).status == "failed"
             r_fetch = session.get(models.TaskHistory, fetch_id)
             r_general = session.get(models.TaskHistory, general_id)
@@ -132,32 +131,13 @@ async def test_task_manager_recovers_stale_runs_both_lanes_and_records_invalid_r
 
 
 @pytest.mark.asyncio
-async def test_pending_null_task_func_refetch_pre_limit_and_batch_progress(
+async def test_refetch_pre_limit_and_batch_export_progress(
     committed_session_factory,
     tmp_path: Path,
 ):
     now = datetime.now(UTC)
-    # 1. get_next_pending(exclude_funcs=...) must NOT drop task_func=NULL rows
-    with committed_session_factory() as session:
-        legacy = models.TaskHistory(
-            name="legacy_null",
-            task_func=None,
-            arguments="{}",
-            status="pending",
-            start_time=now,
-        )
-        session.add(legacy)
-        session.commit()
-        legacy_id = legacy.id
 
-    with committed_session_factory() as session:
-        picked = SQLAlchemyTaskRepository(session).get_next_pending(
-            exclude_funcs=["novel_fetch"],
-        )
-        assert picked is not None
-        assert picked.id == legacy_id
-
-    # 2. refetch._candidates must filter failed rows BEFORE applying LIMIT
+    # 1. refetch._candidates must filter failed rows BEFORE applying LIMIT
     #    (3 skipped rows with ids 1..3 + 1 eligible row with id 4 -> limit=1 returns [4], not [])
     with committed_session_factory() as session:
         session.add_all(
@@ -190,15 +170,9 @@ async def test_pending_null_task_func_refetch_pre_limit_and_batch_progress(
                     has_epub=EpubStatus.MISSING_SOURCE,
                     source="pixiv",
                 ),
-                models.FailedNovel(
-                    novel_id=1, failure_type="x", error_message="dead", failed_times=3, last_failed_at=now
-                ),
-                models.FailedNovel(
-                    novel_id=2, failure_type="x", error_message="dead", failed_times=3, last_failed_at=now
-                ),
-                models.FailedNovel(
-                    novel_id=3, failure_type="x", error_message="recent", failed_times=1, last_failed_at=now
-                ),
+                models.FailedNovel(novel_id=1, error_message="dead", failed_times=3, last_failed_at=now),
+                models.FailedNovel(novel_id=2, error_message="dead", failed_times=3, last_failed_at=now),
+                models.FailedNovel(novel_id=3, error_message="recent", failed_times=1, last_failed_at=now),
             ]
         )
         session.commit()
@@ -206,7 +180,7 @@ async def test_pending_null_task_func_refetch_pre_limit_and_batch_progress(
     with committed_session_factory() as session:
         assert find_refetch_candidates(session, limit=1, skip_cutoff=now.replace(year=2020)) == [4]
 
-    # 3. batch_export + batch_operation report progress via isolated child UoW & run off event loop
+    # 2. batch_export reports progress via isolated child UoW & writes export zip
     storage = FileStorage(str(tmp_path))
     p_ok = tmp_path / "0000" / "OK4_4.txt"
     p_ok.parent.mkdir(parents=True, exist_ok=True)
@@ -214,10 +188,9 @@ async def test_pending_null_task_func_refetch_pre_limit_and_batch_progress(
     with committed_session_factory() as session:
         session.get(models.Novel, 4).path = str(p_ok)
         th_export = models.TaskHistory(name="exp", task_func="batch_export", status="running", start_time=now)
-        th_del = models.TaskHistory(name="del", task_func="batch_operation", status="running", start_time=now)
-        session.add_all([th_export, th_del])
+        session.add(th_export)
         session.commit()
-        exp_id, del_id = th_export.id, th_del.id
+        exp_id = th_export.id
 
     ctx_exp = TaskContext(
         uow=SqlUnitOfWork(committed_session_factory),
@@ -228,19 +201,30 @@ async def test_pending_null_task_func_refetch_pre_limit_and_batch_progress(
     res_exp = await batch_export(BatchExportArgs(novel_ids=[4], zip_name="top.zip"), ctx_exp)
     assert "批量导出完成" in res_exp.summary
     assert (tmp_path / f"batch_export_{exp_id}.zip").is_file()
+    with committed_session_factory() as session:
+        assert session.get(models.TaskHistory, exp_id).progress is not None
 
-    ctx_del = TaskContext(
+    # 3. batch_export raises NotFoundError and leaves no 0-byte zip when all files are missing
+    from copixiv.core.exceptions import NotFoundError
+
+    p_ok.unlink()
+    with committed_session_factory() as session:
+        th_empty = models.TaskHistory(
+            name="exp_empty", task_func="batch_export", status="running", start_time=now
+        )
+        session.add(th_empty)
+        session.commit()
+        empty_id = th_empty.id
+
+    ctx_empty = TaskContext(
         uow=SqlUnitOfWork(committed_session_factory),
         session_factory=committed_session_factory,
         file_storage=storage,
-        task_id=del_id,
+        task_id=empty_id,
     )
-    res_del = await batch_operation(BatchOperationArgs(operation="delete", novel_ids=[4]), ctx_del)
-    assert "共处理 1/1 篇" in res_del.summary
-    assert not p_ok.exists()
-    with committed_session_factory() as session:
-        assert session.get(models.TaskHistory, exp_id).progress is not None
-        assert session.get(models.TaskHistory, del_id).progress is not None
+    with pytest.raises(NotFoundError, match="未找到可下载的有效文件"):
+        await batch_export(BatchExportArgs(novel_ids=[4], zip_name="empty.zip"), ctx_empty)
+    assert not (tmp_path / f"batch_export_{empty_id}.zip").exists()
 
 
 @pytest.mark.asyncio
@@ -274,14 +258,14 @@ async def test_task_manager_cancel_pending_running_and_get_export_info(
         exp_row = models.TaskHistory(
             name="exp",
             task_func="batch_export",
-            arguments='{"zip_name": "top.zip"}',
+            arguments={"zip_name": "top.zip"},
             status="success",
             start_time=now,
         )
         pending_row = models.TaskHistory(
             name="pending_cancel",
             task_func="_test_cancel_followup",
-            arguments="{}",
+            arguments={},
             status="pending",
             start_time=now,
         )

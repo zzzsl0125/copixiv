@@ -6,7 +6,7 @@ import pytest
 
 from copixiv.core.draft import build_novel
 from copixiv.core.exceptions import ValidationError
-from copixiv.core.models import EpubStatus, new_shuffle_key
+from copixiv.core.models import EpubStatus
 from copixiv.core.search import QuerySpec
 from copixiv.db import models
 from copixiv.db.uow import SqlUnitOfWork
@@ -70,7 +70,6 @@ def _seed_search_corpus(uow: SqlUnitOfWork) -> None:
                     view=600,
                     text=3500,
                     has_epub=EpubStatus.NO_IMAGES,
-                    shuffle=new_shuffle_key(),
                     tags=["百合"],
                     source="local",
                     source_key=f"sha_{neg_id}",
@@ -101,7 +100,8 @@ def test_keyword_search_and_tag_predicates(uow: SqlUnitOfWork):
         assert 3000 not in ids_tag  # excluded because it carries blocked tag "ntr"
         assert {5000, -4000, -2000} == ids_tag
         assert repo.has_excluded_novels(QuerySpec(conditions=[("tags", "百合")])) is True
-        assert repo.count_excluded_novels(QuerySpec(conditions=[("tags", "百合")])).value == 1
+        res_blocked = repo.get_novels(QuerySpec(conditions=[("tags", "百合")]), only_blocked=True)
+        assert [n.id for n in res_blocked["novels"]] == [3000]
 
         # Explicit override shows blocked novel
         res_all = repo.get_novels(QuerySpec(conditions=[("tags", "百合")], exclude_blocked_tags=False))

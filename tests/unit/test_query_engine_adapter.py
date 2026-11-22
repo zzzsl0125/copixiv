@@ -59,7 +59,6 @@ def _build_engine(
     *,
     blocked_tags: list[str] | None = None,
     exclude_default: bool = True,
-    sf_authors: list[int] | None = None,
 ) -> RustNovelQueryEngine:
     engine = RustNovelQueryEngine()
     staging = engine.create_staging(capacity=len(rows))
@@ -68,7 +67,6 @@ def _build_engine(
         staging,
         blocked_tags or [],
         exclude_default,
-        sf_authors or [],
     )
     return engine
 
@@ -80,6 +78,8 @@ def test_datetime_to_us_precision_and_timezone_normalization():
     assert us_to_datetime(us) == utc_dt
     plus8 = datetime(2025, 1, 13, 23, 0, 0, 123456, tzinfo=timezone(timedelta(hours=8)))
     assert datetime_to_us(plus8) == us
+    naive_utc = datetime(2025, 1, 13, 15, 0, 0, 123456)
+    assert datetime_to_us(naive_utc) == us
     assert us_to_datetime(datetime_to_us(datetime(1969, 12, 31, 23, 59, 59, 500000, tzinfo=UTC))) == (
         datetime(1969, 12, 31, 23, 59, 59, 500000, tzinfo=UTC)
     )
@@ -152,7 +152,7 @@ def test_abs_id_null_sort_order_and_js_safe_random_cursor():
         ).rows
     ] == [100, 300, -200, 200]
 
-    # Non-null create_time cursor excludes NULL rows in both directions
+    # Keyset create_time cursor preserves PG NULLS FIRST (DESC) and NULLS LAST (ASC)
     assert [
         r.id
         for r in eng.query_novel_rows(
@@ -168,11 +168,31 @@ def test_abs_id_null_sort_order_and_js_safe_random_cursor():
         for r in eng.query_novel_rows(
             q,
             order_by="create_time",
+            descending=True,
+            limit=10,
+            cursor=EngineCursor(cursor_id=200, cursor_int=None),
+        ).rows
+    ] == [-200, 300, 100]
+    assert [
+        r.id
+        for r in eng.query_novel_rows(
+            q,
+            order_by="create_time",
             descending=False,
             limit=10,
             cursor=EngineCursor(cursor_id=100, cursor_int=1000),
         ).rows
-    ] == [300]
+    ] == [300, -200, 200]
+    assert [
+        r.id
+        for r in eng.query_novel_rows(
+            q,
+            order_by="create_time",
+            descending=False,
+            limit=10,
+            cursor=EngineCursor(cursor_id=-200, cursor_int=None),
+        ).rows
+    ] == [200]
 
     # Stateless true-random walk produces hex cursors (JS safe) and covers all 4 rows cleanly.
     seen: list[int] = []
@@ -214,13 +234,12 @@ def test_tag_suggestions_rebuild_flag_and_memory_breakdown():
         stg,
         [],
         True,
-        [],
         tags=[(1, "百合", 10), (2, "百合漫画", 5), (3, "日常", 8)],
         aliased_tag_ids=[],
     )
     assert eng.needs_rebuild() is False
     items, next_off = eng.suggest_tag_aliases(limit=5, offset=0, target_tag="百合")
-    assert next_off == 0
+    assert next_off is None
     assert len(items) == 1
     assert [c.name for c in items[0].candidates] == ["百合漫画"]
     breakdown = eng.memory_breakdown()

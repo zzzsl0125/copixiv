@@ -11,12 +11,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from copixiv.core.models import TaskResult
 from copixiv.db.backup import backup_database
-from copixiv.features.library.decode import decode_txt
 from copixiv.features.library.filenames import parse_filename
+from copixiv.storage.encoding import decode_text_bytes
 from copixiv.tasks import registry
 from copixiv.tasks.cron import CRON_TIMEZONE, CronTicker, next_occurrence
 from copixiv.tasks.executor import TaskContext, TaskExecutor
@@ -25,6 +25,13 @@ from copixiv.tasks.schemas import ScheduledTaskResponse
 
 class _SampleArgs(BaseModel):
     count: int = 1
+
+
+class _RichSampleArgs(BaseModel):
+    count: int = 1
+    flag: bool = False
+    limit: int | None = Field(default=None, description="可选上限")
+    ids: list[int]
 
 
 class _FakeRecorder:
@@ -74,8 +81,8 @@ def test_registry_register_rejects_sync_and_exposes_schema(monkeypatch: pytest.M
         def _sync_fn():
             return None
 
-    @registry.register("unit_sample_task", description="Sample task", args=_SampleArgs)
-    async def _sample_fn(args: _SampleArgs, ctx: TaskContext):
+    @registry.register("unit_sample_task", description="Sample task", args=_RichSampleArgs)
+    async def _sample_fn(args: _RichSampleArgs, ctx: TaskContext):
         del ctx
         return TaskResult(summary=f"ok:{args.count}")
 
@@ -87,7 +94,32 @@ def test_registry_register_rejects_sync_and_exposes_schema(monkeypatch: pytest.M
 
     described = {m["name"]: m for m in registry.describe_tasks()}
     assert "unit_sample_task" in described
-    assert described["unit_sample_task"]["arguments"]["properties"]["count"]["default"] == 1
+    args_by_name = {a["name"]: a for a in described["unit_sample_task"]["arguments"]}
+    assert args_by_name["count"] == {
+        "name": "count",
+        "type": "integer",
+        "required": False,
+        "nullable": False,
+        "default": 1,
+        "description": None,
+    }
+    assert args_by_name["flag"]["type"] == "boolean"
+    assert args_by_name["limit"] == {
+        "name": "limit",
+        "type": "integer",
+        "required": False,
+        "nullable": True,
+        "default": None,
+        "description": "可选上限",
+    }
+    assert args_by_name["ids"] == {
+        "name": "ids",
+        "type": "array",
+        "required": True,
+        "nullable": False,
+        "default": None,
+        "description": None,
+    }
 
 
 def test_cron_next_occurrence_and_fire_due(monkeypatch: pytest.MonkeyPatch):
@@ -255,7 +287,7 @@ async def test_phase1_task_context_cron_locking_backup_decode_and_filename(
             "name": "legacy",
             "task": "check_epub",
             "cron": "not a valid cron",
-            "params": '{"a": 1}',
+            "params": {"a": 1},
             "is_enabled": False,
             "sort_index": 0,
         }
@@ -372,9 +404,36 @@ async def test_phase1_task_context_cron_locking_backup_decode_and_filename(
         backup_database(secret_url, backup_dir=str(tmp_path), timeout=5)
     assert "SUPER_SECRET_PW" not in str(timeout_info.value)
 
+    # 4b. backup helpers: _connection_args query port, _pg_bin priority, cleanup_old_backups guard
+    from copixiv.db.backup import _connection_args, _pg_bin, cleanup_old_backups
+
+    args, _env = _connection_args("postgresql+psycopg2://postgres@/copixiv?host=/tmp/sock&port=5433")
+    assert "--host" in args
+    assert args[args.index("--host") + 1] == "/tmp/sock"
+    assert "--port" in args
+    assert args[args.index("--port") + 1] == "5433"
+
+    monkeypatch.setattr("copixiv.db.backup.shutil.which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.delenv("COPIXIV_USE_SYSTEM_PG", raising=False)
+    assert _pg_bin("pg_dump") != "/usr/bin/pg_dump"
+    monkeypatch.setenv("COPIXIV_USE_SYSTEM_PG", "1")
+    assert _pg_bin("pg_dump") == "/usr/bin/pg_dump"
+    monkeypatch.delenv("COPIXIV_USE_SYSTEM_PG", raising=False)
+
+    for bad_keep in (0, -1):
+        with pytest.raises(ValueError, match="keep_count"):
+            cleanup_old_backups(keep_count=bad_keep, backup_dir=str(tmp_path))
+
+    (tmp_path / "2026-W01.dump").write_bytes(b"1")
+    (tmp_path / "2026-W02.dump").write_bytes(b"2")
+    (tmp_path / "2026-W03.dump").write_bytes(b"3")
+    removed = cleanup_old_backups(keep_count=2, backup_dir=str(tmp_path))
+    assert removed == [str(tmp_path / "2026-W01.dump")]
+    assert sorted(p.name for p in tmp_path.glob("*.dump")) == ["2026-W02.dump", "2026-W03.dump"]
+
     # 5. Short Big5 text is not silently misdecoded as GB18030
     big5_text = "這是繁體中文測試"
-    assert decode_txt(big5_text.encode("big5")) == big5_text
+    assert decode_text_bytes(big5_text.encode("big5"), strict=True) == big5_text
 
     # 6. Bare extension filename gets non-empty fallback title
     assert parse_filename(".txt") == ("未命名", "未知作者")

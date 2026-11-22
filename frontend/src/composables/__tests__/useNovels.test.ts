@@ -1,5 +1,4 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { ref } from 'vue'
 import { focusManager, onlineManager } from '@tanstack/vue-query'
 import type { Novel, NovelListResult } from '../../types'
 import { SECTIONS } from '../../config'
@@ -20,16 +19,6 @@ vi.mock('../../api', async (importOriginal) => {
   }
 })
 
-vi.mock('../useSystem', () => ({
-  useSystem: () => ({
-    systemConfig: ref({
-      exclude_blocked_tag_novels: true,
-      batch_download_naming: '',
-    }),
-    isConfigReady: ref(true),
-  }),
-}))
-
 import { buildNovelQuery, computeSearchFilters, parseNovelQuery, useNovels } from '../index'
 
 function makeNovel(id: number, overrides: Partial<Novel> = {}): Novel {
@@ -47,8 +36,8 @@ function makeNovel(id: number, overrides: Partial<Novel> = {}): Novel {
     has_epub: 0,
     create_time: null,
     source: 'pixiv',
-    is_favourite: 0,
-    is_special_follow: 0,
+    is_favourite: false,
+    is_special_follow: false,
     tags: [],
     editable_fields: [],
     ...overrides,
@@ -100,6 +89,10 @@ describe('useNovelQueryState & useNovels', () => {
       min_like: 0,
       min_text: 0,
     })
+
+    // Non-empty keyword defaults align between parseNovelQuery and computeSearchFilters
+    expect(buildNovelQuery(computeSearchFilters('百合'))).toEqual({ keyword: '百合' })
+    expect(parseNovelQuery({ keyword: '百合' })).toEqual(computeSearchFilters('百合'))
   })
 
   it('computes search ordering across shelf, id, series, author, and free search', () => {
@@ -173,13 +166,35 @@ describe('useNovelQueryState & useNovels', () => {
 
     // In-place cache patch/state/remove update active view without refetching
     result.patchNovelInCache(makeNovel(1, { title: 'Updated One' }))
-    result.patchNovelStateInCache({ id: 2, field: 'is_favourite', value: 1 })
+    result.patchNovelStateInCache({ id: 2, field: 'is_favourite', value: true })
     expect(result.novels.value[0]?.title).toBe('Updated One')
-    expect(result.novels.value[1]?.is_favourite).toBe(1)
+    expect(result.novels.value[1]?.is_favourite).toBe(true)
 
     result.removeNovelFromCache(1)
     expect(result.novels.value.map((n) => n.id)).toEqual([2])
     expect(mocks.getNovels).toHaveBeenCalledTimes(2)
+
+    wrapper.unmount()
+  })
+
+  it('passes only_blocked=true when onlyBlocked option is enabled', async () => {
+    mocks.getNovels.mockResolvedValueOnce({
+      novels: [makeNovel(10)],
+      cursor: null,
+      has_excluded: false,
+    })
+
+    const { result, wrapper } = await mountWithQuery(() => useNovels({ onlyBlocked: true }))
+    await flushPromises()
+
+    expect(mocks.getNovels).toHaveBeenCalledWith(
+      expect.objectContaining({
+        only_blocked: true,
+        exclude_blocked: undefined,
+      }),
+      expect.any(AbortSignal),
+    )
+    expect(result.novels.value.map((n) => n.id)).toEqual([10])
 
     wrapper.unmount()
   })

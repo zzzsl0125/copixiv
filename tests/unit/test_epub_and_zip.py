@@ -15,7 +15,7 @@ from copixiv.core.draft import build_novel
 from copixiv.core.models import EpubStatus
 from copixiv.storage.epub import reader, state
 from copixiv.storage.epub.builder import EpubBuilder, EpubBuildResult
-from copixiv.storage.zip import build_batch_zip
+from copixiv.storage.zip import build_batch_zip, build_batch_zip_to_file
 
 
 def test_epub_builder_epub3_structure_spine_roundtrip_and_missing_images(tmp_path: Path):
@@ -57,10 +57,7 @@ def test_epub_builder_epub3_structure_spine_roundtrip_and_missing_images(tmp_pat
 
     epub_path = target_txt.with_suffix(".epub")
     assert res.output_path == epub_path
-    assert state.is_readable_container(epub_path) is True
-    assert state.has_embedded_images(epub_path) is True
-    assert state.has_raw_markers(epub_path) is False
-    assert state.is_complete(epub_path) is True
+    assert state.inspect_epub(epub_path) == (True, True)
 
     with zipfile.ZipFile(epub_path) as zf:
         names = zf.namelist()
@@ -88,7 +85,7 @@ def test_epub_builder_epub3_structure_spine_roundtrip_and_missing_images(tmp_pat
     assert "第一段" in parsed_roundtrip.body
     assert "第二段" in parsed_roundtrip.body
 
-    # Corrupt compressed payload of EPUB/content.xhtml -> state.is_complete must return False
+    # Corrupt compressed payload of EPUB/content.xhtml -> state.inspect_epub returns (True, False)
     raw_bytes = bytearray(epub_path.read_bytes())
     hdr = content_info.header_offset
     fn_len = int.from_bytes(raw_bytes[hdr + 26 : hdr + 28], "little")
@@ -96,8 +93,7 @@ def test_epub_builder_epub3_structure_spine_roundtrip_and_missing_images(tmp_pat
     raw_bytes[hdr + 30 + fn_len + extra_len] ^= 0xFF
     corrupt_epub = tmp_path / "corrupt.epub"
     corrupt_epub.write_bytes(bytes(raw_bytes))
-    assert state.has_embedded_images(corrupt_epub) is True
-    assert state.is_complete(corrupt_epub) is False
+    assert state.inspect_epub(corrupt_epub) == (True, False)
 
 
 def test_epub_reader_reads_spine_order_and_blocks_xxe_and_size(monkeypatch):
@@ -194,7 +190,7 @@ def test_build_batch_zip_formats_compression_root_guard_and_progress(tmp_path: P
         download_root=dl_root,
     )
     try:
-        assert added == ["One", "Two"]
+        assert added == 2
         assert missing == ["3", "4"]
         assert progress_calls == []
         buf.seek(0)
@@ -205,3 +201,91 @@ def test_build_batch_zip_formats_compression_root_guard_and_progress(tmp_path: P
             assert zf.getinfo("A/Two_2.txt").compress_type == zipfile.ZIP_DEFLATED
     finally:
         buf.close()
+
+
+def test_build_batch_zip_to_file_direct_and_empty_guard(tmp_path: Path):
+    dl_root = tmp_path / "dl"
+    dl_root.mkdir()
+    txt1 = dl_root / "one_1.txt"
+    txt1.write_text("txt1", encoding="utf-8")
+
+    novel_ok = SimpleNamespace(
+        id=1,
+        path=str(txt1),
+        title="One",
+        author_name="A",
+        series_id=None,
+        series_name=None,
+        series_index=None,
+        has_epub=EpubStatus.NO_IMAGES,
+    )
+    novel_missing = SimpleNamespace(
+        id=2,
+        path=str(dl_root / "missing_2.txt"),
+        title="Missing",
+        author_name="A",
+        series_id=None,
+        series_name=None,
+        series_index=None,
+        has_epub=EpubStatus.NO_IMAGES,
+    )
+
+    out_ok = tmp_path / "batch_export_1.zip"
+    size_bytes, added, missing = build_batch_zip_to_file(
+        [novel_ok, novel_missing],
+        out_ok,
+        format_mode="txt",
+        naming_template="{title}_{id}",
+        download_root=dl_root,
+    )
+    assert size_bytes > 0
+    assert out_ok.is_file()
+    assert added == 1
+    assert missing == ["2"]
+    assert not list(tmp_path.glob(".*.tmp"))
+    with zipfile.ZipFile(out_ok) as zf:
+        assert zf.namelist() == ["One_1.txt"]
+
+    # Empty package: 0 valid files -> no output file created, size_bytes == 0
+    out_empty = tmp_path / "batch_export_2.zip"
+    size_empty, added_empty, missing_empty = build_batch_zip_to_file(
+        [novel_missing],
+        out_empty,
+        format_mode="txt",
+        naming_template="{title}_{id}",
+        download_root=dl_root,
+    )
+    assert size_empty == 0
+    assert added_empty == 0
+    assert missing_empty == ["2"]
+    assert not out_empty.exists()
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_epub_builder_zero_embedded_images_does_not_overwrite_existing_epub(tmp_path: Path):
+    novel_id = 8002
+    draft = build_novel(
+        id=novel_id,
+        title="缺图保护",
+        author_id=10,
+        author_name="作者",
+        content="正文\n[uploadedimage:111]",
+        images={"111": {"url": "x"}},
+        download_dir=str(tmp_path),
+    )
+    target_txt = Path(draft.path)
+    target_txt.parent.mkdir(parents=True, exist_ok=True)
+    target_txt.write_text(draft.content or "", encoding="utf-8")
+
+    existing_epub = target_txt.with_suffix(".epub")
+    sentinel_bytes = b"existing-valid-epub-sentinel"
+    existing_epub.write_bytes(sentinel_bytes)
+
+    res = EpubBuilder().create_epub(draft)
+    assert res.ok is False
+    assert res.written is False
+    assert res.embedded_images == 0
+    assert res.missing_images == 1
+    assert res.output_path == existing_epub
+    assert existing_epub.read_bytes() == sentinel_bytes
+    assert not list(target_txt.parent.glob(".*.tmp"))

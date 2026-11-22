@@ -11,29 +11,23 @@ import respx
 
 from copixiv.core.models import TaskResult
 from copixiv.log import capture_logs, logger, setup_logging
-from copixiv.notify.factory import build_notifier
 from copixiv.notify.telegram import (
     TELEGRAM_MAX_CAPTION_LEN,
     TELEGRAM_MAX_MESSAGE_LEN,
     TelegramNotifier,
     format_task_notification,
-    split_telegram_text,
 )
 
 
-def test_split_telegram_text_preserves_html_tags_and_length_bounds():
-    long_line = "<b>" + ("A" * 50) + "</b>"
-    chunks = split_telegram_text(long_line, max_length=25)
-    assert len(chunks) >= 2
-    for chunk in chunks:
-        assert len(chunk) <= 25
-        assert chunk.startswith("<b>")
-        assert chunk.endswith("</b>")
-
-    multi_line = "\n".join(f"- <code>Title {i}</code>" for i in range(300))
-    msg_chunks = split_telegram_text(multi_line, max_length=TELEGRAM_MAX_MESSAGE_LEN)
-    assert len(msg_chunks) >= 2
-    assert all(len(c) <= TELEGRAM_MAX_MESSAGE_LEN for c in msg_chunks)
+def test_format_task_notification_truncates_long_task_name_and_error():
+    payload = format_task_notification(
+        "t_" + ("N" * 300),
+        "failed",
+        error="X" * 5000,
+    )
+    assert len(payload.text) <= TELEGRAM_MAX_MESSAGE_LEN
+    assert "任务历史" in payload.text
+    assert payload.text.endswith("</code>")
 
 
 def test_format_task_notification_switches_to_document_above_10_titles():
@@ -84,16 +78,15 @@ async def test_telegram_notifier_retries_429_splits_long_messages_and_masks_toke
                 side_effect=[
                     httpx.Response(429, json={"parameters": {"retry_after": 1}}),
                     httpx.Response(200, json={"ok": True}),
-                    httpx.Response(200, json={"ok": True}),
                 ]
             )
-            # Send a huge failure error > 4096 chars -> splits and retries 429
+            # Huge failure error -> truncated with history note and retries 429
             await notifier.send_task_result(
                 "huge_task",
                 "failed",
                 error="X" * 5000,
             )
-            assert msg_route.call_count == 3
+            assert msg_route.call_count == 2
 
         # 400 error is NOT retried and token is masked in logged error
         captured: list[str] = []
@@ -109,12 +102,9 @@ async def test_telegram_notifier_retries_429_splits_long_messages_and_masks_toke
             logger.remove(sink_id)
         assert any("***" in line and token not in line for line in captured)
 
-        # Document with > 1024 caption spills remainder to sendMessage
+        # Document with long task_name keeps caption <= TELEGRAM_MAX_CAPTION_LEN
         with respx.mock:
             doc_route = respx.post(f"https://api.telegram.org/bot{token}/sendDocument").mock(
-                return_value=httpx.Response(200, json={"ok": True})
-            )
-            overflow_route = respx.post(f"https://api.telegram.org/bot{token}/sendMessage").mock(
                 return_value=httpx.Response(200, json={"ok": True})
             )
             await notifier.send_task_result(
@@ -126,20 +116,19 @@ async def test_telegram_notifier_retries_429_splits_long_messages_and_masks_toke
                 ),
             )
             assert doc_route.call_count == 1
-            assert overflow_route.call_count >= 1
             assert TELEGRAM_MAX_CAPTION_LEN == 1024
 
-        # Factory builds notifier with proxy_url and shared http_client
-        cfg = SimpleConfigStub(token=token, chat_id="1", proxy_url="127.0.0.1:8080")
-        built = build_notifier(cfg, http_client=http_client)
+        # TelegramNotifier.from_config builds notifier when configured and returns None when empty
+        cfg = SimpleConfigStub(token=token, chat_id="1")
+        built = TelegramNotifier.from_config(cfg, http_client)
         assert built is not None
-        assert built._proxy_url == "http://127.0.0.1:8080"
+        assert TelegramNotifier.from_config(SimpleConfigStub(token="", chat_id="1"), http_client) is None
+        assert TelegramNotifier.from_config(SimpleConfigStub(token=token, chat_id=""), http_client) is None
 
 
 class SimpleConfigStub:
-    def __init__(self, token: str, chat_id: str, proxy_url: str) -> None:
+    def __init__(self, token: str, chat_id: str) -> None:
         self.notifications = [type("N", (), {"token": token, "chat_id": chat_id})()]
-        self.proxy = type("P", (), {"url": proxy_url})()
 
 
 def test_capture_logs_bounded_ring_buffer_thread_safe_and_post_exit(tmp_path: Path):

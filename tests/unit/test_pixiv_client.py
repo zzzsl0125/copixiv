@@ -346,8 +346,8 @@ async def test_client_paginate_joins_pages_stops_on_thresholds_and_rejects_bad_n
             res = await client.search_novel("tag", fetch_minlike=100)
             assert [n.id for n in res.novels] == [1, 2]
 
-            async with client.account_rule(force_account="acc1"):
-                assert AccountStrategy(force_account="acc1") == pool._strategy.get()
+            async with client.account_rule(force_follow=True):
+                assert AccountStrategy(force_follow=True) == pool._strategy.get()
 
             res2 = await client.novel_follow(fetch_til=datetime(2026, 6, 4))
             assert [n.id for n in res2.novels] == [1, 2]
@@ -373,27 +373,27 @@ async def test_client_rate_limit_and_account_invalid_error_types():
     pool = _make_pool("acc1")
     client = PixivClient(pool, max_concurrency=1)
 
-    async def _fail_rate_limit(self: PixivAccount, method: str, *args, **kwargs):
-        del self, method, args, kwargs
+    async def _fail_rate_limit(self: PixivAccount, method: str, url: str, **kwargs):
+        del self, method, url, kwargs
         raise RateLimitError("limited")
 
-    orig = PixivAccount.execute
-    PixivAccount.execute = _fail_rate_limit  # type: ignore[method-assign]
+    orig = PixivAccount.request
+    PixivAccount.request = _fail_rate_limit  # type: ignore[method-assign]
     try:
         pool.accounts[0].start_cooldown(0.0)
         client._MAX_RETRIES = 0
         with pytest.raises(RateLimitError):
             await client.user_detail(1)
     finally:
-        PixivAccount.execute = orig  # type: ignore[method-assign]
+        PixivAccount.request = orig  # type: ignore[method-assign]
 
-    async def _fail_invalid(self: PixivAccount, method: str, *args, **kwargs):
-        del self, method, args, kwargs
+    async def _fail_invalid(self: PixivAccount, method: str, url: str, **kwargs):
+        del self, method, url, kwargs
         raise AccountInvalidError("invalid")
 
-    PixivAccount.execute = _fail_invalid  # type: ignore[method-assign]
+    PixivAccount.request = _fail_invalid  # type: ignore[method-assign]
     try:
         with pytest.raises(AccountInvalidError):
             await client.user_detail(1)
     finally:
-        PixivAccount.execute = orig  # type: ignore[method-assign]
+        PixivAccount.request = orig  # type: ignore[method-assign]

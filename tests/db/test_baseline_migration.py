@@ -1,8 +1,7 @@
-"""Layer 2 DB tests: squashed 0001_baseline roundtrip (upgrade/downgrade/upgrade) & prod transition."""
+"""Layer 2 DB tests: squashed 0001_baseline roundtrip (upgrade/downgrade/upgrade) & drift alignment."""
 
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
 
 import pytest
@@ -16,16 +15,6 @@ from sqlalchemy.exc import IntegrityError
 from copixiv.db.models import Base
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_TRANSITION_SCRIPT = _PROJECT_ROOT / "scripts" / "transition_to_baseline.py"
-
-
-def _load_transition_module():
-    spec = importlib.util.spec_from_file_location("transition_to_baseline", _TRANSITION_SCRIPT)
-    assert spec is not None
-    assert spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 def _isolated_schema_url(base_url, schema: str) -> str:
@@ -55,7 +44,7 @@ def test_baseline_upgrade_downgrade_upgrade_and_metadata_parity(pg_test_engine):
 
         with isolated_engine.begin() as conn:
             ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-            assert ver == "0001_baseline"
+            assert ver == "0005_align_schema_drift"
 
             # ORM Base.metadata parity (types & server defaults)
             mc = MigrationContext.configure(
@@ -63,18 +52,30 @@ def test_baseline_upgrade_downgrade_upgrade_and_metadata_parity(pg_test_engine):
                 opts={"compare_type": True, "compare_server_default": True},
             )
             diffs = compare_metadata(mc, Base.metadata)
-            assert diffs == [], f"Unexpected metadata drift after 0001_baseline: {diffs!r}"
+            assert diffs == [], f"Unexpected metadata drift after upgrade head: {diffs!r}"
 
-            # Custom sequence, BigInteger summary range, analyze tuning, and tag triggers
+            args_type = conn.execute(
+                text(
+                    "SELECT data_type FROM information_schema.columns "
+                    "WHERE table_schema = :s AND table_name = 'task_history' "
+                    "AND column_name = 'arguments'"
+                ),
+                {"s": schema},
+            ).scalar_one()
+            assert args_type == "jsonb"
+            active_idx = conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM pg_indexes "
+                    "WHERE schemaname = :s AND indexname = 'ix_task_history_active_func'"
+                ),
+                {"s": schema},
+            ).scalar_one()
+            assert active_idx == 0
+
+            # Custom sequence, analyze tuning, and tag triggers
             assert conn.execute(text("SELECT nextval('novel_local_coord_seq')")).scalar_one() == 1
 
-            conn.execute(
-                text("INSERT INTO author (author_id, author_name, \"like\") VALUES (1, 'A', 5000000000)")
-            )
-            assert (
-                conn.execute(text('SELECT "like" FROM author WHERE author_id = 1')).scalar_one()
-                == 5_000_000_000
-            )
+            conn.execute(text("INSERT INTO author (author_id, author_name) VALUES (1, 'A')"))
 
             conn.execute(
                 text("INSERT INTO novel (id, title, author_id, tags) VALUES (1, 'N1', 1, ARRAY['t1', 't2'])")
@@ -153,209 +154,64 @@ def test_baseline_upgrade_downgrade_upgrade_and_metadata_parity(pg_test_engine):
             admin_conn.execute(text(f"DROP SCHEMA IF EXISTS {schema} CASCADE"))
 
 
-def test_transition_to_baseline_from_legacy_0016_schema(pg_test_engine):
-    schema = "_test_mig_transition"
-    mod = _load_transition_module()
-
+def test_0005_align_schema_drift_fixes_legacy_default_and_constraint(pg_test_engine):
+    schema = "_test_mig_0005_drift"
     with pg_test_engine.begin() as admin_conn:
         admin_conn.execute(text(f"DROP SCHEMA IF EXISTS {schema} CASCADE"))
         admin_conn.execute(text(f"CREATE SCHEMA {schema}"))
 
     isolated_url = _isolated_schema_url(pg_test_engine.url, schema)
     isolated_engine = create_engine(isolated_url)
+    alembic_cfg = _alembic_config_for_url(isolated_url)
     try:
-        # Build a legacy 0016-shaped schema (with search_lower, INTEGER counters, legacy indexes)
+        command.upgrade(alembic_cfg, "0004_novel_shuffle_and_indexes")
+
+        # Simulate legacy drift: sequence default on series_dead_letter.series_id
+        # and old auto-named check constraint on tag_preference.
         with isolated_engine.begin() as conn:
+            conn.execute(text("CREATE SEQUENCE series_dead_letter_series_id_seq"))
             conn.execute(
                 text(
-                    """
-                CREATE FUNCTION copixiv_search_text(t text, a text, s text, tags text[])
-                RETURNS text LANGUAGE sql IMMUTABLE AS $$
-                  SELECT lower(concat_ws(' ', nullif(t, ''), nullif(a, ''), nullif(s, ''), nullif(array_to_string(tags, ' '), '')))
-                $$;
-                CREATE TABLE author (
-                    author_id BIGINT PRIMARY KEY,
-                    author_name TEXT,
-                    novel_count INTEGER NOT NULL DEFAULT 0,
-                    "like" INTEGER NOT NULL DEFAULT 0,
-                    view INTEGER NOT NULL DEFAULT 0,
-                    text INTEGER NOT NULL DEFAULT 0,
-                    last_update TIMESTAMPTZ,
-                    is_special_follow BOOLEAN NOT NULL DEFAULT false
-                );
-                CREATE INDEX ix_author_special_follow ON author (author_id) WHERE is_special_follow;
-                CREATE INDEX ix_author_last_update ON author (last_update);
-
-                CREATE TABLE series (
-                    series_id BIGINT PRIMARY KEY,
-                    series_name TEXT,
-                    novel_count INTEGER NOT NULL DEFAULT 0,
-                    author_id BIGINT REFERENCES author(author_id) ON DELETE SET NULL,
-                    "like" INTEGER NOT NULL DEFAULT 0,
-                    view INTEGER NOT NULL DEFAULT 0,
-                    text INTEGER NOT NULL DEFAULT 0
-                );
-                CREATE INDEX ix_series_author_id ON series (author_id);
-
-                CREATE TABLE novel (
-                    id BIGINT PRIMARY KEY,
-                    title TEXT NOT NULL,
-                    author_id BIGINT REFERENCES author(author_id),
-                    author_name TEXT,
-                    path TEXT UNIQUE,
-                    "like" INTEGER NOT NULL DEFAULT 0,
-                    view INTEGER NOT NULL DEFAULT 0,
-                    text INTEGER NOT NULL DEFAULT 0,
-                    caption TEXT,
-                    series_id BIGINT REFERENCES series(series_id) ON DELETE SET NULL,
-                    series_name TEXT,
-                    series_index INTEGER,
-                    create_time TIMESTAMPTZ,
-                    has_epub INTEGER NOT NULL DEFAULT 0,
-                    shuffle INTEGER NOT NULL DEFAULT 0,
-                    tags TEXT[] NOT NULL DEFAULT '{}'::text[],
-                    is_favourite BOOLEAN NOT NULL DEFAULT false,
-                    source TEXT NOT NULL DEFAULT 'pixiv'::text,
-                    source_key TEXT,
-                    search_lower TEXT GENERATED ALWAYS AS (copixiv_search_text(title, author_name, series_name, tags)) STORED
-                );
-                CREATE INDEX ix_novel_like_text_id ON novel ("like", text, id);
-                CREATE INDEX ix_novel_like_id ON novel ("like", id);
-                CREATE INDEX ix_novel_shuffle_id ON novel (shuffle, id);
-                CREATE INDEX ix_novel_shuffle_like_text ON novel (shuffle, "like", text);
-                CREATE INDEX ix_novel_author_id ON novel (author_id, id);
-                CREATE INDEX ix_novel_series_id ON novel (series_id, id);
-                CREATE INDEX ix_novel_author_like ON novel (author_id, "like");
-                CREATE INDEX ix_novel_series_like ON novel (series_id, "like");
-                CREATE INDEX ix_novel_create_time ON novel (create_time);
-                CREATE INDEX ix_novel_tags_gin ON novel USING gin (tags);
-                CREATE INDEX ix_novel_source ON novel (source);
-                CREATE UNIQUE INDEX ux_novel_source_key ON novel (source, source_key) WHERE source_key IS NOT NULL;
-                CREATE INDEX ix_novel_favourite ON novel (id) WHERE is_favourite;
-                CREATE INDEX ix_novel_abs_id ON novel (abs(id), id);
-
-                CREATE TABLE tag (
-                    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-                    name TEXT NOT NULL UNIQUE,
-                    reference_count INTEGER NOT NULL DEFAULT 0,
-                    search_lower TEXT GENERATED ALWAYS AS (lower(name)) STORED
-                );
-                CREATE INDEX tag_reference_count_id_idx ON tag (reference_count DESC, id DESC);
-
-                CREATE TABLE tag_preference (
-                    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-                    tag TEXT NOT NULL UNIQUE,
-                    preference TEXT NOT NULL,
-                    sort_index INTEGER NOT NULL DEFAULT 0,
-                    CONSTRAINT ck_tag_preference_value CHECK (preference IN ('favourite', 'blocked'))
-                );
-                CREATE TABLE setting (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                );
-                CREATE TABLE tag_alias (
-                    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-                    source BIGINT NOT NULL UNIQUE REFERENCES tag(id),
-                    target BIGINT NOT NULL REFERENCES tag(id)
-                );
-                CREATE INDEX ix_tag_alias_target ON tag_alias (target);
-                CREATE TABLE scheduled_task (
-                    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    task TEXT NOT NULL,
-                    cron TEXT NOT NULL,
-                    params JSONB,
-                    is_enabled BOOLEAN NOT NULL DEFAULT false,
-                    sort_index INTEGER NOT NULL DEFAULT 0
-                );
-                CREATE TABLE task_history (
-                    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    task_func TEXT,
-                    arguments TEXT,
-                    status TEXT NOT NULL,
-                    start_time TIMESTAMPTZ NOT NULL,
-                    end_time TIMESTAMPTZ,
-                    duration DOUBLE PRECISION,
-                    result JSONB,
-                    progress JSONB
-                );
-                CREATE INDEX ix_task_history_pending ON task_history (id) WHERE status = 'pending';
-                CREATE INDEX ix_task_history_active_func ON task_history (task_func) WHERE status IN ('pending', 'running');
-                CREATE TABLE token (
-                    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-                    name TEXT NOT NULL UNIQUE,
-                    token TEXT NOT NULL,
-                    premium BOOLEAN NOT NULL DEFAULT false,
-                    valid BOOLEAN NOT NULL DEFAULT true,
-                    sort_index INTEGER NOT NULL DEFAULT 0,
-                    is_follow BOOLEAN NOT NULL DEFAULT false
-                );
-                CREATE TABLE failed_novel (
-                    novel_id BIGINT PRIMARY KEY,
-                    failure_type TEXT,
-                    error_message TEXT,
-                    failed_times INTEGER NOT NULL DEFAULT 1,
-                    title TEXT,
-                    last_failed_at TIMESTAMPTZ
-                );
-                CREATE INDEX ix_failed_novel_last_failed_at ON failed_novel (last_failed_at);
-                CREATE TABLE series_dead_letter (
-                    series_id BIGINT PRIMARY KEY,
-                    consecutive_failures INTEGER NOT NULL DEFAULT 0,
-                    last_error TEXT,
-                    last_failed_at TIMESTAMPTZ,
-                    retired_at TIMESTAMPTZ
-                );
-                CREATE INDEX ix_series_dead_letter_retired_at ON series_dead_letter (retired_at) WHERE retired_at IS NOT NULL;
-                CREATE TABLE search_history (
-                    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-                    type TEXT NOT NULL,
-                    value TEXT NOT NULL,
-                    display_value TEXT,
-                    "timestamp" TIMESTAMPTZ NOT NULL,
-                    CONSTRAINT uq_search_history_type_value UNIQUE (type, value)
-                );
-                CREATE INDEX ix_search_history_type_timestamp ON search_history (type, "timestamp");
-                CREATE TABLE alembic_version (
-                    version_num VARCHAR(32) NOT NULL CONSTRAINT alembic_version_pkc PRIMARY KEY
-                );
-                INSERT INTO alembic_version (version_num) VALUES ('0016_tag_refs_no_temp_table');
-                INSERT INTO author (author_id, author_name, "like") VALUES (1, 'A', 123);
-                INSERT INTO novel (id, title, author_id, tags) VALUES (1, 'N1', 1, ARRAY['t1']);
-                INSERT INTO token (name, token, is_follow) VALUES ('acc1', 'tok1', true);
-                """
+                    "ALTER TABLE series_dead_letter "
+                    "ALTER COLUMN series_id SET DEFAULT nextval('series_dead_letter_series_id_seq')"
+                )
+            )
+            conn.execute(
+                text(
+                    "ALTER TABLE tag_preference "
+                    "RENAME CONSTRAINT ck_tag_preference_value TO tag_preference_preference_check"
                 )
             )
 
-        before = mod.inspect_transition_state(isolated_engine, schema=schema)
-        assert before["alembic_versions"] == ["0016_tag_refs_no_temp_table"]
-        assert "novel.search_lower" in before["search_lower_columns"]
-        assert "ix_novel_abs_id" in before["legacy_indexes_present"]
-        assert before["non_bigint_summary_columns"]
-
-        after = mod.apply_baseline_transition(isolated_engine, isolated_url, schema=schema)
-        assert after["alembic_versions"] == ["0001_baseline"]
-        assert after["search_lower_columns"] == []
-        assert after["legacy_indexes_present"] == []
-        assert after["non_bigint_summary_columns"] == []
-        assert after["missing_partial_indexes"] == []
-        assert after["metadata_diffs"] == []
-
-        # Second invocation is a safe no-op
-        repeat = mod.apply_baseline_transition(isolated_engine, isolated_url, schema=schema)
-        assert repeat["alembic_versions"] == ["0001_baseline"]
-        assert repeat["metadata_diffs"] == []
+        command.upgrade(alembic_cfg, "head")
 
         with isolated_engine.begin() as conn:
-            conn.execute(text('UPDATE author SET "like" = 5000000000 WHERE author_id = 1'))
-            conn.execute(text("INSERT INTO novel (id, title, tags) VALUES (2, 'N2', ARRAY['trig_a'])"))
+            col_default = conn.execute(
+                text(
+                    "SELECT column_default FROM information_schema.columns "
+                    "WHERE table_schema = :s AND table_name = 'series_dead_letter' "
+                    "AND column_name = 'series_id'"
+                ),
+                {"s": schema},
+            ).scalar_one()
+            assert col_default is None
             assert (
-                conn.execute(text("SELECT reference_count FROM tag WHERE name = 'trig_a'")).scalar_one() == 1
+                conn.execute(text("SELECT to_regclass('series_dead_letter_series_id_seq')")).scalar() is None
             )
 
-        with pytest.raises(IntegrityError), isolated_engine.begin() as conn:
-            conn.execute(text("INSERT INTO token (name, token, is_follow) VALUES ('acc2', 'tok2', true)"))
+            constraints = set(
+                conn.execute(
+                    text(
+                        "SELECT c.conname FROM pg_constraint c "
+                        "JOIN pg_class t ON t.oid = c.conrelid "
+                        "JOIN pg_namespace n ON n.oid = t.relnamespace "
+                        "WHERE n.nspname = :s AND t.relname = 'tag_preference'"
+                    ),
+                    {"s": schema},
+                ).scalars()
+            )
+            assert "ck_tag_preference_value" in constraints
+            assert "tag_preference_preference_check" not in constraints
     finally:
         isolated_engine.dispose()
         with pg_test_engine.begin() as admin_conn:

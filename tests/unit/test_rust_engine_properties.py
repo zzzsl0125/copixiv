@@ -85,9 +85,6 @@ def _cursor_from_last_row(order_by: str, row, rand_cursor: dict | None) -> Engin
             random_seed_hex=rand_cursor["seed"],
             random_h_hex=rand_cursor["h"],
         )
-    if order_by in ("title", "author_name", "series_name"):
-        val = getattr(row, order_by)
-        return EngineCursor(cursor_id=row.id, cursor_str=val)
     if order_by == "id":
         return EngineCursor(cursor_id=row.id, cursor_int=row.id)
     val_map = {
@@ -95,10 +92,6 @@ def _cursor_from_last_row(order_by: str, row, rand_cursor: dict | None) -> Engin
         "text": row.text,
         "view": row.view,
         "create_time": row.create_time_us,
-        "author_id": row.author_id,
-        "series_id": row.series_id,
-        "series_index": row.series_index,
-        "has_epub": row.has_epub,
     }
     val = val_map[order_by]
     return EngineCursor(
@@ -137,7 +130,7 @@ def _oracle_matches(
             row_sf,
             tags,
         ) = row
-        effective_sf = row_sf or (author_id is not None and author_id in sf_authors)
+        effective_sf = bool(row_sf)
         if query.restrict_ids is not None and nid not in query.restrict_ids:
             continue
         if query.exclude_ids is not None and nid in query.exclude_ids:
@@ -196,16 +189,9 @@ def _oracle_sort(rows: list[tuple], order_by: str, descending: bool) -> list[tup
         if order_by == "id":
             return (0, abs(nid), nid) if descending else (1, abs(nid), nid)
         field_idx = {
-            "title": 1,
-            "author_id": 2,
-            "author_name": 3,
-            "series_id": 4,
-            "series_name": 5,
-            "series_index": 6,
             "text": 7,
             "like": 8,
             "view": 9,
-            "has_epub": 10,
             "create_time": 11,
         }[order_by]
         v = row[field_idx]
@@ -248,10 +234,6 @@ def _oracle_sort(rows: list[tuple], order_by: str, descending: bool) -> list[tup
             "text",
             "view",
             "create_time",
-            "series_index",
-            "title",
-            "author_name",
-            "series_name",
             "random",
         ]
     ),
@@ -287,7 +269,6 @@ def test_rust_engine_full_reference_oracle(
         staging,
         blocked_tags=list(blocked),
         exclude_blocked_default=exclude_blocked_default,
-        special_follow_authors=sf_authors,
     )
     assert engine.ready()
 
@@ -326,9 +307,6 @@ def test_rust_engine_full_reference_oracle(
             break
         assert page.rows
         cursor = _cursor_from_last_row(order_by, page.rows[-1], page.random_cursor)
-        # Keyset cursors require a non-null axis value; rows with NULL stop non-cursor path
-        if order_by not in ("random", "id") and cursor.cursor_int is None and cursor.cursor_str is None:
-            break
 
     if order_by == "random" or all(
         # Only compare full multi-page traversal when NULL didn't sit on boundary without cursor val
@@ -355,13 +333,11 @@ def test_rust_engine_incremental_upsert_and_delete_roundtrip(rows, data):
     engine = RustNovelQueryEngine()
     staging = engine.create_staging(capacity=len(rows))
     staging.push_batch(rows)
-    engine.swap_from_staging(
-        staging, blocked_tags=[], exclude_blocked_default=False, special_follow_authors=[]
-    )
+    engine.swap_from_staging(staging, blocked_tags=[], exclude_blocked_default=False)
 
     all_ids = [r[0] for r in rows]
     to_delete = data.draw(st.lists(st.sampled_from(all_ids), unique=True, max_size=len(all_ids)))
-    engine.delete_ids(to_delete)
+    engine.apply_delta(delete_ids=to_delete)
 
     remaining = set(all_ids) - set(to_delete)
     assert set(engine.list_matching_ids(EngineQuery())) == remaining
@@ -381,7 +357,7 @@ def test_tag_index_incremental_deltas_and_cursor_pagination():
         (6, "%PercentTag", 30),
         (7, "%PercentTagSub", 10),
     ]
-    engine.swap_from_staging(stg, [], True, [], tags=initial_tags, aliased_tag_ids=[4, 5])
+    engine.swap_from_staging(stg, [], True, tags=initial_tags, aliased_tag_ids=[4, 5])
 
     # Alias source & target excluded as both target and candidate
     assert engine.suggest_tag_aliases(limit=5, offset=0, target_tag="BetaSource")[0] == []

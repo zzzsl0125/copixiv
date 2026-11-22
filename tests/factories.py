@@ -6,7 +6,7 @@ import io
 import zipfile
 from pathlib import Path
 
-from copixiv.core.models import EpubStatus, new_shuffle_key
+from copixiv.core.models import EpubStatus
 
 
 def make_minimal_epub(
@@ -111,7 +111,6 @@ def make_local_novel(
         view=kwargs.pop("view", 0),
         text=kwargs.pop("text", 100),
         has_epub=has_epub,
-        shuffle=kwargs.pop("shuffle", new_shuffle_key()),
         tags=kwargs.pop("tags", []),
         source="local",
         source_key=source_key or f"sha_local_{abs(novel_id)}",
@@ -139,7 +138,6 @@ def make_test_app(
         log_dir=str(tmp_path / "logs"),
         session_factory=session_factory,
         skip_init_db=True,
-        skip_auto_backup=True,
         mount_spa=False,
         run_background_tasks=False,
     )

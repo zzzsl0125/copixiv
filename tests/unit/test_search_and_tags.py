@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from copixiv.core.exceptions import ValidationError
-from copixiv.core.search import normalize_search_segments, parse_search_keyword
+from copixiv.core.search import OrderBy, normalize_search_segments, parse_search_keyword
 from copixiv.core.text import normalize_tag, parse_tags, validate_tags
 
 
@@ -29,6 +29,18 @@ def test_parse_search_keyword_empty_and_punctuation():
     assert parse_search_keyword("   ; ； ") == []
     assert parse_search_keyword("tags:") == []
     assert parse_search_keyword("123456") == [("keyword", "123456")]
+
+
+def test_parse_search_keyword_preserves_colons_for_non_dsl_terms():
+    assert parse_search_keyword("崩坏:星穹铁道") == [("keyword", "崩坏:星穹铁道")]
+    assert parse_search_keyword("明日方舟:终末地") == [("keyword", "明日方舟:终末地")]
+    assert parse_search_keyword("Re:Zero;tags:崩坏:星穹铁道") == [
+        ("keyword", "Re:Zero"),
+        ("tags", "崩坏:星穹铁道"),
+    ]
+    assert parse_search_keyword("foo:") == [("keyword", "foo:")]
+    assert parse_search_keyword(":bar") == [("keyword", ":bar")]
+    assert "none" not in {m.value for m in OrderBy}
 
 
 def test_normalize_search_segments_drops_punctuation_only():

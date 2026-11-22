@@ -28,7 +28,7 @@ def test_uow_session_guards_and_rollback_on_error(uow: SqlUnitOfWork):
     def _fail_tx() -> None:
         with uow.begin():
             uow.session.add(models.Setting(key="k_bad", value="2"))
-            uow.flush()
+            uow.session.flush()
             raise ValueError("boom")
 
     with pytest.raises(ValueError, match="boom"):
@@ -162,3 +162,11 @@ async def test_run_write_transaction_retries_on_55p03_lock_timeout(
     finally:
         release_lock2.set()
         holder2.join(timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_lock_timeout_persists_after_read_transaction_rollback(uow: SqlUnitOfWork):
+    await read_transaction(uow, lambda uw: uw.session.execute(text("SELECT 1")).scalar_one())
+    with uow.begin():
+        lock_timeout = uow.session.execute(text("SHOW lock_timeout")).scalar_one()
+    assert lock_timeout == "5s"

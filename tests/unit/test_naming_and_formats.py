@@ -56,6 +56,28 @@ def test_naming_template_keeps_zero_for_numeric_stats_and_author_fallback():
     )
     assert tpl.resolve(novel) == "未知作者/0_0_2026-10-01_9"
 
+    # Aware UTC datetime converts to JST before formatting {date}
+    jst_rollover = SimpleNamespace(
+        id=10,
+        title="T",
+        author_name="A",
+        like=1,
+        view=1,
+        text=1,
+        create_time=datetime(2026, 5, 1, 15, 0, tzinfo=UTC),
+    )
+    assert tpl.resolve(jst_rollover) == "A/1_1_2026-05-02_10"
+    same_jst_day = SimpleNamespace(
+        id=11,
+        title="T",
+        author_name="A",
+        like=1,
+        view=1,
+        text=1,
+        create_time=datetime(2026, 5, 1, 14, 59, tzinfo=UTC),
+    )
+    assert tpl.resolve(same_jst_day) == "A/1_1_2026-05-01_11"
+
 
 def test_safe_filename_and_build_path_respect_name_max_utf8():
     assert safe_filename('///\\:*?"<>|') == "untitled"
@@ -72,6 +94,16 @@ def test_safe_filename_and_build_path_respect_name_max_utf8():
     # Small IDs go into 0000 shard
     small_built = Path(build_path(123, "Title", download_dir="dl"))
     assert small_built.parent == Path("dl/0000")
+
+    # Negative local IDs go into local/ shard and match FileStorage.local_novel_path
+    from copixiv.storage.file_storage import FileStorage
+
+    local_built = Path(build_path(-123, "标题", download_dir="dl"))
+    assert local_built == Path("dl/local/标题_-123.txt")
+    assert local_built == FileStorage("dl").local_novel_path(-123, "标题")
+    assert Path(build_path(-123, "标题", download_dir="dl", kind="epub")) == FileStorage(
+        "dl"
+    ).local_novel_path(-123, "标题", "epub")
 
     # Naming template clamps dir segments <=255 UTF-8 bytes and leaf <=250 UTF-8 bytes preserving _{id}
     long_tpl = NovelNamingTemplate("{author_name}/{title}_{id}")
@@ -139,22 +171,23 @@ def test_naming_prevents_secondary_token_expansion_and_has_no_raw_bidi_chars():
     assert not any(ch in naming_src for ch in raw_bidi)
 
 
-def test_assets_case_insensitive_int_dedup_tmp_filter_and_file_storage_guards(tmp_path: Path):
-    # int/str dedup + uppercase extension + .tmp exclusion
-    upper_cover = tmp_path / "777_c_cover.JPG"
-    upper_img = tmp_path / "777_u_42.PNG"
+def test_assets_int_dedup_tmp_filter_and_file_storage_guards(tmp_path: Path):
+    # int/str dedup + .tmp exclusion + case-insensitive iter_novel_asset_files
+    cover = tmp_path / "777_c_cover.jpg"
+    img = tmp_path / "777_u_42.png"
+    upper_img = tmp_path / "777_p_43.PNG"
     tmp_leftover = tmp_path / "777_u_99.jpg.tmp"
-    for p in (upper_cover, upper_img, tmp_leftover):
+    for p in (cover, img, upper_img, tmp_leftover):
         p.write_bytes(b"data")
 
     assert assets.asset_suffix("https://i.pximg.net/img/a.PNG?x=1") == ".png"
-    assert assets.find_cover(tmp_path, 777) == upper_cover
+    assert assets.find_cover(tmp_path, 777) == cover
     assert assets.iter_assets(
         tmp_path,
         777,
         [(assets.UPLOADED, 42), (assets.ILLUSTRATION, "42")],
-    ) == {"42": upper_img}
-    assert set(assets.iter_novel_asset_files(tmp_path, 777)) == {upper_cover, upper_img}
+    ) == {"42": img}
+    assert set(assets.iter_novel_asset_files(tmp_path, 777)) == {cover, img, upper_img}
 
     only_tmp_dir = tmp_path / "only_tmp"
     only_tmp_dir.mkdir()

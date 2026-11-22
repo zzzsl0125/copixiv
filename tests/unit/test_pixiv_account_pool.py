@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
+import httpx
 import pytest
 
 from copixiv.pixiv.account import AccountStrategy, PixivAccount, TokenInfo
 from copixiv.pixiv.accounts import AccountPool
 from copixiv.pixiv.errors import PremiumRequiredError
+
+_DUMMY_CLIENT = MagicMock(spec=httpx.AsyncClient)
 
 
 def _make_account(
@@ -24,13 +29,14 @@ def _make_account(
             valid=valid,
             follow=follow,
         ),
+        http_client=_DUMMY_CLIENT,
         min_interval=0.0,
         cooling_duration=60.0,
     )
 
 
 def test_account_pool_lru_rotation():
-    pool = AccountPool()
+    pool = AccountPool(http_client=_DUMMY_CLIENT)
     a1 = _make_account("a1")
     a2 = _make_account("a2")
     a3 = _make_account("a3")
@@ -45,7 +51,7 @@ def test_account_pool_lru_rotation():
 
 
 def test_account_pool_force_follow_pins_flagged_even_during_cooldown_and_falls_back_when_absent():
-    pool = AccountPool()
+    pool = AccountPool(http_client=_DUMMY_CLIENT)
     normal = _make_account("normal", follow=False)
     follower = _make_account("follower", follow=True)
     pool.add_account(normal)
@@ -61,13 +67,13 @@ def test_account_pool_force_follow_pins_flagged_even_during_cooldown_and_falls_b
     assert pinned is follower
 
     # Only falls back when no valid follow account exists in the pool
-    pool_no_follow = AccountPool()
+    pool_no_follow = AccountPool(http_client=_DUMMY_CLIENT)
     pool_no_follow.add_account(normal)
     assert pool_no_follow.select(AccountStrategy(force_follow=True)) is normal
 
 
 def test_account_pool_need_premium_raises_when_absent_and_selects_when_present():
-    pool = AccountPool()
+    pool = AccountPool(http_client=_DUMMY_CLIENT)
     free = _make_account("free", premium=False)
     pool.add_account(free)
 

@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from starlette.websockets import WebSocketDisconnect
 from tests.factories import make_test_app
 
 from copixiv.core.draft import build_novel
@@ -57,14 +56,6 @@ def test_security_middlewares_host_and_api_key(db_session_factory, tmp_path: Pat
         assert client.get("/api/novels/999999/download?api_key=wrong").status_code == 401
         assert client.get("/api/novels/999999/download?api_key=secret-xyz").status_code == 404
         assert client.get("/api/novels/export/999999/download?api_key=secret-xyz").status_code == 404
-
-        # WebSocket with invalid Host rejected (1008 close)
-        with (
-            pytest.raises(WebSocketDisconnect) as ws_exc,
-            client.websocket_connect("/ws", headers={"Host": "evil.example"}),
-        ):
-            pass
-        assert ws_exc.value.code == 1008
 
     # Duplicate Host headers rejected at ASGI layer
     async def _run_dup_host() -> int:
@@ -283,7 +274,6 @@ def test_lifespan_defers_runtime_init_and_cleans_up_resources(
         ),
         log_dir=str(tmp_path / "logs"),
         skip_init_db=True,
-        skip_auto_backup=True,
         mount_spa=False,
         run_background_tasks=False,
     )
@@ -319,7 +309,15 @@ def test_task_cancellation_and_uniform_204_deletes(db_session_factory, tmp_path:
             status="pending",
             start_time=datetime.now(UTC),
         )
-        uow.session.add(pending)
+        with_log = models.TaskHistory(
+            name="done_with_log",
+            task_func="check_epub",
+            arguments={"dry_run": False},
+            status="success",
+            start_time=datetime.now(UTC),
+            result={"summary": "完成", "log": "line 1\nline 2"},
+        )
+        uow.session.add_all([pending, with_log])
         uow.session.add(
             models.SearchHistory(
                 type="keyword",
@@ -329,13 +327,35 @@ def test_task_cancellation_and_uniform_204_deletes(db_session_factory, tmp_path:
         )
         uow.session.flush()
         pending_id = pending.id
+        with_log_id = with_log.id
 
     app = _build_test_app(db_session_factory, tmp_path)
     with TestClient(app, base_url="http://localhost") as client:
+        methods_res = client.get("/api/tasks/methods")
+        assert methods_res.status_code == 200
+        methods_by_name = {m["name"]: m for m in methods_res.json()}
+        assert "novel_fetch" in methods_by_name
+        assert isinstance(methods_by_name["novel_fetch"]["arguments"], list)
+        assert methods_by_name["check_epub"]["arguments"] == []
+
         cancelled = client.post(f"/api/tasks/history/{pending_id}/cancel")
         assert cancelled.status_code == 200
         assert cancelled.json() == {"task_id": pending_id, "status": "cancelled"}
         assert client.post("/api/tasks/history/999999/cancel").status_code == 404
+
+        hist = client.get("/api/tasks/history?limit=50&offset=0")
+        assert hist.status_code == 200
+        hist_items = {item["id"]: item for item in hist.json()["items"]}
+        assert hist_items[with_log_id]["has_log"] is True
+        assert hist_items[with_log_id]["arguments"] == {"dry_run": False}
+        assert hist_items[with_log_id]["result"] == {"summary": "完成"}
+        assert hist_items[pending_id]["has_log"] is False
+        assert hist_items[pending_id]["result"] == {"summary": "任务已手动取消"}
+
+        log_res = client.get(f"/api/tasks/history/{with_log_id}/log")
+        assert log_res.status_code == 200
+        assert log_res.json() == {"id": with_log_id, "log": "line 1\nline 2"}
+        assert client.get(f"/api/tasks/history/{pending_id}/log").status_code == 404
 
         pref = client.post(
             "/api/tag-preferences",
@@ -364,3 +384,74 @@ def test_task_cancellation_and_uniform_204_deletes(db_session_factory, tmp_path:
         )
         assert sched.status_code == 200
         assert client.delete(f"/api/tasks/scheduled/{sched.json()['id']}").status_code == 204
+
+
+def test_token_validation_and_reorder_skips_pool_reload(
+    db_session_factory,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    app = _build_test_app(db_session_factory, tmp_path)
+    with TestClient(app, base_url="http://localhost") as client:
+        # Whitespace-only token is rejected
+        bad_create = client.post(
+            "/api/tokens",
+            json={"name": "blank", "token": "   ", "premium": False, "valid": True},
+        )
+        assert bad_create.status_code == 422
+
+        # Leading/trailing whitespace is stripped
+        r1 = client.post(
+            "/api/tokens",
+            json={"name": "t1", "token": "  tok_strip_1234  ", "premium": False, "valid": True},
+        )
+        assert r1.status_code == 200
+        t1_id = r1.json()["id"]
+        assert r1.json()["token"] == "****1234"
+
+        bad_upd = client.put(f"/api/tokens/{t1_id}", json={"token": "   "})
+        assert bad_upd.status_code == 422
+
+        # Reorder must NOT trigger account_pool.reload_from_tokens
+        reloads: list[object] = []
+        monkeypatch.setattr(
+            app.state.account_pool, "reload_from_tokens", lambda tokens: reloads.append(tokens)
+        )
+        reord = client.post("/api/tokens/reorder", json=[t1_id])
+        assert reord.status_code == 200
+        assert reloads == []
+
+
+def test_failed_novels_list_join_and_removed_endpoints(
+    db_session_factory,
+    tmp_path: Path,
+):
+    from copixiv.features.failures.repo import FailedNovelRepository
+
+    uow = SqlUnitOfWork(db_session_factory)
+    with uow.begin():
+        uow.session.add(models.Novel(id=501, title="Joined Novel Title"))
+        repo = FailedNovelRepository(uow.session)
+        repo.record(501, "download", "network timeout", title=None)
+        repo.record(502, "download", "not found", title="Explicit Title")
+        uow.session.commit()
+
+    app = _build_test_app(db_session_factory, tmp_path)
+    with TestClient(app, base_url="http://localhost") as client:
+        res = client.get("/api/failed-novels")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["total"] == 2
+        # Actionable failure (501) first, "not found" (502) last; 501 inherits title from novel table
+        assert [item["novel_id"] for item in data["items"]] == [501, 502]
+        assert data["items"][0]["title"] == "Joined Novel Title"
+        assert data["items"][1]["title"] == "Explicit Title"
+
+        # 204 reset endpoints
+        assert client.post("/api/failed-novels/501/reset-count").status_code == 204
+        assert client.post("/api/failed-novels/reset-count").status_code == 204
+
+        # Removed dead endpoints
+        assert client.get("/api/failed-novels/count").status_code == 404
+        assert client.delete("/api/failed-novels/501").status_code == 404
+        assert client.delete("/api/failed-novels").status_code == 405

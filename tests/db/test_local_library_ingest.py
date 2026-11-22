@@ -6,6 +6,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
 from tests.factories import make_simple_epub
 
 from copixiv.core import naming as formats
@@ -107,8 +108,7 @@ def test_local_ingest_dedup_attaches_epub_and_updates_preset_author(
 
         author = uow.session.get(models.Author, 900)
         assert author is not None
-        assert author.novel_count == 1
-        assert author.text == len(body)
+        assert author.author_name == "预设作者"
 
 
 def test_setting_get_bool_respects_default_and_concurrent_next_local_id(
@@ -142,3 +142,139 @@ def test_setting_get_bool_respects_default_and_concurrent_next_local_id(
         ids = list(pool.map(lambda _: _allocate(), range(4)))
     assert all(nid < 0 for nid in ids)
     assert len(set(ids)) == 4
+
+
+@pytest.mark.asyncio
+async def test_epub_reconcile_does_not_downgrade_local_epub(
+    uow: SqlUnitOfWork,
+    tmp_path: Path,
+):
+    from copixiv.features.novels.use_cases.epub_reconcile import reconcile_epub_status
+
+    storage = FileStorage(str(tmp_path))
+    epub_bytes = make_simple_epub("本地EPUB", "本地作者", "正文内容无images目录")
+
+    with uow.begin():
+        results = ingest_uploads(uow.session, storage, [("local.epub", epub_bytes)])
+        local_id = results[0].novel_id
+        assert local_id is not None
+
+    await reconcile_epub_status(uow)
+
+    with uow.begin():
+        novel = uow.session.get(models.Novel, local_id)
+        assert novel is not None
+        assert novel.has_epub == EpubStatus.DONE
+
+
+def test_local_ingest_rollback_discards_created_files(
+    uow: SqlUnitOfWork,
+    tmp_path: Path,
+):
+    storage = FileStorage(str(tmp_path))
+    created_paths: list[Path] = []
+
+    def _run_and_fail() -> None:
+        with uow.begin():
+            results = ingest_uploads(
+                uow.session,
+                storage,
+                [("rollback_book.txt", "回滚测试正文内容".encode())],
+            )
+            assert results[0].status == STATUS_CREATED
+            novel = uow.session.get(models.Novel, results[0].novel_id)
+            assert novel is not None
+            created_paths.append(Path(novel.path))
+            assert created_paths[0].is_file()
+            raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _run_and_fail()
+
+    assert not created_paths[0].exists()
+
+
+@pytest.mark.asyncio
+async def test_batch_download_truncation_sorts_by_abs_id(
+    uow: SqlUnitOfWork,
+    tmp_path: Path,
+):
+    from datetime import UTC, datetime
+
+    from copixiv.db.base import ensure_parent_rows
+    from copixiv.features.novels.use_cases.batch_download import BatchDownloadUseCase
+
+    storage = FileStorage(str(tmp_path))
+    with uow.begin():
+        ensure_parent_rows(uow.session, author_ids={1})
+        p1 = storage.save_novel_text(10_000_000, "PixivOld", "old body")
+        p2 = storage.save_novel_text(25_000_000, "PixivNew", "new body")
+        p3 = storage.local_novel_path(-30_000_000, "LocalLatest")
+        p3.parent.mkdir(parents=True, exist_ok=True)
+        p3.write_text("local body", encoding="utf-8")
+
+        now = datetime.now(UTC)
+        uow.session.add_all(
+            [
+                models.Novel(
+                    id=10_000_000,
+                    title="PixivOld",
+                    author_id=1,
+                    author_name="A",
+                    path=str(p1),
+                    like=0,
+                    view=0,
+                    text=8,
+                    create_time=now,
+                    has_epub=EpubStatus.NO_IMAGES,
+                    tags=[],
+                    is_favourite=False,
+                    source="pixiv",
+                ),
+                models.Novel(
+                    id=25_000_000,
+                    title="PixivNew",
+                    author_id=1,
+                    author_name="A",
+                    path=str(p2),
+                    like=0,
+                    view=0,
+                    text=8,
+                    create_time=now,
+                    has_epub=EpubStatus.NO_IMAGES,
+                    tags=[],
+                    is_favourite=False,
+                    source="pixiv",
+                ),
+                models.Novel(
+                    id=-30_000_000,
+                    title="LocalLatest",
+                    author_id=None,
+                    author_name="本地",
+                    path=str(p3),
+                    like=0,
+                    view=0,
+                    text=10,
+                    create_time=now,
+                    has_epub=EpubStatus.NO_IMAGES,
+                    tags=[],
+                    is_favourite=False,
+                    source="local",
+                    source_key="abs-sort-test",
+                ),
+            ]
+        )
+
+    uc = BatchDownloadUseCase(uow, download_dir=str(tmp_path))
+    result = await uc.execute(novel_ids=[10_000_000, 25_000_000, -30_000_000], limit=2)
+    try:
+        assert result.added_count == 2
+        import zipfile
+
+        with zipfile.ZipFile(result.zip_buffer) as zf:
+            names = "\n".join(zf.namelist())
+        assert "-30000000" in names
+        assert "25000000" in names
+        assert "10000000" not in names
+    finally:
+        result.zip_buffer.close()
