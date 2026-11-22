@@ -9,6 +9,25 @@ from contextlib import contextmanager, suppress
 from pathlib import Path
 
 
+def resolve_within_root(
+    target: Path,
+    root: Path,
+    *,
+    allow_root: bool = False,
+) -> Path | None:
+    """Resolve *target* and return it when inside *root*, else ``None``."""
+    try:
+        resolved_target = target.resolve()
+        resolved_root = root.resolve()
+    except OSError:
+        return None
+    if not resolved_target.is_relative_to(resolved_root):
+        return None
+    if not allow_root and resolved_target == resolved_root:
+        return None
+    return resolved_target
+
+
 def _tmp_path(path: Path) -> Path:
     """同目录随机短临时路径（29 字节），兼容 255 字节长目标名与并发写。"""
     return path.parent / f".copixiv-{secrets.token_hex(8)}.tmp"
@@ -21,11 +40,8 @@ def atomic_write(path: Path, *, root: Path | None = None) -> Iterator[Path]:
     异常退出（含 ``KeyboardInterrupt``）会删掉临时文件后原样重抛。
     ``root`` 为目录越界防线：拒绝写到 ``root`` 本身或其目录之外。
     """
-    if root is not None:
-        resolved_target = path.resolve()
-        resolved_root = root.resolve()
-        if resolved_target == resolved_root or not resolved_target.is_relative_to(resolved_root):
-            raise OSError(f"路径落在 download 根之外：{path}")
+    if root is not None and resolve_within_root(path, root) is None:
+        raise OSError(f"路径落在 download 根之外：{path}")
 
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = _tmp_path(path)

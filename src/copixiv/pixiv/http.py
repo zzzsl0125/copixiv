@@ -1,4 +1,4 @@
-"""Shared Pixiv HTTP constants, proxy normalization, and Retry-After parsing."""
+"""Shared Pixiv HTTP constants and Retry-After parsing."""
 
 from __future__ import annotations
 
@@ -20,18 +20,6 @@ PIXIV_IMAGE_HEADERS: dict[str, str] = {
     "Referer": PIXIV_REFERER,
     "User-Agent": PIXIV_IOS_USER_AGENT,
 }
-
-
-def normalize_proxy_url(proxy_url: str | None) -> str | None:
-    """Normalise a proxy string (``127.0.0.1:20172`` → ``http://127.0.0.1:20172``)."""
-    if not proxy_url:
-        return None
-    cleaned = proxy_url.strip()
-    if not cleaned:
-        return None
-    if "://" not in cleaned:
-        return f"http://{cleaned}"
-    return cleaned
 
 
 def parse_retry_after(

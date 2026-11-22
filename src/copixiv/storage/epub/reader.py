@@ -9,6 +9,7 @@ import posixpath
 import re
 import xml.etree.ElementTree as ET
 import zipfile
+import zlib
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import quote, unquote
@@ -128,7 +129,7 @@ def _zip_mimetype_is_epub(data: bytes) -> bool:
             with archive.open("mimetype") as handle:
                 raw = handle.read(_MAX_MIMETYPE_BYTES + 1)
             return len(raw) <= _MAX_MIMETYPE_BYTES and raw.strip() == b"application/epub+zip"
-    except (zipfile.BadZipFile, KeyError, OSError):
+    except (zipfile.BadZipFile, KeyError, OSError, zlib.error):
         return False
 
 
@@ -152,7 +153,7 @@ def read_epub(data: bytes) -> EpubContent:
             body = _extract_body(archive, package)
     except EpubReadError:
         raise
-    except (zipfile.BadZipFile, zipfile.LargeZipFile, KeyError, OSError) as exc:
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, KeyError, OSError, zlib.error) as exc:
         logger.warning("EPUB 读取失败：{}: {}", type(exc).__name__, exc)
         raise EpubReadError(EPUB_INVALID_ERROR) from exc
     except ET.ParseError as exc:

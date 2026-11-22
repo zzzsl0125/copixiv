@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from tenacity import (
 )
 
 from copixiv.log import logger
-from copixiv.storage.atomic import atomic_write
+from copixiv.storage.atomic import write_atomic
 
 _PERMANENT_HTTP_STATUS = frozenset({400, 401, 403, 404, 410})
 _DEFAULT_MAX_IMAGE_BYTES = 50 * 1024 * 1024
@@ -31,15 +32,16 @@ class _PermanentImageError(RuntimeError):
     """Non-retryable 4xx / size limit error."""
 
 
-def _normalize_proxy_url(proxy_url: str | None) -> str | None:
-    if not proxy_url:
-        return None
-    cleaned = proxy_url.strip()
-    if not cleaned:
-        return None
-    if "://" not in cleaned:
-        return f"http://{cleaned}"
-    return cleaned
+def _is_decodable_image_bytes(data: bytes) -> bool:
+    """True when PIL can open and verify *data* in memory."""
+    from PIL import Image, UnidentifiedImageError
+
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            img.verify()
+        return True
+    except (UnidentifiedImageError, OSError, ValueError):
+        return False
 
 
 def _is_decodable_image(path: Path) -> bool:
@@ -59,12 +61,11 @@ def _write_and_verify_image(
     data: bytes,
     root: Path | None,
 ) -> None:
-    """Write *data* atomically and verify PIL decoding before committing."""
-    with atomic_write(save_path, root=root) as tmp_path:
-        tmp_path.write_bytes(data)
-        if not _is_decodable_image(tmp_path):
-            head = data[:32]
-            raise _TransientImageError(f"Not a decodable image ({len(data)} bytes, head={head!r})")
+    """Verify PIL decoding in memory, then write *data* atomically."""
+    if not _is_decodable_image_bytes(data):
+        head = data[:32]
+        raise _TransientImageError(f"Not a decodable image ({len(data)} bytes, head={head!r})")
+    write_atomic(save_path, data, root=root)
 
 
 def _check_existing_image(save_path: Path) -> bool:
@@ -89,8 +90,7 @@ class ImageDownloader:
     def __init__(
         self,
         *,
-        http_client: httpx.AsyncClient | None = None,
-        proxy_url: str = "",
+        http_client: httpx.AsyncClient,
         max_concurrency: int = 4,
         min_interval: float = 0.25,
         default_headers: Mapping[str, str] | None = None,
@@ -99,8 +99,6 @@ class ImageDownloader:
         max_image_bytes: int = _DEFAULT_MAX_IMAGE_BYTES,
     ) -> None:
         self._http_client = http_client
-        self._owns_client = http_client is None
-        self._proxy_url = _normalize_proxy_url(proxy_url)
         self._semaphore = asyncio.Semaphore(max(max_concurrency, 1))
         self._min_interval = min_interval
         self._throttle_lock = asyncio.Lock()
@@ -109,21 +107,6 @@ class ImageDownloader:
         self._timeout = timeout
         self._max_attempts = max(max_attempts, 1)
         self._max_image_bytes = max_image_bytes
-
-    def _get_client(self) -> httpx.AsyncClient:
-        if self._http_client is None:
-            self._http_client = httpx.AsyncClient(
-                proxy=self._proxy_url,
-                timeout=self._timeout,
-            )
-            self._owns_client = True
-        return self._http_client
-
-    async def aclose(self) -> None:
-        """Close the HTTP client if owned by this downloader."""
-        if self._http_client is not None and self._owns_client:
-            await self._http_client.aclose()
-            self._http_client = None
 
     async def _throttle(self) -> None:
         """Space out download starts across concurrent tasks."""
@@ -144,11 +127,10 @@ class ImageDownloader:
         headers: dict[str, str],
         root: Path | None,
     ) -> None:
-        client = self._get_client()
         async with self._semaphore:
             await self._throttle()
             try:
-                async with client.stream(
+                async with self._http_client.stream(
                     "GET",
                     url,
                     headers=headers,
@@ -159,6 +141,7 @@ class ImageDownloader:
                     if resp.status_code >= 400:
                         raise _TransientImageError(f"HTTP {resp.status_code} for {url}")
 
+                    has_encoding = bool(resp.headers.get("content-encoding"))
                     raw_len = resp.headers.get("content-length")
                     expected_size = int(raw_len) if raw_len and raw_len.isdigit() else 0
                     if expected_size > self._max_image_bytes:
@@ -177,7 +160,7 @@ class ImageDownloader:
                 raise _TransientImageError(f"HTTP error for {url}: {exc}") from exc
 
             downloaded_size = len(buf)
-            if expected_size and downloaded_size != expected_size:
+            if expected_size and not has_encoding and downloaded_size != expected_size:
                 raise _TransientImageError(
                     f"Incomplete download: expected {expected_size}, got {downloaded_size}"
                 )

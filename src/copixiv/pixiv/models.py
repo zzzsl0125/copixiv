@@ -9,12 +9,9 @@ from pydantic.alias_generators import to_camel
 
 
 class BasePixivModel(BaseModel):
-    """Base model tolerating extra vendor fields and subscript access."""
+    """Base model tolerating extra vendor fields."""
 
     model_config = ConfigDict(extra="allow", populate_by_name=True)
-
-    def __getitem__(self, item: str) -> Any:
-        return getattr(self, item)
 
 
 def _none_to_str(value: Any) -> str:
@@ -26,9 +23,8 @@ def _none_to_str(value: Any) -> str:
 class PixivUser(BasePixivModel):
     id: int = 0
     name: str = ""
-    account: str = ""
 
-    @field_validator("name", "account", mode="before")
+    @field_validator("name", mode="before")
     @classmethod
     def _coerce_str(cls, value: Any) -> str:
         return _none_to_str(value)
@@ -49,7 +45,6 @@ class PixivSeries(BasePixivModel):
 
 class PixivTag(BasePixivModel):
     name: str = ""
-    translated_name: str | None = None
 
     @field_validator("name", mode="before")
     @classmethod
@@ -90,7 +85,6 @@ class PixivNovelInfo(BasePixivModel):
 
 
 class PixivNovelRating(BasePixivModel):
-    like: int = 0
     bookmark: int = 0
     view: int = 0
 
@@ -164,7 +158,6 @@ class NovelListResponse(BasePixivModel):
     novels: list[PixivNovelInfo] = Field(default_factory=list)
     next_url: str | None = None
     series: PixivSeries | None = None
-    novel_series_detail: dict[str, Any] | None = None
 
     @field_validator("novels", mode="before")
     @classmethod

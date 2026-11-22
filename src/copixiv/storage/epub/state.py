@@ -50,70 +50,30 @@ _TEXT_SUFFIXES = (".xhtml", ".html", ".htm")
 _IMAGES_PREFIX = "images/"
 
 
-def is_readable_container(path: Path) -> bool:
-    """True when *path* exists and is a readable zip container.
+def inspect_epub(path: Path) -> tuple[bool, bool]:
+    """Return ``(is_readable, is_complete)`` in a single ZIP open.
 
-    Deliberately weak: this answers "can it even be opened as an EPUB", not
-    "is it complete".  A zip whose XHTML still holds raw markers passes
-    here — combine it with :func:`is_complete` (``check_epub`` does) before
-    calling a novel done.
+    * ``is_readable``: *path* exists and opens as a valid ZIP container.
+    * ``is_complete``: *is_readable*, embeds at least one illustration under
+      ``images/``, and carries no unresolved raw image markers in XHTML.
     """
-    return path.is_file() and zipfile.is_zipfile(path)
-
-
-def has_raw_markers(path: Path) -> bool:
-    """True when a built EPUB still carries an unresolved image marker.
-
-    Such a file is readable but *not finished*: the reader would see
-    ``[pixivimage:123]`` as literal text.  The "already exists ⇒ done" guard
-    must not treat it as complete.
-    """
+    if not path.is_file():
+        return False, False
     try:
         with zipfile.ZipFile(path) as archive:
-            return _archive_has_raw_markers(archive)
-    except (OSError, KeyError, zipfile.BadZipFile, zlib.error, RuntimeError):
-        return False
-
-
-def has_embedded_images(path: Path) -> bool:
-    """True when the EPUB embedded at least one illustration.
-
-    Guards promotion to ``DONE``: a file written from a draft whose images
-    had not landed yet is empty of pictures and must be regenerated instead
-    of being blessed as done.  The cover is excluded on purpose (see
-    ``_IMAGES_PREFIX``).
-    """
-    try:
-        with zipfile.ZipFile(path) as archive:
-            return _archive_has_images(archive)
+            if not _archive_has_images(archive):
+                return True, False
+            try:
+                has_markers = _archive_has_raw_markers(archive)
+            except (OSError, KeyError, zipfile.BadZipFile, zlib.error, RuntimeError):
+                return True, False
+            return True, not has_markers
     except (OSError, zipfile.BadZipFile):
-        return False
-
-
-def is_complete(path: Path) -> bool:
-    """True when *path* is a usable book: no raw marker left, ≥1 image.
-
-    This is the single "the produced EPUB is actually finished" predicate.
-    Every promotion to ``DONE`` uses it, so a file written while its images
-    were missing can never be blessed regardless of the row's current status.
-
-    Opens the container **once** and asks both questions against that one
-    archive: re-opening the same file to answer the second half of the same
-    predicate is exactly the kind of duplicated work this module exists to
-    remove (it also keeps the two answers from ever seeing different files if
-    a rebuild lands between the reads).
-    """
-    try:
-        with zipfile.ZipFile(path) as archive:
-            return _archive_has_images(archive) and not _archive_has_raw_markers(archive)
-    except (OSError, KeyError, zipfile.BadZipFile, zlib.error, RuntimeError):
-        return False
+        return False, False
 
 
 # ---------------------------------------------------------------------------
-# Archive-level helpers — the bodies shared by the single- and multi-open
-# entry points.  Keeping them separate is what lets ``is_complete`` read one
-# archive while the individual predicates stay cheap to call on their own.
+# Archive-level helpers
 # ---------------------------------------------------------------------------
 
 
@@ -154,9 +114,6 @@ def needs_epub(body: str | None) -> bool | None:
 
 
 __all__ = [
-    "has_embedded_images",
-    "has_raw_markers",
-    "is_complete",
-    "is_readable_container",
+    "inspect_epub",
     "needs_epub",
 ]

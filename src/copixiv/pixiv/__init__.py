@@ -11,5 +11,5 @@ Public API:
 - Typed response DTOs in ``models.py`` (``WebviewNovel``, ``PixivNovelInfo``,
   ``NovelListResponse``, ``UserDetailResponse``).
 - Exceptions: ``RateLimitError``, ``AccountInvalidError``, ``PixivApiError``,
-  ``PixivHttpError``, ``PremiumRequiredError`` (``errors.py``).
+  ``PremiumRequiredError`` (``errors.py``).
 """

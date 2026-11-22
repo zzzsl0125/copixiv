@@ -1,7 +1,6 @@
 """Pixiv infrastructure errors — pure domain/transport exceptions.
 
 - ``PixivError`` — base class for Pixiv client/account errors.
-- ``PixivHttpError`` — non-2xx HTTP response with preserved ``status_code``.
 - ``RateLimitError`` — the account is rate-limited (429 / Rate Limit body).
 - ``AccountInvalidError`` — the account's credentials are permanently bad.
 - ``PixivApiError`` — any other API-level failure (retryable unless 4xx
@@ -11,30 +10,9 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 
 class PixivError(Exception):
     """Base error for Pixiv HTTP/API failures."""
-
-    def __init__(self, msg: str = "", header: Any = None, body: Any = None) -> None:
-        self.header = header
-        self.body = body
-        super().__init__(msg)
-
-
-class PixivHttpError(PixivError):
-    """A Pixiv HTTP request returned a non-success status code."""
-
-    def __init__(
-        self,
-        msg: str,
-        status_code: int,
-        header: Any = None,
-        body: Any = None,
-    ) -> None:
-        self.status_code = status_code
-        super().__init__(msg, header=header, body=body)
 
 
 class RateLimitError(PixivError):
@@ -45,11 +23,9 @@ class RateLimitError(PixivError):
         msg: str = "",
         *,
         retry_after: float | None = None,
-        header: Any = None,
-        body: Any = None,
     ) -> None:
         self.retry_after = retry_after
-        super().__init__(msg, header=header, body=body)
+        super().__init__(msg)
 
 
 class AccountInvalidError(PixivError):
@@ -67,11 +43,9 @@ class PixivApiError(PixivError):
         self,
         msg: str,
         status_code: int | None = None,
-        header: Any = None,
-        body: Any = None,
     ) -> None:
         self.status_code = status_code
-        super().__init__(msg, header=header, body=body)
+        super().__init__(msg)
 
 
 class PremiumRequiredError(PixivError):

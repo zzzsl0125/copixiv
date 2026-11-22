@@ -22,7 +22,9 @@ id 解析回来 (``tasks/maintenance/files.py``)。任何一处改一次，另�
 
 from __future__ import annotations
 
+import os
 import re
+from collections.abc import Iterable
 from pathlib import Path
 
 # 类型字母 → 含义（也是文件名里的那段）。顺序即"同一本小说里先下谁"。
@@ -32,11 +34,10 @@ ILLUSTRATION = "p"
 
 # 下载时尝试的后缀顺序。图片 URL 的后缀不一定可信（``.jpg`` 里可能是 PNG），
 # 真正决定格式的是字节，所以查到哪个算哪个。
-IMAGE_SUFFIXES: tuple[str, ...] = (".jpg", ".png", ".jpeg", ".gif")
+IMAGE_SUFFIXES: tuple[str, ...] = (".jpg", ".png", ".jpeg", ".gif", ".webp")
 
 # ``{novel_id}_{kind}_{asset_id}`` —— 用于反解孤儿文件。
 _ASSET_STEM_RE = re.compile(r"^(?P<novel_id>\d+)_(?P<kind>[cup])_(?P<asset>.+)$")
-_COVER_STEM_RE = re.compile(r"^(?P<novel_id>\d+)_c_cover$")
 
 
 def asset_path(
@@ -60,23 +61,13 @@ def asset_suffix(url: str, default: str = ".jpg") -> str:
     return Path(url.split("?", 1)[0]).suffix.lower() or default
 
 
-def _find_case_insensitive(directory: Path, stem: str) -> Path | None:
-    """Fallback scan when an asset on disk carries an uppercase suffix (e.g. ``.JPG``)."""
-    if not directory.is_dir():
-        return None
-    for path in directory.glob(f"{stem}.*"):
-        if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES:
-            return path
-    return None
-
-
 def find_cover(directory: Path, novel_id: int | str) -> Path | None:
     """已有的封面文件（按 :data:`IMAGE_SUFFIXES` 顺序找第一个存在的）。"""
     for suffix in IMAGE_SUFFIXES:
         candidate = asset_path(directory, novel_id, COVER, suffix=suffix)
         if candidate.is_file():
             return candidate
-    return _find_case_insensitive(directory, f"{novel_id}_c_cover")
+    return None
 
 
 def iter_assets(directory: Path, novel_id: int | str, asset_ids) -> dict[str, Path]:
@@ -90,16 +81,11 @@ def iter_assets(directory: Path, novel_id: int | str, asset_ids) -> dict[str, Pa
         asset_id = str(raw_id)
         if asset_id in found:
             continue
-        matched: Path | None = None
         for suffix in IMAGE_SUFFIXES:
             candidate = asset_path(directory, novel_id, kind, asset_id, suffix)
             if candidate.is_file():
-                matched = candidate
+                found[asset_id] = candidate
                 break
-        if matched is None:
-            matched = _find_case_insensitive(directory, f"{novel_id}_{kind}_{asset_id}")
-        if matched is not None:
-            found[asset_id] = matched
     return found
 
 
@@ -129,7 +115,7 @@ def novel_id_of(stem: str) -> int | None:
     正文文件名是 ``{标题}_{id}``，由 :func:`copixiv.core.naming.build_path` 那边
     反解，与这里刻意分开——两套名字的"id 在哪一段"根本不同。
     """
-    match = _ASSET_STEM_RE.match(stem) or _COVER_STEM_RE.match(stem)
+    match = _ASSET_STEM_RE.match(stem)
     return int(match["novel_id"]) if match else None
 
 
@@ -149,18 +135,34 @@ def has_illustration_assets(directory: Path, novel_id: int | str) -> bool:
     return False
 
 
-def iter_novel_asset_files(directory: Path, novel_id: int | str) -> list[Path]:
-    """返回目录下属于 *novel_id* 的全部资产文件（封面 / 内嵌图 / 关联插图）。"""
-    nid_str = str(novel_id)
-    if not nid_str.isdigit():
+def iter_batch_novel_asset_files(directory: Path, novel_ids: Iterable[int | str]) -> list[Path]:
+    """通过单次 ``os.scandir`` 返回目录下属于 *novel_ids* 的全部资产文件。"""
+    id_set = {str(nid) for nid in novel_ids if str(nid).isdigit()}
+    if not id_set:
         return []
     matched: list[Path] = []
-    for path in directory.glob(f"{nid_str}_*"):
-        if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES:
-            continue
-        if _ASSET_STEM_RE.match(path.stem) or _COVER_STEM_RE.match(path.stem):
-            matched.append(path)
+    try:
+        with os.scandir(directory) as it:
+            for entry in it:
+                try:
+                    if not entry.is_file():
+                        continue
+                except OSError:
+                    continue
+                path = Path(entry.path)
+                if path.suffix.lower() not in IMAGE_SUFFIXES:
+                    continue
+                match = _ASSET_STEM_RE.match(path.stem)
+                if match and match["novel_id"] in id_set:
+                    matched.append(path)
+    except OSError:
+        return []
     return matched
+
+
+def iter_novel_asset_files(directory: Path, novel_id: int | str) -> list[Path]:
+    """返回目录下属于 *novel_id* 的全部资产文件（封面 / 内嵌图 / 关联插图）。"""
+    return iter_batch_novel_asset_files(directory, (novel_id,))
 
 
 __all__ = [
@@ -173,6 +175,7 @@ __all__ = [
     "find_cover",
     "has_illustration_assets",
     "iter_assets",
+    "iter_batch_novel_asset_files",
     "iter_novel_asset_files",
     "novel_id_of",
     "scan_assets",

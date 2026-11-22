@@ -6,6 +6,7 @@ import html
 import io
 import re
 import zipfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -82,6 +83,7 @@ class EpubBuilder:
         novel: NovelDraft,
         compress_quality: int = 75,
         needs_epub: bool | None = None,
+        asset_paths: Sequence[Path] | None = None,
     ) -> EpubBuildResult:
         """Build an EPUB3 archive from *novel*.
 
@@ -116,18 +118,30 @@ class EpubBuilder:
             logger.warning(f"Empty content for {novel_path}, skipping EPUB.")
             return EpubBuildResult(ok=False)
 
-        cover_path = self._find_cover(parent_dir, novel_id)
+        if asset_paths is not None:
+            cover_path, image_map = self._resolve_passed_assets(novel_id, asset_paths)
+        else:
+            cover_path = self._find_cover(parent_dir, novel_id)
+            image_map = self._build_image_map(parent_dir, novel_id, novel)
         cover_bytes = self._prepare_cover(cover_path, compress_quality)
-
-        image_map = self._build_image_map(parent_dir, novel_id, novel)
         processed_content, embedded_images, missing_images = self._replace_image_placeholders(
             content, image_map, compress_quality
         )
 
         output_path = formats.sibling_path(novel_path, formats.EPUB)
-        has_raw_markers = bool(IMAGE_PLACEHOLDER_PATTERN.search(processed_content))
-        if has_raw_markers:
-            logger.error(f"EPUB 仍含未替换的图片占位符: {output_path.name}")
+        expects_images = missing_images > 0 or bool(novel.images or novel.illusts)
+        if not embedded_images and expects_images:
+            logger.warning(
+                f"EPUB 未嵌入任何图片（缺失 {missing_images} 张），跳过写入以防覆盖已有文件: {output_path.name}"
+            )
+            return EpubBuildResult(
+                ok=False,
+                written=False,
+                output_path=output_path,
+                embedded_images=0,
+                missing_images=missing_images,
+                has_cover=cover_bytes is not None,
+            )
 
         has_cover = cover_bytes is not None
         opf_bytes = self._build_opf(
@@ -143,7 +157,7 @@ class EpubBuilder:
         cover_page_bytes = self._build_cover_xhtml() if has_cover else None
 
         try:
-            with atomic_write(output_path) as tmp_path, zipfile.ZipFile(tmp_path, "w") as zf:
+            with atomic_write(output_path, root=parent_dir) as tmp_path, zipfile.ZipFile(tmp_path, "w") as zf:
                 # OCF spec requires ``mimetype`` as the first, uncompressed entry.
                 zf.writestr(
                     zipfile.ZipInfo("mimetype"),
@@ -204,7 +218,7 @@ class EpubBuilder:
                 output_path=output_path,
                 embedded_images=len(embedded_images),
                 missing_images=missing_images,
-                has_raw_markers=has_raw_markers,
+                has_raw_markers=False,
                 has_cover=has_cover,
             )
         except Exception:
@@ -292,6 +306,27 @@ class EpubBuilder:
             f'<div class="illust-missing">（图片缺失 {_xml_text(img_id)}）</div>'
             "</div>"
         )
+
+    @staticmethod
+    def _resolve_passed_assets(
+        novel_id: str,
+        asset_paths: Sequence[Path],
+    ) -> tuple[Path | None, dict[str, Path]]:
+        """Partition pre-resolved *asset_paths* into ``(cover_path, image_map)``."""
+        cover_path: Path | None = None
+        image_map: dict[str, Path] = {}
+        prefix = f"{novel_id}_"
+        for path in asset_paths:
+            stem = path.stem
+            if not stem.startswith(prefix):
+                continue
+            rest = stem[len(prefix) :]
+            if rest.startswith(f"{assets.COVER}_") and cover_path is None:
+                cover_path = path
+            elif rest.startswith((f"{assets.UPLOADED}_", f"{assets.ILLUSTRATION}_")):
+                asset_id = rest.split("_", 1)[1]
+                image_map.setdefault(asset_id, path)
+        return cover_path, image_map
 
     @staticmethod
     def _build_image_map(parent_dir: Path, novel_id: str, novel: NovelDraft) -> dict[str, Path]:

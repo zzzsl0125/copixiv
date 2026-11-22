@@ -1,28 +1,27 @@
 """File storage — manages novel text and EPUB files on disk."""
 
+from __future__ import annotations
+
+from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
 
 from copixiv.core import naming as formats
-from copixiv.core.naming import build_path, safe_filename
+from copixiv.core.naming import build_path
 from copixiv.log import logger
 from copixiv.storage import assets
-from copixiv.storage.atomic import write_text_atomic
+from copixiv.storage.atomic import resolve_within_root, write_text_atomic
 
 
 class FileStorage:
     """Manages novel text and EPUB files on the local filesystem."""
 
-    #: 本地书（「我的上传」）所在的子目录（docs/LIBRARY_DESIGN.md §3.2）。
-    LOCAL_SUBDIR = "local"
-
     def __init__(self, download_dir: str = "download"):
         self.download_dir = download_dir
+        self._root = Path(download_dir).resolve()
 
     def novel_text_path(self, novel_id: int, title: str) -> Path:
         return Path(build_path(novel_id, title, self.download_dir))
-
-    def novel_epub_path(self, novel_id: int, title: str) -> Path:
-        return formats.sibling_path(self.novel_text_path(novel_id, title), formats.EPUB)
 
     def adopt_anchor(self, anchor: str | None) -> str | None:
         """Return *anchor* when it is a usable write target, else ``None``.
@@ -35,24 +34,13 @@ class FileStorage:
         path, so the novel stays fetchable while the bad value is ignored
         (and logged).
 
-        **A stored path can also be too long to write through.**  Paths written
-        before ``build_path`` learned to reserve the ``.tmp`` suffix sit at 253
-        bytes; the atomic write appends ``.tmp`` and needs 257, so every
-        download through such an anchor dies with ``OSError: [Errno 36] File
-        name too long`` in the temporary file — before anything reaches the
-        final path.  Three production novels are in exactly that state
-        (27001932 / 27038159 / 28571161).  They are refused here so the caller
-        recomputes a path that fits, which is also the only way those rows can
-        ever be recovered: re-downloading them cannot succeed while the old name
-        is reused.
+        A stored path whose basename (or sibling ``.epub``) exceeds
+        ``NAME_MAX`` is also refused so the caller recomputes a fitting path.
         """
         if not anchor:
             return None
-        try:
-            resolved = Path(anchor).resolve()
-        except OSError:
-            return None
-        if not resolved.is_relative_to(Path(self.download_dir).resolve()):
+        resolved = resolve_within_root(Path(anchor), self._root)
+        if resolved is None:
             logger.warning(
                 "忽略 download 根之外的 path，按标题重新计算：{}",
                 anchor,
@@ -60,7 +48,7 @@ class FileStorage:
             return None
         if not self._fits_name_max(resolved.name):
             logger.warning(
-                "stored path 加上原子写的 .tmp 会超过 NAME_MAX，按标题重新计算：{}",
+                "stored path 超过 NAME_MAX，按标题重新计算：{}",
                 anchor,
             )
             return None
@@ -87,23 +75,15 @@ class FileStorage:
     ) -> Path:
         """``{download_dir}/local/{安全标题}_{id}{后缀}``（§3.2）。
 
-        本地书不走 :func:`build_path`：它按 id 分片，负数会被塞进 ``0000/``，
-        而契约要的是 ``local/``。这里是那条第二约定的**唯一**所有者 ——
-        上传管线只调用它，不再自己拼路径。
-
-        标题按 ``NAME_MAX`` 截断，并把最长的后缀（``_{id}.epub``）算进余量，
-        所以正文与 EPUB 原件两份都在限额内。
+        委托 :func:`build_path` 统一处理负数 id 路由到 ``local/`` 与 ``NAME_MAX`` 截断。
         """
-        reserved = len(f"_{novel_id}{formats.SUFFIXES[formats.EPUB]}") + 1
-        filename = f"{safe_filename(title, max_length=254 - reserved)}_{novel_id}{formats.suffix_for(kind)}"
-        return Path(self.download_dir) / self.LOCAL_SUBDIR / filename
+        return Path(build_path(novel_id, title, self.download_dir, kind=kind))
 
     def save_novel_text(
         self,
         novel_id: int,
         title: str,
         content: str,
-        force: bool = False,
         anchor: str | Path | None = None,
     ) -> Path:
         """Write novel text to disk. Returns the file path.
@@ -118,10 +98,7 @@ class FileStorage:
         ``(novel_id, title)``, which is correct only for first-time writes.
         """
         path = Path(anchor) if anchor else self.novel_text_path(novel_id, title)
-        if path.exists() and not force and path.stat().st_size > 0:
-            logger.debug(f'下载: #{novel_id} "{title}" 已存在，跳过')
-            return path
-        write_text_atomic(path, content, root=Path(self.download_dir))
+        write_text_atomic(path, content, root=self._root)
         logger.info(
             f'下载: #{novel_id} "{title}" → {path} ({len(content)} 字符)',
         )
@@ -153,7 +130,7 @@ class FileStorage:
             return None
         return content or None
 
-    def delete_novel_files(self, novel_path: str) -> None:
+    def delete_novel_files(self, novel_path: str, *, novel_id: int | None = None) -> None:
         """Delete a novel's text, EPUB, and downloaded images.
 
         Refuses to touch paths outside the download root — ``novel_path``
@@ -167,13 +144,8 @@ class FileStorage:
         them now — that is the difference between "I deleted this" and "I
         deleted this, and 12 images are still sitting in the tree".
         """
-        root = Path(self.download_dir).resolve()
-        path = Path(novel_path)
-        try:
-            resolved = path.resolve()
-        except OSError:
-            return
-        if resolved == root or not resolved.is_relative_to(root):
+        resolved = resolve_within_root(Path(novel_path), self._root)
+        if resolved is None:
             logger.warning(
                 "Refusing to delete files outside download dir: {}",
                 novel_path,
@@ -183,15 +155,44 @@ class FileStorage:
         for suffix in formats.ALL_SUFFIXES:
             _unlink(resolved.with_suffix(suffix))
 
-        novel_id = resolved.stem.rsplit("_", 1)[-1]
-        if novel_id.isdigit():
-            for asset in assets.iter_novel_asset_files(resolved.parent, novel_id):
+        nid_str = str(novel_id) if novel_id is not None else resolved.stem.rsplit("_", 1)[-1]
+        if nid_str.isdigit():
+            for asset in assets.iter_novel_asset_files(resolved.parent, nid_str):
                 _unlink(asset)
 
         # Remove the parent directory when this was the last novel in it.
         # Assets are gone by now, so an "empty directory" really means empty.
-        parent = resolved.parent
-        if parent != root and parent.is_relative_to(root):
+        self._rmdir_if_empty(resolved.parent)
+
+    def delete_novels_files(self, novel_paths: Iterable[str | None]) -> None:
+        """Batch-delete novel files, grouping asset scans per parent directory."""
+        by_parent: dict[Path, list[str]] = defaultdict(list)
+        for novel_path in novel_paths:
+            if not novel_path:
+                continue
+            resolved = resolve_within_root(Path(novel_path), self._root)
+            if resolved is None:
+                logger.warning(
+                    "Refusing to delete files outside download dir: {}",
+                    novel_path,
+                )
+                continue
+            for suffix in formats.ALL_SUFFIXES:
+                _unlink(resolved.with_suffix(suffix))
+            nid_str = resolved.stem.rsplit("_", 1)[-1]
+            if nid_str.isdigit():
+                by_parent[resolved.parent].append(nid_str)
+            else:
+                by_parent.setdefault(resolved.parent, [])
+
+        for parent, novel_ids in by_parent.items():
+            if novel_ids:
+                for asset in assets.iter_batch_novel_asset_files(parent, novel_ids):
+                    _unlink(asset)
+            self._rmdir_if_empty(parent)
+
+    def _rmdir_if_empty(self, parent: Path) -> None:
+        if resolve_within_root(parent, self._root) is not None:
             try:
                 if not any(parent.iterdir()):
                     parent.rmdir()

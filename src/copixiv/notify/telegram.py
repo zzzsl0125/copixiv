@@ -1,10 +1,9 @@
-"""Telegram notifier — pure message formatting/splitting + httpx client with tenacity."""
+"""Telegram notifier — pure message formatting + httpx client with tenacity."""
 
 from __future__ import annotations
 
 import asyncio
 import html
-import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -23,7 +22,9 @@ from copixiv.log import logger
 TELEGRAM_MAX_MESSAGE_LEN = 4096
 TELEGRAM_MAX_CAPTION_LEN = 1024
 
-_HTML_TAG_RE = re.compile(r"<(/?)(b|i|u|s|code|pre)\b[^>]*>")
+_MAX_TASK_NAME_LEN = 120
+_MAX_DETAIL_LEN = 3000
+_TRUNCATED_NOTE = "…（已截断，请在任务历史查看完整信息）"
 
 
 def _escape(text: str) -> str:
@@ -31,15 +32,12 @@ def _escape(text: str) -> str:
     return html.escape(text, quote=False)
 
 
-def _normalize_proxy_url(proxy_url: str | None) -> str | None:
-    if not proxy_url:
-        return None
-    cleaned = proxy_url.strip()
-    if not cleaned:
-        return None
-    if "://" not in cleaned:
-        return f"http://{cleaned}"
-    return cleaned
+def _truncate(text: str, limit: int) -> str:
+    """Truncate *text* to *limit* chars, appending a task-history note when cut."""
+    if len(text) <= limit:
+        return text
+    keep = max(limit - len(_TRUNCATED_NOTE), 0)
+    return text[:keep] + _TRUNCATED_NOTE
 
 
 @dataclass(frozen=True)
@@ -59,13 +57,15 @@ def format_task_notification(
     result: TaskResult | None = None,
 ) -> TelegramMessagePayload:
     """Render a :class:`TaskResult` or failure notice into Telegram HTML payload."""
+    safe_task_name = _escape(_truncate(task_name, _MAX_TASK_NAME_LEN))
     if status != "success":
+        safe_error = _escape(_truncate(error or "Unknown error", _MAX_DETAIL_LEN))
         text = "\n".join(
             [
                 "❌ <b>Task Failed</b>",
-                f"<b>Task:</b> <code>{_escape(task_name)}</code>",
+                f"<b>Task:</b> <code>{safe_task_name}</code>",
                 "<b>Status:</b> failed",
-                f"<b>Error:</b> <code>{_escape(error or 'Unknown error')}</code>",
+                f"<b>Error:</b> <code>{safe_error}</code>",
             ]
         )
         return TelegramMessagePayload(text=text)
@@ -77,7 +77,7 @@ def format_task_notification(
 
     lines = [
         "✅ <b>Task Completed</b>",
-        f"<b>Task:</b> <code>{_escape(task_name)}</code>",
+        f"<b>Task:</b> <code>{safe_task_name}</code>",
         "<b>Status:</b> success",
         f"<b>Duration:</b> <code>{dur}</code>",
     ]
@@ -101,96 +101,10 @@ def format_task_notification(
         return TelegramMessagePayload(text="\n".join(lines))
 
     if summary:
-        lines.append(f"<b>Result:</b> {_escape(summary)}")
+        lines.append(f"<b>Result:</b> {_escape(_truncate(summary, _MAX_DETAIL_LEN))}")
     else:
         lines.append(f"<b>New Novels:</b> <code>{count}</code>")
     return TelegramMessagePayload(text="\n".join(lines))
-
-
-def _update_tag_stack(stack: list[str], fragment: str) -> None:
-    for match in _HTML_TAG_RE.finditer(fragment):
-        is_close, tag = match.group(1), match.group(2)
-        if not is_close:
-            stack.append(tag)
-        else:
-            for idx in range(len(stack) - 1, -1, -1):
-                if stack[idx] == tag:
-                    stack.pop(idx)
-                    break
-
-
-def _safe_cut_index(text: str, limit: int) -> int:
-    """Avoid splitting inside an HTML tag ``<...>`` or entity ``&...;``."""
-    if len(text) <= limit:
-        return len(text)
-    cut = limit
-    lt = text.rfind("<", 0, cut)
-    gt = text.rfind(">", 0, cut)
-    if lt > gt:
-        cut = lt
-    amp = text.rfind("&", 0, cut)
-    semi = text.rfind(";", 0, cut)
-    if amp > semi and (cut - amp) <= 10:
-        cut = amp
-    return cut if cut > 0 else limit
-
-
-def split_telegram_text(
-    text: str,
-    max_length: int = TELEGRAM_MAX_MESSAGE_LEN,
-) -> list[str]:
-    """Split *text* into chunks of at most *max_length* while keeping HTML balanced."""
-    if len(text) <= max_length:
-        return [text]
-
-    chunks: list[str] = []
-    stack: list[str] = []
-    remaining = text
-
-    while remaining:
-        prefix = "".join(f"<{tag}>" for tag in stack)
-        known_close_len = sum(len(f"</{tag}>") for tag in stack)
-        # Reserve room for existing closing tags plus a possible new open tag
-        # inside this chunk, never exceeding half of max_length.
-        reserve = min(known_close_len + 14, max(max_length // 2, known_close_len))
-        budget = max(max_length - len(prefix) - reserve, 1)
-
-        if len(remaining) <= max_length - len(prefix) - known_close_len:
-            candidate_stack = list(stack)
-            _update_tag_stack(candidate_stack, remaining)
-            candidate_suffix = "".join(f"</{tag}>" for tag in reversed(candidate_stack))
-            if len(prefix) + len(remaining) + len(candidate_suffix) <= max_length:
-                chunks.append(f"{prefix}{remaining}{candidate_suffix}")
-                break
-
-        split_at = remaining.rfind("\n", 0, budget + 1)
-        if split_at > 0:
-            chunk_body = remaining[:split_at]
-            rest = remaining[split_at + 1 :]
-        else:
-            cut = _safe_cut_index(remaining, budget)
-            chunk_body = remaining[:cut]
-            rest = remaining[cut:]
-
-        next_stack = list(stack)
-        _update_tag_stack(next_stack, chunk_body)
-        suffix = "".join(f"</{tag}>" for tag in reversed(next_stack))
-
-        # Safety trim if chunk_body opened extra tags that pushed past max_length
-        while len(prefix) + len(chunk_body) + len(suffix) > max_length and len(chunk_body) > 1:
-            trim = max(1, len(prefix) + len(chunk_body) + len(suffix) - max_length)
-            new_len = _safe_cut_index(chunk_body, max(len(chunk_body) - trim, 1))
-            rest = chunk_body[new_len:] + rest
-            chunk_body = chunk_body[:new_len]
-            next_stack = list(stack)
-            _update_tag_stack(next_stack, chunk_body)
-            suffix = "".join(f"</{tag}>" for tag in reversed(next_stack))
-
-        stack = next_stack
-        remaining = rest
-        chunks.append(f"{prefix}{chunk_body}{suffix}")
-
-    return chunks
 
 
 class _RetryableTelegramError(RuntimeError):
@@ -220,14 +134,11 @@ def _extract_retry_after(resp: httpx.Response) -> float | None:
 class TelegramNotifier:
     """Sends task-completion notifications to a Telegram chat."""
 
-    name = "telegram"
-
     def __init__(
         self,
-        token: str = "",
-        chat_id: str | int = "",
-        proxy_url: str | None = None,
-        http_client: httpx.AsyncClient | None = None,
+        token: str,
+        chat_id: str | int,
+        http_client: httpx.AsyncClient,
         *,
         max_attempts: int = 3,
     ) -> None:
@@ -235,10 +146,37 @@ class TelegramNotifier:
         self._chat_id: str = str(chat_id) if chat_id else ""
         self._message_url = f"https://api.telegram.org/bot{self._token}/sendMessage"
         self._document_url = f"https://api.telegram.org/bot{self._token}/sendDocument"
-        self._proxy_url = _normalize_proxy_url(proxy_url)
         self._client = http_client
-        self._owns_client = http_client is None
         self._max_attempts = max(max_attempts, 1)
+
+    @classmethod
+    def from_config(
+        cls,
+        config: Any,
+        http_client: httpx.AsyncClient,
+    ) -> TelegramNotifier | None:
+        """Build a :class:`TelegramNotifier` from *config*, or ``None`` when unconfigured."""
+        entries = config.notifications
+        if not entries:
+            return None
+
+        if len(entries) > 1:
+            logger.warning(
+                "Multiple notification entries configured ({}) — only the first "
+                "Telegram entry is used; the list shape is retained for future "
+                "channels.",
+                len(entries),
+            )
+
+        entry = entries[0]
+        if not entry.token or not entry.chat_id:
+            return None
+
+        return cls(
+            token=entry.token,
+            chat_id=entry.chat_id,
+            http_client=http_client,
+        )
 
     async def send_task_result(
         self,
@@ -261,35 +199,14 @@ class TelegramNotifier:
             result=result,
         )
         if payload.document_content is not None and payload.document_name is not None:
-            caption_chunks = split_telegram_text(
-                payload.text,
-                max_length=TELEGRAM_MAX_CAPTION_LEN,
-            )
             await self._send_document(
-                caption_chunks[0],
+                payload.text[:TELEGRAM_MAX_CAPTION_LEN],
                 payload.document_content,
                 payload.document_name,
             )
-            if len(caption_chunks) > 1:
-                overflow = "\n".join(caption_chunks[1:])
-                for msg_chunk in split_telegram_text(overflow, TELEGRAM_MAX_MESSAGE_LEN):
-                    await self._send_message(msg_chunk)
             return
 
-        for msg_chunk in split_telegram_text(payload.text, TELEGRAM_MAX_MESSAGE_LEN):
-            await self._send_message(msg_chunk)
-
-    async def close(self) -> None:
-        """Close the underlying HTTP client if owned by this notifier."""
-        if self._client is not None and self._owns_client:
-            await self._client.aclose()
-            self._client = None
-
-    def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None:
-            self._client = httpx.AsyncClient(proxy=self._proxy_url)
-            self._owns_client = True
-        return self._client
+        await self._send_message(payload.text[:TELEGRAM_MAX_MESSAGE_LEN])
 
     async def _post_with_retry(
         self,
@@ -300,7 +217,7 @@ class TelegramNotifier:
         files: dict[str, Any] | None = None,
         timeout: float = 10.0,
     ) -> None:
-        client = self._get_client()
+        client = self._client
 
         def _wait(retry_state: RetryCallState) -> float:
             exc = retry_state.outcome.exception() if retry_state.outcome else None
@@ -391,5 +308,4 @@ __all__ = [
     "TelegramMessagePayload",
     "TelegramNotifier",
     "format_task_notification",
-    "split_telegram_text",
 ]

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
 from copixiv.log import logger
 from copixiv.storage import assets
+from copixiv.storage.atomic import resolve_within_root
 
 EXPORT_FILE_PREFIX = "batch_export_"
 
@@ -20,8 +23,9 @@ def extract_managed_novel_id(name_stem: str) -> int | None:
         return asset_novel_id
 
     tokens = name_stem.split("_")
-    if tokens[-1].isdigit():
-        return int(tokens[-1])
+    last = tokens[-1]
+    if last.isdigit() or (last.startswith("-") and len(last) > 1 and last[1:].isdigit()):
+        return int(last)
     return None
 
 
@@ -30,45 +34,82 @@ def collect_orphan_files(
     known_ids: set[int],
     min_age_days: int,
     now: float | None = None,
+    known_paths: set[Path] | None = None,
 ) -> list[tuple[Path, int]]:
     """Walk *root* and return ``[(path, size_bytes), ...]`` of reclaimable files."""
     resolved_root = root.resolve()
+    normalized_known_paths = {p.resolve() for p in known_paths} if known_paths else set()
     current_time = time.time() if now is None else now
     orphans: list[tuple[Path, int]] = []
     min_age_seconds = min_age_days * 86400
 
-    for dirpath, _dirnames, filenames in resolved_root.walk():
-        for name in filenames:
-            path = dirpath / name
-            if path.suffix == ".tmp":
-                continue
+    stack: list[Path] = [resolved_root]
+    while stack:
+        current_dir = stack.pop()
+        try:
+            with os.scandir(current_dir) as it:
+                entries = list(it)
+        except OSError:
+            continue
+
+        for entry in entries:
             try:
-                if path.is_symlink() and not path.resolve().is_relative_to(resolved_root):
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(Path(entry.path))
                     continue
-                st = path.stat()
+
+                if entry.is_symlink():
+                    entry_path = Path(entry.path)
+                    if resolve_within_root(entry_path, resolved_root) is None:
+                        continue
+                    if not entry_path.is_file():
+                        continue
+                elif not entry.is_file(follow_symlinks=False):
+                    continue
+                else:
+                    entry_path = Path(entry.path)
+            except OSError:
+                continue
+
+            name = entry.name
+            if entry_path.suffix == ".tmp":
+                continue
+
+            if normalized_known_paths and entry_path in normalized_known_paths:
+                continue
+
+            is_export = name.startswith(EXPORT_FILE_PREFIX) and entry_path.suffix == ".zip"
+            if not is_export:
+                novel_id = extract_managed_novel_id(entry_path.stem)
+                if novel_id is None or novel_id in known_ids:
+                    continue
+
+            try:
+                st = entry.stat()
             except OSError:
                 continue
 
             if (current_time - st.st_mtime) < min_age_seconds:
                 continue
 
-            novel_id = extract_managed_novel_id(path.stem)
-            if novel_id is None or novel_id in known_ids:
-                continue
-            orphans.append((path, st.st_size))
+            orphans.append((entry_path, st.st_size))
 
     return orphans
 
 
-def unlink_files(paths: list[Path]) -> tuple[int, int]:
-    """Delete *paths*; return ``(deleted_count, freed_bytes)``."""
+def unlink_files(files: Sequence[tuple[Path, int]] | Sequence[Path]) -> tuple[int, int]:
+    """Delete *files*; return ``(deleted_count, freed_bytes)``."""
     deleted = 0
     freed = 0
-    for path in paths:
-        try:
-            size = path.stat().st_size
-        except OSError:
-            size = 0
+    for item in files:
+        if isinstance(item, tuple):
+            path, size = item
+        else:
+            path = item
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = 0
         try:
             path.unlink()
         except OSError as exc:
