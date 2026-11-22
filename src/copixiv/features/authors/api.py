@@ -52,9 +52,8 @@ async def lookup_author(
     只读、不写库：本地 ``author`` 表命中就返回（零延迟、离线可用），否则问一次
     Pixiv。``source`` 告诉前端这个名字是哪来的；``unknown`` **不是错误**——
     id 才是身份，名字只是缓存，编辑器照样允许保存。保存后名字若为 NULL，那是
-    **仓库认可的中间态**、不是"有任务会兜底"：``sync_empty_name`` 默认禁用
-    （``scheduled_task.is_enabled`` 列默认 false），会把名字补回来的是**再抓
-    一次该作品 / 作者**或编辑器里的「同步」（见 ``update_metadata.py``）。
+    **仓库认可的中间态**，会把名字补回来的是**再抓一次该作品 / 作者**或编辑器里
+    的「同步」（见 ``update_metadata.py``）。
 
     放在 ``/author/{author_id}`` 而不是新开 ``/api/authors`` 路由：既有的
     ``POST /author/{author_id}/follow`` 已经在这里，作者相关的两个动作挨着更好找，

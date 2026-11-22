@@ -176,28 +176,3 @@ class SQLAlchemyAuthorRepository:
         if result is None:
             raise NotFoundError(f"Author {author_id} not found")
         engine_delta.record_authors_dirty(self.session, [author_id])
-
-    def get_novel_author_ids_with_empty_name(self) -> list[int]:
-        """Return distinct non-null ``author_id`` values on novels whose ``author_name`` is NULL."""
-        return [
-            int(aid)
-            for aid in self.session.execute(
-                _select(models.Novel.author_id)
-                .where(
-                    models.Novel.author_name.is_(None),
-                    models.Novel.author_id.isnot(None),
-                )
-                .distinct()
-            )
-            .scalars()
-            .all()
-            if aid is not None
-        ]
-
-    def count_novels_with_empty_author_name(self) -> int:
-        """Return total number of novels whose ``author_name`` is NULL."""
-        return int(
-            self.session.execute(
-                _select(func.count()).select_from(models.Novel).where(models.Novel.author_name.is_(None))
-            ).scalar_one()
-        )

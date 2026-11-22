@@ -10,14 +10,14 @@ from pydantic import BaseModel
 from copixiv.db.tx import read_transaction
 from copixiv.deps import PixivClientDep, UowDep
 from copixiv.features.series.repo import SQLAlchemySeriesRepository
-from copixiv.features.series.resolve import lookup_series_profile
+from copixiv.features.series.service import lookup_series_profile
 
 
 class SeriesLookupResponse(BaseModel):
     """系列 ID 预览（``GET /api/novels/series/{series_id}``）—— 与作者那份同构。
 
     差别只在名字的来源链：``series`` 行 → 同系列的 novel 行 → pixiv
-    ``novel_series``（前两步都是本地查询，见 ``resolve_series.py``）。
+    ``novel_series``（前两步都是本地查询，见 ``features/series/service.py``）。
     """
 
     series_id: int

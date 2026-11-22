@@ -9,7 +9,7 @@
 | 后端 | Python 3.12+，FastAPI + SQLAlchemy 2.0 + `pydantic-settings` + `tenacity` + Alembic + Loguru |
 | 检索引擎 | Rust (`crates/copixiv_rs`，PyO3 + `lasso` + `roaring` + `memchr` + `rayon` + `parking_lot`) |
 | 前端 | Vue 3 + Vite + TypeScript + Tailwind CSS v4 + `@tanstack/vue-query` + `@tanstack/vue-virtual` + `reka-ui`（`frontend/package.json`） |
-| 数据库 | 标准 PostgreSQL 16（无需 `pg_bigm`，Alembic 基线迁移 `0001_baseline`；`BIGINT` / `timestamptz` / `JSONB` / `TEXT[]`） |
+| 数据库 | 标准 PostgreSQL 16（无需 `pg_bigm`，Alembic 迁移 `0001_baseline .. 0006_drop_tag_table`；`BIGINT` / `timestamptz` / `JSONB` / `TEXT[]`） |
 | Pixiv 客户端 | 原生异步 `httpx` 客户端 + Pydantic v2 DTO（`pixiv/`，含统一 `Retry-After` / `tenacity` 重试与账号池调度） |
 | 服务端口 | `9000`（生产由后端同进程托管 `frontend/dist`，Vite 开发代理转发 `/api` → `9000`） |
 
@@ -49,7 +49,7 @@ uv pip install --no-build-isolation ./crates/copixiv_rs
 # 启动本地 PostgreSQL（数据目录 data/pg/pgdata，端口 5433，日志 log/pg.log）
 uv run python scripts/pg_dev.py start
 
-# 启动应用（自动应用 Alembic 基线迁移 0001_baseline，随后流式加载内存检索快照）
+# 启动应用（自动应用 Alembic 迁移，随后流式加载内存检索快照）
 uv run python -u main.py
 ```
 
@@ -85,19 +85,20 @@ sudo systemctl enable --now copixiv-pg.service copixiv.service
 ## API
 
 | 前缀 | 路由模块 | 说明 |
-|------|----------|------|
-| `/api/novels` | `features/novels/routes/` | 列表、计数、按 ID 批量卡片（`by-ids`）、排序/范围辅助（`sort-ids` / `match-ids` / `ids`）、作者/系列预览、下载、收藏、特别关注、单本编辑/同步/删除、批量操作与打包导出 |
+|---|---|---|
+| `/api/novels` | `features/novels/routes/`（`novel` / `query` / `batch` / `downloads`） | 列表、计数、按 ID 批量卡片（`by-ids`）、排序/范围辅助（`sort-ids` / `match-ids` / `ids`）、单本/导出包下载、收藏、单本编辑/同步/删除、批量操作、批量元数据编辑与异步打包导出 |
+| `/api/novels/author` | `features/authors/api.py` | 特别关注开关、作者 ID 预览 |
+| `/api/novels/series` | `features/series/api.py` | 系列 ID 预览 |
 | `/api/library` | `features/library/api.py` | 本地 TXT / EPUB 上传与入库 |
-| `/api/authors` | `features/authors/api.py` | 作者删除与级联清理 |
 | `/api/tasks` | `tasks/api.py` | 任务方法、定时任务管理、立即运行、任务取消与执行历史 |
 | `/api/system` | `features/system/api.py` | 系统配置（含 `exclude_blocked_tag_novels` / `batch_download_naming`） |
 | `/api/tag-preferences` | `features/tags/preferences.py` | 标签偏好（喜爱 / 厌恶）与排序 |
-| `/api/tag-aliases` | `features/tags/aliases.py` | 标签别名映射与基于 Rust 标签索引的相似标签建议 |
-| `/api/search-history` | `features/search_history/api.py` | 搜索历史 |
-| `/api/tokens` | `features/accounts/api.py` | Pixiv 刷新令牌管理 |
+| `/api/tag-aliases` | `features/tags/aliases.py` | 标签别名映射与基于 Rust 惰性 `TagIndex` 的相似标签建议 |
+| `/api/search-history` | `features/search_history.py` | 搜索历史 |
+| `/api/tokens` | `features/accounts.py` | Pixiv 刷新令牌管理 |
 | `/api/failed-novels` | `features/failures/api.py` | 失败台账查看、清除、重置计数与重试 |
 
-OpenAPI 契约由 `src/copixiv/export_openapi.py` 导出为 `frontend/openapi.json`，再通过 `npm --prefix frontend run codegen` 生成 `frontend/src/types/api.generated.ts`。
+OpenAPI 契约由 `src/copixiv/export_openapi.py`（`python -m copixiv.export_openapi`）导出为 `frontend/openapi.json`，再通过 `npm --prefix frontend run codegen` 生成 `frontend/src/types/api.generated.ts`。
 
 ---
 
@@ -105,7 +106,7 @@ OpenAPI 契约由 `src/copixiv/export_openapi.py` 导出为 `frontend/openapi.js
 
 ### 模块化单体边界
 
-项目采用**模块化单体**：组合根（`app.py` / `middleware.py` / `error_handlers.py` / `lifespan.py`）+ 纯 Python 核心（`core/`）+ 底层适配器叶子（`db/` / `pixiv/` / `storage/` / `notify/` / `query_engine/`）+ 任务内核（`tasks/`）+ 按功能切片的 `features/`。全部静态边界契约由 `.importlinter` + `lint-imports` 强制执行，详见 [docs/MODULARITY.md](docs/MODULARITY.md)。
+项目采用**模块化单体**：组合根（`app.py` / `middleware.py` / `error_handlers.py` / `lifespan.py`）+ 纯 Python 核心（`core/`）+ 底层适配器叶子（`db/` / `pixiv/` / `storage/` / `notify/` / `query_engine/`）+ 任务内核（`tasks/`）+ 按功能切片的 `features/`。全部 12 条静态边界契约由 `.importlinter` + `lint-imports` 强制执行，详见 [docs/MODULARITY.md](docs/MODULARITY.md)。
 
 ```text
 app.py + lifespan.py + middleware.py + error_handlers.py（组合根与装配）
@@ -122,13 +123,15 @@ crates/copixiv_rs 为 PyO3 原生检索扩展，由 query_engine 适配层封装
 
 ### 数据库、检索引擎与后台任务
 
-- **PostgreSQL 持久化真源**：`db/models.py` 定义全部 13 张表（`author` / `series` / `novel` / `tag` / `tag_preference` / `setting` / `tag_alias` / `scheduled_task` / `task_history` / `token` / `failed_novel` / `series_dead_letter` / `search_history`），`db/pg_objects.py` 定义唯一真源序列、标签触发器与表级 autovacuum 参数，由单一基线迁移 `0001_baseline` 管理（可用 `alembic check` 校验 ORM 与迁移一致）。写入采用 PG MVCC 多写者 + `lock_timeout='5s'` + `ON CONFLICT` upsert + `db/tx.py::run_write_transaction`（针对 `55P03` / `40P01` / `40001` 退避重试）。
+- **PostgreSQL 持久化真源**：`db/models.py` 定义全部 12 张表（`author` / `series` / `novel` / `tag_preference` / `setting` / `tag_alias` / `scheduled_task` / `task_history` / `token` / `failed_novel` / `series_dead_letter` / `search_history`；`0006_drop_tag_table` 已移除冗余 `tag` 表及其触发器），`db/pg_objects.py` 定义唯一真源序列与表级 autovacuum 参数，由 Alembic 迁移链（`0001_baseline .. 0006_drop_tag_table`）管理（可用 `alembic check` 校验 ORM 与迁移一致）。写入采用 PG MVCC 多写者 + `lock_timeout='5s'` + `ON CONFLICT` upsert + `db/tx.py::run_write_transaction`（针对 `55P03` / `40P01` / `40001` 退避重试）。
 - **Rust 进程内检索引擎（`copixiv_rs`）**：
   - 启动时由 `db/novel_snapshot.py::PgSnapshotStore` 在 `REPEATABLE READ READ ONLY` 快照下流式投影窄列构建内存索引；所有写事务通过 `session_factory` 原生 SQLAlchemy 事件（`after_flush` / `after_commit` / `after_rollback`）收集 `PendingEngineDelta`，提交后再原子调用 `apply_delta(...)` 增量同步，回滚绝不污染内存。
-  - 内部按 `engine`/`storage`/`interner`/`postings`/`text_index`/`tag_index`/`tracks`/`mutation`/`query`/`hydrate`/`staging` 模块化拆分，支持小说全文/多维检索、真随机分页（`splitmix64`）与标签子串/相似度别名推荐，列表查询与 `/by-ids` 直出卡片对象。
+  - 内部按 `engine` / `storage` / `interner` / `postings` / `text_index` / `tag_index` / `tracks` / `mutation` / `query` / `hydrate` / `staging` 模块化拆分；`TagIndex` 按需惰性构建并随标签与别名变更维护，支持小说全文/多维检索、真随机分页（`splitmix64`）与标签子串/相似度别名推荐，列表查询与 `/by-ids` 直出卡片对象。
 - **后台任务内核（`tasks/`）**：
-  - `registry.py`（`@register(lane, timeout, notify)` 与独立 `TaskContext::report_progress`）+ `executor.py` + `cron.py`（`cronstrue` / `croniter`）+ `manager.py`（双 lane `asyncio.Event` 与任务取消追踪）。
-  - 业务任务覆盖抓取（`tasks/novels.py`）、批量删改/打包（`tasks/batch.py`）与维护巡检（`tasks/maintenance/`：`search` / `epub` / `series` / `files` / `history` / `backup` / `refetch`）。
+  - `registry.py`（`@register(lane, timeout, notify)` 与独立 `TaskContext::report_progress`）+ `executor.py` + `cron.py`（`croniter`）+ `manager.py`（双 lane `asyncio.Event` 与任务取消追踪）。
+  - 业务任务覆盖抓取与作者删除（`tasks/novels.py`）、统一异步批量导出（`tasks/batch.py::batch_export`）与维护巡检（`tasks/maintenance/`：`backup` / `epub` / `files` / `refetch` / `series`；已退役 `sync_empty_name` 与 `prune_task_history`）。
+- **前端状态组织（`frontend/src/`）**：
+  - `App.vue` 仅提供壳层容器并挂载 `useProvideNovelShellState()`；小说列表筛选、虚拟瀑布流与统一批量状态机 `useBatchMode` 收口于 `views/Novels.vue` 与 `composables/`。
 
 ---
 
@@ -136,30 +139,30 @@ crates/copixiv_rs 为 PyO3 原生检索扩展，由 query_engine 适配层封装
 
 ```text
 crates/
-└── copixiv_rs/         # Rust PyO3 检索引擎（arena / filter / random / engine / interner / postings / text_index / tag_index / tracks / query / ...）
+└── copixiv_rs/         # Rust PyO3 检索引擎（arena / engine / filter / hydrate / interner / model / mutation / postings / query/ / random / staging / storage / tag_index / text_index / tracks）
 src/copixiv/
 ├── app.py              # FastAPI 组合根：create_app / mount_routers / mount_frontend / main()
 ├── middleware.py       # Host 校验、API Key 鉴权、CORS、GZip 与访问日志中间件
 ├── error_handlers.py   # 域异常 → HTTP 状态码与 DB 约束映射
 ├── lifespan.py         # AsyncExitStack 统一托管 DB、共享 httpx、检索引擎、账号池、任务系统与备份
 ├── config.py           # pydantic-settings 配置模型与 config.yaml/环境变量加载器
-├── deps.py             # FastAPI DI 依赖（get_uow / get_write_uow / get_task_manager / API Key 等）
+├── deps.py             # FastAPI DI 依赖（get_uow / get_task_manager / API Key 等）
 ├── log.py              # Loguru 日志配置与有界环形缓冲区
 ├── export_openapi.py   # 无 DB/网络依赖导出 OpenAPI schema
 ├── core/               # 纯 Python：models / draft / naming / search / text / time / snapshot_types / exceptions
-├── db/                 # PG 适配：models / engine / uow / tx / pg_objects / backup / constants / base / delta / novel_snapshot
+├── db/                 # PG 适配：models / engine / uow / tx / pg_objects / backup / base / delta / novel_snapshot
 ├── query_engine/       # 进程内引擎适配层：port / adapter / sync
 ├── pixiv/              # 原生异步 httpx Pixiv 协议层：client / http / models / account / accounts / errors
 ├── storage/            # 本地存储：file_storage / image_downloader / encoding / orphan_cleanup / zip / atomic / assets / epub/
 ├── notify/             # 通知适配：telegram
 ├── tasks/              # registry / executor / cron / manager / history_repo / schemas / api / novels / batch / maintenance/
-└── features/           # accounts / authors / failures / library / novels / search_history / series / system / tags
-alembic/                # 数据库迁移 (0001_baseline .. 0005_align_schema_drift)
+└── features/           # accounts.py / search_history.py / authors/ / failures/ / library/ / novels/ / series/ / system/ / tags/
+alembic/                # 数据库迁移 (0001_baseline .. 0006_drop_tag_table)
 deploy/                 # systemd 单元文件 (copixiv.service + copixiv-pg.service)
 docs/                   # MODULARITY.md、REFACTOR_PLAN.md、设计文档与性能分析
 frontend/               # Vue 3 + TypeScript + Tailwind CSS v4 + Vue Query + reka-ui 前端
 scripts/                # pg_dev.py / deploy_backend.sh / run_verification.sh / bench_engine_comparison.py
-tests/                  # unit/、db/（PG 基线迁移、触发器与 Rust 对拍）与 integration/
+tests/                  # unit/、db/（PG 迁移、约束与 Rust 对拍）与 integration/
 ```
 
 ---
@@ -167,8 +170,8 @@ tests/                  # unit/、db/（PG 基线迁移、触发器与 Rust 对�
 ## 质量门禁与基准
 
 ```bash
-bash scripts/run_verification.sh                            # 完整 8 项本地门禁（Rust → ruff → mypy → lint-imports → OpenAPI → pytest → alembic check → 前端）
-uv run pytest tests -v --cov=copixiv                      # 后端 unit + PG16 + integration 全量测试
-uv run alembic check                                      # ORM 模型 ↔ 迁移基线对齐检查
-uv run python scripts/bench_engine_comparison.py          # 只读检索延迟与一致性基准
+bash scripts/run_verification.sh                                             # 完整 8 项本地门禁（Rust → ruff → mypy → lint-imports → OpenAPI → pytest → alembic check → 前端）
+.venv/bin/pytest tests -v --cov=copixiv                                    # 后端 unit + PG16 + integration 全量测试（使用 copixiv_test 库）
+.venv/bin/alembic -x url=postgresql+psycopg2://postgres@127.0.0.1:5433/copixiv_test check  # ORM 模型 ↔ 迁移对齐检查（针对测试库）
+.venv/bin/python scripts/bench_engine_comparison.py                        # 只读检索延迟与一致性基准
 ```

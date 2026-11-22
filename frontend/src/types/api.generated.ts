@@ -131,8 +131,8 @@ export interface paths {
          *     ``author_id`` 可选、**整批共用**：给了就把这批书挂到这位 pixiv 作者名下
          *     （新书直接写 id；已在库的重复件也应用——用户拍板），名字由 id 解析出来
          *     （本地 ``author`` 表优先、pixiv 兜底、**整批只解析一次**），解析不出就写
-         *     ``NULL``（"待解析"，仓库认可的中间态；``sync_empty_name`` 默认禁用，别把它
-         *     当兜底任务）。**本版刻意不做系列**（``series_id``）：系列要连名字与章节号
+         *     ``NULL``（"待解析"，仓库认可的中间态，可由后续抓取或手动同步补回）。
+         *     **本版刻意不做系列**（``series_id``）：系列要连名字与章节号
          *     一起收尾（``update_metadata.py::_series_columns``），是另一件事。
          *
          *     **解析在写事务之外**（模块 docstring 第 1 条）：防的是"写事务里等 pixiv"
@@ -176,9 +176,8 @@ export interface paths {
          *     只读、不写库：本地 ``author`` 表命中就返回（零延迟、离线可用），否则问一次
          *     Pixiv。``source`` 告诉前端这个名字是哪来的；``unknown`` **不是错误**——
          *     id 才是身份，名字只是缓存，编辑器照样允许保存。保存后名字若为 NULL，那是
-         *     **仓库认可的中间态**、不是"有任务会兜底"：``sync_empty_name`` 默认禁用
-         *     （``scheduled_task.is_enabled`` 列默认 false），会把名字补回来的是**再抓
-         *     一次该作品 / 作者**或编辑器里的「同步」（见 ``update_metadata.py``）。
+         *     **仓库认可的中间态**，会把名字补回来的是**再抓一次该作品 / 作者**或编辑器里
+         *     的「同步」（见 ``update_metadata.py``）。
          *
          *     放在 ``/author/{author_id}`` 而不是新开 ``/api/authors`` 路由：既有的
          *     ``POST /author/{author_id}/follow`` 已经在这里，作者相关的两个动作挨着更好找，
@@ -1374,7 +1373,7 @@ export interface components {
          *     ``series_name`` 已从可编辑集合移除，提交即 422；身份由 ``author_id`` /
          *     ``series_id`` 表达，显示名是它们的解析结果
          *     （``features/authors/service.py::lookup_author_profile``、
-         *     ``features/series/resolve.py::lookup_series_profile``）。这样上传的
+         *     ``features/series/service.py::lookup_series_profile``）。这样上传的
          *     本地书才能真正挂到 pixiv 作者/系列名下——作者页、系列页、``author_id:`` /
          *     ``series_id:`` 搜索全部按 id 工作，而名字只是一份可刷新的缓存。
          *
@@ -1512,7 +1511,7 @@ export interface components {
          * @description 系列 ID 预览（``GET /api/novels/series/{series_id}``）—— 与作者那份同构。
          *
          *     差别只在名字的来源链：``series`` 行 → 同系列的 novel 行 → pixiv
-         *     ``novel_series``（前两步都是本地查询，见 ``resolve_series.py``）。
+         *     ``novel_series``（前两步都是本地查询，见 ``features/series/service.py``）。
          */
         SeriesLookupResponse: {
             /**

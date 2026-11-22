@@ -28,7 +28,7 @@ from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.authors.service import collect_author_names, writeback_author_names
 from copixiv.features.failures.repo import FailedNovelRepository
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
-from copixiv.features.series.index import resolve_series_indices
+from copixiv.features.series.service import resolve_series_indices
 from copixiv.log import logger
 
 from .asset_pipeline import AssetBatch

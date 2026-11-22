@@ -1,1 +1,1 @@
-"""Series slice: repository, name/index resolution, dead-letter ledger, and repair."""
+"""Series feature package: repository, API router, and application services."""

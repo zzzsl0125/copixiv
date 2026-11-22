@@ -19,10 +19,9 @@
   作者页、系列页、``author_id:`` / ``series_id:`` 搜索全部按 id 工作，而
   ``author_name`` / ``series_name`` 降级为**由 id 解析出来的显示名**
   （本地表 → pixiv 兜底）。名字解析失败不算失败——id 是身份、名字是缓存：此时写
-  NULL（"待解析"），而名字待解析是**仓库认可的中间态**、**不是**"有任务会兜底"
-  （``sync_empty_name`` 默认禁用：``scheduled_task.is_enabled`` 列默认 false，
-  只有手动启用才跑）。会把它补回来的是**再抓一次该作品 / 作者**或下一次「同步」；
-  系列名则由 ``update_summary`` 在下次抓到该系列时从小说行推导。
+  NULL（"待解析"），而名字待解析是**仓库认可的中间态**。会把它补回来的是
+  **再抓一次该作品 / 作者**或下一次「同步」；系列名则由 ``update_summary``
+  在下次抓到该系列时从小说行推导。
 * **解除关联（显式 null）时两者刻意不同**（2026-09-22 修）：作者保留显示名——它在
   上传时来自文件名解析，有独立来源；系列连名字与章节号一起清——本地书的系列名只
   可能由 id 解析而来（上传时是 NULL），留着它就是一串"点不动的系列名"，而名字本身
@@ -63,22 +62,22 @@ from copixiv.features.authors.service import lookup_author_profile
 from copixiv.features.novels import field_policy
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository, StoredNovel
 from copixiv.features.series.repo import SQLAlchemySeriesRepository
-from copixiv.features.series.resolve import lookup_series_profile
+from copixiv.features.series.service import lookup_series_profile
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
 from copixiv.pixiv.client import PixivClient
 
 # 本地书的 ``author_name`` 在上传时永不为 NULL（LIBRARY_DESIGN.md §3.3）：解析
 # 不出写「未知作者」。它是**产品承诺**「每本书都有作者名可显示」的落点——这条
-# 承诺不外包给任何任务（``sync_empty_name`` 默认禁用，见 §7）。解除作者关联时
-# 若名字仍是 NULL，会被补回本值（见 :func:`_author_columns` 的守卫）。
+# 承诺不外包给任何后台任务。解除作者关联时若名字仍是 NULL，会被补回本值
+# （见 :func:`_author_columns` 的守卫）。
 
 MAX_TITLE = 300
 MAX_TAGS = 50
 
 # 章节号的取值口径：正整数或空（0 = 无章节号，与 NULL 同义）。写侧由本模块执法
 # （0 提交即 400），读侧由命名模板执法（``core/services.py``：0 与 None 一样让
-# token 消失）。``fix_series_index`` 按名册位置从 1 开始编号、不会写 0（补 NULL +
-# 纠正错值 + 孤儿分支，另见 ``sweep_all`` 全量复查）；而且它默认禁用
+# token 消失）。``fix_series_index`` 按名册位置从 1 开始编号、不会写 0（仅补
+# 缺失章节号并顺带纠正同系列错值）；而且它默认禁用
 # （``scheduled_task.is_enabled`` 列默认 false）——别把它当兜底。
 SERIES_INDEX_POSITIVE = "章节号必须是正整数"
 

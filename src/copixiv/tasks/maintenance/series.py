@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from copixiv.core.models import TaskResult
-from copixiv.features.series.repair import run_series_repair
+from copixiv.features.series.service import run_series_repair
 from copixiv.tasks.executor import TaskContext
 from copixiv.tasks.registry import register
 
@@ -13,29 +13,21 @@ from copixiv.tasks.registry import register
 class FixSeriesIndexArgs(BaseModel):
     """Parameters for ``fix_series_index``."""
 
-    max_series: int | None = None
-    max_orphans: int | None = None
-    max_sweep: int | None = None
-    sweep_all: bool = False
+    model_config = ConfigDict(extra="ignore")
 
-    @field_validator("max_series", "max_orphans", "max_sweep", mode="before")
+    max_series: int | None = 200
+
+    @field_validator("max_series", mode="before")
     @classmethod
-    def _blank_means_unlimited(cls, value):
+    def _blank_means_unlimited(cls, value: object) -> object:
         if isinstance(value, str) and not value.strip():
             return None
-        return value
-
-    @field_validator("sweep_all", mode="before")
-    @classmethod
-    def _blank_means_off(cls, value):
-        if isinstance(value, str) and not value.strip():
-            return False
         return value
 
 
 @register(
     "fix_series_index",
-    description="修复小说章节号与系列归属的数据问题",
+    description="修复缺失或错误的小说章节号",
     args=FixSeriesIndexArgs,
     lane="general",
 )
@@ -43,14 +35,11 @@ async def fix_series_index(
     args: FixSeriesIndexArgs,
     ctx: TaskContext,
 ) -> TaskResult:
-    """Repair missing/mismatched ``series_index`` values and orphan rows."""
+    """Repair missing/mismatched ``series_index`` values using Pixiv series rosters."""
     return await run_series_repair(
         uow=ctx.require_uow(),
         client=ctx.require_client(),
         max_series=args.max_series,
-        max_orphans=args.max_orphans,
-        max_sweep=args.max_sweep,
-        sweep_all=args.sweep_all,
     )
 
 

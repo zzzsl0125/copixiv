@@ -53,10 +53,7 @@ async def collect_author_names(
     Returns ``{author_id: author_name}`` for every successfully-resolved
     author.  IDs that could not be resolved (API failure, empty name) are
     silently omitted — the name stays a cache, and what re-resolves it is a
-    **later fetch of the same work / author**.  The ``sync_empty_name``
-    task scans that shape too, but it ships **disabled**
-    (``scheduled_task.is_enabled`` defaults to false), so it is not a
-    guarantee (LIBRARY_DESIGN.md §3.3).
+    **later fetch of the same work / author**.
 
     This phase is lock-free: it only reads the database and performs
     network I/O.  Do **not** call this while holding a write transaction —
@@ -77,12 +74,8 @@ async def collect_author_names(
     resolved = {aid: name for aid, name in raw_resolved.items() if name}
 
     # -- remote ---------------------------------------------------------
-    # 丢掉空的 author_id：``sync_empty_name`` 的输入集来自 ``novel.author_id``，
-    # 而"行有 NULL 名"并不保证"行有 id"。没有 id 就没有可查的东西，
-    # ``sorted()`` 混进 None 还会直接 TypeError，把一个可跳过的行变成整任务失败。
-    #
-    # 这是**纵深防御**：不变量由承诺 + 编辑器补写共同守（LIBRARY_DESIGN.md §3.3
-    # 「每本书都有作者名可显示」），这里只是不让越界的输入把任务打崩。
+    # Drop falsy/None author IDs: ``author_id`` is nullable on novels, and
+    # mixing None into ``sorted()`` raises TypeError.
     missing = sorted(aid for aid in author_ids - set(resolved.keys()) if aid)
     api_names: dict[int, str] = {}
     if missing:
@@ -172,29 +165,6 @@ def writeback_author_names(
     author_repo = SQLAlchemyAuthorRepository(uow.session)
     for aid, name in mapping.items():
         author_repo.update_author_name(aid, name)
-
-
-async def sync_empty_author_names(
-    uow: SqlUnitOfWork,
-    client: PixivClient | None,
-) -> TaskResult:
-    """Backfill novels whose ``author_name`` is NULL from local cache or Pixiv."""
-
-    def _read_empty(tx: SqlUnitOfWork) -> tuple[int, set[int]]:
-        repo = SQLAlchemyAuthorRepository(tx.session)
-        return (
-            repo.count_novels_with_empty_author_name(),
-            set(repo.get_novel_author_ids_with_empty_name()),
-        )
-
-    novel_count, author_ids = await read_transaction(uow, _read_empty)
-    if novel_count == 0:
-        return TaskResult(summary="作者名同步: 无需修复")
-
-    mapping = await collect_author_names(author_ids, uow=uow, client=client)  # type: ignore[arg-type]
-    if mapping:
-        await run_write_transaction(uow, lambda uw: writeback_author_names(mapping, uw))
-    return TaskResult(summary=f"作者名同步: 处理 {novel_count} 本空名小说 ({len(mapping)} 位作者解析成功)")
 
 
 async def delete_author(

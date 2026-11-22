@@ -771,7 +771,7 @@
       },
       "NovelUpdateRequest": {
         "additionalProperties": false,
-        "description": "单本元数据编辑的部分更新体。\n\n只列**可编辑**字段。结构性事实（``source`` / ``source_key`` / ``path`` /\n``id`` / ``has_epub``）与任何未知字段一样，提交即被 ``extra=\"forbid\"`` 拒掉\n（FastAPI 的请求体校验错误 → 422，与仓库既有约定一致；业务规则拒绝走\n``ValidationError`` → 400）。\n\n``title`` / ``author_id`` / ``series_id`` 能否改由 **``source``\n决定**（仅本地书），这条业务规则在用例里执法并返回 400——schema 层表达不了\n\"取决于行\"的约束。三者的**理由与清单的唯一所有者**是\n``features/novels/field_policy.py``，同一份策略由\n``NovelBase.editable_fields`` 下发给前端；pixiv 书提交它们 → 400，错配的\n修正入口是 ``POST /api/novels/{id}/sync``（按 id 从来源重抓、恢复来源值）。\n\n**作者与系列都是 id 而不是名字**（2026-09-19 拍板）：``author_name`` /\n``series_name`` 已从可编辑集合移除，提交即 422；身份由 ``author_id`` /\n``series_id`` 表达，显示名是它们的解析结果\n（``features/authors/service.py::lookup_author_profile``、\n``features/series/resolve.py::lookup_series_profile``）。这样上传的\n本地书才能真正挂到 pixiv 作者/系列名下——作者页、系列页、``author_id:`` /\n``series_id:`` 搜索全部按 id 工作，而名字只是一份可刷新的缓存。\n\n\"未提交\"与\"显式 null\"必须可区分（PATCH 三态）：调用方用\n``model_dump(exclude_unset=True)`` 取值——键不出现 = 不动，显式 ``null``\n= 清空（``series_index`` / ``create_time`` 允许清空；\n``author_id`` / ``series_id`` 显式 null = 解除关联，收尾见\n``update_metadata.py::_series_columns``：作者保留显示名，系列连名字与章节号\n一起清，2026-09-22）。\n\n注意 ``create_time`` 在这里仍是**字符串**（写侧载体）：HTTP 边界接受\n``YYYY-MM-DD`` 之类的日期字面量，由 ``update_metadata._create_time``\n解析成 ``datetime`` 后写库。响应模型 ``NovelBase.create_time`` 才是\n``datetime``（DB 列是 ``timestamptz``）。",
+        "description": "单本元数据编辑的部分更新体。\n\n只列**可编辑**字段。结构性事实（``source`` / ``source_key`` / ``path`` /\n``id`` / ``has_epub``）与任何未知字段一样，提交即被 ``extra=\"forbid\"`` 拒掉\n（FastAPI 的请求体校验错误 → 422，与仓库既有约定一致；业务规则拒绝走\n``ValidationError`` → 400）。\n\n``title`` / ``author_id`` / ``series_id`` 能否改由 **``source``\n决定**（仅本地书），这条业务规则在用例里执法并返回 400——schema 层表达不了\n\"取决于行\"的约束。三者的**理由与清单的唯一所有者**是\n``features/novels/field_policy.py``，同一份策略由\n``NovelBase.editable_fields`` 下发给前端；pixiv 书提交它们 → 400，错配的\n修正入口是 ``POST /api/novels/{id}/sync``（按 id 从来源重抓、恢复来源值）。\n\n**作者与系列都是 id 而不是名字**（2026-09-19 拍板）：``author_name`` /\n``series_name`` 已从可编辑集合移除，提交即 422；身份由 ``author_id`` /\n``series_id`` 表达，显示名是它们的解析结果\n（``features/authors/service.py::lookup_author_profile``、\n``features/series/service.py::lookup_series_profile``）。这样上传的\n本地书才能真正挂到 pixiv 作者/系列名下——作者页、系列页、``author_id:`` /\n``series_id:`` 搜索全部按 id 工作，而名字只是一份可刷新的缓存。\n\n\"未提交\"与\"显式 null\"必须可区分（PATCH 三态）：调用方用\n``model_dump(exclude_unset=True)`` 取值——键不出现 = 不动，显式 ``null``\n= 清空（``series_index`` / ``create_time`` 允许清空；\n``author_id`` / ``series_id`` 显式 null = 解除关联，收尾见\n``update_metadata.py::_series_columns``：作者保留显示名，系列连名字与章节号\n一起清，2026-09-22）。\n\n注意 ``create_time`` 在这里仍是**字符串**（写侧载体）：HTTP 边界接受\n``YYYY-MM-DD`` 之类的日期字面量，由 ``update_metadata._create_time``\n解析成 ``datetime`` 后写库。响应模型 ``NovelBase.create_time`` 才是\n``datetime``（DB 列是 ``timestamptz``）。",
         "properties": {
           "author_id": {
             "anyOf": [
@@ -1109,7 +1109,7 @@
         "type": "object"
       },
       "SeriesLookupResponse": {
-        "description": "系列 ID 预览（``GET /api/novels/series/{series_id}``）—— 与作者那份同构。\n\n差别只在名字的来源链：``series`` 行 → 同系列的 novel 行 → pixiv\n``novel_series``（前两步都是本地查询，见 ``resolve_series.py``）。",
+        "description": "系列 ID 预览（``GET /api/novels/series/{series_id}``）—— 与作者那份同构。\n\n差别只在名字的来源链：``series`` 行 → 同系列的 novel 行 → pixiv\n``novel_series``（前两步都是本地查询，见 ``features/series/service.py``）。",
         "properties": {
           "novel_count": {
             "default": 0,
@@ -2177,7 +2177,7 @@
     },
     "/api/library/uploads": {
       "post": {
-        "description": "把本地 TXT / EPUB 收进库（「我的上传」）。\n\n整个写入是一个写事务：id 分配 + 指纹去重 + 落库都在里面，\n``ingest_uploads`` 只写库、逐条给出结果。每个文件按后缀 / 内容分派：\nTXT 解码入库、EPUB 抽正文 + 存原件（§4.1）。\n\n``author_id`` 可选、**整批共用**：给了就把这批书挂到这位 pixiv 作者名下\n（新书直接写 id；已在库的重复件也应用——用户拍板），名字由 id 解析出来\n（本地 ``author`` 表优先、pixiv 兜底、**整批只解析一次**），解析不出就写\n``NULL``（\"待解析\"，仓库认可的中间态；``sync_empty_name`` 默认禁用，别把它\n当兜底任务）。**本版刻意不做系列**（``series_id``）：系列要连名字与章节号\n一起收尾（``update_metadata.py::_series_columns``），是另一件事。\n\n**解析在写事务之外**（模块 docstring 第 1 条）：防的是\"写事务里等 pixiv\"\n——咨询锁与一个开着的事务被慢对端攥着。失败不致命：名字是缓存，id 是身份。",
+        "description": "把本地 TXT / EPUB 收进库（「我的上传」）。\n\n整个写入是一个写事务：id 分配 + 指纹去重 + 落库都在里面，\n``ingest_uploads`` 只写库、逐条给出结果。每个文件按后缀 / 内容分派：\nTXT 解码入库、EPUB 抽正文 + 存原件（§4.1）。\n\n``author_id`` 可选、**整批共用**：给了就把这批书挂到这位 pixiv 作者名下\n（新书直接写 id；已在库的重复件也应用——用户拍板），名字由 id 解析出来\n（本地 ``author`` 表优先、pixiv 兜底、**整批只解析一次**），解析不出就写\n``NULL``（\"待解析\"，仓库认可的中间态，可由后续抓取或手动同步补回）。\n**本版刻意不做系列**（``series_id``）：系列要连名字与章节号\n一起收尾（``update_metadata.py::_series_columns``），是另一件事。\n\n**解析在写事务之外**（模块 docstring 第 1 条）：防的是\"写事务里等 pixiv\"\n——咨询锁与一个开着的事务被慢对端攥着。失败不致命：名字是缓存，id 是身份。",
         "operationId": "upload_novels_api_library_uploads_post",
         "requestBody": {
           "content": {
@@ -2381,7 +2381,7 @@
     },
     "/api/novels/author/{author_id}": {
       "get": {
-        "description": "作者 ID → 显示名预览（编辑器「作者」一栏的即时反馈）。\n\n只读、不写库：本地 ``author`` 表命中就返回（零延迟、离线可用），否则问一次\nPixiv。``source`` 告诉前端这个名字是哪来的；``unknown`` **不是错误**——\nid 才是身份，名字只是缓存，编辑器照样允许保存。保存后名字若为 NULL，那是\n**仓库认可的中间态**、不是\"有任务会兜底\"：``sync_empty_name`` 默认禁用\n（``scheduled_task.is_enabled`` 列默认 false），会把名字补回来的是**再抓\n一次该作品 / 作者**或编辑器里的「同步」（见 ``update_metadata.py``）。\n\n放在 ``/author/{author_id}`` 而不是新开 ``/api/authors`` 路由：既有的\n``POST /author/{author_id}/follow`` 已经在这里，作者相关的两个动作挨着更好找，\n也不用动路由前缀的接线测试。",
+        "description": "作者 ID → 显示名预览（编辑器「作者」一栏的即时反馈）。\n\n只读、不写库：本地 ``author`` 表命中就返回（零延迟、离线可用），否则问一次\nPixiv。``source`` 告诉前端这个名字是哪来的；``unknown`` **不是错误**——\nid 才是身份，名字只是缓存，编辑器照样允许保存。保存后名字若为 NULL，那是\n**仓库认可的中间态**，会把名字补回来的是**再抓一次该作品 / 作者**或编辑器里\n的「同步」（见 ``update_metadata.py``）。\n\n放在 ``/author/{author_id}`` 而不是新开 ``/api/authors`` 路由：既有的\n``POST /author/{author_id}/follow`` 已经在这里，作者相关的两个动作挨着更好找，\n也不用动路由前缀的接线测试。",
         "operationId": "lookup_author_api_novels_author__author_id__get",
         "parameters": [
           {

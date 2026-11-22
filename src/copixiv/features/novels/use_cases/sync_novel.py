@@ -184,9 +184,7 @@ async def _with_author_name(
     名字的来源链与本库其它地方一致：``author`` 表优先、pixiv
     ``user_detail`` 兜底（``collect_author_names`` 的两阶段，全部在写事务
     之外；本地命中时零网络）。解析不出来就留 NULL——名字待解析是**仓库认可
-    的中间态**（id 是身份、名字是缓存），**不是**"有兜底任务在等着"：
-    ``sync_empty_name`` 默认禁用（``scheduled_task.is_enabled`` 列默认
-    false，只有手动启用才跑）；真正会把名字补回来的是**再抓一次这个作品 /
+    的中间态**（id 是身份、名字是缓存），真正会把名字补回来的是**再抓一次这个作品 /
     作者**，或者用户再点一次「同步」。
     """
     if not draft.author_id:

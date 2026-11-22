@@ -318,7 +318,7 @@ class SeriesDeadLetter(Base):
 
     ``consecutive_failures`` guards against a single 404: pixiv can answer
     404 transiently, so a series is retired only after
-    :data:`copixiv.features.series.ledger.RETIRE_AFTER_FAILURES`
+    :data:`copixiv.features.series.service.RETIRE_AFTER_FAILURES`
     consecutive *definitive* 404s.  Any success resets the count and clears
     ``retired_at``, so a mis-retired series comes back on its own.
     """

@@ -45,8 +45,7 @@
 **⑤ 解析只做一次。** 同一个 id 写 N 本：``lookup_author_profile`` /
 ``lookup_series_profile`` **各解析一次**（本地表优先、pixiv 兜底、永不抛），这正是
 批量相对单本省下来的 N-1 次解析。解析失败**不算失败**：id 是身份、名字是缓存，
-此时落 ``author_name = NULL``（"待解析"，仓库认可的中间态——``sync_empty_name``
-默认禁用，别把它当兜底）。
+此时落 ``author_name = NULL``（"待解析"，仓库认可的中间态）。
 
 写路径纪律：与单本一致，**绝不走 ``_upsert_rows``**（那是来源刷新的写路径，带
 "来源权威"覆盖白名单与"非空者胜"规则，见 ``update_metadata.py`` 模块 docstring）。
@@ -67,7 +66,7 @@ from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 from copixiv.features.authors.service import lookup_author_profile
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.features.series.repo import SQLAlchemySeriesRepository
-from copixiv.features.series.resolve import lookup_series_profile
+from copixiv.features.series.service import lookup_series_profile
 from copixiv.pixiv.client import PixivClient
 
 

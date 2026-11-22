@@ -137,7 +137,7 @@ class NovelUpdateRequest(BaseModel):
     ``series_name`` 已从可编辑集合移除，提交即 422；身份由 ``author_id`` /
     ``series_id`` 表达，显示名是它们的解析结果
     （``features/authors/service.py::lookup_author_profile``、
-    ``features/series/resolve.py::lookup_series_profile``）。这样上传的
+    ``features/series/service.py::lookup_series_profile``）。这样上传的
     本地书才能真正挂到 pixiv 作者/系列名下——作者页、系列页、``author_id:`` /
     ``series_id:`` 搜索全部按 id 工作，而名字只是一份可刷新的缓存。
 

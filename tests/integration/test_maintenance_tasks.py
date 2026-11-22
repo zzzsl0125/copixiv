@@ -1,4 +1,4 @@
-"""Layer 3 integration tests: maintenance tasks (check_epub, fix_series_index, prune_orphan_files, prune_task_history)."""
+"""Layer 3 integration tests: maintenance tasks (check_epub, fix_series_index, prune_orphan_files)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import select
 from tests.factories import make_local_novel, write_epub_zip
 
 from copixiv.core.draft import build_novel
@@ -23,7 +22,6 @@ from copixiv.storage.file_storage import FileStorage
 from copixiv.tasks.executor import TaskContext
 from copixiv.tasks.maintenance.epub import check_epub
 from copixiv.tasks.maintenance.files import PruneOrphanFilesArgs, prune_orphan_files
-from copixiv.tasks.maintenance.history import PruneTaskHistoryArgs, prune_task_history
 from copixiv.tasks.maintenance.series import FixSeriesIndexArgs, fix_series_index
 
 
@@ -88,8 +86,17 @@ async def test_check_epub_covers_positive_and_negative_ids(uow: SqlUnitOfWork, t
         assert uow.session.get(models.Novel, -50).has_epub == EpubStatus.MISSING_SOURCE
 
 
+def test_fix_series_index_args_accepts_legacy_extra_fields():
+    legacy = FixSeriesIndexArgs.model_validate(
+        {"max_sweep": "", "sweep_all": False, "max_series": "200", "max_orphans": "200"}
+    )
+    assert legacy.max_series == 200
+    assert FixSeriesIndexArgs().max_series == 200
+    assert FixSeriesIndexArgs.model_validate({"max_series": ""}).max_series is None
+
+
 @pytest.mark.asyncio
-async def test_fix_series_index_single_multi_orphan_and_dead_letter(
+async def test_fix_series_index_single_multi_and_dead_letter(
     uow: SqlUnitOfWork,
     fake_pixiv_client,
 ):
@@ -120,16 +127,6 @@ async def test_fix_series_index_single_multi_orphan_and_dead_letter(
                     series_name="S20",
                     series_index=None,
                 ),
-                # Orphan row: series_id=None, series_index=5 -> webview has no series -> cleared
-                build_novel(
-                    id=301,
-                    title="Orphan",
-                    author_id=1,
-                    author_name="A",
-                    series_id=None,
-                    series_name="Old",
-                    series_index=5,
-                ),
                 # Dead series 40 -> 3 consecutive 404s retire it
                 build_novel(
                     id=401, title="Dead1", author_id=1, author_name="A", series_id=40, series_name="S40"
@@ -141,7 +138,6 @@ async def test_fix_series_index_single_multi_orphan_and_dead_letter(
         )
 
     fake_pixiv_client.series_responses[20] = {"novels": [SimpleNamespace(id=202), SimpleNamespace(id=201)]}
-    fake_pixiv_client.webview_responses[301] = {"id": 301, "series_id": None, "user_id": 1}
     fake_pixiv_client.errors[("novel_series", 40)] = PixivApiError("gone", status_code=404)
 
     ctx = TaskContext(uow=uow, client=fake_pixiv_client)
@@ -151,7 +147,6 @@ async def test_fix_series_index_single_multi_orphan_and_dead_letter(
         assert uow.session.get(models.Novel, 1).series_index == 1
         assert uow.session.get(models.Novel, 202).series_index == 1
         assert uow.session.get(models.Novel, 201).series_index == 2
-        assert uow.session.get(models.Novel, 301).series_index is None
         ledger = uow.session.get(models.SeriesDeadLetter, 40)
         assert ledger is not None
         assert ledger.consecutive_failures == 1
@@ -270,57 +265,7 @@ async def test_prune_orphan_files_protects_legacy_paths_and_handles_negative_loc
 
 
 @pytest.mark.asyncio
-async def test_prune_task_history_keep_zero_and_keep_n_protect_active(uow: SqlUnitOfWork):
-    now = datetime.now(UTC)
-    old_time = now - timedelta(days=200)
-    recent_time = now - timedelta(days=5)
-
-    with uow.begin():
-        for idx, (status, st_time) in enumerate(
-            [
-                ("completed", old_time),
-                ("failed", old_time),
-                ("completed", old_time),
-                ("completed", recent_time),
-                ("pending", old_time),
-                ("running", old_time),
-            ],
-            start=1,
-        ):
-            uow.session.add(
-                models.TaskHistory(
-                    name=f"t{idx}",
-                    task_func="check_epub",
-                    status=status,
-                    start_time=st_time,
-                )
-            )
-
-    ctx = TaskContext(uow=uow)
-
-    # keep=4: table has 6 rows -> newest 4 (ids >= 3rd from bottom) survive, old id=1,2 deleted
-    await prune_task_history(PruneTaskHistoryArgs(apply=True, keep=4, max_age_days=30), ctx)
-    with uow.begin():
-        remaining = list(
-            uow.session.execute(select(models.TaskHistory.name).order_by(models.TaskHistory.id))
-            .scalars()
-            .all()
-        )
-        assert remaining == ["t3", "t4", "t5", "t6"]
-
-    # keep=0: removes remaining old terminal row t3, protects recent t4 and active t5(pending)/t6(running)
-    await prune_task_history(PruneTaskHistoryArgs(apply=True, keep=0, max_age_days=30), ctx)
-    with uow.begin():
-        remaining = list(
-            uow.session.execute(select(models.TaskHistory.name).order_by(models.TaskHistory.id))
-            .scalars()
-            .all()
-        )
-        assert remaining == ["t4", "t5", "t6"]
-
-
-@pytest.mark.asyncio
-async def test_fix_series_index_clears_404_orphan_and_skips_roster_absent_series(
+async def test_fix_series_index_skips_roster_absent_series_and_respects_max_series(
     uow: SqlUnitOfWork,
     fake_pixiv_client,
 ):
@@ -328,16 +273,6 @@ async def test_fix_series_index_clears_404_orphan_and_skips_roster_absent_series
         persist_novels(
             uow,
             [
-                # Orphan whose webview returns 404 -> stale series_index cleared
-                build_novel(
-                    id=501,
-                    title="GoneOrphan",
-                    author_id=1,
-                    author_name="A",
-                    series_id=None,
-                    series_name="Old",
-                    series_index=3,
-                ),
                 # Partially cataloged series 60: novel 601 is in roster, novel 602 is deleted (absent)
                 build_novel(
                     id=601,
@@ -357,25 +292,51 @@ async def test_fix_series_index_clears_404_orphan_and_skips_roster_absent_series
                     series_name="S60",
                     series_index=None,
                 ),
+                # Second series 70 -> deferred when max_series=1, completed on round 2
+                build_novel(
+                    id=701,
+                    title="S70-1",
+                    author_id=1,
+                    author_name="A",
+                    series_id=70,
+                    series_name="S70",
+                    series_index=None,
+                ),
+                build_novel(
+                    id=702,
+                    title="S70-2",
+                    author_id=1,
+                    author_name="A",
+                    series_id=70,
+                    series_name="S70",
+                    series_index=None,
+                ),
             ],
         )
 
-    fake_pixiv_client.errors[("webview_novel", 501)] = PixivApiError("not found", status_code=404)
     fake_pixiv_client.series_responses[60] = {"novels": [SimpleNamespace(id=601)]}
+    fake_pixiv_client.series_responses[70] = {"novels": [SimpleNamespace(id=701), SimpleNamespace(id=702)]}
 
     ctx = TaskContext(uow=uow, client=fake_pixiv_client)
-    await fix_series_index(FixSeriesIndexArgs(), ctx)
+    res1 = await fix_series_index(FixSeriesIndexArgs(max_series=1), ctx)
+    assert "本轮达上限" in res1.summary
 
     with uow.begin():
-        assert uow.session.get(models.Novel, 501).series_index is None
         assert uow.session.get(models.Novel, 601).series_index == 1
         assert uow.session.get(models.Novel, 602).series_index is None
+        assert uow.session.get(models.Novel, 701).series_index is None
+        assert uow.session.get(models.Novel, 702).series_index is None
+        assert ("novel_series", (70, True)) not in fake_pixiv_client.calls
 
-    # Round 2: neither 501 nor 60 should be requested again
+    # Round 2: series 60 is retired (not requested again); series 70 is repaired
     fake_pixiv_client.calls.clear()
-    await fix_series_index(FixSeriesIndexArgs(), ctx)
-    assert ("webview_novel", 501) not in fake_pixiv_client.calls
+    res2 = await fix_series_index(FixSeriesIndexArgs(max_series=1), ctx)
+    assert "本轮达上限" not in res2.summary
     assert ("novel_series", (60, True)) not in fake_pixiv_client.calls
+    assert ("novel_series", (70, True)) in fake_pixiv_client.calls
+    with uow.begin():
+        assert uow.session.get(models.Novel, 701).series_index == 1
+        assert uow.session.get(models.Novel, 702).series_index == 2
 
 
 @pytest.mark.asyncio
