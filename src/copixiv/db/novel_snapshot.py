@@ -21,21 +21,7 @@ from copixiv.db import models
 
 __all__ = [
     "PgSnapshotStore",
-    "SlimNovelTuple",
-    "SlimTagTuple",
     "SnapshotDeltaPayload",
-    "datetime_to_us",
-    "fetch_all_tags",
-    "fetch_aliased_tag_ids",
-    "fetch_author_sf_flags",
-    "fetch_blocked_tag_names",
-    "fetch_engine_metadata",
-    "fetch_exclude_blocked_default",
-    "fetch_novel_rows_by_ids",
-    "fetch_special_follow_author_ids",
-    "fetch_tags_by_names",
-    "fetch_total_novel_count",
-    "iter_all_novel_row_batches",
 ]
 
 
@@ -46,7 +32,6 @@ class SnapshotDeltaPayload:
     blocked_tags: list[str] | None
     exclude_blocked_default: bool | None
     special_follow_changes: list[tuple[int, bool]]
-    replace_all_tags: list[SlimTagTuple] | None
     delete_tag_names: list[str] | None
     upsert_tags: list[SlimTagTuple] | None
     aliased_tag_ids: list[int] | None
@@ -101,11 +86,11 @@ def _row_to_tuple(row) -> SlimNovelRecord:
     )
 
 
-def fetch_total_novel_count(session: Session) -> int:
+def _fetch_total_novel_count(session: Session) -> int:
     return int(session.execute(select(func.count()).select_from(models.Novel)).scalar() or 0)
 
 
-def iter_all_novel_row_batches(
+def _iter_all_novel_row_batches(
     session: Session,
     batch_size: int = 2_000,
 ) -> Iterator[list[SlimNovelTuple]]:
@@ -120,7 +105,7 @@ def iter_all_novel_row_batches(
         yield [_row_to_tuple(row) for row in partition]
 
 
-def fetch_novel_rows_by_ids(
+def _fetch_novel_rows_by_ids(
     session: Session,
     novel_ids: Sequence[int],
     chunk_size: int = 5_000,
@@ -137,7 +122,7 @@ def fetch_novel_rows_by_ids(
     return out
 
 
-def fetch_blocked_tag_names(session: Session) -> list[str]:
+def _fetch_blocked_tag_names(session: Session) -> list[str]:
     rows = session.execute(
         select(models.TagPreference.tag).where(
             models.TagPreference.preference == models.TagPreferenceORM.blocked
@@ -146,23 +131,14 @@ def fetch_blocked_tag_names(session: Session) -> list[str]:
     return list(rows)
 
 
-def fetch_exclude_blocked_default(session: Session) -> bool:
+def _fetch_exclude_blocked_default(session: Session) -> bool:
     row = session.execute(
         select(models.Setting).where(models.Setting.key == EXCLUDE_BLOCKED_SETTING_KEY)
     ).scalar_one_or_none()
     return resolve_exclude_blocked(None, row.value if row is not None else None)
 
 
-def fetch_special_follow_author_ids(session: Session) -> list[int]:
-    rows = session.execute(
-        select(models.Author.author_id).where(
-            models.Author.is_special_follow == True  # noqa: E712
-        )
-    ).scalars()
-    return [int(aid) for aid in rows]
-
-
-def fetch_author_sf_flags(
+def _fetch_author_sf_flags(
     session: Session,
     author_ids: Sequence[int],
     chunk_size: int = 2_000,
@@ -183,12 +159,12 @@ def fetch_author_sf_flags(
     return [(aid, sf_map.get(aid, False)) for aid in unique]
 
 
-def fetch_all_tags(session: Session) -> list[SlimTagTuple]:
+def _fetch_all_tags(session: Session) -> list[SlimTagTuple]:
     rows = session.execute(select(models.Tag.id, models.Tag.name, models.Tag.reference_count)).all()
     return [SlimTagRecord(int(tid), str(name), int(rc)) for tid, name, rc in rows]
 
 
-def fetch_tags_by_names(
+def _fetch_tags_by_names(
     session: Session,
     names: Sequence[str],
     chunk_size: int = 2_000,
@@ -213,24 +189,13 @@ def fetch_tags_by_names(
     return upserts, deleted
 
 
-def fetch_aliased_tag_ids(session: Session) -> list[int]:
+def _fetch_aliased_tag_ids(session: Session) -> list[int]:
     rows = session.execute(select(models.TagAlias.source, models.TagAlias.target)).all()
     ids: set[int] = set()
     for src, tgt in rows:
         ids.add(int(src))
         ids.add(int(tgt))
     return sorted(ids)
-
-
-def fetch_engine_metadata(
-    session: Session,
-) -> tuple[list[str], bool, list[int]]:
-    """Fetch ``(blocked_tags, exclude_blocked_default, special_follow_authors)``."""
-    return (
-        fetch_blocked_tag_names(session),
-        fetch_exclude_blocked_default(session),
-        fetch_special_follow_author_ids(session),
-    )
 
 
 class PgSnapshotStore:
@@ -257,16 +222,17 @@ class PgSnapshotStore:
         consume_total: Callable[[int], None],
         consume_batch: Callable[[list[SlimNovelTuple]], None],
         batch_size: int = 2_000,
-    ) -> tuple[list[str], bool, list[int], list[SlimTagTuple], list[int]]:
+    ) -> tuple[list[str], bool, list[SlimTagTuple], list[int]]:
         """Stream all novels, metadata, and tags under one consistent snapshot."""
         with self._snapshot_session() as session:
-            consume_total(fetch_total_novel_count(session))
-            for batch in iter_all_novel_row_batches(session, batch_size=batch_size):
+            consume_total(_fetch_total_novel_count(session))
+            for batch in _iter_all_novel_row_batches(session, batch_size=batch_size):
                 consume_batch(batch)
-            blocked_tags, exclude_default, sf_authors = fetch_engine_metadata(session)
-            all_tags = fetch_all_tags(session)
-            aliased_tag_ids = fetch_aliased_tag_ids(session)
-            return blocked_tags, exclude_default, sf_authors, all_tags, aliased_tag_ids
+            blocked_tags = _fetch_blocked_tag_names(session)
+            exclude_default = _fetch_exclude_blocked_default(session)
+            all_tags = _fetch_all_tags(session)
+            aliased_tag_ids = _fetch_aliased_tag_ids(session)
+            return blocked_tags, exclude_default, all_tags, aliased_tag_ids
 
     def fetch_delta_payload(
         self,
@@ -274,34 +240,30 @@ class PgSnapshotStore:
     ) -> SnapshotDeltaPayload:
         with self._snapshot_session() as session:
             unique_nids = sorted(pending.novel_ids)
-            upsert_rows = fetch_novel_rows_by_ids(session, unique_nids) if unique_nids else []
+            upsert_rows = _fetch_novel_rows_by_ids(session, unique_nids) if unique_nids else []
             found_nids = {row[0] for row in upsert_rows}
             delete_ids = [nid for nid in unique_nids if nid not in found_nids]
 
             sf_changes = (
-                fetch_author_sf_flags(session, sorted(pending.author_ids)) if pending.author_ids else []
+                _fetch_author_sf_flags(session, sorted(pending.author_ids)) if pending.author_ids else []
             )
-            blocked_tags = fetch_blocked_tag_names(session) if pending.blocked_tags_dirty else None
+            blocked_tags = _fetch_blocked_tag_names(session) if pending.blocked_tags_dirty else None
             exclude_default = (
-                fetch_exclude_blocked_default(session) if pending.exclude_setting_dirty else None
+                _fetch_exclude_blocked_default(session) if pending.exclude_setting_dirty else None
             )
 
-            replace_all_tags: list[SlimTagTuple] | None = None
             upsert_tags: list[SlimTagTuple] | None = None
             delete_tag_names: list[str] | None = None
-            if pending.tags_full_refresh:
-                replace_all_tags = fetch_all_tags(session)
-            elif pending.tag_names:
-                upsert_tags, delete_tag_names = fetch_tags_by_names(session, sorted(pending.tag_names))
+            if pending.tag_names:
+                upsert_tags, delete_tag_names = _fetch_tags_by_names(session, sorted(pending.tag_names))
 
-            aliased_tag_ids = fetch_aliased_tag_ids(session) if pending.aliases_dirty else None
+            aliased_tag_ids = _fetch_aliased_tag_ids(session) if pending.aliases_dirty else None
             return SnapshotDeltaPayload(
                 delete_ids=delete_ids,
                 upsert_rows=upsert_rows,
                 blocked_tags=blocked_tags,
                 exclude_blocked_default=exclude_default,
                 special_follow_changes=sf_changes,
-                replace_all_tags=replace_all_tags,
                 delete_tag_names=delete_tag_names or None,
                 upsert_tags=upsert_tags or None,
                 aliased_tag_ids=aliased_tag_ids,

@@ -20,6 +20,7 @@ from copixiv.db import models
 SESSION_ENGINE_KEY = "query_engine"
 SESSION_DELTA_KEY = "pending_engine_delta"
 _SESSION_COMMITTED_KEY = "_engine_tx_committed"
+_SESSION_HOOK_KEY = "_query_engine_sync_hook"
 
 _REGISTERED_RUNTIME: dict[
     int, tuple[Callable[[PendingEngineDelta], None], list[tuple[str, Callable[..., Any]]]]
@@ -33,7 +34,6 @@ class PendingEngineDelta:
     novel_ids: set[int] = field(default_factory=set)
     author_ids: set[int] = field(default_factory=set)
     tag_names: set[str] = field(default_factory=set)
-    tags_full_refresh: bool = False
     aliases_dirty: bool = False
     blocked_tags_dirty: bool = False
     exclude_setting_dirty: bool = False
@@ -43,7 +43,6 @@ class PendingEngineDelta:
             not self.novel_ids
             and not self.author_ids
             and not self.tag_names
-            and not self.tags_full_refresh
             and not self.aliases_dirty
             and not self.blocked_tags_dirty
             and not self.exclude_setting_dirty
@@ -60,6 +59,7 @@ def attach_engine_runtime(
 
     existing_info = dict(session_factory.kw.get("info") or {})
     existing_info[SESSION_ENGINE_KEY] = engine
+    existing_info[_SESSION_HOOK_KEY] = post_commit_hook
     session_factory.configure(info=existing_info)
 
     def _on_after_flush(session: Session, _flush_context: Any) -> None:
@@ -83,9 +83,12 @@ def attach_engine_runtime(
             return
         committed = bool(session.info.pop(_SESSION_COMMITTED_KEY, False))
         pending = pop_pending_delta(session)
-        if not committed or pending is None or pending.is_empty():
+        if not committed:
             return
-        post_commit_hook(pending)
+        needs_rebuild = callable(getattr(engine, "needs_rebuild", None)) and bool(engine.needs_rebuild())
+        if (pending is None or pending.is_empty()) and not needs_rebuild:
+            return
+        post_commit_hook(pending if pending is not None else PendingEngineDelta())
 
     listeners: list[tuple[str, Callable[..., Any]]] = [
         ("after_flush", _on_after_flush),
@@ -101,8 +104,9 @@ def attach_engine_runtime(
 def detach_engine_runtime(session_factory: sessionmaker) -> None:
     """Remove lifecycle listeners and ``SESSION_ENGINE_KEY`` from ``session_factory``."""
     existing_info = dict(session_factory.kw.get("info") or {})
-    if SESSION_ENGINE_KEY in existing_info:
+    if SESSION_ENGINE_KEY in existing_info or _SESSION_HOOK_KEY in existing_info:
         existing_info.pop(SESSION_ENGINE_KEY, None)
+        existing_info.pop(_SESSION_HOOK_KEY, None)
         session_factory.configure(info=existing_info)
     registered = _REGISTERED_RUNTIME.pop(id(session_factory), None)
     if registered is not None:
@@ -115,13 +119,6 @@ def detach_engine_runtime(session_factory: sessionmaker) -> None:
 def get_attached_engine(session_factory: sessionmaker) -> Any | None:
     info = session_factory.kw.get("info") or {}
     return info.get(SESSION_ENGINE_KEY)
-
-
-def get_post_commit_hook(
-    session_factory: sessionmaker,
-) -> Callable[[PendingEngineDelta], None] | None:
-    registered = _REGISTERED_RUNTIME.get(id(session_factory))
-    return registered[0] if registered is not None else None
 
 
 def get_or_create_pending_delta(session: Session | None) -> PendingEngineDelta | None:
@@ -191,9 +188,23 @@ def _collect_flushed_orm_deltas(session: Session) -> None:
             elif isinstance(obj, models.TagAlias):
                 pending.aliases_dirty = True
             elif isinstance(obj, models.TagPreference):
-                pending.blocked_tags_dirty = True
+                if _tag_preference_affects_blocked(obj, bucket_name):
+                    pending.blocked_tags_dirty = True
             elif isinstance(obj, models.Setting) and obj.key == EXCLUDE_BLOCKED_SETTING_KEY:
                 pending.exclude_setting_dirty = True
+
+
+def _tag_preference_affects_blocked(obj: models.TagPreference, bucket_name: str) -> bool:
+    if bucket_name in ("new", "deleted"):
+        return obj.preference == models.TagPreferenceORM.blocked
+    insp = sa_inspect(obj)
+    pref_hist = insp.attrs.preference.history
+    tag_hist = insp.attrs.tag.history
+    if not pref_hist.has_changes() and not tag_hist.has_changes():
+        return False
+    if obj.preference == models.TagPreferenceORM.blocked:
+        return True
+    return any(val == models.TagPreferenceORM.blocked for val in pref_hist.deleted)
 
 
 def record_novel_upserts(session: Session | None, novel_ids: Iterable[int]) -> None:
@@ -202,10 +213,7 @@ def record_novel_upserts(session: Session | None, novel_ids: Iterable[int]) -> N
         pending.novel_ids.update(int(nid) for nid in novel_ids)
 
 
-def record_novel_deletes(session: Session | None, novel_ids: Iterable[int]) -> None:
-    pending = get_or_create_pending_delta(session)
-    if pending is not None:
-        pending.novel_ids.update(int(nid) for nid in novel_ids)
+record_novel_deletes = record_novel_upserts
 
 
 def record_authors_dirty(session: Session | None, author_ids: Iterable[int]) -> None:
@@ -220,28 +228,31 @@ def record_tags_dirty(session: Session | None, tag_names: Iterable[str]) -> None
         pending.tag_names.update(str(name) for name in tag_names if name)
 
 
-def record_tags_full_refresh(session: Session | None) -> None:
-    pending = get_or_create_pending_delta(session)
-    if pending is not None:
-        pending.tags_full_refresh = True
-
-
 def record_aliases_dirty(session: Session | None) -> None:
     pending = get_or_create_pending_delta(session)
     if pending is not None:
         pending.aliases_dirty = True
 
 
-def record_blocked_tags_dirty(session: Session | None) -> None:
-    pending = get_or_create_pending_delta(session)
-    if pending is not None:
-        pending.blocked_tags_dirty = True
-
-
 def record_exclude_setting_dirty(session: Session | None) -> None:
     pending = get_or_create_pending_delta(session)
     if pending is not None:
         pending.exclude_setting_dirty = True
+
+
+def sync_engine_if_needed(session: Session | None, engine: Any | None = None) -> None:
+    """Trigger the registered rebuild hook if *engine* is marked ``needs_rebuild``."""
+    if session is None:
+        return
+    eng = engine if engine is not None else session.info.get(SESSION_ENGINE_KEY)
+    if eng is None:
+        return
+    needs_rebuild = getattr(eng, "needs_rebuild", None)
+    if not callable(needs_rebuild) or not needs_rebuild():
+        return
+    hook = session.info.get(_SESSION_HOOK_KEY)
+    if callable(hook):
+        hook(PendingEngineDelta())
 
 
 __all__ = [
@@ -253,14 +264,12 @@ __all__ = [
     "detach_engine_runtime",
     "get_attached_engine",
     "get_or_create_pending_delta",
-    "get_post_commit_hook",
     "pop_pending_delta",
     "record_aliases_dirty",
     "record_authors_dirty",
-    "record_blocked_tags_dirty",
     "record_exclude_setting_dirty",
     "record_novel_deletes",
     "record_novel_upserts",
     "record_tags_dirty",
-    "record_tags_full_refresh",
+    "sync_engine_if_needed",
 ]

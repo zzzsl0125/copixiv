@@ -30,39 +30,22 @@ def safe_get(data: Any, path: str, default: Any = None) -> Any:
     return default
 
 
-def safe_set(data: Any, path: str, value: Any) -> None:
-    """Set a (possibly nested) field on a Pydantic model or dict."""
-    if data is None:
-        raise ValueError("Cannot set on None")
-    keys = path.split(".")
-    for key in keys[:-1]:
-        if isinstance(data, dict):
-            if key not in data:
-                data[key] = {}
-            data = data[key]
-        else:
-            data = getattr(data, key)
-    last = keys[-1]
-    if isinstance(data, dict):
-        data[last] = value
-    else:
-        setattr(data, last, value)
-
-
 def guess_series_order(navigation: Any) -> int | None:
     """Infer a novel's 1-based chapter order from Pixiv series navigation."""
     try:
+        inferred: int | None = None
         prev = safe_get(navigation, "prevNovel")
         if prev is not None:
             order = safe_get(prev, "contentOrder")
             if order is not None:
-                return int(order) + 1
-        nxt = safe_get(navigation, "nextNovel")
-        if nxt is not None:
-            order = safe_get(nxt, "contentOrder")
-            if order is not None:
-                return int(order) - 1
-        return None
+                inferred = int(order) + 1
+        if inferred is None:
+            nxt = safe_get(navigation, "nextNovel")
+            if nxt is not None:
+                order = safe_get(nxt, "contentOrder")
+                if order is not None:
+                    inferred = int(order) - 1
+        return inferred if inferred is not None and inferred > 0 else None
     except (TypeError, ValueError):
         return None
 
@@ -91,7 +74,6 @@ class NovelDraft:
     images: dict | None = None
     illusts: dict | None = None
     cover_url: str | None = None
-    download_dir: str = "download"
 
 
 class UserInfoLike(Protocol):
@@ -130,6 +112,7 @@ def build_novel(
     title: str,
     author_id: int,
     author_name: str | None = None,
+    path: str | None = None,
     like: int = 0,
     view: int = 0,
     text: int = 0,
@@ -152,7 +135,7 @@ def build_novel(
         title=title,
         author_id=author_id,
         author_name=author_name,
-        path=build_path(id, title, download_dir),
+        path=build_path(id, title, download_dir) if path is None else path,
         like=like,
         view=view,
         text=text,
@@ -167,7 +150,6 @@ def build_novel(
         images=images,
         illusts=illusts,
         cover_url=cover_url,
-        download_dir=download_dir,
     )
 
 
@@ -209,6 +191,7 @@ def build_from_novel_info(data: NovelInfoLike, download_dir: str = "download") -
         title=data.title,
         author_id=safe_get(user, "id"),
         author_name=safe_get(user, "name"),
+        path="",
         like=data.total_bookmarks,
         view=data.total_view,
         text=data.text_length,
@@ -216,7 +199,7 @@ def build_from_novel_info(data: NovelInfoLike, download_dir: str = "download") -
         series_id=safe_get(series, "id"),
         series_name=safe_get(series, "title"),
         series_index=safe_get(series, "index"),
-        create_time=(data.create_date or "")[:10],
+        create_time=data.create_date or None,
         has_epub=None,
         tags=[safe_get(tag, "name", str(tag)) for tag in data.tags],
         download_dir=download_dir,
@@ -233,5 +216,4 @@ __all__ = [
     "build_novel",
     "guess_series_order",
     "safe_get",
-    "safe_set",
 ]

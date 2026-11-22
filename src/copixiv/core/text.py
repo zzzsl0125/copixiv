@@ -113,7 +113,6 @@ _CHINESE_TAG_KEYWORDS: frozenset[str] = frozenset(
         "中国語注意",
         "中國語注意",
         "中国语注意",
-        "Chinese",
         "chinese",
         "中國",
         "中国",
@@ -123,7 +122,6 @@ _CHINESE_TAG_KEYWORDS: frozenset[str] = frozenset(
 _HAN_RE: re.Pattern[str] = re.compile(r"[\u4e00-\u9fff]")
 _LATIN_RE: re.Pattern[str] = re.compile(r"[A-Za-z]")
 _HTML_TAG_RE: re.Pattern[str] = re.compile(r"<[^>]*>")
-_URL_RE: re.Pattern[str] = re.compile(r"(?:https?://|pixiv://|mailto:)\S+", re.I)
 _SCHEME_RE: re.Pattern[str] = re.compile(r"\b[a-z][a-z0-9+.-]*://\S+", re.I)
 
 _MIN_HAN = 1
@@ -132,7 +130,6 @@ _MIN_HAN_RATIO = 0.1
 
 def _strip_noise(text: str) -> str:
     text = _HTML_TAG_RE.sub(" ", text)
-    text = _URL_RE.sub(" ", text)
     return _SCHEME_RE.sub(" ", text)
 
 
@@ -147,7 +144,7 @@ def is_chinese(
     tags: list[str] | None = None,
 ) -> bool:
     """Whether a Pixiv work should be treated as Chinese-language."""
-    if tags and any(t in _CHINESE_TAG_KEYWORDS for t in tags):
+    if tags and any(t.lower() in _CHINESE_TAG_KEYWORDS for t in tags):
         return True
 
     sample = (title or "") + (caption or "")
@@ -163,23 +160,17 @@ def is_chinese(
     return han / max(han + latin, 1) >= _MIN_HAN_RATIO
 
 
-def _field(obj: Any, path: str, default: Any) -> Any:
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(path, default)
-    return getattr(obj, path, default)
-
-
 def filter_chinese(novels: list[Any]) -> list[Any]:
     """Filter Pixiv novel payload items down to Chinese works."""
+    from copixiv.core.draft import safe_get
+
     return [
         n
         for n in novels
         if is_chinese(
-            title=_field(n, "title", ""),
-            caption=_field(n, "caption", ""),
-            tags=[_field(t, "name", str(t)) for t in _field(n, "tags", None) or []],
+            title=safe_get(n, "title", ""),
+            caption=safe_get(n, "caption", ""),
+            tags=[safe_get(t, "name", str(t)) for t in safe_get(n, "tags", None) or []],
         )
     ]
 

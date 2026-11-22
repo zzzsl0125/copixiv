@@ -1,8 +1,8 @@
 """PostgreSQL-only custom DDL objects (sequences, trigger functions, triggers, table tuning).
 
 Single source of truth imported by Alembic migrations (starting at
-``0001_baseline``) and by the baseline transition script so ``alembic check``
-and PostgreSQL runtime behavior stay identical.
+``0001_baseline``) so ``alembic check`` and PostgreSQL runtime behavior
+stay identical.
 """
 
 from __future__ import annotations
@@ -117,7 +117,6 @@ END; $$;
 """
 
 TAG_REFS_TRIGGER_STATEMENTS = (
-    "DROP TRIGGER IF EXISTS trg_sync_tag_refs ON novel",
     "DROP TRIGGER IF EXISTS trg_sync_tag_refs_insert ON novel",
     "DROP TRIGGER IF EXISTS trg_sync_tag_refs_update ON novel",
     "DROP TRIGGER IF EXISTS trg_sync_tag_refs_delete ON novel",
@@ -165,7 +164,6 @@ def uninstall_pg_objects(conn: Connection) -> None:
     """Drop custom triggers, trigger functions, and sequences cleanly."""
     if conn.execute(text("SELECT to_regclass('novel')")).scalar() is not None:
         for trg in (
-            "trg_sync_tag_refs",
             "trg_sync_tag_refs_insert",
             "trg_sync_tag_refs_update",
             "trg_sync_tag_refs_delete",

@@ -11,14 +11,16 @@ still run via Alembic on init (replacing ``Base.metadata.create_all()``).
 
 from pathlib import Path
 
-from sqlalchemy import create_engine, event
-from sqlalchemy.engine import Engine
+from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import QueuePool
 
+DEFAULT_DATABASE_URL = "postgresql+psycopg2://postgres@127.0.0.1:5433/copixiv"
+
 
 def create_database_engine(
-    database_url: str = "postgresql+psycopg2://postgres@127.0.0.1:5433/copixiv",
+    database_url: str = DEFAULT_DATABASE_URL,
     echo: bool = False,
 ) -> Engine:
     """Create a SQLAlchemy engine for PostgreSQL with connection pooling.
@@ -31,11 +33,20 @@ def create_database_engine(
     connections for concurrent reads plus up to 12 overflow connections for
     bursts.  Concurrency is kept in check by the page-handler semaphore in
     ``copixiv.features.novels.ingest``, so the pool only needs to cover that
-    cap plus API traffic.  Each connection sets a ``lock_timeout`` so a
-    blocked write fails fast instead of wedging the request.
+    cap plus API traffic.  Each connection sets a ``lock_timeout`` via startup
+    ``options`` so a blocked write fails fast instead of wedging the request,
+    and so the setting persists across ``ROLLBACK``.
     """
+    url = make_url(database_url)
+    existing_options = url.query.get("options", "")
+    if isinstance(existing_options, tuple):
+        existing_options = " ".join(existing_options)
+    if "lock_timeout" not in existing_options:
+        merged_options = f"{existing_options} -c lock_timeout=5000".strip()
+        url = url.update_query_dict({"options": merged_options})
+
     engine = create_engine(
-        database_url,
+        url,
         echo=echo,
         poolclass=QueuePool,
         pool_size=6,
@@ -43,16 +54,6 @@ def create_database_engine(
         pool_pre_ping=True,
         pool_recycle=1800,
     )
-
-    @event.listens_for(engine, "connect")
-    def _set_pg_opts(dbapi_connection, _connection_record):
-        cursor = dbapi_connection.cursor()
-        # Fail a request quickly rather than blocking indefinitely if it
-        # hits a lock it cannot acquire.  MVCC means ordinary writes don't
-        # need the old SQLite single-writer serialization; this is just a
-        # safety valve for the rare long-running lock.
-        cursor.execute("SET lock_timeout = '5s'")
-        cursor.close()
 
     return engine
 
@@ -67,7 +68,7 @@ def create_session_factory(engine: Engine) -> sessionmaker[Session]:
     Caveat: inside one transaction, a SELECT on a table you just wrote
     to does NOT see your own pending rows unless the write was flushed.
     When a code path needs "write then read the same table", call
-    ``await uow.flush()`` explicitly (see :class:`SqlUnitOfWork`).
+    ``uow.session.flush()`` explicitly.
     """
     return sessionmaker(
         autocommit=False,
@@ -77,7 +78,12 @@ def create_session_factory(engine: Engine) -> sessionmaker[Session]:
     )
 
 
-def run_migrations(database_url: str, project_root: str | None = None) -> None:
+def run_migrations(
+    database_url: str,
+    project_root: str | None = None,
+    *,
+    engine: Engine | None = None,
+) -> None:
     """Run Alembic migrations to bring the database schema up to date.
 
     Replaces the old ``Base.metadata.create_all()`` approach. Safe to call
@@ -87,6 +93,8 @@ def run_migrations(database_url: str, project_root: str | None = None) -> None:
         database_url: PostgreSQL SQLAlchemy URL.
         project_root: Root directory containing alembic.ini.  Defaults to
             searching upward from this file's location.
+        engine: Optional pre-existing SQLAlchemy :class:`Engine` to reuse
+            for the online migration connection instead of creating a new one.
     """
     from alembic import command
     from alembic.config import Config
@@ -100,15 +108,15 @@ def run_migrations(database_url: str, project_root: str | None = None) -> None:
     alembic_cfg = Config(str(Path(project_root) / "alembic.ini"))
     alembic_cfg.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 
-    command.upgrade(alembic_cfg, "head")
+    if engine is not None:
+        with engine.connect() as connection:
+            alembic_cfg.attributes["connection"] = connection
+            command.upgrade(alembic_cfg, "head")
+    else:
+        command.upgrade(alembic_cfg, "head")
 
 
 def init_database(engine: Engine, database_url: str | None = None) -> None:
-    """Run Alembic migrations to bring the database schema up to date.
-
-    This replaces the old ``Base.metadata.create_all()`` call.  The *engine*
-    parameter is retained for backwards compatibility — the migration runner
-    uses its own engine internally via *database_url*.
-    """
+    """Run Alembic migrations using *engine* to bring the database schema up to date."""
     url = database_url or engine.url.render_as_string(hide_password=False)
-    run_migrations(url)
+    run_migrations(url, engine=engine)

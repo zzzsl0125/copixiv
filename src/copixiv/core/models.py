@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import random
 from datetime import datetime
 from enum import IntEnum, StrEnum
 from typing import Any
@@ -60,15 +59,6 @@ class EpubStatus(IntEnum):
     MISSING_SOURCE = 4
 
 
-# Preserves positive signed int32 range for precomputed random seek order.
-SHUFFLE_KEY_MAX = 2**31 - 1
-
-
-def new_shuffle_key(rng=random) -> int:
-    """Return a fresh random-browsing shuffle key in ``[0, SHUFFLE_KEY_MAX]``."""
-    return rng.randint(0, SHUFFLE_KEY_MAX)
-
-
 class Novel(BaseModel):
     """Read-path domain entity representing a stored Pixiv or local novel."""
 
@@ -85,7 +75,6 @@ class Novel(BaseModel):
     series_name: str | None = None
     series_index: int | None = None
     create_time: datetime | None = None
-    shuffle: int = 0
     has_epub: EpubStatus | None = None
     source: NovelSource = NovelSource.PIXIV
     source_key: str | None = None
@@ -106,13 +95,6 @@ class TaskResult(BaseModel):
     def new_novel_count(self) -> int:
         """Count of newly persisted novels derived from ``new_novel_titles``."""
         return len(self.new_novel_titles)
-
-
-class BatchTaskResponse(BaseModel):
-    """A batch operation enqueued into the background task system."""
-
-    task_id: int
-    matched: int
 
 
 def positive_pixiv_id(raw: Any, label: str, hint: str) -> int:
@@ -137,17 +119,14 @@ def series_id(raw: Any) -> int:
 
 
 __all__ = [
-    "BatchTaskResponse",
     "EpubStatus",
     "Novel",
     "NovelSource",
-    "SHUFFLE_KEY_MAX",
     "SOURCE_LOCAL",
     "SOURCE_PIXIV",
     "TaskResult",
     "UNKNOWN_AUTHOR",
     "author_id",
-    "new_shuffle_key",
     "positive_pixiv_id",
     "series_id",
 ]

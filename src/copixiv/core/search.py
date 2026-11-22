@@ -18,7 +18,6 @@ class OrderBy(StrEnum):
     TEXT = "text"
     CREATE_TIME = "create_time"
     RANDOM = "random"
-    NONE = "none"
 
 
 class SortableOrderBy(StrEnum):
@@ -51,6 +50,27 @@ SearchConditions = list[tuple[str, str]]
 
 _BARE_ID_RE = re.compile(r"^\d{7,}$")
 
+VALID_DSL_FIELDS: frozenset[str] = frozenset(
+    {
+        "id",
+        "author_id",
+        "series_id",
+        "like",
+        "view",
+        "text",
+        "series_index",
+        "has_epub",
+        "title",
+        "author_name",
+        "series_name",
+        "source",
+        "tags",
+        "keyword",
+        "is_favourite",
+        "is_special_follow",
+    }
+)
+
 
 def parse_search_keyword(keyword: str) -> SearchConditions:
     """Parse a search keyword string into an ordered list of ``(type, value)`` pairs."""
@@ -65,12 +85,13 @@ def parse_search_keyword(keyword: str) -> SearchConditions:
         colon_idx = cond.find(":")
         if colon_idx > 0:
             qtype = cond[:colon_idx].strip()
-            qvalue = cond[colon_idx + 1 :].strip()
-            if qvalue:
-                conditions.append((qtype, qvalue))
-        else:
-            qtype = "id" if _BARE_ID_RE.match(cond) else "keyword"
-            conditions.append((qtype, cond))
+            if qtype in VALID_DSL_FIELDS:
+                qvalue = cond[colon_idx + 1 :].strip()
+                if qvalue:
+                    conditions.append((qtype, qvalue))
+                continue
+        qtype = "id" if _BARE_ID_RE.match(cond) else "keyword"
+        conditions.append((qtype, cond))
     return conditions
 
 
@@ -97,7 +118,20 @@ class QuerySpec(BaseModel):
 
 EXCLUDE_BLOCKED_SETTING_KEY = "exclude_blocked_tag_novels"
 DEFAULT_ACTIVE = True
-_TRUTHY = ("1", "true", "yes", "on")
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+_FALSY = frozenset({"0", "false", "no", "off"})
+
+
+def parse_bool_setting(raw: str | None, *, default: bool = False) -> bool:
+    """Parse a boolean setting string; missing or unparsable values return *default*."""
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in _TRUTHY:
+        return True
+    if normalized in _FALSY:
+        return False
+    return default
 
 
 def resolve_exclude_blocked(
@@ -107,9 +141,7 @@ def resolve_exclude_blocked(
     """Decide whether blocked-tag exclusion applies to a query."""
     if explicit is not None:
         return explicit
-    if global_setting_value is None:
-        return DEFAULT_ACTIVE
-    return global_setting_value.strip().lower() in _TRUTHY
+    return parse_bool_setting(global_setting_value, default=DEFAULT_ACTIVE)
 
 
 __all__ = [
@@ -120,7 +152,9 @@ __all__ = [
     "QuerySpec",
     "SearchConditions",
     "SortableOrderBy",
+    "VALID_DSL_FIELDS",
     "normalize_search_segments",
+    "parse_bool_setting",
     "parse_search_keyword",
     "resolve_exclude_blocked",
 ]

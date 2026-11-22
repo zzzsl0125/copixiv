@@ -29,15 +29,15 @@ def _is_retryable_db_error(exc: BaseException) -> bool:
     return code in _RETRYABLE_SQLSTATES
 
 
-def _run_write_sync(
+def run_write_transaction_sync(
     uow,
     fn: Callable[[Any], Any],
     *,
-    max_attempts: int,
-    base_delay: float,
-    max_delay: float,
+    max_attempts: int = 3,
+    base_delay: float = 0.05,
+    max_delay: float = 0.5,
 ) -> Any:
-    """Synchronous body of :func:`run_write_transaction` (runs in a worker thread)."""
+    """Run synchronous ``fn(uow)`` in one write transaction with tenacity retries."""
     attempts = max(max_attempts, 1)
 
     def _wait(retry_state: RetryCallState) -> float:
@@ -70,24 +70,6 @@ def _run_write_sync(
     raise AssertionError("unreachable: retry loop must return or raise")
 
 
-def run_write_transaction_sync(
-    uow,
-    fn: Callable[[Any], Any],
-    *,
-    max_attempts: int = 3,
-    base_delay: float = 0.05,
-    max_delay: float = 0.5,
-) -> Any:
-    """Synchronous variant of :func:`run_write_transaction` for sync callers."""
-    return _run_write_sync(
-        uow,
-        fn,
-        max_attempts=max_attempts,
-        base_delay=base_delay,
-        max_delay=max_delay,
-    )
-
-
 async def run_write_transaction(
     uow,
     fn: Callable[[Any], Any],
@@ -98,7 +80,7 @@ async def run_write_transaction(
 ) -> Any:
     """Run synchronous ``fn(uow)`` in one write transaction with tenacity retries."""
     return await asyncio.to_thread(
-        _run_write_sync,
+        run_write_transaction_sync,
         uow,
         fn,
         max_attempts=max_attempts,

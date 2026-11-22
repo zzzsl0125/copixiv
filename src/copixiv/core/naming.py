@@ -7,6 +7,11 @@ from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
+
+from copixiv.core.models import UNKNOWN_AUTHOR
+
+_JST = ZoneInfo("Asia/Tokyo")
 
 
 class FormatMode(StrEnum):
@@ -78,16 +83,30 @@ def safe_filename(text: str, max_length: int = 240) -> str:
     return clean.strip() or "untitled"
 
 
+LOCAL_SUBDIR = "local"
+
+
 def build_path(
     novel_id: int | str,
     title: str,
     download_dir: str = "download",
+    *,
+    kind: str = TEXT,
 ) -> str:
-    """Generate ``{download_dir}/{subdir}/{safe_title}_{novel_id}.txt`` within NAME_MAX."""
+    """Generate ``{download_dir}/{subdir}/{safe_title}_{novel_id}{ext}`` within NAME_MAX.
+
+    Negative IDs (local uploads) are routed to ``local/``; non-negative IDs
+    (Pixiv novels) are sharded by leading digits (``0000`` below 10,000,000).
+    """
     id_int = int(novel_id)
-    subdir = "0000" if id_int < 10_000_000 else str(id_int).zfill(8)[:4]
-    reserved = len(f"_{id_int}.epub") + 1
-    filename = f"{safe_filename(title, max_length=254 - reserved)}_{id_int}.txt"
+    if id_int < 0:
+        subdir = LOCAL_SUBDIR
+    elif id_int < 10_000_000:
+        subdir = "0000"
+    else:
+        subdir = str(id_int).zfill(8)[:4]
+    reserved = len(f"_{id_int}{SUFFIXES[EPUB]}") + 1
+    filename = f"{safe_filename(title, max_length=254 - reserved)}_{id_int}{suffix_for(kind)}"
     return str(Path(download_dir) / subdir / filename)
 
 
@@ -266,7 +285,7 @@ class NovelNamingTemplate:
                 continue
             value = getattr(novel, key, None)
             if key == "author_name" and not value:
-                yield key, "未知作者"
+                yield key, UNKNOWN_AUTHOR
             elif key == "series_index" and value == 0 or value is None:
                 yield key, ""
             else:
@@ -277,7 +296,8 @@ def _format_date(value: Any) -> str:
     if value is None:
         return ""
     if isinstance(value, datetime):
-        return value.strftime("%Y-%m-%d")
+        dt = value.astimezone(_JST) if value.tzinfo is not None else value
+        return dt.strftime("%Y-%m-%d")
     return str(value)[:10]
 
 
@@ -286,6 +306,7 @@ __all__ = [
     "DEFAULT_NAMING_TEMPLATE",
     "EPUB",
     "FormatMode",
+    "LOCAL_SUBDIR",
     "MEDIA_TYPES",
     "NovelNamingTemplate",
     "SUFFIXES",

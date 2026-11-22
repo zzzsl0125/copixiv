@@ -79,41 +79,23 @@ class SqlUnitOfWork:
         try:
             yield
         except BaseException:
-            try:
-                self.rollback()
-            except BaseException:
-                # Never let a rollback failure mask the original error.
-                from copixiv.log import logger
+            if self._session is not None:
+                try:
+                    self._session.rollback()
+                except BaseException:
+                    # Never let a rollback failure mask the original error.
+                    from copixiv.log import logger
 
-                logger.exception("Rollback failed")
+                    logger.exception("Rollback failed")
             raise
         else:
-            if read_only:
-                self.rollback()
-            else:
-                self.commit()
+            if self._session is not None:
+                if read_only:
+                    self._session.rollback()
+                else:
+                    self._session.commit()
         finally:
             self._in_tx = False
             if self._session is not None:
                 self._session.close()
                 self._session = None
-
-    def commit(self) -> None:
-        if self._session is not None:
-            self._session.commit()
-
-    def flush(self) -> None:
-        """Force pending changes into the database, inside the current transaction.
-
-        Needed when the same transaction reads a table it just wrote to:
-        the session factory uses ``autoflush=False`` (see
-        ``engine.create_session_factory``), so a SELECT does NOT flush
-        pending INSERTs automatically — without an explicit flush you
-        would read stale rows and get no error.
-        """
-        if self._session is not None:
-            self._session.flush()
-
-    def rollback(self) -> None:
-        if self._session is not None:
-            self._session.rollback()

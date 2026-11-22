@@ -25,11 +25,10 @@ if _src_dir not in sys.path:
 # ---------------------------------------------------------------------------
 # Target metadata — all ORM models registered on Base
 # ---------------------------------------------------------------------------
+from copixiv.db.engine import DEFAULT_DATABASE_URL  # noqa: E402
 from copixiv.db.models import Base  # noqa: E402
 
 target_metadata = Base.metadata
-
-_DEFAULT_DATABASE_URL = "postgresql+psycopg2://postgres@127.0.0.1:5433/copixiv"
 
 
 def _get_database_url() -> str:
@@ -49,7 +48,7 @@ def _get_database_url() -> str:
 
     # 2. alembic.ini sqlalchemy.url (set at runtime by engine.run_migrations).
     ini_url = (config.get_main_option("sqlalchemy.url") or "").strip()
-    if ini_url and not ini_url.startswith("sqlite:///") and "://" in ini_url:
+    if ini_url and "://" in ini_url:
         return ini_url
 
     # 3. copixiv config.yaml / env override
@@ -61,7 +60,7 @@ def _get_database_url() -> str:
         pass
 
     # 4. Fallback
-    return ini_url or _DEFAULT_DATABASE_URL
+    return ini_url or DEFAULT_DATABASE_URL
 
 
 def run_migrations_offline() -> None:
@@ -83,6 +82,16 @@ def run_migrations_offline() -> None:
 
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode against a live database."""
+    connection = config.attributes.get("connection")
+    if connection is not None:
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+        )
+        with context.begin_transaction():
+            context.run_migrations()
+        return
+
     url = _get_database_url()
 
     connectable = engine_from_config(
@@ -91,9 +100,9 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
 
-    with connectable.connect() as connection:
+    with connectable.connect() as conn:
         context.configure(
-            connection=connection,
+            connection=conn,
             target_metadata=target_metadata,
         )
 

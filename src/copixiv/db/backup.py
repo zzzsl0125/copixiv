@@ -9,6 +9,7 @@ now ``pg_dump`` custom-format dumps named after the current ISO week (e.g.
 from __future__ import annotations
 
 import importlib.util
+import logging
 import os
 import shutil
 import subprocess
@@ -17,20 +18,23 @@ import uuid
 from datetime import date
 from pathlib import Path
 
-from sqlalchemy.engine import Engine, make_url
+from sqlalchemy.engine import make_url
+
+logger = logging.getLogger(__name__)
 
 
 def _pg_bin(name: str) -> str:
     """Return the path to a PostgreSQL admin binary.
 
-    Prefers a binary already on ``PATH``; otherwise falls back to the
-    ``pgserver``-bundled binaries — first in the *running* interpreter
-    (where CI installs it), then the repo-local ``.venv`` layout used by
-    the dev/test harness.
+    Prefers ``pgserver``-bundled binaries (matching ``scripts/pg_dev.py``) so
+    versions/extensions stay consistent; set ``COPIXIV_USE_SYSTEM_PG=1`` to
+    prefer binaries on ``PATH``. Falls back to ``PATH`` if ``pgserver`` is not
+    installed.
     """
-    resolved = shutil.which(name)
-    if resolved:
-        return resolved
+    if os.environ.get("COPIXIV_USE_SYSTEM_PG") == "1":
+        resolved = shutil.which(name)
+        if resolved:
+            return resolved
     spec = importlib.util.find_spec("pgserver")
     if spec is not None and spec.origin:
         candidate = Path(spec.origin).resolve().parent / "pginstall" / "bin" / name
@@ -49,6 +53,9 @@ def _pg_bin(name: str) -> str:
     candidate = venv_bin / name
     if candidate.exists():
         return str(candidate)
+    resolved = shutil.which(name)
+    if resolved:
+        return resolved
     return name  # let subprocess raise FileNotFoundError with a clear message
 
 
@@ -59,16 +66,19 @@ def _connection_args(database_url: str) -> tuple[list[str], dict[str, str]]:
     args: list[str] = []
     env: dict[str, str] = {}
 
-    host = url.host
+    host: str | None = url.host
     # Socket connections put the socket dir in the ``host`` query parameter.
     if host is None and "host" in url.query:
         query_host = url.query["host"]
-        host = query_host[0] if isinstance(query_host, tuple) else query_host
+        host = (query_host[0] if query_host else None) if isinstance(query_host, tuple) else query_host
     if host:
         args += ["--host", host]
 
-    port = url.port or url.query.get("port") or "5432"
-    args += ["--port", str(port)]
+    port: int | str | tuple[str, ...] | None = url.port
+    if port is None:
+        query_port = url.query.get("port")
+        port = query_port[0] if isinstance(query_port, tuple) and query_port else query_port
+    args += ["--port", str(port or "5432")]
 
     if url.username:
         args += ["--username", url.username]
@@ -85,7 +95,6 @@ def _connection_args(database_url: str) -> tuple[list[str], dict[str, str]]:
 def backup_database(
     database_url: str,
     backup_dir: str | None = None,
-    engine: Engine | None = None,
     *,
     timeout: float = 600,
 ) -> str:
@@ -96,8 +105,6 @@ def backup_database(
     Args:
         database_url: PostgreSQL SQLAlchemy URL.
         backup_dir: Directory for backups.  Defaults to ``./backups``.
-        engine: Unused — kept for backwards compatibility with the old
-            SQLite ``backup_database`` signature.
         timeout: Subprocess timeout in seconds (default 600).
 
     Returns:
@@ -145,21 +152,21 @@ def backup_database(
 
 
 def cleanup_old_backups(
-    database_url: str,
     keep_count: int = 1,
     backup_dir: str | None = None,
 ) -> list[str]:
     """Remove old ``*.dump`` backups, keeping only the most recent *keep_count*.
 
     Args:
-        database_url: PostgreSQL SQLAlchemy URL (unused for cleanup —
-            kept for signature compatibility).
-        keep_count: Number of most-recent backups to retain (default 1).
+        keep_count: Number of most-recent backups to retain (default 1, must be >= 1).
         backup_dir: Directory for backups.  Defaults to ``./backups``.
 
     Returns:
         List of removed file paths.
     """
+    if keep_count < 1:
+        raise ValueError(f"keep_count must be >= 1, got {keep_count}")
+
     backup_path = Path(backup_dir or "backups")
     if not backup_path.exists():
         return []
@@ -171,7 +178,7 @@ def cleanup_old_backups(
         try:
             f.unlink()
             removed.append(str(f))
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.warning("Failed to remove old backup %s: %s", f, exc)
 
     return removed

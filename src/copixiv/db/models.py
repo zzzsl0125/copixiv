@@ -3,16 +3,14 @@
 - ``novel.tags TEXT[]`` stores tags directly; full-text/substring and tag
   similarity search run exclusively in the in-process Rust engine
   (``copixiv_rs``), so PG keeps only constraint / maintenance indexes.
-- ID columns are ``BIGINT``; aggregate counters on ``author`` / ``series``
-  are ``BIGINT``; timestamp columns are ``timestamptz``;
-  ``task_history.result`` / ``progress`` and ``scheduled_task.params`` use
-  :class:`JsonObjectType` over ``JSONB``.
+- ID columns are ``BIGINT``; timestamp columns are ``timestamptz``;
+  ``task_history.arguments`` / ``result`` / ``progress`` and
+  ``scheduled_task.params`` use native PostgreSQL ``JSONB``.
 """
 
 from __future__ import annotations
 
 import enum
-import json
 from datetime import datetime
 from typing import Any
 
@@ -27,41 +25,16 @@ from sqlalchemy import (
     Index,
     Integer,
     Text,
-    TypeDecorator,
     UniqueConstraint,
 )
 from sqlalchemy import (
     text as sa_text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql.elements import quoted_name
 
 from . import constants as C
-
-
-class JsonObjectType(TypeDecorator[Any]):
-    """JSONB column wrapper that safely unwraps legacy double-encoded JSON strings."""
-
-    impl = JSONB
-    cache_ok = True
-
-    @staticmethod
-    def _unwrap(value: Any) -> Any:
-        if isinstance(value, str):
-            try:
-                parsed = json.loads(value)
-                if isinstance(parsed, (dict, list)):
-                    return parsed
-            except (ValueError, TypeError):
-                pass
-        return value
-
-    def process_bind_param(self, value: Any, dialect: Any) -> Any:
-        return self._unwrap(value)
-
-    def process_result_value(self, value: Any, dialect: Any) -> Any:
-        return self._unwrap(value)
 
 
 class Base(DeclarativeBase):
@@ -96,25 +69,12 @@ TEXT_COL = quoted_name(C.COL_TEXTS, True)
 class Author(Base):
     __tablename__ = C.TABLE_AUTHOR
 
-    author_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    author_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     author_name: Mapped[str | None] = mapped_column(Text)
-    novel_count: Mapped[int] = mapped_column(Integer, default=0, server_default=sa_text("0"), nullable=False)
-    like: Mapped[int] = mapped_column(
-        LIKE_COL, BigInteger, default=0, server_default=sa_text("0"), nullable=False
-    )
-    view: Mapped[int] = mapped_column(
-        VIEW_COL, BigInteger, default=0, server_default=sa_text("0"), nullable=False
-    )
-    text: Mapped[int] = mapped_column(
-        TEXT_COL, BigInteger, default=0, server_default=sa_text("0"), nullable=False
-    )
     last_update: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_special_follow: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default=sa_text("false"), nullable=False
     )
-
-    novels: Mapped[list[Novel]] = relationship("Novel", back_populates="author_rel")
-    series: Mapped[list[Series]] = relationship("Series", back_populates="author_rel")
 
     __table_args__ = (
         Index(
@@ -122,7 +82,6 @@ class Author(Base):
             "author_id",
             postgresql_where=sa_text("is_special_follow"),
         ),
-        Index("ix_author_last_update", "last_update"),
     )
 
     def __repr__(self) -> str:
@@ -132,24 +91,11 @@ class Author(Base):
 class Series(Base):
     __tablename__ = C.TABLE_SERIES
 
-    series_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    series_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     series_name: Mapped[str | None] = mapped_column(Text)
-    novel_count: Mapped[int] = mapped_column(Integer, default=0, server_default=sa_text("0"), nullable=False)
     author_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey(f"{C.TABLE_AUTHOR}.author_id", ondelete="SET NULL")
     )
-    like: Mapped[int] = mapped_column(
-        LIKE_COL, BigInteger, default=0, server_default=sa_text("0"), nullable=False
-    )
-    view: Mapped[int] = mapped_column(
-        VIEW_COL, BigInteger, default=0, server_default=sa_text("0"), nullable=False
-    )
-    text: Mapped[int] = mapped_column(
-        TEXT_COL, BigInteger, default=0, server_default=sa_text("0"), nullable=False
-    )
-
-    author_rel: Mapped[Author | None] = relationship("Author", back_populates="series")
-    novels: Mapped[list[Novel]] = relationship("Novel", back_populates="series_rel")
 
     __table_args__ = (Index("ix_series_author_id", "author_id"),)
 
@@ -160,7 +106,7 @@ class Series(Base):
 class Novel(Base):
     __tablename__ = C.TABLE_NOVEL
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     author_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey(f"{C.TABLE_AUTHOR}.author_id"))
     author_name: Mapped[str | None] = mapped_column(Text)
@@ -190,7 +136,6 @@ class Novel(Base):
     # 对账任务（check_epub）负责降级；元数据刷新**永不**写它。
     # （2026-09 追溯：元数据刷新曾无条件写 0，把 22 万行"已完成"冲掉。）
     has_epub: Mapped[int] = mapped_column(Integer, default=0, server_default=sa_text("0"), nullable=False)
-    shuffle: Mapped[int] = mapped_column(Integer, default=0, server_default=sa_text("0"), nullable=False)
     tags: Mapped[list[str]] = mapped_column(
         ARRAY(Text), nullable=False, server_default=sa_text("'{}'::text[]")
     )
@@ -205,9 +150,6 @@ class Novel(Base):
     )
     source_key: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    author_rel: Mapped[Author | None] = relationship("Author", back_populates="novels")
-    series_rel: Mapped[Series | None] = relationship("Series", back_populates="novels")
-
     __table_args__ = (
         Index("ix_novel_author_id", "author_id", "id"),
         Index("ix_novel_series_id", "series_id", "id"),
@@ -219,29 +161,14 @@ class Novel(Base):
             postgresql_where=sa_text("source_key IS NOT NULL"),
         ),
         Index(
-            "ix_novel_favourite",
-            "id",
-            postgresql_where=sa_text("is_favourite"),
-        ),
-        Index(
-            "ix_novel_local_id",
-            "id",
-            postgresql_where=sa_text("id < 0"),
-        ),
-        Index(
             "ix_novel_missing_source",
             "id",
-            postgresql_where=sa_text("source = ''"),
+            postgresql_where=sa_text("has_epub = 4 AND source = 'pixiv' AND id > 0"),
         ),
         Index(
             "ix_novel_series_missing_index",
             "series_id",
             postgresql_where=sa_text("series_id IS NOT NULL AND series_index IS NULL"),
-        ),
-        Index(
-            "ix_novel_empty_author_name",
-            "author_id",
-            postgresql_where=sa_text("author_id IS NOT NULL AND (author_name IS NULL OR author_name = '')"),
         ),
     )
 
@@ -256,14 +183,6 @@ class Tag(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     reference_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=sa_text("0")
-    )
-
-    __table_args__ = (
-        Index(
-            "tag_reference_count_id_idx",
-            sa_text("reference_count DESC"),
-            sa_text("id DESC"),
-        ),
     )
 
     def __repr__(self) -> str:
@@ -312,9 +231,6 @@ class TagAlias(Base):
         nullable=False,
     )
 
-    source_tag: Mapped[Tag] = relationship("Tag", foreign_keys=[source])
-    target_tag: Mapped[Tag] = relationship("Tag", foreign_keys=[target])
-
     __table_args__ = (Index("ix_tag_alias_target", "target"),)
 
     def __repr__(self) -> str:
@@ -328,7 +244,7 @@ class ScheduledTask(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     task: Mapped[str] = mapped_column(Text, nullable=False)
     cron: Mapped[str] = mapped_column(Text, nullable=False)
-    params: Mapped[dict[str, Any] | None] = mapped_column(JsonObjectType(), nullable=True)
+    params: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     is_enabled: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default=sa_text("false"), nullable=False
     )
@@ -340,13 +256,13 @@ class TaskHistory(Base):
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     task_func: Mapped[str | None] = mapped_column(Text, nullable=True)
-    arguments: Mapped[str | None] = mapped_column(Text)
+    arguments: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     status: Mapped[str] = mapped_column(Text, nullable=False)
     start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     end_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     duration: Mapped[float | None] = mapped_column(Float)
-    result: Mapped[Any | None] = mapped_column(JsonObjectType())
-    progress: Mapped[Any | None] = mapped_column(JsonObjectType())
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    progress: Mapped[Any | None] = mapped_column(JSONB)
     # No dedup index: repeated enqueues for the same ``task_func`` insert
     # separate pending rows and queue up (task ordering is the worker's job).
 
@@ -355,11 +271,6 @@ class TaskHistory(Base):
             "ix_task_history_pending",
             "id",
             postgresql_where=sa_text("status = 'pending'"),
-        ),
-        Index(
-            "ix_task_history_active_func",
-            "task_func",
-            postgresql_where=sa_text("status IN ('pending', 'running')"),
         ),
     )
 
@@ -400,14 +311,12 @@ class FailedNovel(Base):
     novel_id: Mapped[int] = mapped_column(
         BigInteger,
         primary_key=True,
+        autoincrement=False,
     )
-    failure_type: Mapped[str | None] = mapped_column(Text)
     error_message: Mapped[str | None] = mapped_column(Text)
     failed_times: Mapped[int] = mapped_column(Integer, default=1, server_default=sa_text("1"), nullable=False)
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-
-    __table_args__ = (Index("ix_failed_novel_last_failed_at", "last_failed_at"),)
 
 
 class SeriesDeadLetter(Base):
@@ -439,7 +348,7 @@ class SeriesDeadLetter(Base):
     # Same shape as ``failed_novel``: the business key, no ForeignKey (a
     # verdict may exist before/without a ``series`` row, and deleting a
     # ``series`` row must not silently resurrect the fetch attempts).
-    series_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    series_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     consecutive_failures: Mapped[int] = mapped_column(
         Integer, default=0, server_default=sa_text("0"), nullable=False
     )
@@ -447,14 +356,6 @@ class SeriesDeadLetter(Base):
     last_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # NULL = still worth trying; set = excluded from the candidate query.
     retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-
-    __table_args__ = (
-        Index(
-            "ix_series_dead_letter_retired_at",
-            "retired_at",
-            postgresql_where=sa_text("retired_at IS NOT NULL"),
-        ),
-    )
 
 
 class SearchHistory(Base):
@@ -465,7 +366,4 @@ class SearchHistory(Base):
     display_value: Mapped[str | None] = mapped_column(Text, nullable=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
-    __table_args__ = (
-        UniqueConstraint("type", "value", name="uq_search_history_type_value"),
-        Index("ix_search_history_type_timestamp", "type", "timestamp"),
-    )
+    __table_args__ = (UniqueConstraint("type", "value", name="uq_search_history_type_value"),)
