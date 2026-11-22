@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from copixiv.core.exceptions import NotFoundError, ValidationError
 from copixiv.core.models import TaskResult
 from copixiv.db.tx import read_transaction
-from copixiv.features.novels.repo import SQLAlchemyNovelRepository
+from copixiv.features.novels.repo import SQLAlchemyNovelRepository, StoredNovel
 from copixiv.features.novels.use_cases.batch_operations import BATCH_ID_CHUNK_SIZE
 from copixiv.log import logger
 from copixiv.storage.orphan_cleanup import EXPORT_FILE_PREFIX
@@ -68,11 +68,11 @@ async def batch_export(args: BatchExportArgs, ctx: TaskContext) -> TaskResult:
 
     await ctx.report_progress("批量导出进行中：收集小说信息…")
 
-    novels: list[dict] = []
+    novels: list[StoredNovel] = []
     for i in range(0, total, BATCH_ID_CHUNK_SIZE):
         chunk = ids[i : i + BATCH_ID_CHUNK_SIZE]
 
-        def _read_chunk(uw, chunk: list[int] = chunk) -> list:
+        def _read_chunk(uw, chunk: list[int] = chunk) -> list[StoredNovel]:
             return SQLAlchemyNovelRepository(uw.session).get_novels_by_ids(chunk)
 
         # One read transaction per id chunk (one thread hop each).

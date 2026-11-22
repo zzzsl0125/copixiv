@@ -10,18 +10,14 @@ from typing import Any
 
 from copixiv.log import logger
 from copixiv.query_engine.adapter import RustNovelQueryEngine
-from copixiv.query_engine.port import (
-    PendingDeltaProtocol,
-    SnapshotStoreProtocol,
-)
 
 
 def build_engine_from_store(
-    store: SnapshotStoreProtocol,
+    store: Any,
     *,
     engine: RustNovelQueryEngine | None = None,
 ) -> RustNovelQueryEngine:
-    """Populate *engine* (or a new one) via a staged atomic swap."""
+    """Populate *engine* (or a new one) from *store* (e.g. ``PgSnapshotStore``) via a staged atomic swap."""
     t0 = time.perf_counter()
     target = engine or RustNovelQueryEngine()
     staging_holder: list[Any] = []
@@ -61,14 +57,14 @@ def build_engine_from_store(
 
 
 def make_post_commit_hook(
-    store: SnapshotStoreProtocol,
+    store: Any,
     engine: RustNovelQueryEngine,
     sync_lock: threading.Lock | None = None,
-) -> Callable[[PendingDeltaProtocol], None]:
+) -> Callable[[Any], None]:
     """Return a thread-safe post-commit hook reading latest committed rows."""
     lock = sync_lock or threading.Lock()
 
-    def _on_commit(delta: PendingDeltaProtocol) -> None:
+    def _on_commit(delta: Any) -> None:
         with lock:
             if delta.is_empty() and not engine.needs_rebuild():
                 return
@@ -113,7 +109,7 @@ def make_post_commit_hook(
 
 
 def attach_and_start_engine(
-    store: SnapshotStoreProtocol,
+    store: Any,
     *,
     build_initial: bool = True,
 ) -> RustNovelQueryEngine:

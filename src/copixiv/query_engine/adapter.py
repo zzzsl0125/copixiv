@@ -1,4 +1,4 @@
-"""PyO3 ``copixiv_rs`` adapter implementing ``NovelQueryEnginePort``."""
+"""PyO3 ``copixiv_rs`` adapter for the in-process novel and tag query engine."""
 
 from __future__ import annotations
 
@@ -6,14 +6,12 @@ from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING
 
 from copixiv.core.exceptions import ValidationError
-from copixiv.core.snapshot_types import SlimNovelTuple, SlimTagTuple
+from copixiv.core.snapshot_types import SlimNovelRecord, SlimTagRecord
 from copixiv.query_engine.port import (
     EngineCountResult,
     EngineCursor,
-    EngineNovelRecord,
     EnginePageRowsResult,
     EngineQuery,
-    TagSuggestItemProtocol,
 )
 
 if TYPE_CHECKING:
@@ -78,7 +76,7 @@ class RustNovelQueryEngine:
         staging: copixiv_rs.StagingEngine,
         blocked_tags: list[str],
         exclude_blocked_default: bool,
-        tags: list[SlimTagTuple] | None = None,
+        tags: list[SlimTagRecord] | None = None,
         aliased_tag_ids: list[int] | None = None,
     ) -> None:
         self._rs.swap_from_staging(
@@ -93,12 +91,12 @@ class RustNovelQueryEngine:
         self,
         *,
         delete_ids: Sequence[int] = (),
-        upsert_rows: Iterable[SlimNovelTuple] = (),
+        upsert_rows: Iterable[SlimNovelRecord] = (),
         blocked_tags: Sequence[str] | None = None,
         exclude_blocked_default: bool | None = None,
         special_follow_changes: Sequence[tuple[int, bool]] = (),
         delete_tag_names: Sequence[str] | None = None,
-        upsert_tags: Sequence[SlimTagTuple] | None = None,
+        upsert_tags: Sequence[SlimTagRecord] | None = None,
         aliased_tag_ids: Sequence[int] | None = None,
     ) -> None:
         self._rs.apply_delta(
@@ -145,7 +143,7 @@ class RustNovelQueryEngine:
             random_cursor=rand_cursor,
         )
 
-    def get_novel_rows_by_ids(self, novel_ids: list[int]) -> list[EngineNovelRecord]:
+    def get_novel_rows_by_ids(self, novel_ids: list[int]) -> list[copixiv_rs.NovelRecord]:
         return list(self._rs.get_novel_rows_by_ids(novel_ids))
 
     def count_novels(self, query: EngineQuery, *, cap: int) -> EngineCountResult:
@@ -176,7 +174,7 @@ class RustNovelQueryEngine:
         limit: int = 5,
         offset: int = 0,
         target_tag: str | None = None,
-    ) -> tuple[list[TagSuggestItemProtocol], int | None]:
+    ) -> tuple[list[copixiv_rs.TagSuggestItem], int | None]:
         items, next_cursor = self._rs.suggest_tag_aliases(
             limit=limit,
             offset=offset,

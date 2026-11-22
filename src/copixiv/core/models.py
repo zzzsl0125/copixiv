@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from enum import IntEnum, StrEnum
 from typing import Any
 
@@ -59,30 +58,6 @@ class EpubStatus(IntEnum):
     MISSING_SOURCE = 4
 
 
-class Novel(BaseModel):
-    """Read-path domain entity representing a stored Pixiv or local novel."""
-
-    id: int
-    title: str
-    author_id: int | None = None
-    author_name: str | None = None
-    path: str | None = None
-    like: int = 0
-    view: int = 0
-    text: int = 0
-    caption: str | None = None
-    series_id: int | None = None
-    series_name: str | None = None
-    series_index: int | None = None
-    create_time: datetime | None = None
-    has_epub: EpubStatus | None = None
-    source: NovelSource = NovelSource.PIXIV
-    source_key: str | None = None
-    tags: list[str] = Field(default_factory=list)
-    is_favourite: bool = False
-    is_special_follow: bool = False
-
-
 class TaskResult(BaseModel):
     """Structured result returned by all background tasks."""
 
@@ -120,7 +95,6 @@ def series_id(raw: Any) -> int:
 
 __all__ = [
     "EpubStatus",
-    "Novel",
     "NovelSource",
     "SOURCE_LOCAL",
     "SOURCE_PIXIV",

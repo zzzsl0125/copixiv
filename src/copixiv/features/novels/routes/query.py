@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Annotated, cast
+from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 
@@ -172,7 +172,7 @@ def get_novels_by_ids(
     """
     with uow.begin(read_only=True):
         novels = SQLAlchemyNovelRepository(uow.session).get_novel_cards_by_ids(body.novel_ids)
-    return NovelsByIdsResponse(novels=cast(list, novels))
+    return NovelsByIdsResponse(novels=novels)
 
 
 @router.post("/match-ids", response_model=MatchIdsResponse)

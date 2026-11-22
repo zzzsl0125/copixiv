@@ -1284,10 +1284,8 @@ export interface components {
          * NovelBase
          * @description 小说列表 / 详情的响应模型。
          *
-         *     字段与领域模型 :class:`copixiv.core.models.Novel` 的卡片投影逐条对应
-         *     （`path` / `caption` / `shuffle` / `source_key` 内部字段除外）。刻意**不**继承
-         *     领域模型：Pydantic 的 ``ConfigDict(exclude=...)`` 会静默失效、``Field(exclude=True)``
-         *     挡不住 JSON Schema，而这份 schema 正是前端 codegen 的契约源（§7.4）。
+         *     字段对应前端卡片与详情视图所需的公开投影
+         *     （不含 `path` / `caption` / `source_key` 等内部字段），是前端 codegen 的契约源。
          *
          *     ``create_time`` 是 ``timestamptz`` → ``datetime``，JSON 里是 ISO 字符串；
          *     写侧的 ``NovelUpdateRequest`` 仍收字符串（PATCH 接受日期字面量）。

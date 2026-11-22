@@ -5,13 +5,13 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from copixiv.db import delta as engine_delta
-from copixiv.query_engine.port import NovelQueryEnginePort
+from copixiv.query_engine.adapter import RustNovelQueryEngine
 
 
 def _require_engine(
     session: Session,
-    query_engine: NovelQueryEnginePort | None = None,
-) -> NovelQueryEnginePort:
+    query_engine: RustNovelQueryEngine | None = None,
+) -> RustNovelQueryEngine:
     eng = query_engine if query_engine is not None else session.info.get(engine_delta.SESSION_ENGINE_KEY)
     if eng is None or not eng.ready():
         raise RuntimeError("Rust query_engine is not attached or not ready on this session")
@@ -25,7 +25,7 @@ def suggest_tag_aliases(
     limit: int = 5,
     offset: int = 0,
     target_tag: str | None = None,
-    query_engine: NovelQueryEnginePort | None = None,
+    query_engine: RustNovelQueryEngine | None = None,
 ) -> dict:
     """Suggest tag alias groupings using the in-process Rust engine."""
     eng = _require_engine(session, query_engine)

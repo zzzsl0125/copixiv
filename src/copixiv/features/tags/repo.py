@@ -15,7 +15,7 @@ from copixiv.core.exceptions import ValidationError
 from copixiv.db import delta as engine_delta
 from copixiv.db import models
 from copixiv.db.base import BaseRepository
-from copixiv.query_engine.port import NovelQueryEnginePort
+from copixiv.query_engine.adapter import RustNovelQueryEngine
 
 from .suggest import suggest_tag_aliases
 
@@ -27,10 +27,10 @@ class SQLAlchemyTagRepository(BaseRepository):
         self,
         session: Session,
         *,
-        query_engine: NovelQueryEnginePort | None = None,
+        query_engine: RustNovelQueryEngine | None = None,
     ):
         super().__init__(session)
-        self._query_engine: NovelQueryEnginePort | None = (
+        self._query_engine: RustNovelQueryEngine | None = (
             query_engine if query_engine is not None else session.info.get(engine_delta.SESSION_ENGINE_KEY)
         )
 

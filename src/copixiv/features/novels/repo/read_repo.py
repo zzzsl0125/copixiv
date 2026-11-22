@@ -2,27 +2,27 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.orm import Session
 
 from copixiv.core.exceptions import ValidationError
-from copixiv.core.models import SOURCE_PIXIV, EpubStatus, Novel
+from copixiv.core.models import SOURCE_PIXIV, EpubStatus, NovelSource
 from copixiv.core.search import QuerySpec, normalize_search_segments
 from copixiv.core.time import datetime_to_us, us_to_datetime
 from copixiv.db import constants as C
 from copixiv.db import delta as engine_delta
 from copixiv.db import models
 from copixiv.db.base import BaseRepository
-from copixiv.query_engine.port import (
-    EngineCursor,
-    EngineNovelRecord,
-    EngineQuery,
-    NovelQueryEnginePort,
-)
+from copixiv.features.novels.schemas import NovelBase
+from copixiv.query_engine.adapter import RustNovelQueryEngine
+from copixiv.query_engine.port import EngineCursor, EngineQuery
+
+if TYPE_CHECKING:
+    import copixiv_rs
 
 # Bounded count cap for list/count endpoints.
 COUNT_CAP = 5000
@@ -75,6 +75,29 @@ class NovelCount:
     truncated: bool = False
 
 
+@dataclass(slots=True)
+class StoredNovel:
+    """Stored novel row materialized from PostgreSQL (excludes ``caption`` and ``source_key``)."""
+
+    id: int
+    title: str
+    author_id: int | None = None
+    author_name: str | None = None
+    path: str | None = None
+    like: int = 0
+    view: int = 0
+    text: int = 0
+    series_id: int | None = None
+    series_name: str | None = None
+    series_index: int | None = None
+    create_time: datetime | None = None
+    has_epub: EpubStatus = EpubStatus.NO
+    source: NovelSource = NovelSource.PIXIV
+    tags: list[str] = field(default_factory=list)
+    is_favourite: bool = False
+    is_special_follow: bool = False
+
+
 def _parse_query_int(raw: Any, label: str) -> int:
     if isinstance(raw, bool):
         raise ValidationError(f"Invalid integer for {label}: {raw!r}")
@@ -122,56 +145,49 @@ def _categorize_conditions(conditions) -> tuple[set[str], set[str], dict[str, st
     return tags, keywords, field_filters
 
 
-def _novel_from_record(rec: EngineNovelRecord) -> Novel:
-    """Materialize a card-projection :class:`Novel` directly from Rust ``NovelRecord``."""
-    return Novel.model_construct(
+def _novel_from_record(rec: copixiv_rs.NovelRecord) -> NovelBase:
+    """Materialize a card-projection :class:`NovelBase` directly from Rust ``NovelRecord``."""
+    return NovelBase.model_construct(
         id=rec.id,
         title=rec.title,
         author_id=rec.author_id,
         author_name=rec.author_name,
-        path=None,
         like=rec.like,
         view=rec.view,
         text=rec.text,
-        caption=None,
-        series_id=rec.series_id,
-        series_name=rec.series_name,
-        series_index=rec.series_index,
         create_time=us_to_datetime(rec.create_time_us),
         has_epub=EpubStatus(rec.has_epub),
-        source=rec.source,
-        source_key=None,
         tags=list(rec.tags),
         is_favourite=rec.is_favourite,
         is_special_follow=rec.is_special_follow,
+        series_id=rec.series_id,
+        series_name=rec.series_name,
+        series_index=rec.series_index,
+        source=NovelSource(rec.source),
     )
 
 
-def _novel_from_orm(obj) -> Novel:
-    """Convert an ORM ``Novel`` to the domain :class:`Novel` model."""
-    d = {c.name: getattr(obj, c.name) for c in obj.__table__.columns}
-    return Novel(**d)
-
-
-def _attach_special_follow(session: Session, novels: list[Novel]) -> None:
-    """Populate ``is_special_follow`` on *novels* from ``author`` in one query."""
-    author_ids = {n.author_id for n in novels if n.author_id}
-    if not author_ids:
-        for novel in novels:
-            novel.is_special_follow = False
-        return
-    sf = set(
-        session.execute(
-            select(models.Author.author_id).where(
-                models.Author.is_special_follow == True,  # noqa: E712
-                models.Author.author_id.in_(author_ids),
-            )
-        )
-        .scalars()
-        .all()
+def _novel_from_orm(obj: models.Novel, *, is_special_follow: bool = False) -> StoredNovel:
+    """Convert an ORM ``Novel`` row into a lightweight :class:`StoredNovel`."""
+    return StoredNovel(
+        id=obj.id,
+        title=obj.title,
+        author_id=obj.author_id,
+        author_name=obj.author_name,
+        path=obj.path,
+        like=obj.like,
+        view=obj.view,
+        text=obj.text,
+        series_id=obj.series_id,
+        series_name=obj.series_name,
+        series_index=obj.series_index,
+        create_time=obj.create_time,
+        has_epub=EpubStatus(obj.has_epub),
+        source=NovelSource(obj.source),
+        tags=list(obj.tags) if obj.tags else [],
+        is_favourite=obj.is_favourite,
+        is_special_follow=is_special_follow,
     )
-    for novel in novels:
-        novel.is_special_follow = novel.author_id in sf
 
 
 class SQLAlchemyNovelReadRepository(BaseRepository):
@@ -181,14 +197,14 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         self,
         session: Session,
         *,
-        query_engine: NovelQueryEnginePort | None = None,
+        query_engine: RustNovelQueryEngine | None = None,
     ):
         super().__init__(session)
-        self._query_engine: NovelQueryEnginePort | None = (
+        self._query_engine: RustNovelQueryEngine | None = (
             query_engine if query_engine is not None else session.info.get(engine_delta.SESSION_ENGINE_KEY)
         )
 
-    def _require_engine(self) -> NovelQueryEnginePort:
+    def _require_engine(self) -> RustNovelQueryEngine:
         eng = self._query_engine
         if eng is None or not eng.ready():
             raise RuntimeError("Rust query_engine is not attached or not ready on this session")
@@ -277,13 +293,18 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
             return EngineCursor(cursor_id=cursor_id, cursor_int=int(raw_val))
         return EngineCursor(cursor_id=cursor_id, cursor_str=str(raw_val))
 
-    def get_by_id(self, novel_id: int) -> Novel | None:
+    def get_by_id(self, novel_id: int) -> StoredNovel | None:
         novel = self.session.get(models.Novel, novel_id)
         if novel is None:
             return None
-        domain = _novel_from_orm(novel)
-        _attach_special_follow(self.session, [domain])
-        return domain
+        is_sf = False
+        if novel.author_id:
+            is_sf = bool(
+                self.session.execute(
+                    select(models.Author.is_special_follow).where(models.Author.author_id == novel.author_id)
+                ).scalar_one_or_none()
+            )
+        return _novel_from_orm(novel, is_special_follow=is_sf)
 
     def get_existing_ids(self, novel_ids: set[int]) -> set[int]:
         if not novel_ids:
@@ -378,15 +399,15 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         eng = self._require_engine()
         return eng.list_matching_ids(self._compile_engine_query(spec, restrict_ids=novel_ids))
 
-    def get_novel_cards_by_ids(self, novel_ids: list[int]) -> list[Novel]:
+    def get_novel_cards_by_ids(self, novel_ids: list[int]) -> list[NovelBase]:
         """Return card-projection novel models for the given IDs, in caller order."""
         if not novel_ids:
             return []
         eng = self._require_engine()
         return [_novel_from_record(rec) for rec in eng.get_novel_rows_by_ids(novel_ids)]
 
-    def get_novels_by_ids(self, novel_ids: list[int]) -> list[Novel]:
-        """Return full novel models for the given IDs, in the given order."""
+    def get_novels_by_ids(self, novel_ids: list[int]) -> list[StoredNovel]:
+        """Return stored novel projections for the given IDs, in the given order."""
         if not novel_ids:
             return []
         rows = (
@@ -396,8 +417,8 @@ class SQLAlchemyNovelReadRepository(BaseRepository):
         by_id = {n.id: n for n in novels}
         return [by_id[nid] for nid in novel_ids if nid in by_id]
 
-    def get_latest_novel_by_ids(self, novel_ids: list[int]) -> Novel | None:
-        """Return the highest-ID novel among *novel_ids* (without ``is_special_follow``)."""
+    def get_latest_novel_by_ids(self, novel_ids: list[int]) -> StoredNovel | None:
+        """Return the highest-ID stored novel among *novel_ids* (without ``is_special_follow``)."""
         if not novel_ids:
             return None
         row = self.session.execute(

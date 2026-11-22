@@ -13,7 +13,7 @@ from copixiv.core.naming import DEFAULT_NAMING_TEMPLATE, NovelNamingTemplate
 from copixiv.core.search import QuerySpec, SearchConditions
 from copixiv.db.tx import read_transaction
 from copixiv.db.uow import SqlUnitOfWork
-from copixiv.features.novels.repo import SQLAlchemyNovelRepository
+from copixiv.features.novels.repo import SQLAlchemyNovelRepository, StoredNovel
 from copixiv.storage.zip import build_batch_zip
 
 
@@ -96,16 +96,30 @@ class BatchDownloadUseCase:
                         min_text=min_text,
                     )
                 )
-                selected = results.get("novels", [])
-                missing_path_ids = {n.id for n in selected if n.id is not None and not n.path}
-                if missing_path_ids:
-                    stored_paths = repo.get_stored_paths(missing_path_ids)
-                    selected = [
-                        n.model_copy(update={"path": stored_paths.get(n.id)})
-                        if n.id is not None and not n.path and n.id in stored_paths
-                        else n
-                        for n in selected
-                    ]
+                selected_cards = results.get("novels", [])
+                stored_paths = repo.get_stored_paths({c.id for c in selected_cards}) if selected_cards else {}
+                selected = [
+                    StoredNovel(
+                        id=c.id,
+                        title=c.title,
+                        author_id=c.author_id,
+                        author_name=c.author_name,
+                        path=stored_paths.get(c.id),
+                        like=c.like,
+                        view=c.view,
+                        text=c.text,
+                        series_id=c.series_id,
+                        series_name=c.series_name,
+                        series_index=c.series_index,
+                        create_time=c.create_time,
+                        has_epub=c.has_epub,
+                        source=c.source,
+                        tags=c.tags,
+                        is_favourite=c.is_favourite,
+                        is_special_follow=c.is_special_follow,
+                    )
+                    for c in selected_cards
+                ]
             return selected
 
         novels = await read_transaction(self._uow, _load_novels)

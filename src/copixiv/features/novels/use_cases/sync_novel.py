@@ -50,7 +50,7 @@ from copixiv.core.exceptions import (
     NovelNotFoundError,
     ValidationError,
 )
-from copixiv.core.models import SOURCE_PIXIV, Novel
+from copixiv.core.models import SOURCE_PIXIV
 from copixiv.db.tx import read_transaction, run_write_transaction
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.authors.resolve_names import (
@@ -58,7 +58,7 @@ from copixiv.features.authors.resolve_names import (
     writeback_author_names,
 )
 from copixiv.features.novels.ingest.persist import persist_novels
-from copixiv.features.novels.repo import SQLAlchemyNovelRepository
+from copixiv.features.novels.repo import SQLAlchemyNovelRepository, StoredNovel
 from copixiv.log import logger
 from copixiv.pixiv.client import PixivClient
 
@@ -97,8 +97,8 @@ class SyncNovelUseCase:
         # 只为算 draft.path（``build_path``）——落库时它只在库中为 NULL 时才生效。
         self._download_dir = download_dir
 
-    async def execute(self, novel_id: int) -> Novel:
-        """重抓并落库，返回更新后的域模型（HTTP 层直接做 response_model）。
+    async def execute(self, novel_id: int) -> StoredNovel:
+        """重抓并落库，返回更新后的存储模型（HTTP 层直接做 response_model）。
 
         Raises:
             NotFoundError: 库里没有这一行 → 404；或 pixiv 上已不存在 / 受限
@@ -143,7 +143,7 @@ class SyncNovelUseCase:
     # 三个阶段：读（短事务）→ 抓（网络）→ 写（短事务）
     # ------------------------------------------------------------------
 
-    def _read(self, uow: SqlUnitOfWork, novel_id: int) -> Novel | None:
+    def _read(self, uow: SqlUnitOfWork, novel_id: int) -> StoredNovel | None:
         """短读事务读一行；读不到就是不存在。
 
         同步：事务边界由调用方的 ``read_transaction`` 提供（那个

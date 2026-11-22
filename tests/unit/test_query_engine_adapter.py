@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 
 from copixiv.core.search import normalize_search_segments
-from copixiv.core.snapshot_types import SlimNovelTuple
+from copixiv.core.snapshot_types import SlimNovelRecord, SlimTagRecord
 from copixiv.core.time import datetime_to_us, us_to_datetime
 from copixiv.query_engine.adapter import RustNovelQueryEngine
 from copixiv.query_engine.port import EngineCursor, EngineQuery
@@ -33,8 +33,8 @@ def _row(
     is_favourite: bool = False,
     is_special_follow: bool = False,
     tags: list[str] | None = None,
-) -> SlimNovelTuple:
-    return (
+) -> SlimNovelRecord:
+    return SlimNovelRecord(
         novel_id,
         title,
         author_id,
@@ -55,7 +55,7 @@ def _row(
 
 
 def _build_engine(
-    rows: list[SlimNovelTuple],
+    rows: list[SlimNovelRecord],
     *,
     blocked_tags: list[str] | None = None,
     exclude_default: bool = True,
@@ -234,7 +234,11 @@ def test_tag_suggestions_rebuild_flag_and_memory_breakdown():
         stg,
         [],
         True,
-        tags=[(1, "百合", 10), (2, "百合漫画", 5), (3, "日常", 8)],
+        tags=[
+            SlimTagRecord(1, "百合", 10),
+            SlimTagRecord(2, "百合漫画", 5),
+            SlimTagRecord(3, "日常", 8),
+        ],
         aliased_tag_ids=[],
     )
     assert eng.needs_rebuild() is False

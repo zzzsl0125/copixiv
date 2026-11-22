@@ -4,7 +4,7 @@ from .read_repo import (
     COUNT_CAP,
     NovelCount,
     SQLAlchemyNovelReadRepository,
-    _novel_from_orm,
+    StoredNovel,
 )
 from .write_repo import (
     BATCH_METADATA_COLUMNS,
@@ -19,5 +19,5 @@ __all__ = [
     "SQLAlchemyNovelReadRepository",
     "SQLAlchemyNovelRepository",
     "SQLAlchemyNovelWriteRepository",
-    "_novel_from_orm",
+    "StoredNovel",
 ]

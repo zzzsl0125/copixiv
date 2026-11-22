@@ -50,7 +50,7 @@ from datetime import datetime
 from typing import Any
 
 from copixiv.core.exceptions import NotFoundError, ValidationError
-from copixiv.core.models import UNKNOWN_AUTHOR, Novel
+from copixiv.core.models import UNKNOWN_AUTHOR
 from copixiv.core.models import author_id as _author_id
 from copixiv.core.models import series_id as _series_id
 from copixiv.core.text import MAX_TAG_LENGTH, parse_tags, validate_tags
@@ -61,7 +61,7 @@ from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 from copixiv.features.authors.resolve_names import lookup_author_profile
 from copixiv.features.novels import field_policy
-from copixiv.features.novels.repo import SQLAlchemyNovelRepository
+from copixiv.features.novels.repo import SQLAlchemyNovelRepository, StoredNovel
 from copixiv.features.series.repo import SQLAlchemySeriesRepository
 from copixiv.features.series.resolve import lookup_series_profile
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
@@ -102,8 +102,8 @@ class UpdateNovelMetadataUseCase:
         # 可选：为 None 时名字只能来自本地表（测试与离线场景）。
         self._client = client
 
-    async def execute(self, novel_id: int, changes: dict[str, Any]) -> Novel:
-        """应用 *changes*（只含客户端提交的键），返回更新后的域模型。
+    async def execute(self, novel_id: int, changes: dict[str, Any]) -> StoredNovel:
+        """应用 *changes*（只含客户端提交的键），返回更新后的存储模型。
 
         DB reads and writes run off the event loop via :func:`read_transaction`
         and :func:`run_write_transaction`; Pixiv lookups never hold an open
@@ -116,7 +116,7 @@ class UpdateNovelMetadataUseCase:
         if not changes:
             raise ValidationError("没有要更新的字段")
 
-        def _prepare(tx: SqlUnitOfWork) -> tuple[Novel, dict[str, Any]]:
+        def _prepare(tx: SqlUnitOfWork) -> tuple[StoredNovel, dict[str, Any]]:
             novel_repo = SQLAlchemyNovelRepository(tx.session)
             novel = novel_repo.get_by_id(novel_id)
             if novel is None:
@@ -143,7 +143,7 @@ class UpdateNovelMetadataUseCase:
             )
             values.update(series_values)
 
-        def _commit(tx: SqlUnitOfWork) -> Novel:
+        def _commit(tx: SqlUnitOfWork) -> StoredNovel:
             novel_repo = SQLAlchemyNovelRepository(tx.session)
             author_repo = SQLAlchemyAuthorRepository(tx.session)
             series_repo = SQLAlchemySeriesRepository(tx.session)
@@ -182,7 +182,7 @@ class UpdateNovelMetadataUseCase:
 
     def _build_values(
         self,
-        novel: Novel,
+        novel: StoredNovel,
         changes: dict[str, Any],
         tag_repo: SQLAlchemyTagRepository,
     ) -> dict[str, Any]:
@@ -222,7 +222,7 @@ class UpdateNovelMetadataUseCase:
     async def _author_columns(
         self,
         raw: Any,
-        novel: Novel,
+        novel: StoredNovel,
     ) -> tuple[dict[str, Any], tuple[int, str] | None]:
         """``author_id`` 提交值 → 列值 + 需要写回作者行的 ``(id, 名字)``。"""
         if raw is None:

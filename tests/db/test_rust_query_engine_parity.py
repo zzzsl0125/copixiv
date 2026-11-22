@@ -26,6 +26,7 @@ from copixiv.db.novel_snapshot import PgSnapshotStore
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
+from copixiv.features.novels.schemas import NovelBase
 from copixiv.features.series.repo import SQLAlchemySeriesRepository
 from copixiv.features.system.repo import SQLAlchemySettingRepository
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
@@ -285,6 +286,7 @@ def _assert_db_oracle_parity(session_factory, engine, specs: list[QuerySpec]) ->
 
         def _assert_cards_equal(novels: list[Any], context: str) -> None:
             for n in novels:
+                assert isinstance(n, NovelBase)
                 truth = by_id[n.id]
                 for f in card_fields:
                     got = getattr(n, f)

@@ -191,3 +191,15 @@ def test_http_endpoints_rust_engine_and_live_mutations(
         with zipfile.ZipFile(io.BytesIO(dl.content)) as zf:
             assert len(zf.namelist()) == 1
             assert zf.read(zf.namelist()[0]) == b"Novel One Body"
+
+        # PATCH returns NovelBase serialized directly from StoredNovel (no caption/source_key/path)
+        patched = client.patch("/api/novels/-5", json={"title": "LocalFiveEdited"})
+        assert patched.status_code == 200
+        patched_body = patched.json()
+        assert patched_body["id"] == -5
+        assert patched_body["title"] == "LocalFiveEdited"
+        assert patched_body["is_special_follow"] is True
+        assert "title" in patched_body["editable_fields"]
+        assert "caption" not in patched_body
+        assert "source_key" not in patched_body
+        assert "path" not in patched_body

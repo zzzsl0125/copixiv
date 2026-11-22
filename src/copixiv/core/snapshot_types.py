@@ -34,30 +34,7 @@ class SlimTagRecord(NamedTuple):
     reference_count: int
 
 
-SlimNovelTuple = tuple[
-    int,
-    str,
-    int | None,
-    str | None,
-    int | None,
-    str | None,
-    int | None,
-    int,
-    int,
-    int,
-    int,
-    int | None,
-    str,
-    bool,
-    bool,
-    list[str],
-]
-
-SlimTagTuple = tuple[int, str, int]
-
 __all__ = [
     "SlimNovelRecord",
-    "SlimNovelTuple",
     "SlimTagRecord",
-    "SlimTagTuple",
 ]

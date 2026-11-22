@@ -14,7 +14,7 @@ from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 
 from copixiv.core.search import EXCLUDE_BLOCKED_SETTING_KEY, resolve_exclude_blocked
-from copixiv.core.snapshot_types import SlimNovelRecord, SlimNovelTuple, SlimTagRecord, SlimTagTuple
+from copixiv.core.snapshot_types import SlimNovelRecord, SlimTagRecord
 from copixiv.core.time import datetime_to_us
 from copixiv.db import delta as engine_delta
 from copixiv.db import models
@@ -28,12 +28,12 @@ __all__ = [
 @dataclass(frozen=True)
 class SnapshotDeltaPayload:
     delete_ids: list[int]
-    upsert_rows: list[SlimNovelTuple]
+    upsert_rows: list[SlimNovelRecord]
     blocked_tags: list[str] | None
     exclude_blocked_default: bool | None
     special_follow_changes: list[tuple[int, bool]]
     delete_tag_names: list[str] | None
-    upsert_tags: list[SlimTagTuple] | None
+    upsert_tags: list[SlimTagRecord] | None
     aliased_tag_ids: list[int] | None
 
 
@@ -93,7 +93,7 @@ def _fetch_total_novel_count(session: Session) -> int:
 def _iter_all_novel_row_batches(
     session: Session,
     batch_size: int = 2_000,
-) -> Iterator[list[SlimNovelTuple]]:
+) -> Iterator[list[SlimNovelRecord]]:
     """Stream all novels (without ``content`` / ``caption``) in consistent batches."""
     stmt = (
         _slim_novel_select()
@@ -109,11 +109,11 @@ def _fetch_novel_rows_by_ids(
     session: Session,
     novel_ids: Sequence[int],
     chunk_size: int = 5_000,
-) -> list[SlimNovelTuple]:
+) -> list[SlimNovelRecord]:
     """Fetch slim rows for a list of novel IDs."""
     if not novel_ids:
         return []
-    out: list[SlimNovelTuple] = []
+    out: list[SlimNovelRecord] = []
     base = _slim_novel_select()
     for i in range(0, len(novel_ids), chunk_size):
         chunk = list(novel_ids[i : i + chunk_size])
@@ -159,7 +159,7 @@ def _fetch_author_sf_flags(
     return [(aid, sf_map.get(aid, False)) for aid in unique]
 
 
-def _fetch_all_tags(session: Session) -> list[SlimTagTuple]:
+def _fetch_all_tags(session: Session) -> list[SlimTagRecord]:
     rows = session.execute(select(models.Tag.id, models.Tag.name, models.Tag.reference_count)).all()
     return [SlimTagRecord(int(tid), str(name), int(rc)) for tid, name, rc in rows]
 
@@ -168,11 +168,11 @@ def _fetch_tags_by_names(
     session: Session,
     names: Sequence[str],
     chunk_size: int = 2_000,
-) -> tuple[list[SlimTagTuple], list[str]]:
+) -> tuple[list[SlimTagRecord], list[str]]:
     unique = list(dict.fromkeys(str(n) for n in names if n))
     if not unique:
         return [], []
-    upserts: list[SlimTagTuple] = []
+    upserts: list[SlimTagRecord] = []
     found_names: set[str] = set()
     for i in range(0, len(unique), chunk_size):
         chunk = unique[i : i + chunk_size]
@@ -220,9 +220,9 @@ class PgSnapshotStore:
     def stream_snapshot(
         self,
         consume_total: Callable[[int], None],
-        consume_batch: Callable[[list[SlimNovelTuple]], None],
+        consume_batch: Callable[[list[SlimNovelRecord]], None],
         batch_size: int = 2_000,
-    ) -> tuple[list[str], bool, list[SlimTagTuple], list[int]]:
+    ) -> tuple[list[str], bool, list[SlimTagRecord], list[int]]:
         """Stream all novels, metadata, and tags under one consistent snapshot."""
         with self._snapshot_session() as session:
             consume_total(_fetch_total_novel_count(session))
@@ -252,7 +252,7 @@ class PgSnapshotStore:
                 _fetch_exclude_blocked_default(session) if pending.exclude_setting_dirty else None
             )
 
-            upsert_tags: list[SlimTagTuple] | None = None
+            upsert_tags: list[SlimTagRecord] | None = None
             delete_tag_names: list[str] | None = None
             if pending.tag_names:
                 upsert_tags, delete_tag_names = _fetch_tags_by_names(session, sorted(pending.tag_names))

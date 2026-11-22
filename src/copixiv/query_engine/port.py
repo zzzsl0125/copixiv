@@ -1,66 +1,12 @@
-"""Protocol and DTOs for the in-process novel and tag query engine adapter."""
+"""DTOs for the in-process novel and tag query engine adapter."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any
 
-from copixiv.core.snapshot_types import SlimNovelTuple, SlimTagTuple
-
-
-class PendingDeltaProtocol(Protocol):
-    novel_ids: set[int]
-    author_ids: set[int]
-    tag_names: set[str]
-    aliases_dirty: bool
-    blocked_tags_dirty: bool
-    exclude_setting_dirty: bool
-
-    def is_empty(self) -> bool: ...
-
-
-class SnapshotDeltaProtocol(Protocol):
-    @property
-    def delete_ids(self) -> list[int]: ...
-    @property
-    def upsert_rows(self) -> list[SlimNovelTuple]: ...
-    @property
-    def blocked_tags(self) -> list[str] | None: ...
-    @property
-    def exclude_blocked_default(self) -> bool | None: ...
-    @property
-    def special_follow_changes(self) -> list[tuple[int, bool]]: ...
-    @property
-    def delete_tag_names(self) -> list[str] | None: ...
-    @property
-    def upsert_tags(self) -> list[SlimTagTuple] | None: ...
-    @property
-    def aliased_tag_ids(self) -> list[int] | None: ...
-
-
-class SnapshotStoreProtocol(Protocol):
-    """Data-layer snapshot/delta store injected by the composition root."""
-
-    def stream_snapshot(
-        self,
-        consume_total: Callable[[int], None],
-        consume_batch: Callable[[list[SlimNovelTuple]], None],
-        batch_size: int = 2_000,
-    ) -> tuple[list[str], bool, list[SlimTagTuple], list[int]]: ...
-
-    def fetch_delta_payload(
-        self,
-        pending: PendingDeltaProtocol,
-    ) -> SnapshotDeltaProtocol: ...
-
-    def attach_runtime(
-        self,
-        engine: Any,
-        hook: Callable[[PendingDeltaProtocol], None],
-    ) -> None: ...
-
-    def detach_runtime(self) -> None: ...
+if TYPE_CHECKING:
+    import copixiv_rs
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,64 +38,11 @@ class EngineCursor:
     random_h_hex: str | None = None
 
 
-class EngineNovelRecord(Protocol):
-    """Typed attribute view matching ``copixiv_rs.NovelRecord``."""
-
-    @property
-    def id(self) -> int: ...
-    @property
-    def title(self) -> str: ...
-    @property
-    def author_id(self) -> int | None: ...
-    @property
-    def author_name(self) -> str | None: ...
-    @property
-    def series_id(self) -> int | None: ...
-    @property
-    def series_name(self) -> str | None: ...
-    @property
-    def series_index(self) -> int | None: ...
-    @property
-    def text(self) -> int: ...
-    @property
-    def like(self) -> int: ...
-    @property
-    def view(self) -> int: ...
-    @property
-    def has_epub(self) -> int: ...
-    @property
-    def create_time_us(self) -> int | None: ...
-    @property
-    def source(self) -> str: ...
-    @property
-    def is_favourite(self) -> bool: ...
-    @property
-    def is_special_follow(self) -> bool: ...
-    @property
-    def tags(self) -> list[str]: ...
-
-
-class TagCandidateProtocol(Protocol):
-    @property
-    def id(self) -> int: ...
-    @property
-    def name(self) -> str: ...
-    @property
-    def reference_count(self) -> int: ...
-
-
-class TagSuggestItemProtocol(Protocol):
-    @property
-    def target(self) -> TagCandidateProtocol: ...
-    @property
-    def candidates(self) -> list[TagCandidateProtocol]: ...
-
-
 @dataclass(frozen=True, slots=True)
 class EnginePageRowsResult:
     """Result of ``query_novel_rows``: materialized rows + pagination flags."""
 
-    rows: list[EngineNovelRecord]
+    rows: list[copixiv_rs.NovelRecord]
     has_more: bool
     random_cursor: dict[str, Any] | None = None
 
@@ -162,67 +55,9 @@ class EngineCountResult:
     truncated: bool
 
 
-class NovelQueryEnginePort(Protocol):
-    """Port implemented by ``RustNovelQueryEngine``."""
-
-    def ready(self) -> bool: ...
-
-    def needs_rebuild(self) -> bool: ...
-
-    def mark_needs_rebuild(self) -> None: ...
-
-    def swap_from_staging(
-        self,
-        staging: Any,
-        blocked_tags: list[str],
-        exclude_blocked_default: bool,
-        tags: list[SlimTagTuple] | None = None,
-        aliased_tag_ids: list[int] | None = None,
-    ) -> None: ...
-
-    def apply_delta(
-        self,
-        *,
-        delete_ids: Sequence[int] = (),
-        upsert_rows: Iterable[SlimNovelTuple] = (),
-        blocked_tags: Sequence[str] | None = None,
-        exclude_blocked_default: bool | None = None,
-        special_follow_changes: Sequence[tuple[int, bool]] = (),
-        delete_tag_names: Sequence[str] | None = None,
-        upsert_tags: Sequence[SlimTagTuple] | None = None,
-        aliased_tag_ids: Sequence[int] | None = None,
-    ) -> None: ...
-
-    def query_novel_rows(
-        self,
-        query: EngineQuery,
-        *,
-        order_by: str,
-        descending: bool,
-        limit: int,
-        cursor: EngineCursor | None = None,
-    ) -> EnginePageRowsResult: ...
-
-    def get_novel_rows_by_ids(self, novel_ids: list[int]) -> list[EngineNovelRecord]: ...
-
-    def count_novels(self, query: EngineQuery, *, cap: int) -> EngineCountResult: ...
-
-    def has_match(self, query: EngineQuery) -> bool: ...
-
-    def list_matching_ids(self, query: EngineQuery) -> list[int]: ...
-
-    def sort_ids(
-        self,
-        novel_ids: list[int],
-        *,
-        order_by: str,
-        descending: bool,
-    ) -> list[int]: ...
-
-    def suggest_tag_aliases(
-        self,
-        *,
-        limit: int = 5,
-        offset: int = 0,
-        target_tag: str | None = None,
-    ) -> tuple[list[TagSuggestItemProtocol], int | None]: ...
+__all__ = [
+    "EngineCountResult",
+    "EngineCursor",
+    "EnginePageRowsResult",
+    "EngineQuery",
+]

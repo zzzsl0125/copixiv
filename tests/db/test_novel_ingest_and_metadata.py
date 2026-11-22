@@ -192,6 +192,11 @@ async def test_update_novel_metadata_policy_and_unlink_semantics(
             "create_time": "2026-10-19",
         },
     )
+    from copixiv.features.novels.repo import StoredNovel
+
+    assert isinstance(updated, StoredNovel)
+    assert not hasattr(updated, "caption")
+    assert not hasattr(updated, "source_key")
     assert updated.title == "LocalRenamed"
     assert updated.series_name == "LocalSeries"
     assert updated.series_index == 3
