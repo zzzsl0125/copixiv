@@ -8,10 +8,9 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from copixiv.db.tx import read_transaction, run_write_transaction_sync
-from copixiv.db.uow import SqlUnitOfWork
 from copixiv.deps import PixivClientDep, UowDep
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
-from copixiv.features.authors.resolve_names import fetch_author_name
+from copixiv.features.authors.resolve_names import lookup_author_profile
 
 
 class AuthorLookupResponse(BaseModel):
@@ -62,24 +61,14 @@ async def lookup_author(
     也不用动路由前缀的接线测试。
     """
 
-    def _read_author(tx: SqlUnitOfWork) -> tuple[str | None, int]:
-        repo = SQLAlchemyAuthorRepository(tx.session)
-        known = repo.get_names_by_ids({author_id})
-        count = repo.count_novels_by_author(author_id)
-        return known.get(author_id), count
-
-    local_name, novel_count = await read_transaction(uow, _read_author)
-    if local_name is not None:
-        return AuthorLookupResponse(
-            author_id=author_id,
-            author_name=local_name,
-            source="local",
-            novel_count=novel_count,
-        )
-    pixiv_name = await fetch_author_name(client, author_id)
+    profile = await lookup_author_profile(author_id, uow=uow, client=client)
+    novel_count = await read_transaction(
+        uow,
+        lambda tx: SQLAlchemyAuthorRepository(tx.session).count_novels_by_author(author_id),
+    )
     return AuthorLookupResponse(
-        author_id=author_id,
-        author_name=pixiv_name,
-        source="pixiv" if pixiv_name else "unknown",
+        author_id=profile.author_id,
+        author_name=profile.author_name or None,
+        source=profile.source,
         novel_count=novel_count,
     )

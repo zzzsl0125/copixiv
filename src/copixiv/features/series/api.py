@@ -8,10 +8,9 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from copixiv.db.tx import read_transaction
-from copixiv.db.uow import SqlUnitOfWork
 from copixiv.deps import PixivClientDep, UowDep
 from copixiv.features.series.repo import SQLAlchemySeriesRepository
-from copixiv.features.series.resolve import fetch_series_name
+from copixiv.features.series.resolve import lookup_series_profile
 
 
 class SeriesLookupResponse(BaseModel):
@@ -43,22 +42,14 @@ async def lookup_series(
     行 → 同系列的 novel 行 → pixiv ``novel_series``（前两步都是本地查询）。
     """
 
-    def _read_series(tx: SqlUnitOfWork) -> tuple[str | None, int]:
-        repo = SQLAlchemySeriesRepository(tx.session)
-        return repo.get_name_fallback(series_id), repo.count_novels_by_series(series_id)
-
-    local_name, novel_count = await read_transaction(uow, _read_series)
-    if local_name:
-        return SeriesLookupResponse(
-            series_id=series_id,
-            series_name=local_name,
-            source="local",
-            novel_count=novel_count,
-        )
-    pixiv_name = await fetch_series_name(client, series_id)
+    profile = await lookup_series_profile(series_id, uow=uow, client=client)
+    novel_count = await read_transaction(
+        uow,
+        lambda tx: SQLAlchemySeriesRepository(tx.session).count_novels_by_series(series_id),
+    )
     return SeriesLookupResponse(
-        series_id=series_id,
-        series_name=pixiv_name,
-        source="pixiv" if pixiv_name else "unknown",
+        series_id=profile.series_id,
+        series_name=profile.series_name or None,
+        source=profile.source,
         novel_count=novel_count,
     )

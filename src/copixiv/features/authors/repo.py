@@ -9,15 +9,11 @@ from sqlalchemy import update as _update
 from sqlalchemy.orm import Session
 
 from copixiv.core.exceptions import NotFoundError
-from copixiv.db import constants as C
 from copixiv.db import delta as engine_delta
 from copixiv.db import models
 from copixiv.db.base import (
     BaseRepository,
-    ensure_parent_rows,
     model_to_dict,
-    refresh_parent_summaries,
-    update_summary,
 )
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
 
@@ -27,10 +23,6 @@ class SQLAlchemyAuthorRepository(BaseRepository):
 
     def __init__(self, session: Session):
         super().__init__(session)
-
-    def ensure_exists(self, author_ids: set[int]) -> None:
-        """INSERT ... ON CONFLICT DO NOTHING placeholder rows (FK safety)."""
-        ensure_parent_rows(self.session, author_ids=author_ids)
 
     def get_by_id(self, author_id: int) -> dict | None:
         author = self.session.get(models.Author, author_id)
@@ -66,24 +58,11 @@ class SQLAlchemyAuthorRepository(BaseRepository):
             ).scalar_one()
         )
 
-    def need_update(self, author_id: int) -> bool:
+    def was_updated_today(self, author_id: int) -> bool:
         author = self.session.get(models.Author, author_id)
         if author and author.last_update:
-            last = author.last_update
-            if last.tzinfo is None:
-                last = last.replace(tzinfo=UTC)
-            return (datetime.now(UTC) - last).days > 0
-        return True
-
-    def update_summary(self, author_ids: set[int] | None = None) -> None:
-        """Recalculate author aggregates."""
-        update_summary(
-            self.session,
-            models.Author,
-            C.COL_AUTHOR_ID,
-            author_ids,
-            extra_columns=[func.max(models.Novel.author_name).label(C.COL_AUTHOR_NAME)],
-        )
+            return (datetime.now(UTC) - author.last_update).days <= 0
+        return False
 
     def update_author_name(self, author_id: int, name: str) -> None:
         """Write *name* to the author row **and** normalise its novel rows.
@@ -110,7 +89,12 @@ class SQLAlchemyAuthorRepository(BaseRepository):
         if changed_ids:
             engine_delta.record_novel_upserts(self.session, changed_ids)
         self.session.execute(
-            _update(models.Author).where(models.Author.author_id == author_id).values(author_name=name)
+            _update(models.Author)
+            .where(
+                models.Author.author_id == author_id,
+                models.Author.author_name.is_distinct_from(name),
+            )
+            .values(author_name=name)
         )
 
     def update_last_update(self, author_id: int) -> None:
@@ -165,30 +149,25 @@ class SQLAlchemyAuthorRepository(BaseRepository):
             empty_series = check_series - non_empty_series
             if empty_series:
                 self.session.execute(_delete(models.Series).where(models.Series.series_id.in_(empty_series)))
-            if non_empty_series:
-                # Detach deleted author before deleting the author row and
-                # recompute summary aggregates for remaining shared series.
-                self.session.execute(
-                    _update(models.Series)
-                    .where(
-                        models.Series.series_id.in_(non_empty_series),
-                        models.Series.author_id == author_id,
-                    )
-                    .values(author_id=None)
-                )
-                refresh_parent_summaries(self.session, series_ids=non_empty_series)
+        else:
+            non_empty_series = set()
 
         self.session.execute(_delete(models.Author).where(models.Author.author_id == author_id))
-        return paths
-
-    def get_empty_author_ids(self) -> list[int]:
-        return list(
-            self.session.execute(
-                _select(models.Author.author_id).where(models.Author.author_name.is_(None)).distinct()
+        if non_empty_series:
+            remaining_author_subq = (
+                _select(func.max(models.Novel.author_id))
+                .where(models.Novel.series_id == models.Series.series_id)
+                .scalar_subquery()
             )
-            .scalars()
-            .all()
-        )
+            self.session.execute(
+                _update(models.Series)
+                .where(
+                    models.Series.series_id.in_(non_empty_series),
+                    models.Series.author_id.is_(None),
+                )
+                .values(author_id=remaining_author_subq)
+            )
+        return paths
 
     def get_special_follow_author_ids(self) -> list[int]:
         return list(

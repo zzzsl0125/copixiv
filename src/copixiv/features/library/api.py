@@ -1,41 +1,28 @@
 """「我的上传」API —— ``POST /api/library/uploads``（docs/LIBRARY_DESIGN.md §4）。
 
 multipart，字段名 ``files``（可重复，承载多文件）；可选表单字段 ``author_id``
-（**整批共用**：一次上传的这批书挂同一位作者）。写端点必须声明
-``Depends(get_write_uow)``（``tests/regression/test_m6_write_lock.py`` 执法）。
+（**整批共用**：一次上传的这批书挂同一位作者）。
 
 收 **TXT 与 EPUB** 两种本地文件（同一批可以混着来）：分派与解析在
 ``ingest.py`` / ``storage.epub.reader``，本端点对格式无感知——
 多文件时按文件逐个分派，TXT 走解码管线、EPUB 走抽取管线（§4.1）。
 
 **写事务纪律（本端点的形状由它决定）：名字解析必须在写事务之前完成。**
-``ingest_uploads`` 一进去就拿事务级咨询锁（``pg_advisory_xact_lock``，
-``ingest.py::_lock_local_ids``），而作者名解析可能要问一次 pixiv
-（``lookup_author_profile``：本地表优先、pixiv 兜底）。把网络调用留在写事务里
-= 拿着咨询锁 + 一个开着的事务等外部 HTTP，锁与连接都被一个慢对端攥着
-（``sync_novel.py`` 是同一条纪律的另一个形状）。所以这里拆成两步：
+``ingest_uploads`` 一进去就拿事务级咨询锁（``pg_advisory_xact_lock``），而作者名
+解析可能要问一次 pixiv（``lookup_author_profile``：本地表优先、pixiv 兜底）。
+如果把网络调用留在写事务里，等于拿着咨询锁 + 一个开着的事务等外部 HTTP。
+所以这里用单个 ``uow: UowDep`` 明确分两阶段执行：
 
-1. ``Depends(get_uow)``（读事务）：解析一次名字（整批共用，``lookup_author_profile``
-   **只调一次**）——本地表命中时零网络，没有再问 pixiv；解析结果与占位行
-   在这一步提交（见下）；
-2. ``Depends(get_write_uow)``：``with write_uow.begin():`` 里落库
-   （``ensure_exists`` 兜底 + ``ingest_uploads``）。写事务里没有网络。
-
-两个 UoW 的 ``session`` 都是**懒创建**的：依赖注入阶段的 ``begin()`` 只占位，
-谁先碰 ``session`` 谁才真正开事务。于是"读 UoW 在写 UoW 之前"不是装饰——真正
-的写事务（含那把咨询锁）确实晚于 pixiv 调用。两个 ``ensure_exists`` 的分工也
-由此而来：读事务里那次建完**随读事务一起提交**（所以显式再包一层
-``uow.begin()``，而不是把它挂到请求末尾的依赖回收上去提交）。这不是洁癖，是
-必须：写事务里那条同键 ``INSERT ... ON CONFLICT DO NOTHING`` 会**等**读事务里
-那个尚未提交的元组（PG 的推测插入等待），而读事务只会在响应之后的依赖回收里
-提交——端点于是自己把自己锁死，且默认没有超时。写事务里那次 ``ensure_exists``
-是幂等兜底（行已提交，不再等锁）。
+1. 若提供了 ``author_id``，先在写事务外调用 ``lookup_author_profile``
+   解析一次名字（整批共用，本地表命中时零网络，只在未命中时请求 pixiv）；
+2. 再通过 ``run_write_transaction(uow, ...)`` 在独立写事务中调用
+   ``ingest_uploads`` 落库（写事务内无网络调用）。
 
 响应契约（前端 ``frontend/src/types/uploads.ts`` 已按此实现）：
 
 * ``200`` + 逐条结果 —— 部分成功（有的入库、有的重复、有的失败）也是 200；
-* ``400`` —— 一个文件都没带；单个文件超过 :data:`MAX_UPLOAD_BYTES`；
-  ``author_id`` 不是正整数（0 / 负数）；
+* ``400`` —— 一个文件都没带；单个文件超过 :data:`MAX_UPLOAD_BYTES` 或整批
+  总大小超过 :data:`MAX_BATCH_UPLOAD_BYTES`；``author_id`` 不是正整数（0 / 负数）；
 * ``422`` —— ``author_id`` 不是整数（``"abc"``，FastAPI 类型转换阶段）。
 
 **体积上限在这一层拦**（:func:`_read_capped`）：``ingest`` 拿到的已经是完整
@@ -56,9 +43,10 @@ from fastapi import APIRouter, File, Form, UploadFile
 
 from copixiv.core.exceptions import ValidationError
 from copixiv.core.models import author_id as _author_id
+from copixiv.db.tx import run_write_transaction
 from copixiv.deps import (
     FileStorageDep,
-    OptionalPixivClientDep,
+    PixivClientDep,
     UowDep,
 )
 from copixiv.features.authors.resolve_names import lookup_author_profile
@@ -79,6 +67,8 @@ router = APIRouter()
 # 有能力把进程的内存打满。
 MAX_UPLOAD_BYTES = 128 * 1024 * 1024
 UPLOAD_TOO_LARGE_ERROR = "文件过大（单个文件最多 128 MB）"
+MAX_BATCH_UPLOAD_BYTES = 512 * 1024 * 1024
+BATCH_TOO_LARGE_ERROR = "单批上传总大小过大（单批最多 512 MB）"
 
 
 async def _read_capped(upload: UploadFile) -> bytes:
@@ -107,7 +97,7 @@ async def _read_capped(upload: UploadFile) -> bytes:
 async def upload_novels(
     file_storage: FileStorageDep,
     uow: UowDep,
-    client: OptionalPixivClientDep = None,
+    client: PixivClientDep,
     files: Annotated[list[UploadFile] | None, File()] = None,
     # ``int | None``：multipart 送来的是字符串，由 FastAPI 转换 —— ``"abc"``
     # 在这一步就是 422（类型不是业务规则）；``0`` / ``-5`` 能转成 int，落到下面
@@ -135,7 +125,14 @@ async def upload_novels(
     if not files:
         raise ValidationError("请选择要上传的 TXT / EPUB 文件")
 
-    payloads = [(upload.filename or "未命名.txt", await _read_capped(upload)) for upload in files]
+    payloads: list[tuple[str, bytes]] = []
+    total_bytes = 0
+    for upload in files:
+        data = await _read_capped(upload)
+        total_bytes += len(data)
+        if total_bytes > MAX_BATCH_UPLOAD_BYTES:
+            raise ValidationError(BATCH_TOO_LARGE_ERROR)
+        payloads.append((upload.filename or "未命名.txt", data))
 
     preset_author_id: int | None = None
     preset_author_name: str | None = None
@@ -151,8 +148,6 @@ async def upload_novels(
         preset_author_name = profile.author_name
 
     # ---- 落库：写事务（咨询锁在里面），无网络 ----
-    from copixiv.db.tx import run_write_transaction
-
     results = await run_write_transaction(
         uow,
         lambda tx: ingest_uploads(

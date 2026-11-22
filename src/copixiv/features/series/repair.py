@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from copixiv.core.draft import guess_series_order, safe_get
 from copixiv.core.models import TaskResult
 from copixiv.db.tx import read_transaction, run_write_transaction
@@ -15,14 +17,20 @@ from copixiv.pixiv.client import PixivClient
 _SERIES_CURSOR_KEY = "fix_series_index.cursor"
 _ORPHAN_CURSOR_KEY = "fix_series_index.orphan_cursor"
 _SWEEP_CURSOR_KEY = "fix_series_index.sweep_cursor"
+_ROSTER_ABSENT_KEY = "fix_series_index.roster_absent"
 
 
-async def _read_cursor(uow: SqlUnitOfWork, key: str) -> int:
-    return await read_transaction(uow, lambda uw: SQLAlchemySettingRepository(uw.session).get_int(key, 0))
-
-
-async def _write_cursor(uow: SqlUnitOfWork, value: int, key: str) -> None:
-    await run_write_transaction(uow, lambda uw: SQLAlchemySettingRepository(uw.session).set_int(key, value))
+def _load_roster_absent(settings: SQLAlchemySettingRepository) -> set[int]:
+    raw = settings.get_value(_ROSTER_ABSENT_KEY)
+    if not raw:
+        return set()
+    try:
+        items = json.loads(raw)
+    except ValueError:
+        return set()
+    if not isinstance(items, list):
+        return set()
+    return {int(x) for x in items if isinstance(x, int) or (isinstance(x, str) and x.isdigit())}
 
 
 def _page(ids: list[int], cap: int | None) -> tuple[list[int], bool]:
@@ -47,10 +55,6 @@ async def run_series_repair(
     sweep_all: bool = False,
 ) -> TaskResult:
     """Repair missing/mismatched ``series_index`` values and orphan ``series_id`` rows."""
-    series_cursor = await _read_cursor(uow, _SERIES_CURSOR_KEY)
-    orphan_cursor = await _read_cursor(uow, _ORPHAN_CURSOR_KEY)
-    sweep_cursor = await _read_cursor(uow, _SWEEP_CURSOR_KEY)
-
     single_book_ids = await read_transaction(
         uow,
         lambda uw: SQLAlchemySeriesRepository(uw.session).single_book_series_missing_index(),
@@ -67,24 +71,42 @@ async def run_series_repair(
             f"（免去 {len(single_book_ids)} 次名册请求）"
         )
 
-    def _read_candidates(uw) -> tuple[list[int], list, list[int]]:
+    def _read_candidates(
+        uw,
+    ) -> tuple[int, int, int, set[int], set[int], list[int], list, list[int]]:
+        settings = SQLAlchemySettingRepository(uw.session)
+        s_cursor = settings.get_int(_SERIES_CURSOR_KEY, 0)
+        o_cursor = settings.get_int(_ORPHAN_CURSOR_KEY, 0)
+        w_cursor = settings.get_int(_SWEEP_CURSOR_KEY, 0)
+        absent_ids = _load_roster_absent(settings)
+        dl_ids = series_ledger.tracked_series_ids(uw.session)
+
         repo = SQLAlchemySeriesRepository(uw.session)
-        candidates = sorted(repo.series_with_empty_index())
+        cands = sorted(sid for sid in repo.series_with_empty_index() if sid not in absent_ids)
         orphans = repo.novels_with_orphan_index(
             limit=(max_orphans + 1 if max_orphans is not None else None),
-            after_id=orphan_cursor,
+            after_id=o_cursor,
         )
         sweeps = (
             repo.series_with_stored_index(
-                after_id=sweep_cursor,
+                after_id=w_cursor,
                 limit=(max_sweep + 1 if max_sweep is not None else None),
             )
             if sweep_all
             else []
         )
-        return candidates, orphans, sweeps
+        return s_cursor, o_cursor, w_cursor, absent_ids, dl_ids, cands, orphans, sweeps
 
-    candidates, orphan_candidates, sweep_candidates = await read_transaction(uow, _read_candidates)
+    (
+        series_cursor,
+        orphan_cursor,
+        sweep_cursor,
+        roster_absent_ids,
+        dead_letter_ids,
+        candidates,
+        orphan_candidates,
+        sweep_candidates,
+    ) = await read_transaction(uow, _read_candidates)
 
     series_page, series_truncated = _page([sid for sid in candidates if sid > series_cursor], max_series)
     orphan_truncated = max_orphans is not None and len(orphan_candidates) > max_orphans
@@ -93,12 +115,23 @@ async def run_series_repair(
     sweep_page = sweep_candidates[:max_sweep] if max_sweep is not None else sweep_candidates
 
     if not series_page and not orphan_page and not sweep_page:
-        if series_cursor:
-            await _write_cursor(uow, 0, _SERIES_CURSOR_KEY)
-        if orphan_cursor:
-            await _write_cursor(uow, 0, _ORPHAN_CURSOR_KEY)
-        if sweep_cursor:
-            await _write_cursor(uow, 0, _SWEEP_CURSOR_KEY)
+        reset_keys = [
+            key
+            for key, val in (
+                (_SERIES_CURSOR_KEY, series_cursor),
+                (_ORPHAN_CURSOR_KEY, orphan_cursor),
+                (_SWEEP_CURSOR_KEY, sweep_cursor),
+            )
+            if val
+        ]
+        if reset_keys:
+
+            def _reset_cursors(uw: SqlUnitOfWork) -> None:
+                settings = SQLAlchemySettingRepository(uw.session)
+                for key in reset_keys:
+                    settings.set_int(key, 0)
+
+            await run_write_transaction(uow, _reset_cursors)
         return TaskResult(summary="系列章节号检查: 无需修复")
 
     stats = {
@@ -112,6 +145,8 @@ async def run_series_repair(
         "failed": 0,
     }
     rosters: dict[int, list | None] = {}
+    new_roster_absent_ids: set[int] = set()
+    cursor_updates: dict[str, int] = {}
 
     async def _note_roster_failure(series_id: int, exc: BaseException) -> None:
         try:
@@ -138,8 +173,9 @@ async def run_series_repair(
             else:
                 novels = safe_get(resp, "novels", None)
                 rosters[series_id] = list(novels) if novels else None
-                if rosters[series_id] is not None or novels is not None:
+                if (rosters[series_id] is not None or novels is not None) and series_id in dead_letter_ids:
                     await _note_roster_success(series_id)
+                    dead_letter_ids.discard(series_id)
         return rosters[series_id]
 
     async def _apply_roster(
@@ -160,15 +196,21 @@ async def run_series_repair(
 
         fills: dict[int, int] = {}
         fixes: dict[int, int] = {}
+        has_unresolvable_missing = False
         for columns in stored:
             novel_id = int(columns["id"])
             want = authority.get(novel_id)
             if want is None or not columns.get("author_id"):
+                if columns["series_index"] is None:
+                    has_unresolvable_missing = True
                 continue
             if columns["series_index"] is None:
                 fills[novel_id] = want
             elif int(columns["series_index"]) != want:
                 fixes[novel_id] = want
+
+        if has_unresolvable_missing:
+            new_roster_absent_ids.add(series_id)
 
         glue_items: list[tuple[int, dict, str | None, int | None, int]] = []
         for novel_id, (columns, series_name, author_id) in forced.items():
@@ -277,10 +319,11 @@ async def run_series_repair(
                 stats["filled"] += filled
                 stats["fixed"] += fixed
                 stats[counter] += 1
-            await _write_cursor(uow, next_cursor, key)
 
         if not truncated and (cursor or page):
-            await _write_cursor(uow, 0, key)
+            cursor_updates[key] = 0
+        elif page:
+            cursor_updates[key] = next_cursor
 
     await _run_roster_branch(series_page, series_cursor, _SERIES_CURSOR_KEY, "series_done", series_truncated)
 
@@ -290,16 +333,20 @@ async def run_series_repair(
         columns = await _stored_columns(uow, novel_id)
         if columns is None:
             stats["failed"] += 1
-            await _write_cursor(uow, orphan_next, _ORPHAN_CURSOR_KEY)
             continue
         try:
             data = await client.webview_novel(novel_id)
         except Exception as exc:  # noqa: BLE001
+            if series_ledger.is_definitive_error(exc):
+                logger.info(f"fix_series_index: #{novel_id} 已在 Pixiv 删除 ({exc})，清除残留 series_index")
+                await _clear_orphan_index(columns)
+                stats["cleared"] += 1
+                stats["orphan_done"] += 1
+                continue
             logger.warning(f"fix_series_index: #{novel_id} webview 请求失败: {exc}")
             data = None
         if not data:
             stats["failed"] += 1
-            await _write_cursor(uow, orphan_next, _ORPHAN_CURSOR_KEY)
             continue
 
         series_id = safe_get(data, "series_id")
@@ -318,13 +365,26 @@ async def run_series_repair(
             stats["failed"] += 1
         else:
             stats["orphan_done"] += 1
-        await _write_cursor(uow, orphan_next, _ORPHAN_CURSOR_KEY)
 
     if not orphan_truncated and (orphan_cursor or orphan_page):
-        await _write_cursor(uow, 0, _ORPHAN_CURSOR_KEY)
+        cursor_updates[_ORPHAN_CURSOR_KEY] = 0
+    elif orphan_page:
+        cursor_updates[_ORPHAN_CURSOR_KEY] = orphan_next
 
     if sweep_all:
         await _run_roster_branch(sweep_page, sweep_cursor, _SWEEP_CURSOR_KEY, "sweep_done", sweep_truncated)
+
+    if cursor_updates or new_roster_absent_ids:
+
+        def _persist_round_state(uw: SqlUnitOfWork) -> None:
+            settings = SQLAlchemySettingRepository(uw.session)
+            for key, value in cursor_updates.items():
+                settings.set_int(key, value)
+            if new_roster_absent_ids:
+                updated = sorted(roster_absent_ids | new_roster_absent_ids)
+                settings.set_value(_ROSTER_ABSENT_KEY, json.dumps(updated))
+
+        await run_write_transaction(uow, _persist_round_state)
 
     if stats["series_done"] == 0 and stats["orphan_done"] == 0 and stats["sweep_done"] == 0:
         return TaskResult(summary="系列章节号检查: API 请求全部失败")

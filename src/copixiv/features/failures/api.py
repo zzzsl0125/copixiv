@@ -4,14 +4,11 @@ Exposes the ``failed_novel`` table (the download-failure ledger) so the
 frontend can show what failed, when, and why — and act on it:
 
 - ``GET /api/failed-novels``        — paginated list; actionable failures
-  first (newest first), "Page not found" family (deleted/unfetchable
+  first (newest first), "not found" family (deleted/unfetchable
   works) last
-- ``GET /api/failed-novels/count``  — sidebar badge number
 - ``POST /api/failed-novels/{novel_id}/reset-count`` — reset one record's
   failure count to 0 (record stays; unblocks automatic retry)
 - ``POST /api/failed-novels/reset-count`` — reset every count
-- ``DELETE /api/failed-novels/{novel_id}`` — clear one record entirely
-- ``DELETE /api/failed-novels``     — clear the whole ledger
 - ``POST /api/failed-novels/retry`` — enqueue a ``failed_retry`` task for
   the given ids (runs through the task system, so the global execution
   lock and history recording apply)
@@ -29,7 +26,6 @@ from fastapi import APIRouter, Query
 from pydantic import BaseModel, ConfigDict
 
 from copixiv.core.exceptions import ValidationError
-from copixiv.core.models import BatchTaskResponse
 from copixiv.db.tx import run_write_transaction_sync
 from copixiv.deps import TaskManagerDep, UowDep
 from copixiv.features.failures.repo import FailedNovelRepository
@@ -64,12 +60,15 @@ class FailedNovelListResponse(BaseModel):
     limit: int = 100
 
 
-class FailedNovelCountResponse(BaseModel):
-    count: int
-
-
 class FailedNovelRetryRequest(BaseModel):
     novel_ids: list[int]
+
+
+class BatchTaskResponse(BaseModel):
+    """A batch operation enqueued into the background task system."""
+
+    task_id: int
+    matched: int
 
 
 router = APIRouter()
@@ -86,7 +85,7 @@ def list_failed_novels(
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ):
-    with uow.begin():
+    with uow.begin(read_only=True):
         repo = FailedNovelRepository(uow.session)
         items = repo.list_failures(offset=offset, limit=limit)
         total = repo.count()
@@ -96,23 +95,6 @@ def list_failed_novels(
             offset=offset,
             limit=limit,
         )
-
-
-@router.get("/count", response_model=FailedNovelCountResponse)
-def count_failed_novels(
-    uow: UowDep,
-):
-    with uow.begin():
-        return FailedNovelCountResponse(count=FailedNovelRepository(uow.session).count())
-
-
-@router.delete("/{novel_id}", status_code=204)
-def delete_failed_novel(
-    novel_id: int,
-    uow: UowDep,
-):
-    """Clear one failure record (unblocks automatic retry)."""
-    run_write_transaction_sync(uow, lambda tx: FailedNovelRepository(tx.session).forget(novel_id))
 
 
 @router.post("/{novel_id}/reset-count", status_code=204)
@@ -135,14 +117,6 @@ def reset_all_failed_novel_counts(
 ):
     """Reset every failure count to 0 — records stay, all unblocked."""
     run_write_transaction_sync(uow, lambda tx: FailedNovelRepository(tx.session).reset_all())
-
-
-@router.delete("", status_code=204)
-def clear_all_failed_novels(
-    uow: UowDep,
-):
-    """Clear the whole ledger."""
-    run_write_transaction_sync(uow, lambda tx: FailedNovelRepository(tx.session).clear_all())
 
 
 @router.post("/retry", response_model=BatchTaskResponse)
@@ -173,7 +147,7 @@ def retry_all_failed_novels(
     cap — the confirmation dialog on the client is the consent guard, and
     the task fans out with the same one-client-per-id pattern.
     """
-    with uow.begin():
+    with uow.begin(read_only=True):
         ids = FailedNovelRepository(uow.session).all_ids()
     if not ids:
         raise ValidationError("当前没有失败记录")

@@ -39,6 +39,7 @@ from copixiv.db import models
 
 # 坐标游标（迁移 0005 建的 ``novel_local_id_seq``，0006 改名并改为承载坐标）。
 COORD_SEQUENCE = "novel_local_coord_seq"
+ID_LOCK_KEY = "copixiv.library.local_novel_id"
 
 # ---------------------------------------------------------------------------
 # 空轴种子：pixiv 侧一行都没有时的兜底
@@ -82,38 +83,41 @@ def pixiv_watermark(session) -> int | None:
     ).scalar()
 
 
-def next_local_id(session, now: datetime | None = None) -> int:
-    """下一个本地书 id（负数）。发号在写事务内进行。
+def lock_local_ids(session) -> None:
+    """获取事务级咨询锁，串行化本地书的去重检查、发号与落库。"""
+    session.execute(
+        sa_text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+        {"key": ID_LOCK_KEY},
+    )
 
-    不需要额外加锁：``nextval`` 本身原子且不回退，水位只可能让坐标**更大**
-    （读旧了也不会撞号，只是略微靠后）。调用方（``ingest_uploads``）仍持有
-    咨询锁，那是为「指纹预检 + INSERT」的串行化，不是为发号。
+
+def next_local_id(session, now: datetime | None = None, *, lock: bool = True) -> int:
+    """下一个本地书 id（负数）。发号在写事务内进行（2 条 SQL）。
+
+    调用方若已在当前事务持有 :func:`lock_local_ids` 咨询锁，可传 ``lock=False``
+    省去重复加锁；独立调用时默认 ``lock=True``，确保并发 ``setval`` 不撞号。
     """
+    if lock:
+        lock_local_ids(session)
     watermark = pixiv_watermark(session)
     floor = watermark + 1 if watermark is not None else seed_coord(now)
-
-    coord = int(session.execute(select(func.nextval(COORD_SEQUENCE))).scalar_one())
-    if coord < floor:
-        # 并发上传都看到水位高于序列时，用事务级咨询锁串行推进并重检，
-        # 避免多事务同时调用 setval(..., false) 把同一坐标发给两本新书。
+    coord = int(
         session.execute(
-            sa_text("SELECT pg_advisory_xact_lock(hashtext(:seq))"),
-            {"seq": COORD_SEQUENCE},
-        )
-        coord = int(session.execute(select(func.nextval(COORD_SEQUENCE))).scalar_one())
-        if coord < floor:
-            session.execute(
-                sa_text(f"SELECT setval('{COORD_SEQUENCE}', :v, false)"),
-                {"v": floor},
-            )
-            coord = int(session.execute(select(func.nextval(COORD_SEQUENCE))).scalar_one())
+            sa_text(
+                f"SELECT setval('{COORD_SEQUENCE}', GREATEST(nextval('{COORD_SEQUENCE}'), :floor), true)"
+            ),
+            {"floor": floor},
+        ).scalar_one()
+    )
     return -coord
 
 
 __all__ = [
     "COORD_SEQUENCE",
+    "ID_LOCK_KEY",
     "SOURCE_LOCAL",
     "SOURCE_PIXIV",
+    "lock_local_ids",
     "next_local_id",
     "pixiv_watermark",
     "seed_coord",

@@ -14,7 +14,6 @@ from copixiv.db import models
 from copixiv.db.base import BaseRepository
 
 MAX_RETRIES = 3
-_MAX_RETRIES = MAX_RETRIES
 
 
 def _now() -> datetime:
@@ -26,7 +25,6 @@ class FailedNovelRepository(BaseRepository):
 
     _NOT_FOUND_PATTERNS = (
         "%webview_novel 返回空%",
-        "%Page not found%",
         "%not found%",
     )
 
@@ -47,7 +45,6 @@ class FailedNovelRepository(BaseRepository):
             pg_insert(models.FailedNovel)
             .values(
                 novel_id=novel_id,
-                failure_type=failure_type,
                 error_message=str(error_message)[:1000],
                 failed_times=1,
                 title=title or None,
@@ -56,7 +53,6 @@ class FailedNovelRepository(BaseRepository):
             .on_conflict_do_update(
                 index_elements=["novel_id"],
                 set_={
-                    "failure_type": failure_type,
                     "error_message": str(error_message)[:1000],
                     "failed_times": models.FailedNovel.failed_times + 1,
                     "last_failed_at": now,
@@ -114,11 +110,18 @@ class FailedNovelRepository(BaseRepository):
         self,
         offset: int = 0,
         limit: int = 100,
-    ) -> list[models.FailedNovel]:
+    ) -> list[dict[str, Any]]:
         """Return failure records — actionable first, not-found family last."""
         not_found = or_(*[models.FailedNovel.error_message.like(p) for p in self._NOT_FOUND_PATTERNS])
         stmt = (
-            select(models.FailedNovel)
+            select(
+                models.FailedNovel.novel_id,
+                func.coalesce(models.FailedNovel.title, models.Novel.title).label("title"),
+                models.FailedNovel.error_message,
+                models.FailedNovel.failed_times,
+                models.FailedNovel.last_failed_at,
+            )
+            .outerjoin(models.Novel, models.FailedNovel.novel_id == models.Novel.id)
             .order_by(
                 case((not_found, 1), else_=0).asc(),
                 models.FailedNovel.last_failed_at.desc().nulls_last(),
@@ -127,7 +130,7 @@ class FailedNovelRepository(BaseRepository):
             .offset(offset)
             .limit(limit)
         )
-        return list(self.session.execute(stmt).scalars())
+        return [dict(row._mapping) for row in self.session.execute(stmt).all()]
 
     def count(self, model_class: type | None = None) -> int:
         """Total number of failure records (or *model_class* when delegated)."""

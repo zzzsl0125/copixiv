@@ -19,10 +19,6 @@ class SQLAlchemyTokenRepository(BaseRepository):
         stmt = select(models.Token).order_by(models.Token.sort_index)
         return list(self.session.execute(stmt).scalars().all())
 
-    def get_by_name(self, name: str) -> models.Token | None:
-        stmt = select(models.Token).where(models.Token.name == name)
-        return self.session.execute(stmt).scalar_one_or_none()
-
     def create(self, token_data: dict) -> models.Token:
         token = models.Token(**token_data)
         self.session.add(token)

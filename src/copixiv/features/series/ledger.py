@@ -75,19 +75,8 @@ def note_success(session, series_id: int) -> None:
     session.execute(_delete(models.SeriesDeadLetter).where(models.SeriesDeadLetter.series_id == series_id))
 
 
-def retired_series_ids(session) -> set[int]:
-    """Series currently excluded from the candidate queries."""
-    return set(
-        session.execute(
-            _select(models.SeriesDeadLetter.series_id).where(models.SeriesDeadLetter.retired_at.isnot(None))
-        )
-        .scalars()
-        .all()
-    )
-
-
-def _all_series_ids(session) -> set[int]:
-    """Every series with a ledger row (retired or not) — for tests/inspection."""
+def tracked_series_ids(session) -> set[int]:
+    """Series IDs currently present in ``series_dead_letter``."""
     return set(session.execute(_select(models.SeriesDeadLetter.series_id)).scalars().all())
 
 
@@ -97,5 +86,5 @@ __all__ = [
     "is_definitive_error",
     "note_failure",
     "note_success",
-    "retired_series_ids",
+    "tracked_series_ids",
 ]

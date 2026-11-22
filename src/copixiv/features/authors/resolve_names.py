@@ -23,8 +23,7 @@ I/O through the Pixiv client and the unit of work.
 
 import asyncio
 from dataclasses import dataclass
-
-from sqlalchemy.orm import Session
+from typing import Literal
 
 from copixiv.core.draft import safe_get
 from copixiv.core.models import TaskResult
@@ -68,10 +67,11 @@ async def collect_author_names(
     # Sync DB read: ``read_transaction`` opens the short transaction and runs
     # the blocking query in a worker thread (this outer function is async
     # because of the network gather below, not because of the database).
-    resolved = await read_transaction(
+    raw_resolved = await read_transaction(
         uow,
         lambda read_uow: SQLAlchemyAuthorRepository(read_uow.session).get_names_by_ids(author_ids),
     )
+    resolved = {aid: name for aid, name in raw_resolved.items() if name}
 
     # -- remote ---------------------------------------------------------
     # 丢掉空的 author_id：``sync_empty_name`` 的输入集来自 ``novel.author_id``，
@@ -127,14 +127,13 @@ class AuthorProfile:
 
     author_id: int
     author_name: str | None
-    source: str  # 'local' | 'pixiv' | 'unknown'
+    source: Literal["local", "pixiv", "unknown"]
 
 
 async def lookup_author_profile(
     author_id: int,
     *,
-    uow: SqlUnitOfWork | None = None,
-    session: Session | None = None,
+    uow: SqlUnitOfWork,
     client: PixivClient | None,
 ) -> AuthorProfile:
     """Resolve one author id → name, **read-only**, local table first.
@@ -148,17 +147,13 @@ async def lookup_author_profile(
     key is ``ensure_exists``'s job, and that belongs to the write path).  Never
     raises: an unreachable Pixiv degrades to ``source='unknown'``.
     """
-    if uow is not None:
-        known = await read_transaction(
-            uow,
-            lambda tx: SQLAlchemyAuthorRepository(tx.session).get_names_by_ids({author_id}),
-        )
-    elif session is not None:
-        known = SQLAlchemyAuthorRepository(session).get_names_by_ids({author_id})
-    else:
-        raise ValueError("lookup_author_profile requires uow or session")
-    if author_id in known:
-        return AuthorProfile(author_id, known[author_id], "local")
+    known = await read_transaction(
+        uow,
+        lambda tx: SQLAlchemyAuthorRepository(tx.session).get_names_by_ids({author_id}),
+    )
+    local_name = known.get(author_id)
+    if local_name:
+        return AuthorProfile(author_id, local_name, "local")
 
     name = await fetch_author_name(client, author_id)
     if name:

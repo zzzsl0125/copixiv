@@ -5,15 +5,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from sqlalchemy import select
-from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 
-from copixiv.core.models import SOURCE_LOCAL, EpubStatus, new_shuffle_key
+from copixiv.core.models import SOURCE_LOCAL, EpubStatus
 from copixiv.db import models
 from copixiv.db.base import BaseRepository
 from copixiv.features.library import local_axis
-
-_ID_LOCK_KEY = "copixiv.library.local_novel_id"
 
 
 class LocalLibraryRepository(BaseRepository):
@@ -24,14 +21,11 @@ class LocalLibraryRepository(BaseRepository):
 
     def lock_local_ids(self) -> None:
         """Acquire the transaction-level advisory lock serializing dedup+insert."""
-        self.session.execute(
-            sa_text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
-            {"key": _ID_LOCK_KEY},
-        )
+        local_axis.lock_local_ids(self.session)
 
     def next_local_id(self) -> int:
-        """Allocate the next monotonic negative coordinate ID."""
-        return local_axis.next_local_id(self.session)
+        """Allocate the next monotonic negative coordinate ID (lock already held)."""
+        return local_axis.next_local_id(self.session, lock=False)
 
     def find_local_duplicate(self, source_key: str) -> tuple[int, str] | None:
         """Return ``(id, title)`` if a local book with *source_key* already exists."""
@@ -82,7 +76,7 @@ class LocalLibraryRepository(BaseRepository):
         has_epub: EpubStatus,
         source_key: str,
     ) -> models.Novel:
-        """Insert a new local book inside a savepoint so conflicts stay isolated."""
+        """Insert a new local book and flush within the enclosing write transaction."""
         novel = models.Novel(
             id=novel_id,
             title=title,
@@ -98,13 +92,11 @@ class LocalLibraryRepository(BaseRepository):
             series_index=None,
             create_time=datetime.now(UTC),
             has_epub=has_epub,
-            shuffle=new_shuffle_key(),
             tags=[],
             is_favourite=False,
             source=SOURCE_LOCAL,
             source_key=source_key,
         )
-        with self.session.begin_nested():
-            self.session.add(novel)
-            self.session.flush()
+        self.session.add(novel)
+        self.session.flush()
         return novel

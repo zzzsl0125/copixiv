@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-
-from sqlalchemy.orm import Session
+from typing import Literal
 
 from copixiv.core.draft import safe_get
 from copixiv.db.tx import read_transaction
@@ -20,27 +19,20 @@ class SeriesProfile:
 
     series_id: int
     series_name: str | None
-    source: str  # 'local' | 'pixiv' | 'unknown'
-
-
-def _lookup_series_local(session: Session, series_id: int) -> str | None:
-    return SQLAlchemySeriesRepository(session).get_name_fallback(series_id)
+    source: Literal["local", "pixiv", "unknown"]
 
 
 async def lookup_series_profile(
     series_id: int,
     *,
-    uow: SqlUnitOfWork | None = None,
-    session: Session | None = None,
+    uow: SqlUnitOfWork,
     client: PixivClient | None,
 ) -> SeriesProfile:
     """Resolve one series id → name. Read-only, never raises."""
-    if uow is not None:
-        local_name = await read_transaction(uow, lambda tx: _lookup_series_local(tx.session, series_id))
-    elif session is not None:
-        local_name = _lookup_series_local(session, series_id)
-    else:
-        raise ValueError("lookup_series_profile requires uow or session")
+    local_name = await read_transaction(
+        uow,
+        lambda tx: SQLAlchemySeriesRepository(tx.session).get_name_fallback(series_id),
+    )
     if local_name:
         return SeriesProfile(series_id, local_name, "local")
 

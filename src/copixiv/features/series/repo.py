@@ -8,15 +8,12 @@ from sqlalchemy import func, update
 from sqlalchemy import select as _select
 from sqlalchemy.orm import Session
 
-from copixiv.db import constants as C
 from copixiv.db import delta as engine_delta
 from copixiv.db import models
 from copixiv.db.base import (
     BaseRepository,
     ensure_parent_rows,
-    finalize_parent_links,
     model_to_dict,
-    update_summary,
 )
 
 
@@ -30,26 +27,13 @@ class SQLAlchemySeriesRepository(BaseRepository):
 
     DRAFT_COLUMNS = (
         "id",
-        "title",
         "author_id",
-        "author_name",
-        "path",
-        "like",
-        "view",
-        "text",
-        "caption",
-        "series_id",
         "series_name",
         "series_index",
-        "tags",
     )
 
     def __init__(self, session: Session):
         super().__init__(session)
-
-    def ensure_exists(self, series_ids: set[int]) -> None:
-        """INSERT ... ON CONFLICT DO NOTHING placeholder rows (FK safety)."""
-        ensure_parent_rows(self.session, series_ids=series_ids)
 
     def get_by_id(self, series_id: int) -> dict | None:
         series = self.session.get(models.Series, series_id)
@@ -69,19 +53,6 @@ class SQLAlchemySeriesRepository(BaseRepository):
                 models.Novel.series_name.isnot(None),
             )
         ).scalar()
-
-    def update_summary(self, series_ids: set[int] | None = None) -> None:
-        """Recalculate series aggregates."""
-        update_summary(
-            self.session,
-            models.Series,
-            C.COL_SERIES_ID,
-            series_ids,
-            extra_columns=[
-                func.max(models.Novel.series_name).label(C.COL_SERIES_NAME),
-                func.max(models.Novel.author_id).label(C.COL_AUTHOR_ID),
-            ],
-        )
 
     def update_series_name(self, series_id: int, name: str) -> None:
         """Write ``series.series_name`` if distinct from the current value."""
@@ -114,16 +85,13 @@ class SQLAlchemySeriesRepository(BaseRepository):
         author_id: int | None,
         force_series_index: bool = False,
     ) -> bool:
-        """Attach an orphan-index novel row back onto *series_id* and update aggregates."""
+        """Attach an orphan-index novel row back onto *series_id* and sync series metadata."""
         novel = self.session.get(models.Novel, novel_id)
         if novel is None:
             return False
         effective_author = novel.author_id or author_id
         if not effective_author:
             return False
-
-        old_author_id = novel.author_id
-        old_series_id = novel.series_id
 
         ensure_parent_rows(
             self.session,
@@ -132,18 +100,22 @@ class SQLAlchemySeriesRepository(BaseRepository):
         )
         novel.author_id = effective_author
         novel.series_id = int(series_id)
-        if series_name or novel.series_name:
-            novel.series_name = series_name or novel.series_name
+        effective_series_name = series_name or novel.series_name
+        if effective_series_name:
+            novel.series_name = effective_series_name
+            self.update_series_name(int(series_id), effective_series_name)
         if series_index is not None and (force_series_index or novel.series_index is None):
             novel.series_index = int(series_index)
+        self.session.execute(
+            update(models.Series)
+            .where(
+                models.Series.series_id == int(series_id),
+                models.Series.author_id.is_distinct_from(effective_author),
+            )
+            .values(author_id=effective_author)
+        )
 
         self.session.flush()
-        engine_delta.record_novel_upserts(self.session, [novel_id])
-        finalize_parent_links(
-            self.session,
-            author_ids={old_author_id, effective_author},
-            series_ids={old_series_id, int(series_id)},
-        )
         return True
 
     def count_novels_by_series(self, series_id: int) -> int:

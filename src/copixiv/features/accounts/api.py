@@ -3,7 +3,7 @@
 import threading
 
 from fastapi import APIRouter
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, field_validator
 
 from copixiv.core.exceptions import NotFoundError
 from copixiv.db.tx import run_write_transaction_sync
@@ -16,6 +16,15 @@ from copixiv.features.accounts.repo import SQLAlchemyTokenRepository
 # ---------------------------------------------------------------------------
 
 
+def _strip_nonempty_token(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        raise ValueError("Token 不能为空")
+    return stripped
+
+
 class TokenBase(BaseModel):
     name: str
     token: str
@@ -23,6 +32,13 @@ class TokenBase(BaseModel):
     valid: bool = True
     # Designated「追更账号」—— the account that owns the Pixiv following feed.
     is_follow: bool = False
+
+    @field_validator("token")
+    @classmethod
+    def _validate_token(cls, value: str) -> str:
+        result = _strip_nonempty_token(value)
+        assert result is not None
+        return result
 
 
 class TokenUpdate(BaseModel):
@@ -32,10 +48,14 @@ class TokenUpdate(BaseModel):
     valid: bool | None = None
     is_follow: bool | None = None
 
+    @field_validator("token")
+    @classmethod
+    def _validate_token(cls, value: str | None) -> str | None:
+        return _strip_nonempty_token(value)
+
 
 class TokenResponse(TokenBase):
     id: int
-    model_config = ConfigDict(from_attributes=True)
 
 
 router = APIRouter()
@@ -65,12 +85,11 @@ def _token_to_masked_dict(t) -> dict:
 def get_tokens(uow: UowDep):
     # Build each row manually so the masked token (not the raw refresh_token)
     # is what the response model validates and serializes.
-    with uow.begin():
+    with uow.begin(read_only=True):
         return [_token_to_masked_dict(t) for t in SQLAlchemyTokenRepository(uow.session).get_all()]
 
 
 def _snapshot_tokens(repo: SQLAlchemyTokenRepository) -> list[dict]:
-    repo.session.flush()
     return [
         {
             "name": t.name,
@@ -86,7 +105,7 @@ def _snapshot_tokens(repo: SQLAlchemyTokenRepository) -> list[dict]:
 def _sync_account_pool(uow: SqlUnitOfWork, account_pool) -> None:
     """Serialize pool reloads from latest committed DB state."""
     with _POOL_SYNC_LOCK:
-        with uow.begin():
+        with uow.begin(read_only=True):
             tokens = _snapshot_tokens(SQLAlchemyTokenRepository(uow.session))
         account_pool.reload_from_tokens(tokens)
 
@@ -131,8 +150,7 @@ def update_token(
         if result is None:
             raise NotFoundError(f"Token {token_id} not found")
         if follow_val is not None:
-            if not repo.set_follow(token_id, bool(follow_val)):
-                raise NotFoundError(f"Token {token_id} not found")
+            repo.set_follow(token_id, bool(follow_val))
             result.is_follow = bool(follow_val)
         return _token_to_masked_dict(result)
 
@@ -160,12 +178,10 @@ def delete_token(
 def reorder_tokens(
     ids: list[int],
     uow: UowDep,
-    account_pool: AccountPoolDep,
 ):
     def _write(tx: SqlUnitOfWork):
         repo = SQLAlchemyTokenRepository(tx.session)
         repo.reorder(ids)
 
     run_write_transaction_sync(uow, _write)
-    _sync_account_pool(uow, account_pool)
     return {"ok": True}

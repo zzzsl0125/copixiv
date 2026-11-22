@@ -3,55 +3,40 @@
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import event
 
 from copixiv.core import naming as formats
-from copixiv.core.models import UNKNOWN_AUTHOR, EpubStatus
+from copixiv.core.models import EpubStatus
 from copixiv.core.text import sha256_text
-from copixiv.db.base import ensure_parent_rows, finalize_parent_links
+from copixiv.db.base import ensure_parent_rows
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
-from copixiv.features.library.decode import (
-    DECODE_ERROR,
-    MAX_SUSPICIOUS_RATIO,
-    TextDecodeError,
-    decode_txt,
-    is_suspicious_char,
-    suspicious_ratio,
-)
 from copixiv.features.library.filenames import clean_filename, parse_filename
 from copixiv.features.library.repo import LocalLibraryRepository
 from copixiv.log import logger
 from copixiv.storage import atomic
+from copixiv.storage.encoding import DECODE_ERROR, TextDecodeError, decode_text_bytes
 from copixiv.storage.epub import reader
 from copixiv.storage.file_storage import FileStorage
 
 __all__ = [
-    "DECODE_ERROR",
     "EMPTY_ERROR",
     "IngestResult",
-    "MAX_SUSPICIOUS_RATIO",
     "ParsedUpload",
     "STATUS_CREATED",
     "STATUS_DUPLICATE",
     "STATUS_FAILED",
-    "TextDecodeError",
-    "UNKNOWN_AUTHOR",
     "UploadStatus",
     "UploadUnreadable",
     "body_fingerprint",
-    "clean_filename",
-    "decode_txt",
     "ingest_uploads",
-    "is_suspicious_char",
     "normalize_text",
-    "parse_filename",
     "parse_upload",
     "resolve_metadata",
-    "suspicious_ratio",
 ]
 
 EMPTY_ERROR = "文件内容为空"
@@ -91,7 +76,7 @@ def parse_upload(name: str, data: bytes) -> ParsedUpload:
         )
 
     try:
-        return ParsedUpload(body=decode_txt(data))
+        return ParsedUpload(body=decode_text_bytes(data, strict=True))
     except TextDecodeError as exc:
         raise UploadUnreadable(DECODE_ERROR) from exc
 
@@ -134,6 +119,7 @@ def _attach_epub_to_existing(
     novel,
     root: Path,
     epub_bytes: bytes,
+    created_paths: list[Path],
 ) -> bool:
     """把上传的 EPUB 原件补挂到已在库的本地书上；返回本次是否真的挂上。"""
     if novel is None or not novel.path:
@@ -143,6 +129,7 @@ def _attach_epub_to_existing(
     if novel.has_epub == EpubStatus.DONE and path.is_file():
         return False
 
+    existed_before = path.is_file()
     try:
         atomic.write_atomic(path, epub_bytes, root=root)
     except OSError as exc:
@@ -154,6 +141,8 @@ def _attach_epub_to_existing(
         )
         return False
 
+    if not existed_before:
+        created_paths.append(path)
     lib_repo.mark_epub_done(novel)
     return True
 
@@ -168,10 +157,27 @@ def _read_upload(name: str, data: bytes) -> tuple[str, ParsedUpload]:
 
 
 def _discard(*paths: Path | None) -> None:
-    """删掉这次写了一半的文件（EPUB 写失败 / 撞车时）。"""
+    """删掉这次写了一半的文件（EPUB 写失败 / 事务回滚时）。"""
     for written in filter(None, paths):
         with contextlib.suppress(OSError):
             written.unlink(missing_ok=True)
+
+
+def _track_created_files(session, created_paths: list[Path]) -> None:
+    """在写事务回滚时清理本次已落盘的新文件。"""
+    session.info["_library_created_paths"] = created_paths
+    if "_library_rollback_hook" not in session.info:
+
+        def _on_rollback(s) -> None:
+            paths = s.info.pop("_library_created_paths", [])
+            _discard(*paths)
+
+        def _on_commit(s) -> None:
+            s.info.pop("_library_created_paths", None)
+
+        event.listen(session, "after_rollback", _on_rollback)
+        event.listen(session, "after_commit", _on_commit)
+        session.info["_library_rollback_hook"] = True
 
 
 def _write_files(
@@ -205,29 +211,26 @@ def _handle_duplicate(
     preset_author_id: int | None,
     preset_author_name: str | None,
     root: Path,
-    touched_author_ids: set[int] | None = None,
+    ensure_preset_author: Callable[[], None],
+    created_paths: list[Path],
 ) -> tuple[IngestResult, bool]:
     """已在库的那一条 → ``(结果, 这次是否真的写了预设作者)``."""
     needs_row = preset_author_id is not None or parsed.original is not None
     novel = lib_repo.get_novel(existing_id) if needs_row else None
-    old_author_id = novel.author_id if novel is not None else None
 
     wrote_preset = False
     duplicate_author_name: str | None = None
     if preset_author_id is not None:
+        ensure_preset_author()
         wrote_preset = lib_repo.apply_preset_author(
             novel,
             preset_author_id,
             preset_author_name,
         )
-        if wrote_preset and touched_author_ids is not None:
-            if old_author_id is not None:
-                touched_author_ids.add(old_author_id)
-            touched_author_ids.add(preset_author_id)
         duplicate_author_name = preset_author_name
 
     epub_attached = (
-        _attach_epub_to_existing(lib_repo, novel, root, parsed.original)
+        _attach_epub_to_existing(lib_repo, novel, root, parsed.original, created_paths)
         if parsed.original is not None
         else False
     )
@@ -255,6 +258,8 @@ def _create_row(
     preset_author_id: int | None,
     preset_author_name: str | None,
     root: Path,
+    ensure_preset_author: Callable[[], None],
+    created_paths: list[Path],
 ) -> tuple[IngestResult, bool]:
     """新书：取号 → 落盘 → 插行 → ``(结果, 这次是否真的写了预设作者)``."""
     title, parsed_author_name = resolve_metadata(name, parsed)
@@ -281,23 +286,23 @@ def _create_row(
             False,
         )
 
-    try:
-        lib_repo.insert_local_novel(
-            novel_id=novel_id,
-            title=title,
-            author_id=author_id,
-            author_name=author_name,
-            path=str(path),
-            text_length=len(body),
-            has_epub=(EpubStatus.DONE if epub_path is not None else EpubStatus.NO_IMAGES),
-            source_key=source_key,
-        )
-    except IntegrityError:
-        _discard(path, epub_path)
-        return (
-            IngestResult(name, STATUS_FAILED, error="入库冲突：id 或正文指纹与已有记录撞车"),
-            False,
-        )
+    created_paths.append(path)
+    if epub_path is not None:
+        created_paths.append(epub_path)
+
+    if preset_author_id is not None:
+        ensure_preset_author()
+
+    lib_repo.insert_local_novel(
+        novel_id=novel_id,
+        title=title,
+        author_id=author_id,
+        author_name=author_name,
+        path=str(path),
+        text_length=len(body),
+        has_epub=(EpubStatus.DONE if epub_path is not None else EpubStatus.NO_IMAGES),
+        source_key=source_key,
+    )
 
     return (
         IngestResult(
@@ -327,9 +332,16 @@ def ingest_uploads(
     lib_repo = LocalLibraryRepository(session)
     root = Path(storage.download_dir)
     results: list[IngestResult] = []
+    created_paths: list[Path] = []
     prepared = False
+    preset_ensured = False
     preset_written = False
-    touched_author_ids: set[int] = set()
+
+    def _ensure_preset_author() -> None:
+        nonlocal preset_ensured
+        if not preset_ensured and preset_author_id is not None:
+            ensure_parent_rows(session, author_ids={preset_author_id})
+            preset_ensured = True
 
     for filename, data in files:
         name = clean_filename(filename)
@@ -341,8 +353,7 @@ def ingest_uploads(
 
         if not prepared:
             lib_repo.lock_local_ids()
-            if preset_author_id is not None:
-                ensure_parent_rows(session, author_ids={preset_author_id})
+            _track_created_files(session, created_paths)
             prepared = True
 
         source_key = body_fingerprint(body)
@@ -357,7 +368,8 @@ def ingest_uploads(
                 preset_author_id=preset_author_id,
                 preset_author_name=preset_author_name,
                 root=root,
-                touched_author_ids=touched_author_ids,
+                ensure_preset_author=_ensure_preset_author,
+                created_paths=created_paths,
             )
         else:
             result, wrote_preset = _create_row(
@@ -370,9 +382,9 @@ def ingest_uploads(
                 preset_author_id=preset_author_id,
                 preset_author_name=preset_author_name,
                 root=root,
+                ensure_preset_author=_ensure_preset_author,
+                created_paths=created_paths,
             )
-            if wrote_preset and preset_author_id is not None:
-                touched_author_ids.add(preset_author_id)
         preset_written = preset_written or wrote_preset
         results.append(result)
 
@@ -381,8 +393,5 @@ def ingest_uploads(
             preset_author_id,
             preset_author_name,
         )
-
-    if touched_author_ids:
-        finalize_parent_links(session, author_ids=touched_author_ids)
 
     return results
