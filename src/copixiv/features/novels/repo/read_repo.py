@@ -310,6 +310,20 @@ class SQLAlchemyNovelReadRepository:
         stmt = select(models.Novel.id).where(models.Novel.id.in_(novel_ids))
         return set(self.session.execute(stmt).scalars().all())
 
+    def get_ids_missing_series_index(self, novel_ids: set[int]) -> set[int]:
+        """Return *novel_ids* whose stored ``series_index`` is NULL (excluding retired series)."""
+        if not novel_ids:
+            return set()
+        retired = select(models.SeriesDeadLetter.series_id).where(
+            models.SeriesDeadLetter.retired_at.isnot(None)
+        )
+        stmt = select(models.Novel.id).where(
+            models.Novel.id.in_(novel_ids),
+            models.Novel.series_index.is_(None),
+            or_(models.Novel.series_id.is_(None), ~models.Novel.series_id.in_(retired)),
+        )
+        return set(self.session.execute(stmt).scalars().all())
+
     def get_stored_paths(self, novel_ids: set[int]) -> dict[int, str]:
         """``{id: path}`` for the given ids — the on-disk anchor of each row."""
         if not novel_ids:

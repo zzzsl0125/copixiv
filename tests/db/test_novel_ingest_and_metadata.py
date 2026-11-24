@@ -29,15 +29,23 @@ from copixiv.tasks.batch import BatchExportArgs, batch_export
 from copixiv.tasks.executor import TaskContext
 
 
-def _fake_webview(novel_id: int, *, title: str, author_id: int = 10, text: str = "这是中文正文内容"):
+def _fake_webview(
+    novel_id: int,
+    *,
+    title: str,
+    author_id: int = 10,
+    text: str = "这是中文正文内容",
+    series_id: int | None = None,
+    series_title: str | None = None,
+):
     return SimpleNamespace(
         id=novel_id,
         title=title,
         user_id=author_id,
         rating={"bookmark": 120, "view": 500},
         caption="中文简介",
-        series_id=None,
-        series_title=None,
+        series_id=series_id,
+        series_title=series_title,
         series_navigation=None,
         cdate="2026-01-02T03:04:05+09:00",
         tags=["中文", "科幻"],
@@ -48,14 +56,21 @@ def _fake_webview(novel_id: int, *, title: str, author_id: int = 10, text: str =
     )
 
 
-def _fake_novel_info(novel_id: int, *, title: str, author_id: int = 10, author_name: str = "Auth10"):
+def _fake_novel_info(
+    novel_id: int,
+    *,
+    title: str,
+    author_id: int = 10,
+    author_name: str = "Auth10",
+    series=None,
+):
     return SimpleNamespace(
         id=novel_id,
         title=title,
         caption="中文简介",
         tags=[SimpleNamespace(name="中文"), SimpleNamespace(name="日常")],
         user=SimpleNamespace(id=author_id, name=author_name),
-        series=None,
+        series=series,
         total_bookmarks=200,
         total_view=1000,
         text_length=len("这是中文正文内容"),
@@ -463,3 +478,164 @@ async def test_ingest_merges_done_ids_and_skips_get_skip_ids_on_redownload(
         n4001 = session.get(models.Novel, 4001)
         assert n4001 is not None
         assert n4001.has_epub == EpubStatus.DONE
+
+
+@pytest.mark.asyncio
+async def test_ingest_existing_meta_resolves_missing_series_index_and_skips_retired_or_indexed(
+    committed_session_factory,
+    fake_pixiv_client,
+    tmp_path: Path,
+):
+    storage = FileStorage(str(tmp_path))
+    downloader = _DummyImageDownloader()
+
+    with committed_session_factory() as session:
+        session.add(models.Author(author_id=50, author_name="Auth50"))
+        session.add_all(
+            [
+                models.Series(series_id=500, series_name="S500", author_id=50),
+                models.Series(series_id=501, series_name="S501", author_id=50),
+                models.SeriesDeadLetter(
+                    series_id=501,
+                    consecutive_failures=3,
+                    last_error="roster_absent",
+                    retired_at=datetime.now(UTC),
+                ),
+            ]
+        )
+        session.flush()
+        session.add_all(
+            [
+                # Standalone novel later added to series 500 -> must resolve index
+                models.Novel(id=5001, title="Standalone->Series", author_id=50, author_name="Auth50"),
+                # Already indexed in series 500 -> must NOT trigger roster fetch on its own
+                models.Novel(
+                    id=5002,
+                    title="AlreadyIndexed",
+                    author_id=50,
+                    author_name="Auth50",
+                    series_id=500,
+                    series_name="S500",
+                    series_index=1,
+                ),
+                # Missing index in retired series 501 -> must NOT poll roster every round
+                models.Novel(
+                    id=5003,
+                    title="RetiredSeries",
+                    author_id=50,
+                    author_name="Auth50",
+                    series_id=501,
+                    series_name="S501",
+                    series_index=None,
+                ),
+            ]
+        )
+        session.commit()
+
+    fake_pixiv_client.series_responses[500] = {"novels": [SimpleNamespace(id=5002), SimpleNamespace(id=5001)]}
+
+    # First run: only 5001 needs roster resolution -> fetches series 500 once, skips 501
+    await ingest(
+        [
+            _fake_novel_info(
+                5001,
+                title="Standalone->Series",
+                author_id=50,
+                series=SimpleNamespace(id=500, title="S500"),
+            ),
+            _fake_novel_info(
+                5002,
+                title="AlreadyIndexed",
+                author_id=50,
+                series=SimpleNamespace(id=500, title="S500"),
+            ),
+            _fake_novel_info(
+                5003,
+                title="RetiredSeries",
+                author_id=50,
+                series=SimpleNamespace(id=501, title="S501"),
+            ),
+        ],
+        session_factory=committed_session_factory,
+        client=fake_pixiv_client,
+        file_storage=storage,
+        image_downloader=downloader,
+    )
+    assert fake_pixiv_client.calls == [("novel_series", (500, True))]
+
+    with committed_session_factory() as session:
+        n5001 = session.get(models.Novel, 5001)
+        assert n5001 is not None
+        assert n5001.series_id == 500
+        assert n5001.series_index == 2
+
+    # Second run: 5001 is now indexed -> zero novel_series calls
+    fake_pixiv_client.calls.clear()
+    await ingest(
+        [
+            _fake_novel_info(
+                5001,
+                title="Standalone->Series",
+                author_id=50,
+                series=SimpleNamespace(id=500, title="S500"),
+            ),
+            _fake_novel_info(
+                5003,
+                title="RetiredSeries",
+                author_id=50,
+                series=SimpleNamespace(id=501, title="S501"),
+            ),
+        ],
+        session_factory=committed_session_factory,
+        client=fake_pixiv_client,
+        file_storage=storage,
+        image_downloader=downloader,
+    )
+    assert fake_pixiv_client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_sync_novel_resolves_series_index_when_added_to_or_moved_between_series(
+    committed_session_factory,
+    fake_pixiv_client,
+    tmp_path: Path,
+):
+    from copixiv.features.novels.use_cases.sync_novel import sync_novel
+
+    uow = SqlUnitOfWork(committed_session_factory)
+    with uow.begin():
+        uow.session.add(models.Author(author_id=60, author_name="Auth60"))
+        uow.session.add(models.Series(series_id=600, series_name="OldS", author_id=60))
+        uow.session.flush()
+        uow.session.add(
+            models.Novel(
+                id=6001,
+                title="Moved",
+                author_id=60,
+                author_name="Auth60",
+                series_id=600,
+                series_name="OldS",
+                series_index=5,
+                path=str(tmp_path / "6001.txt"),
+                source="pixiv",
+            )
+        )
+
+    fake_pixiv_client.webview_responses[6001] = _fake_webview(
+        6001,
+        title="Moved",
+        author_id=60,
+        series_id=601,
+        series_title="NewS",
+    )
+    fake_pixiv_client.series_responses[601] = {"novels": [SimpleNamespace(id=6000), SimpleNamespace(id=6001)]}
+
+    updated = await sync_novel(
+        6001,
+        uow=uow,
+        client=fake_pixiv_client,
+        download_dir=str(tmp_path),
+    )
+    assert updated.series_id == 601
+    assert updated.series_name == "NewS"
+    assert updated.series_index == 2

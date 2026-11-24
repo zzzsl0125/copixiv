@@ -59,6 +59,7 @@ from copixiv.features.authors.service import (
 )
 from copixiv.features.novels.ingest.persist import persist_novels
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository, StoredNovel
+from copixiv.features.series.service import resolve_series_indices
 from copixiv.log import logger
 from copixiv.pixiv.client import PixivClient
 
@@ -112,12 +113,19 @@ async def sync_novel(
         # = 已删除 / 受限（那两条路都把它当"取不到"，只是这里回 404 而不是
         # 写 failed_novel 台账——用户点一下按钮不该往失败账本里写东西）。
         raise NotFoundError(f"小说 #{novel_id} 在 pixiv 上不存在或不可访问")
+    series_changed = novel.series_id != draft.series_id
+    if (
+        draft.series_id is not None
+        and draft.series_index is None
+        and (novel.series_index is None or series_changed)
+    ):
+        draft = (await resolve_series_indices([draft], client))[0]
     draft = await _with_author_name(draft, uow=uow, client=client)
 
     # ---- 落库：短写事务，重试撞锁（run_write_transaction 的既有语义）----
     await run_write_transaction(
         uow,
-        lambda tx: _persist_sync(tx, draft),
+        lambda tx: _persist_sync(tx, draft, series_changed=series_changed),
     )
 
     # 读回与 PATCH 同一条路（``get_by_id`` 的域模型已处理 is_special_follow
@@ -197,7 +205,7 @@ async def _with_author_name(
     return replace(draft, author_name=names.get(draft.author_id))
 
 
-def _persist_sync(uow: SqlUnitOfWork, draft: NovelDraft) -> None:
+def _persist_sync(uow: SqlUnitOfWork, draft: NovelDraft, *, series_changed: bool = False) -> None:
     """落库（调用方已开写事务）：upsert 一行 + 把作者名写回 ``author`` 行。
 
     ``writeback_author_names`` 与 ``ingest`` 的持久化阶段同一个收尾：名字是
@@ -209,8 +217,9 @@ def _persist_sync(uow: SqlUnitOfWork, draft: NovelDraft) -> None:
     force_update = list(SYNC_FORCE_UPDATE)
     if not draft.author_name:
         force_update = [f for f in force_update if f != "author_name"]
-    if draft.series_id is None:
-        draft = replace(draft, series_index=None)
+    if draft.series_id is None or series_changed:
+        if draft.series_id is None:
+            draft = replace(draft, series_index=None)
         force_update.append("series_index")
     persist_novels(uow, [draft], force_update=force_update)
     if draft.author_name:

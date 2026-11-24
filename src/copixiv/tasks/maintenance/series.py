@@ -30,6 +30,7 @@ class FixSeriesIndexArgs(BaseModel):
     description="修复缺失或错误的小说章节号",
     args=FixSeriesIndexArgs,
     lane="general",
+    notify=False,
 )
 async def fix_series_index(
     args: FixSeriesIndexArgs,

@@ -87,12 +87,17 @@ async def test_check_epub_covers_positive_and_negative_ids(uow: SqlUnitOfWork, t
 
 
 def test_fix_series_index_args_accepts_legacy_extra_fields():
+    from copixiv.tasks import registry
+
     legacy = FixSeriesIndexArgs.model_validate(
         {"max_sweep": "", "sweep_all": False, "max_series": "200", "max_orphans": "200"}
     )
     assert legacy.max_series == 200
     assert FixSeriesIndexArgs().max_series == 200
     assert FixSeriesIndexArgs.model_validate({"max_series": ""}).max_series is None
+    spec = registry.get_spec("fix_series_index")
+    assert spec is not None
+    assert spec.notify is False
 
 
 @pytest.mark.asyncio

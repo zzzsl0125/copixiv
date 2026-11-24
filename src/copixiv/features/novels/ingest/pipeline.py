@@ -104,15 +104,6 @@ async def _download_novels(
         else:
             valid.append(result)
 
-    # Chapter numbers that the webview navigation could not anchor (the series'
-    # only volume, a missing neighbour pointer) are resolved here, from the
-    # series roster — the same authority the nightly repair uses, fetched once
-    # per series per round.  Doing it *now* is the point: the value is written
-    # in the same transaction that inserts the row, and ``series_index`` is
-    # fill-once, so nothing re-derives it afterwards.
-    if valid and client is not None:
-        valid = await resolve_series_indices(valid, client)
-
     logger.info(
         f"_download_novels: {len(valid)}/{len(novel_ids)} downloaded successfully",
     )
@@ -129,15 +120,16 @@ def _plan_batch(
     uow,
     redownload: bool = False,
     failed_repo=None,
-) -> tuple[list[NovelDraft], list[int], dict[int, str]]:
+) -> tuple[list[NovelDraft], frozenset[int], list[int], dict[int, str]]:
     """Plan phase (read-only): decide what to download and what to upsert.
 
     Must run outside the write transaction — it only reads.  Returns
-    ``(existing_meta, download_ids, stored_paths)`` where ``existing_meta``
-    holds the metadata dicts of already-known novels (empty when
-    ``redownload``), ``download_ids`` are the novel IDs that still need
-    downloading, and ``stored_paths`` maps every already-known id to the file
-    anchor in the database.
+    ``(existing_meta, missing_index_ids, download_ids, stored_paths)`` where
+    ``existing_meta`` holds the metadata drafts of already-known novels (empty
+    when ``redownload``), ``missing_index_ids`` marks known rows whose stored
+    ``series_index`` is currently NULL, ``download_ids`` are the novel IDs
+    that still need downloading, and ``stored_paths`` maps every already-known
+    id to the file anchor in the database.
 
     ``stored_paths`` exists because ``novel.path`` is written once and then
     only ever filled when NULL: it is a file anchor, not a derived value.
@@ -149,7 +141,7 @@ def _plan_batch(
     that does not exist.
     """
     if not novels:
-        return [], [], {}
+        return [], frozenset(), [], {}
 
     ids = {n.id for n in novels}
     repo = SQLAlchemyNovelRepository(uow.session)
@@ -169,8 +161,12 @@ def _plan_batch(
     )
 
     existing_meta: list[NovelDraft] = []
-    if not redownload:
+    missing_index_ids: frozenset[int] = frozenset()
+    if not redownload and existing:
         existing_meta = [build_from_novel_info(n) for n in novels if n.id in existing]
+        series_meta_ids = {d.id for d in existing_meta if d.series_id}
+        if series_meta_ids:
+            missing_index_ids = frozenset(repo.get_ids_missing_series_index(series_meta_ids))
 
     # Dedup: the same id can appear twice in one discovered batch (a ranking
     # / search page shifted between two offset requests).  Keeping both would
@@ -179,7 +175,7 @@ def _plan_batch(
     # losing every other novel in it.
     download_ids = list(dict.fromkeys(n.id for n in novels if n.id in need_download))
     stored_paths = repo.get_stored_paths(set(download_ids)) if download_ids else {}
-    return existing_meta, download_ids, stored_paths
+    return existing_meta, missing_index_ids, download_ids, stored_paths
 
 
 def _upsert_batch(
@@ -307,9 +303,10 @@ class IngestOutcome:
 
 @dataclass(frozen=True)
 class _RoundPlan:
-    """整轮的计划：已知的元数据、真正要下载的 id、已有行的落盘锚点。"""
+    """整轮的计划：已知的元数据、缺章节号的既有 id、真正要下载的 id、已有行的落盘锚点。"""
 
     existing_meta: list[NovelDraft]
+    missing_index_ids: frozenset[int]
     download_ids: list[int]
     stored_paths: dict[int, str]
 
@@ -350,13 +347,13 @@ def _plan_round(
     嵌套）。
     """
     if novels:
-        existing_meta, download_ids, stored_paths = _plan_batch(
+        existing_meta, missing_index_ids, download_ids, stored_paths = _plan_batch(
             novels,
             uow,
             redownload=force,
             failed_repo=FailedNovelRepository(uow.session),
         )
-        return _RoundPlan(existing_meta, download_ids, stored_paths)
+        return _RoundPlan(existing_meta, missing_index_ids, download_ids, stored_paths)
 
     download_ids = list(dict.fromkeys(ids or []))
     stored_paths = {}
@@ -366,7 +363,33 @@ def _plan_round(
     if download_ids:
         # 调用方（``ingest``）用 ``read_transaction`` 包住本函数，事务边界在那里。
         stored_paths = SQLAlchemyNovelRepository(uow.session).get_stored_paths(set(download_ids))
-    return _RoundPlan([], download_ids, stored_paths)
+    return _RoundPlan([], frozenset(), download_ids, stored_paths)
+
+
+async def _resolve_round_indices(
+    existing_meta: list[NovelDraft],
+    missing_index_ids: frozenset[int],
+    downloaded: list[NovelDraft],
+    client,
+) -> tuple[list[NovelDraft], list[NovelDraft]]:
+    """Resolve missing ``series_index`` from series rosters for new and known rows.
+
+    New downloads fall back here when webview navigation cannot anchor their
+    chapter number; known rows in *missing_index_ids* also enter here because
+    listing endpoints omit ``series.index`` (e.g. a standalone novel later
+    added to a series).
+    """
+    if client is None:
+        return existing_meta, downloaded
+    meta_need = [d for d in existing_meta if d.series_id and d.id in missing_index_ids]
+    if not meta_need and not downloaded:
+        return existing_meta, downloaded
+    combined = await resolve_series_indices([*meta_need, *downloaded], client)
+    split = len(meta_need)
+    if split:
+        by_id = {d.id: d for d in combined[:split]}
+        existing_meta = [by_id.get(d.id, d) for d in existing_meta]
+    return existing_meta, combined[split:]
 
 
 async def _download_round(
@@ -521,6 +544,13 @@ async def ingest(
         asset_batch=asset_batch,
     )
 
+    existing_meta, downloaded = await _resolve_round_indices(
+        plan.existing_meta,
+        plan.missing_index_ids,
+        downloaded,
+        client,
+    )
+
     assets = await _settle_assets(image_downloader, downloaded, asset_batch=asset_batch)
 
     names = await _collect_names(downloaded, uow, client)
@@ -529,7 +559,7 @@ async def ingest(
         uow,
         lambda write_uow: _persist_round(
             write_uow,
-            plan.existing_meta,
+            existing_meta,
             downloaded,
             failed_records=failed_records + assets.failures,
             titles=_titles_by_id(novels, downloaded),
