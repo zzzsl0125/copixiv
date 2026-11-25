@@ -118,6 +118,11 @@ class FakePixivClient:
         self._maybe_raise("user_detail", user_id)
         return self.user_detail_responses.get(user_id)
 
+    async def user_follow_add(self, user_id: int) -> dict[str, Any]:
+        self.calls.append(("user_follow_add", user_id))
+        self._maybe_raise("user_follow_add", user_id)
+        return {}
+
 
 def _reset_test_schema(engine, test_db_url: str) -> None:
     """Reset the test database schema via pure ``alembic upgrade head`` (Phase 6 baseline)."""

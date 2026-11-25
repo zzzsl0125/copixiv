@@ -16,6 +16,7 @@ from copixiv.core.draft import safe_get
 from copixiv.core.models import TaskResult
 from copixiv.core.text import filter_chinese
 from copixiv.core.time import month_ranges
+from copixiv.db.base import ensure_parent_rows
 from copixiv.db.tx import read_transaction, run_write_transaction
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
@@ -113,7 +114,6 @@ async def fetch_author_novels(
     author_id: int,
     *,
     force: bool = False,
-    redownload: bool = False,
     uow: SqlUnitOfWork,
     client: PixivClient,
     file_storage: Any,
@@ -141,7 +141,7 @@ async def fetch_author_novels(
 
     out = await ingest(
         novels,
-        force=redownload,
+        force=force,
         session_factory=uow.session_factory,
         client=client,
         file_storage=file_storage,
@@ -154,15 +154,14 @@ async def fetch_author_novels(
         or (author.get("author_name") or "" if author else "")
     )
 
-    if author is not None or out.titles or author_id in out.new_author_ids:
+    def _finish_author_update(uw: SqlUnitOfWork) -> None:
+        ensure_parent_rows(uw.session, author_ids={author_id})
+        repo = SQLAlchemyAuthorRepository(uw.session)
+        repo.update_last_update(author_id)
+        if name and (author is None or author.get("author_name") != name):
+            repo.update_author_name(author_id, name)
 
-        def _finish_author_update(uw: SqlUnitOfWork) -> None:
-            repo = SQLAlchemyAuthorRepository(uw.session)
-            repo.update_last_update(author_id)
-            if name and (author is None or author.get("author_name") != name):
-                repo.update_author_name(author_id, name)
-
-        await run_write_transaction(uow, _finish_author_update)
+    await run_write_transaction(uow, _finish_author_update)
 
     label = name or f"#{author_id}"
     return TaskResult(
@@ -228,6 +227,7 @@ async def fan_out_author_fetch(
     file_storage: Any,
     image_downloader: Any,
     child_uow_factory: Callable[[], SqlUnitOfWork],
+    seen_authors: set[int] | None = None,
 ) -> tuple[list[str], list[int]]:
     """Filter to Chinese novels and fan out ``fetch_author_novels`` concurrently."""
     cn = filter_chinese(novels)
@@ -235,6 +235,9 @@ async def fan_out_author_fetch(
         return [], []
 
     authors = {safe_get(n, "user.id") for n in cn if safe_get(n, "user")} - {None}
+    if seen_authors is not None:
+        authors -= seen_authors
+        seen_authors.update(authors)
     if not authors:
         return [], []
 
@@ -246,7 +249,6 @@ async def fan_out_author_fetch(
                 return await fetch_author_novels(
                     aid,
                     force=force,
-                    redownload=False,
                     uow=child_uow_factory(),
                     client=client,
                     file_storage=file_storage,
@@ -269,6 +271,18 @@ async def fan_out_author_fetch(
     return titles, failed_ids
 
 
+def _fan_out_result(prefix: str, titles: list[str], failed_ids: list[int]) -> TaskResult:
+    unique_failed = list(dict.fromkeys(failed_ids))
+    summary = f"{prefix}: 新增 {len(titles)} 本小说"
+    if unique_failed:
+        summary += f"，失败 {len(unique_failed)} 本"
+    return TaskResult(
+        summary=summary,
+        new_novel_titles=titles,
+        failed_ids=unique_failed,
+    )
+
+
 async def fetch_ranking_novels(
     *,
     mode: str = "day_r18",
@@ -282,6 +296,7 @@ async def fetch_ranking_novels(
     """Fetch novel rankings over the last *days* days."""
     titles: list[str] = []
     failed_ids: list[int] = []
+    seen_authors: set[int] = set()
     for delta in range(1, days + 1):
         target = datetime.now().astimezone() - timedelta(days=delta)
         resp = await client.novel_ranking(
@@ -299,18 +314,12 @@ async def fetch_ranking_novels(
             file_storage=file_storage,
             image_downloader=image_downloader,
             child_uow_factory=child_uow_factory,
+            seen_authors=seen_authors,
         )
         titles.extend(t)
         failed_ids.extend(f)
 
-    summary = f"排行榜 ({mode}): 新增 {len(titles)} 本小说"
-    if failed_ids:
-        summary += f"，失败 {len(set(failed_ids))} 本"
-    return TaskResult(
-        summary=summary,
-        new_novel_titles=titles,
-        failed_ids=list(dict.fromkeys(failed_ids)),
-    )
+    return _fan_out_result(f"排行榜 ({mode})", titles, failed_ids)
 
 
 async def fetch_search_novels(
@@ -330,6 +339,7 @@ async def fetch_search_novels(
 
     all_titles: list[str] = []
     failed_ids: list[int] = []
+    seen_authors: set[int] = set()
     async with client.account_rule(need_premium=True):
         for start_date, slice_end in month_ranges(end_date, months):
             logger.info(f"Searching {start_date.date()} ~ {slice_end.date()}")
@@ -351,18 +361,12 @@ async def fetch_search_novels(
                 file_storage=file_storage,
                 image_downloader=image_downloader,
                 child_uow_factory=child_uow_factory,
+                seen_authors=seen_authors,
             )
             all_titles.extend(t)
             failed_ids.extend(f)
 
-    summary = f"搜索 ({keyword}): 新增 {len(all_titles)} 本小说"
-    if failed_ids:
-        summary += f"，失败 {len(set(failed_ids))} 本"
-    return TaskResult(
-        summary=summary,
-        new_novel_titles=all_titles,
-        failed_ids=list(dict.fromkeys(failed_ids)),
-    )
+    return _fan_out_result(f"搜索 ({keyword})", all_titles, failed_ids)
 
 
 async def retry_failed_novels(

@@ -74,6 +74,7 @@ def format_task_notification(
     titles = result.new_novel_titles if result else []
     count = result.new_novel_count if result else 0
     summary = result.summary if result else ""
+    failed_count = len(result.failed_ids) if result else 0
 
     lines = [
         "✅ <b>Task Completed</b>",
@@ -84,6 +85,8 @@ def format_task_notification(
 
     if titles:
         lines.append(f"<b>New Novels:</b> <code>{count}</code>")
+        if failed_count:
+            lines.append(f"<b>Failed:</b> <code>{failed_count}</code>")
         text = "\n".join(lines)
         if len(titles) > 10:
             from copixiv.core.naming import safe_filename

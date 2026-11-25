@@ -31,14 +31,18 @@ def extract_managed_novel_id(name_stem: str) -> int | None:
 
 def collect_orphan_files(
     root: Path,
-    known_ids: set[int],
+    known_paths: set[Path],
     min_age_days: int,
     now: float | None = None,
-    known_paths: set[Path] | None = None,
 ) -> list[tuple[Path, int]]:
-    """Walk *root* and return ``[(path, size_bytes), ...]`` of reclaimable files."""
+    """Walk *root* and return ``[(path, size_bytes), ...]`` of reclaimable files.
+
+    Files are kept if they match *known_paths* (a DB novel's text path or its
+    sibling ``.epub``) or if their stem does not follow copixiv's managed
+    naming convention.
+    """
     resolved_root = root.resolve()
-    normalized_known_paths = {p.resolve() for p in known_paths} if known_paths else set()
+    normalized_known_paths = {p.resolve() for p in known_paths}
     current_time = time.time() if now is None else now
     orphans: list[tuple[Path, int]] = []
     min_age_seconds = min_age_days * 86400
@@ -75,14 +79,12 @@ def collect_orphan_files(
             if entry_path.suffix == ".tmp":
                 continue
 
-            if normalized_known_paths and entry_path in normalized_known_paths:
+            if entry_path in normalized_known_paths:
                 continue
 
             is_export = name.startswith(EXPORT_FILE_PREFIX) and entry_path.suffix == ".zip"
-            if not is_export:
-                novel_id = extract_managed_novel_id(entry_path.stem)
-                if novel_id is None or novel_id in known_ids:
-                    continue
+            if not is_export and extract_managed_novel_id(entry_path.stem) is None:
+                continue
 
             try:
                 st = entry.stat()

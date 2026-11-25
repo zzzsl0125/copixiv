@@ -76,6 +76,13 @@ async def test_check_epub_covers_positive_and_negative_ids(uow: SqlUnitOfWork, t
                 source_key="sha_missing_local",
             )
         )
+        uow.session.add_all(
+            [
+                models.FailedNovel(novel_id=101, error_message="stale img err", failed_times=2),
+                models.FailedNovel(novel_id=102, error_message="reverted err", failed_times=1),
+                models.FailedNovel(novel_id=103, error_message="resolved img err", failed_times=1),
+            ]
+        )
 
     await check_epub(TaskContext(uow=uow))
 
@@ -84,6 +91,9 @@ async def test_check_epub_covers_positive_and_negative_ids(uow: SqlUnitOfWork, t
         assert uow.session.get(models.Novel, 102).has_epub == EpubStatus.PENDING
         assert uow.session.get(models.Novel, 103).has_epub == EpubStatus.DONE
         assert uow.session.get(models.Novel, -50).has_epub == EpubStatus.MISSING_SOURCE
+        assert uow.session.get(models.FailedNovel, 101) is None
+        assert uow.session.get(models.FailedNovel, 102) is not None
+        assert uow.session.get(models.FailedNovel, 103) is None
 
 
 def test_fix_series_index_args_accepts_legacy_extra_fields():
@@ -189,9 +199,13 @@ async def test_prune_orphan_files_respects_db_exports_age_and_dry_run(
     kept_fresh.write_text("too new", encoding="utf-8")
     old_orphan = dl / "orphan_888.txt"
     old_orphan.write_text("stale orphan", encoding="utf-8")
+    stale_renamed = dl / "old_title_10.txt"
+    stale_renamed.write_text("stale renamed copy", encoding="utf-8")
+    unmanaged = dl / "notes.txt"
+    unmanaged.write_text("user notes", encoding="utf-8")
 
     old_ts = time.time() - 10 * 86400
-    for p in (kept_db, expired_export, old_orphan):
+    for p in (kept_db, expired_export, old_orphan, stale_renamed, unmanaged):
         os.utime(p, (old_ts, old_ts))
 
     with uow.begin():
@@ -204,14 +218,17 @@ async def test_prune_orphan_files_respects_db_exports_age_and_dry_run(
     await prune_orphan_files(PruneOrphanFilesArgs(apply=False, min_age_days=7), ctx)
     assert old_orphan.exists()
     assert expired_export.exists()
+    assert stale_renamed.exists()
 
-    # Apply deletes old_orphan and expired_export, keeps DB/fresh files and fresh export
+    # Apply deletes orphans + stale unreferenced copy of known id, keeps DB/fresh/unmanaged files
     await prune_orphan_files(PruneOrphanFilesArgs(apply=True, min_age_days=7), ctx)
     assert not old_orphan.exists()
     assert not expired_export.exists()
+    assert not stale_renamed.exists()
     assert kept_db.exists()
     assert fresh_export.exists()
     assert kept_fresh.exists()
+    assert unmanaged.exists()
 
 
 @pytest.mark.asyncio
@@ -390,6 +407,145 @@ async def test_fetch_author_novels_skips_updated_today_and_processes_stale(
     assert "跳过" not in res_stale.summary
     assert ("user_novels", (102, True)) in fake_pixiv_client.calls
     assert ("user_detail", 102) not in fake_pixiv_client.calls
+
+    # force=True ignores was_updated_today AND forces redownload of existing novels
+    from copixiv.features.novels.use_cases.discovery import fan_out_author_fetch
+
+    with uow.begin():
+        persist_novels(
+            uow,
+            [build_novel(id=1011, title="中文已有", author_id=101, author_name="FreshAuthor")],
+        )
+
+    fake_pixiv_client.calls.clear()
+    fake_pixiv_client.user_novels_responses[101] = {
+        "novels": [
+            SimpleNamespace(
+                id=1011,
+                title="中文已有",
+                caption="中文",
+                tags=[SimpleNamespace(name="中文")],
+                user=SimpleNamespace(id=101, name="FreshAuthor"),
+                series=None,
+                total_bookmarks=10,
+                total_view=20,
+                text_length=4,
+                create_date="2026-01-01T00:00:00+09:00",
+            )
+        ]
+    }
+    fake_pixiv_client.webview_responses[1011] = SimpleNamespace(
+        id=1011,
+        title="中文已有",
+        user_id=101,
+        rating={"bookmark": 10, "view": 20},
+        caption="中文",
+        series_id=None,
+        series_title=None,
+        series_navigation=None,
+        cdate="2026-01-01T00:00:00+09:00",
+        tags=["中文"],
+        text="重抓正文",
+        images=[],
+        illusts=[],
+        cover_url=None,
+    )
+    seen: set[int] = set()
+    await fan_out_author_fetch(
+        [fake_pixiv_client.user_novels_responses[101]["novels"][0]],
+        force=True,
+        client=fake_pixiv_client,
+        file_storage=storage,
+        image_downloader=None,
+        child_uow_factory=lambda: SqlUnitOfWork(uow.session_factory),
+        seen_authors=seen,
+    )
+    assert ("user_novels", (101, True)) in fake_pixiv_client.calls
+    assert ("webview_novel", 1011) in fake_pixiv_client.calls
+    assert seen == {101}
+
+    # Same author on a second ranking/search slice in the same run is skipped
+    fake_pixiv_client.calls.clear()
+    await fan_out_author_fetch(
+        [fake_pixiv_client.user_novels_responses[101]["novels"][0]],
+        force=True,
+        client=fake_pixiv_client,
+        file_storage=storage,
+        image_downloader=None,
+        child_uow_factory=lambda: SqlUnitOfWork(uow.session_factory),
+        seen_authors=seen,
+    )
+    assert fake_pixiv_client.calls == []
+
+    # 23-hour cooldown: 23h05m ago is eligible (avoids daily cron drift); 22h ago is skipped
+    with uow.begin():
+        uow.session.add_all(
+            [
+                models.Author(
+                    author_id=103, author_name="DriftOk", last_update=now - timedelta(hours=23, minutes=5)
+                ),
+                models.Author(author_id=104, author_name="Cooldown", last_update=now - timedelta(hours=22)),
+            ]
+        )
+    fake_pixiv_client.user_novels_responses[103] = {"novels": []}
+    fake_pixiv_client.calls.clear()
+    res_drift = await fetch_author_novels(
+        103,
+        force=False,
+        uow=uow,
+        client=fake_pixiv_client,
+        file_storage=storage,
+        image_downloader=None,
+    )
+    assert "跳过" not in res_drift.summary
+    assert ("user_novels", (103, True)) in fake_pixiv_client.calls
+
+    fake_pixiv_client.calls.clear()
+    res_cool = await fetch_author_novels(
+        104,
+        force=False,
+        uow=uow,
+        client=fake_pixiv_client,
+        file_storage=storage,
+        image_downloader=None,
+    )
+    assert "跳过" in res_cool.summary
+    assert fake_pixiv_client.calls == []
+
+    # Brand-new author with only non-Chinese works still gets a placeholder row + last_update
+    fake_pixiv_client.user_novels_responses[105] = {
+        "user": {"id": 105, "name": "JpOnly"},
+        "novels": [
+            SimpleNamespace(
+                id=99001,
+                title="これは日本語の小説です",
+                caption="日本語",
+                tags=[],
+                user=SimpleNamespace(id=105, name="JpOnly"),
+            )
+        ],
+    }
+    fake_pixiv_client.calls.clear()
+    await fetch_author_novels(
+        105,
+        force=False,
+        uow=uow,
+        client=fake_pixiv_client,
+        file_storage=storage,
+        image_downloader=None,
+    )
+    assert ("user_follow_add", 105) in fake_pixiv_client.calls
+    fake_pixiv_client.calls.clear()
+    res_jp_repeat = await fetch_author_novels(
+        105,
+        force=False,
+        uow=uow,
+        client=fake_pixiv_client,
+        file_storage=storage,
+        image_downloader=None,
+    )
+    assert "跳过" in res_jp_repeat.summary
+    assert fake_pixiv_client.calls == []
 
 
 def test_batch_export_preview_uses_highest_id_limit_1(

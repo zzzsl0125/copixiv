@@ -45,7 +45,7 @@ async def _download_novels(
     client,
     file_storage,
     image_downloader,
-    redownload: bool = False,
+    force: bool = False,
     stored_paths: dict[int, str] | None = None,
     asset_batch: AssetBatch | None = None,
 ) -> tuple[list[NovelDraft], list[tuple[int, str]]]:
@@ -78,7 +78,7 @@ async def _download_novels(
             client,
             file_storage,
             image_downloader,
-            redownload,
+            force,
             stored_path=(stored_paths or {}).get(nid),
             asset_batch=asset_batch,
         )
@@ -118,7 +118,7 @@ async def _download_novels(
 def _plan_batch(
     novels: list[NovelInfoLike],
     uow,
-    redownload: bool = False,
+    force: bool = False,
     failed_repo=None,
 ) -> tuple[list[NovelDraft], frozenset[int], list[int], dict[int, str]]:
     """Plan phase (read-only): decide what to download and what to upsert.
@@ -126,9 +126,11 @@ def _plan_batch(
     Must run outside the write transaction — it only reads.  Returns
     ``(existing_meta, missing_index_ids, download_ids, stored_paths)`` where
     ``existing_meta`` holds the metadata drafts of already-known novels (empty
-    when ``redownload``), ``missing_index_ids`` marks known rows whose stored
-    ``series_index`` is currently NULL, ``download_ids`` are the novel IDs
-    that still need downloading, and ``stored_paths`` maps every already-known
+    when ``force`` or scheduled for re-download), ``missing_index_ids`` marks
+    known rows whose stored ``series_index`` is currently NULL,
+    ``download_ids`` are the novel IDs that still need downloading (including
+    already-persisted rows still carrying a retryable failure record, e.g. a
+    previous asset/EPUB failure), and ``stored_paths`` maps every already-known
     id to the file anchor in the database.
 
     ``stored_paths`` exists because ``novel.path`` is written once and then
@@ -147,12 +149,16 @@ def _plan_batch(
     repo = SQLAlchemyNovelRepository(uow.session)
     existing = repo.get_existing_ids(ids)
 
-    # Exclude novels that have already failed too many times
+    # Exclude new novels that have already failed too many times, while
+    # retrying existing rows that still have an active failure record (e.g.
+    # text persisted but asset/EPUB build failed on an earlier round).
     skip_ids: set[int] = set()
-    if failed_repo is not None and not redownload:
+    retry_existing: set[int] = set()
+    if failed_repo is not None and not force:
         skip_ids = failed_repo.get_skip_ids(ids - existing)
+        retry_existing = failed_repo.get_retryable_ids(ids & existing)
 
-    need_download = ids if redownload else ids - existing - skip_ids
+    need_download = ids if force else (ids - existing - skip_ids) | retry_existing
 
     logger.info(
         f"_plan_batch: {len(novels)} novels — "
@@ -162,8 +168,10 @@ def _plan_batch(
 
     existing_meta: list[NovelDraft] = []
     missing_index_ids: frozenset[int] = frozenset()
-    if not redownload and existing:
-        existing_meta = [build_from_novel_info(n) for n in novels if n.id in existing]
+    if not force and existing:
+        existing_meta = [
+            build_from_novel_info(n) for n in novels if n.id in existing and n.id not in need_download
+        ]
         series_meta_ids = {d.id for d in existing_meta if d.series_id}
         if series_meta_ids:
             missing_index_ids = frozenset(repo.get_ids_missing_series_index(series_meta_ids))
@@ -350,7 +358,7 @@ def _plan_round(
         existing_meta, missing_index_ids, download_ids, stored_paths = _plan_batch(
             novels,
             uow,
-            redownload=force,
+            force=force,
             failed_repo=FailedNovelRepository(uow.session),
         )
         return _RoundPlan(existing_meta, missing_index_ids, download_ids, stored_paths)
@@ -424,7 +432,7 @@ async def _download_round(
         client,
         file_storage,
         image_downloader,
-        redownload=force,
+        force=force,
         stored_paths=stored_paths,
         asset_batch=asset_batch,
     )

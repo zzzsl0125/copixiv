@@ -61,10 +61,8 @@ async def prune_orphan_files(
         ctx.require_uow(),
         lambda uw: SQLAlchemyNovelRepository(uw.session).list_all_id_paths(),
     )
-    known_ids: set[int] = set()
     known_paths: set[Path] = set()
-    for nid, raw_path in id_paths:
-        known_ids.add(nid)
+    for _nid, raw_path in id_paths:
         if raw_path:
             resolved = Path(raw_path).resolve()
             known_paths.add(resolved)
@@ -74,16 +72,15 @@ async def prune_orphan_files(
     orphans = await asyncio.to_thread(
         collect_orphan_files,
         root,
-        known_ids,
+        known_paths,
         args.min_age_days,
         now,
-        known_paths,
     )
     total_bytes = sum(size for _path, size in orphans)
     size_mb = total_bytes / (1024 * 1024)
 
     if not orphans:
-        return TaskResult(summary=(f"孤儿文件清理: 没有可回收的文件（{len(known_ids)} 本书全部有主）"))
+        return TaskResult(summary=(f"孤儿文件清理: 没有可回收的文件（{len(id_paths)} 本书全部有主）"))
 
     if not args.apply:
         logger.info(

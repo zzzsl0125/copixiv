@@ -315,7 +315,7 @@ async def test_batch_tag_delete_and_download_by_ids(
         BatchExportArgs(novel_ids=[1001, 1002, 999999], format_mode="txt"),
         ctx,
     )
-    assert "批量导出完成" in export_res.summary
+    assert "批量导出完成：共 2/3 篇" in export_res.summary
     zip_path = tmp_path / f"batch_export_{exp_task_id}.zip"
     assert zip_path.is_file()
     with zipfile.ZipFile(zip_path) as zf:
@@ -639,3 +639,61 @@ async def test_sync_novel_resolves_series_index_when_added_to_or_moved_between_s
     assert updated.series_id == 601
     assert updated.series_name == "NewS"
     assert updated.series_index == 2
+
+
+@pytest.mark.asyncio
+async def test_ingest_retries_existing_novel_with_retryable_failure_and_stops_at_max(
+    committed_session_factory,
+    fake_pixiv_client,
+    tmp_path: Path,
+):
+    from copixiv.features.failures.repo import MAX_RETRIES
+
+    storage = FileStorage(str(tmp_path))
+    downloader = _DummyImageDownloader()
+
+    with committed_session_factory() as session:
+        session.add(models.Author(author_id=70, author_name="Auth70"))
+        session.flush()
+        session.add_all(
+            [
+                models.Novel(
+                    id=7001,
+                    title="RetryableAsset",
+                    author_id=70,
+                    author_name="Auth70",
+                    has_epub=EpubStatus.PENDING,
+                ),
+                models.Novel(
+                    id=7002,
+                    title="ExhaustedAsset",
+                    author_id=70,
+                    author_name="Auth70",
+                    has_epub=EpubStatus.PENDING,
+                ),
+            ]
+        )
+        session.add_all(
+            [
+                models.FailedNovel(novel_id=7001, error_message="EPUB 不完整", failed_times=1),
+                models.FailedNovel(novel_id=7002, error_message="EPUB 不完整", failed_times=MAX_RETRIES),
+            ]
+        )
+        session.commit()
+
+    fake_pixiv_client.webview_responses[7001] = _fake_webview(7001, title="RetryableAsset", author_id=70)
+    await ingest(
+        [
+            _fake_novel_info(7001, title="RetryableAsset", author_id=70, author_name="Auth70"),
+            _fake_novel_info(7002, title="ExhaustedAsset", author_id=70, author_name="Auth70"),
+        ],
+        session_factory=committed_session_factory,
+        client=fake_pixiv_client,
+        file_storage=storage,
+        image_downloader=downloader,
+    )
+    assert ("webview_novel", 7001) in fake_pixiv_client.calls
+    assert ("webview_novel", 7002) not in fake_pixiv_client.calls
+    with committed_session_factory() as session:
+        assert session.get(models.FailedNovel, 7001) is None
+        assert session.get(models.FailedNovel, 7002) is not None

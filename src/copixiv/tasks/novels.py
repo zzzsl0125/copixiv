@@ -30,7 +30,6 @@ class NovelFollowArgs(BaseModel):
 class AuthorFetchArgs(BaseModel):
     author_id: int
     force: bool = False
-    redownload: bool = False
 
 
 class AuthorDeleteArgs(BaseModel):
@@ -101,7 +100,6 @@ async def author_fetch(args: AuthorFetchArgs, ctx: TaskContext) -> TaskResult:
     return await fetch_author_novels(
         args.author_id,
         force=args.force,
-        redownload=args.redownload,
         uow=ctx.require_uow(),
         client=ctx.require_client(),
         file_storage=ctx.file_storage,

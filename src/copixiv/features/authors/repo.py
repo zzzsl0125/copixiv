@@ -1,6 +1,6 @@
 """Author repository."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete as _delete
 from sqlalchemy import func
@@ -12,6 +12,8 @@ from copixiv.core.exceptions import NotFoundError
 from copixiv.db import delta as engine_delta
 from copixiv.db import models
 from copixiv.db.base import model_to_dict
+
+_AUTHOR_UPDATE_COOLDOWN = timedelta(hours=23)
 
 
 class SQLAlchemyAuthorRepository:
@@ -57,7 +59,7 @@ class SQLAlchemyAuthorRepository:
     def was_updated_today(self, author_id: int) -> bool:
         author = self.session.get(models.Author, author_id)
         if author and author.last_update:
-            return (datetime.now(UTC) - author.last_update).days <= 0
+            return (datetime.now(UTC) - author.last_update) < _AUTHOR_UPDATE_COOLDOWN
         return False
 
     def update_author_name(self, author_id: int, name: str) -> None:

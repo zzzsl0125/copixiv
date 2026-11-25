@@ -125,7 +125,8 @@ async def batch_export(args: BatchExportArgs, ctx: TaskContext) -> TaskResult:
         raise NotFoundError("未找到可下载的有效文件")
 
     size_mb = size_bytes / 1024 / 1024
-    summary = f"批量导出完成：共 {total} 篇（{size_mb:.1f} MB），可在任务管理点击下载"
+    count_label = f"{added_count}/{total}" if added_count < total else str(total)
+    summary = f"批量导出完成：共 {count_label} 篇（{size_mb:.1f} MB），可在任务管理点击下载"
     if missing:
         summary += f"，缺失文件 {len(missing)} 篇"
     return TaskResult(summary=summary)

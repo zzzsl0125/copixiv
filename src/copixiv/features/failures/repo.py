@@ -94,16 +94,22 @@ class FailedNovelRepository:
         result = cast(CursorResult[Any], self.session.execute(stmt))
         return result.rowcount or 0
 
-    def get_skip_ids(self, novel_ids: set[int]) -> set[int]:
-        """Return the subset of *novel_ids* that have failed too many times."""
+    def _ids_by_threshold(self, novel_ids: set[int], predicate) -> set[int]:
         if not novel_ids:
             return set()
         stmt = select(models.FailedNovel.novel_id).where(
             models.FailedNovel.novel_id.in_(novel_ids),
-            models.FailedNovel.failed_times >= self._max_retries,
+            predicate,
         )
-        rows = self.session.execute(stmt).fetchall()
-        return {row[0] for row in rows}
+        return set(self.session.execute(stmt).scalars().all())
+
+    def get_skip_ids(self, novel_ids: set[int]) -> set[int]:
+        """Return the subset of *novel_ids* that have failed too many times."""
+        return self._ids_by_threshold(novel_ids, models.FailedNovel.failed_times >= self._max_retries)
+
+    def get_retryable_ids(self, novel_ids: set[int]) -> set[int]:
+        """Return *novel_ids* present in the ledger with ``failed_times < max_retries``."""
+        return self._ids_by_threshold(novel_ids, models.FailedNovel.failed_times < self._max_retries)
 
     def list_failures(
         self,

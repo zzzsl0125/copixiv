@@ -47,12 +47,22 @@ def test_format_task_notification_switches_to_document_above_10_titles():
         result=TaskResult(
             summary="ok",
             new_novel_titles=[f"Book {i}" for i in range(12)],
+            failed_ids=[101, 102],
         ),
     )
     assert many.document_content is not None
     assert many.document_name is not None
     assert many.document_name.endswith(".txt")
     assert len(many.document_content.splitlines()) == 12
+    assert "<b>Failed:</b> <code>2</code>" in many.text
+
+    small_with_fail = format_task_notification(
+        "novel_follow",
+        "success",
+        duration=1.5,
+        result=TaskResult(summary="ok", new_novel_titles=["Book1"], failed_ids=[99]),
+    )
+    assert "<b>Failed:</b> <code>1</code>" in small_with_fail.text
 
 
 @pytest.mark.asyncio

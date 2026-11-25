@@ -16,6 +16,7 @@ from copixiv.core.models import EpubStatus, TaskResult
 from copixiv.core.text import MARKER_OVERLAP, has_image_placeholders_bytes
 from copixiv.db.tx import read_transaction, run_write_transaction
 from copixiv.db.uow import SqlUnitOfWork
+from copixiv.features.failures.repo import FailedNovelRepository
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.log import logger
 from copixiv.storage import assets
@@ -42,12 +43,7 @@ async def reconcile_epub_status(uow: SqlUnitOfWork) -> TaskResult:
             lambda uw: SQLAlchemyNovelRepository(uw.session).iter_epub_sweep_page(after_id, _SWEEP_READ_PAGE),
         )
 
-    completed_ids: list[int] = []
-    revert_ids: list[int] = []
-    no_image_ids: list[int] = []
-    enable_ids: list[int] = []
-    pending_ids: list[int] = []
-    missing_ids: list[int] = []
+    pending_count = 0
     totals = {
         "completed": 0,
         "reverted": 0,
@@ -56,33 +52,13 @@ async def reconcile_epub_status(uow: SqlUnitOfWork) -> TaskResult:
         "missing": 0,
     }
 
-    async def _apply(ids: list[int], status: EpubStatus) -> None:
-        await run_write_transaction(
-            uow,
-            lambda uw: SQLAlchemyNovelRepository(uw.session).update_has_epub_status(ids, status),
-        )
+    async def _apply(ids: list[int], status: EpubStatus, *, clear_failures: bool = False) -> None:
+        def _write(uw: SqlUnitOfWork) -> None:
+            SQLAlchemyNovelRepository(uw.session).update_has_epub_status(ids, status)
+            if clear_failures:
+                FailedNovelRepository(uw.session).forget_many(set(ids))
 
-    async def _flush() -> None:
-        if completed_ids:
-            await _apply(completed_ids, EpubStatus.DONE)
-            totals["completed"] += len(completed_ids)
-            completed_ids.clear()
-        if revert_ids:
-            await _apply(revert_ids, EpubStatus.PENDING)
-            totals["reverted"] += len(revert_ids)
-            revert_ids.clear()
-        if enable_ids:
-            await _apply(enable_ids, EpubStatus.PENDING)
-            totals["enabled"] += len(enable_ids)
-            enable_ids.clear()
-        if no_image_ids:
-            await _apply(no_image_ids, EpubStatus.NO_IMAGES)
-            totals["no_images"] += len(no_image_ids)
-            no_image_ids.clear()
-        if missing_ids:
-            await _apply(missing_ids, EpubStatus.MISSING_SOURCE)
-            totals["missing"] += len(missing_ids)
-            missing_ids.clear()
+        await run_write_transaction(uow, _write)
 
     examined = 0
     seen = 0
@@ -105,13 +81,17 @@ async def reconcile_epub_status(uow: SqlUnitOfWork) -> TaskResult:
                 c_missing,
             ) = await asyncio.to_thread(_sweep, chunk, examined)
             examined += len(chunk)
-            completed_ids += c_done
-            revert_ids += c_revert
-            no_image_ids += c_noimg
-            enable_ids += c_enable
-            pending_ids += c_pending
-            missing_ids += c_missing
-            await _flush()
+            pending_count += len(c_pending)
+            for ids, status, key, clear_failures in (
+                (c_done, EpubStatus.DONE, "completed", True),
+                (c_revert, EpubStatus.PENDING, "reverted", False),
+                (c_enable, EpubStatus.PENDING, "enabled", False),
+                (c_noimg, EpubStatus.NO_IMAGES, "no_images", True),
+                (c_missing, EpubStatus.MISSING_SOURCE, "missing", False),
+            ):
+                if ids:
+                    await _apply(ids, status, clear_failures=clear_failures)
+                    totals[key] += len(ids)
             # Explicit yield: give HTTP handlers a turn between chunks.
             await asyncio.sleep(0)
 
@@ -122,7 +102,7 @@ async def reconcile_epub_status(uow: SqlUnitOfWork) -> TaskResult:
         f"check_epub: 本轮 {seen} 行（{time.monotonic() - started:.0f}s），"
         f"completed={totals['completed']}, reverted={totals['reverted']}, "
         f"enabled={totals['enabled']}, no_images={totals['no_images']}, "
-        f"missing={totals['missing']}, pending={len(pending_ids)}（全表）"
+        f"missing={totals['missing']}, pending={pending_count}（全表）"
     )
 
     parts: list[str] = []
@@ -136,8 +116,8 @@ async def reconcile_epub_status(uow: SqlUnitOfWork) -> TaskResult:
         parts.append(f"{totals['no_images']} 本确认为无图")
     if totals["missing"]:
         parts.append(f"{totals['missing']} 本源文件丢失（需重新下载）")
-    if pending_ids:
-        parts.append(f"{len(pending_ids)} 本仍待处理")
+    if pending_count:
+        parts.append(f"{pending_count} 本仍待处理")
     return TaskResult(
         summary=("EPUB 状态检查: " + (" ".join(parts) if parts else "本轮无变化") + f"（全表 {seen} 行）")
     )
