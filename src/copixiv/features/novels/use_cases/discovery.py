@@ -8,26 +8,46 @@ Contains all pure business orchestration previously embedded inside
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 from typing import Any
 
 from copixiv.core.draft import safe_get
-from copixiv.core.models import TaskResult
+from copixiv.core.exceptions import ValidationError
+from copixiv.core.models import SOURCE_PIXIV, TaskResult
+from copixiv.core.sources import SourceCapability, SourceCredentialRecord, SourceRuntimeConfig
 from copixiv.core.text import filter_chinese
 from copixiv.core.time import month_ranges
 from copixiv.db.base import ensure_parent_rows
 from copixiv.db.tx import read_transaction, run_write_transaction
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
+from copixiv.features.failures.repo import FailedNovelRepository
 from copixiv.features.novels.ingest import ingest
 from copixiv.log import logger
 from copixiv.pixiv.client import PixivClient
+from copixiv.sources.local import LocalSourcePlugin
+from copixiv.sources.pixiv import PixivSourcePlugin
+from copixiv.sources.registry import SourceRegistry
 
 # How many ``fetch_author_novels`` branches may run at once during ranking/search fan-out.
 _FAN_OUT_LIMIT = 8
 # How many novel IDs are processed per ``ingest`` batch in retry flows.
 _RETRY_BATCH_SIZE = 50
+
+
+def _ensure_pixiv_enabled(source_service: Any | None) -> None:
+    if source_service is not None and not source_service.is_enabled(SOURCE_PIXIV):
+        raise ValidationError("Pixiv 数据源已禁用")
+
+
+def _resolve_registry(
+    source_registry: Any | None,
+    source_service: Any | None,
+) -> SourceRegistry | None:
+    if source_service is not None and getattr(source_service, "registry", None) is not None:
+        return source_service.registry
+    return source_registry
 
 
 def _batch_summary(prefix: str, out: Any) -> str:
@@ -51,8 +71,12 @@ async def fetch_single_novel(
     client: PixivClient | None,
     file_storage: Any,
     image_downloader: Any,
+    source_registry: Any | None = None,
+    source_service: Any | None = None,
 ) -> TaskResult:
     """Download and persist a single novel by ID."""
+    del source_registry
+    _ensure_pixiv_enabled(source_service)
     out = await ingest(
         ids=[novel_id],
         force=redownload,
@@ -84,11 +108,17 @@ async def fetch_follow_feed(
     days: int = 3,
     force: bool = False,
     session_factory: Any,
-    client: PixivClient,
+    client: PixivClient | None,
     file_storage: Any,
     image_downloader: Any,
+    source_registry: Any | None = None,
+    source_service: Any | None = None,
 ) -> TaskResult:
     """Fetch new novels from followed users on Pixiv."""
+    del source_registry
+    _ensure_pixiv_enabled(source_service)
+    if client is None:
+        raise RuntimeError("TaskContext.client is not set")
     fetch_til = datetime.now().astimezone() - timedelta(days=days)
     async with client.account_rule(force_follow=True):
         resp = await client.novel_follow(fetch_til=fetch_til)
@@ -115,11 +145,17 @@ async def fetch_author_novels(
     *,
     force: bool = False,
     uow: SqlUnitOfWork,
-    client: PixivClient,
+    client: PixivClient | None,
     file_storage: Any,
     image_downloader: Any,
+    source_registry: Any | None = None,
+    source_service: Any | None = None,
 ) -> TaskResult:
     """Fetch all novels by an author."""
+    del source_registry
+    _ensure_pixiv_enabled(source_service)
+    if client is None:
+        raise RuntimeError("TaskContext.client is not set")
 
     def _plan(uw: SqlUnitOfWork) -> tuple[bool, dict | None]:
         repo = SQLAlchemyAuthorRepository(uw.session)
@@ -174,38 +210,66 @@ async def fetch_author_novels(
 async def fetch_special_follow_novels(
     *,
     uow: SqlUnitOfWork,
-    client: PixivClient,
+    client: PixivClient | None = None,
     file_storage: Any,
     image_downloader: Any,
+    source_registry: Any | None = None,
+    source_service: Any | None = None,
 ) -> TaskResult:
     """Check for new novels from specially-followed authors."""
-    author_ids = await read_transaction(
+    authors_by_source = await read_transaction(
         uow,
-        lambda uw: SQLAlchemyAuthorRepository(uw.session).get_special_follow_author_ids(),
+        lambda uw: SQLAlchemyAuthorRepository(uw.session).get_special_follow_authors_by_source(),
     )
 
-    if not author_ids:
+    if not authors_by_source:
         logger.info("No special followed authors.")
         return TaskResult(summary="无特别关注的作者")
 
-    responses = await asyncio.gather(
-        *[client.user_novels(aid) for aid in author_ids],
-        return_exceptions=True,
-    )
+    registry = _resolve_registry(source_registry, source_service)
+    pixiv_novels: list[Any] = []
 
-    all_novels = []
-    for author_id, resp in zip(author_ids, responses, strict=True):
-        if isinstance(resp, Exception):
-            logger.error(f"Failed to fetch novels for author {author_id}: {resp}")
+    for src, keys in authors_by_source.items():
+        if not keys:
             continue
-        novels = safe_get(resp, "novels", [])
-        if novels:
-            all_novels.extend(novels)
+        if source_service is not None and not source_service.is_enabled(src):
+            logger.info(f"Special follow: skipping disabled source {src}")
+            continue
 
-    all_novels = filter_chinese(all_novels)
+        plugin = registry.get(src) if registry is not None else None
+        if (plugin is None and registry is None and src == SOURCE_PIXIV and client is not None) or (
+            isinstance(plugin, PixivSourcePlugin) and plugin._client is None and client is not None
+        ):
+            plugin = PixivSourcePlugin(client=client)
+
+        if plugin is None or not plugin.manifest.has_capability(SourceCapability.AUTHOR_FEED):
+            logger.info(f"Special follow: skipping unsupported source {src}")
+            continue
+
+        runtime: SourceRuntimeConfig
+        creds: Sequence[SourceCredentialRecord]
+        if source_service is not None:
+
+            def _load_source_ctx(
+                uw: SqlUnitOfWork,
+                target_src: str = src,
+            ) -> tuple[SourceRuntimeConfig, Sequence[SourceCredentialRecord]]:
+                return (
+                    source_service.get_runtime_config(target_src, session=uw.session),
+                    source_service.get_credentials(target_src, session=uw.session),
+                )
+
+            runtime, creds = await read_transaction(uow, _load_source_ctx)
+        else:
+            runtime = SourceRuntimeConfig(source=src, enabled=True)
+            creds = ()
+
+        feed_items = await plugin.fetch_author_feed(keys, runtime, creds)
+        if src == SOURCE_PIXIV and feed_items:
+            pixiv_novels.extend(feed_items)
 
     out = await ingest(
-        all_novels,
+        pixiv_novels,
         session_factory=uow.session_factory,
         client=client,
         file_storage=file_storage,
@@ -228,6 +292,8 @@ async def fan_out_author_fetch(
     image_downloader: Any,
     child_uow_factory: Callable[[], SqlUnitOfWork],
     seen_authors: set[int] | None = None,
+    source_registry: Any | None = None,
+    source_service: Any | None = None,
 ) -> tuple[list[str], list[int]]:
     """Filter to Chinese novels and fan out ``fetch_author_novels`` concurrently."""
     cn = filter_chinese(novels)
@@ -253,6 +319,8 @@ async def fan_out_author_fetch(
                     client=client,
                     file_storage=file_storage,
                     image_downloader=image_downloader,
+                    source_registry=source_registry,
+                    source_service=source_service,
                 )
 
         results = await asyncio.gather(
@@ -288,12 +356,17 @@ async def fetch_ranking_novels(
     mode: str = "day_r18",
     days: int = 3,
     force: bool = False,
-    client: PixivClient,
+    client: PixivClient | None,
     file_storage: Any,
     image_downloader: Any,
     child_uow_factory: Callable[[], SqlUnitOfWork],
+    source_registry: Any | None = None,
+    source_service: Any | None = None,
 ) -> TaskResult:
     """Fetch novel rankings over the last *days* days."""
+    _ensure_pixiv_enabled(source_service)
+    if client is None:
+        raise RuntimeError("TaskContext.client is not set")
     titles: list[str] = []
     failed_ids: list[int] = []
     seen_authors: set[int] = set()
@@ -315,6 +388,8 @@ async def fetch_ranking_novels(
             image_downloader=image_downloader,
             child_uow_factory=child_uow_factory,
             seen_authors=seen_authors,
+            source_registry=source_registry,
+            source_service=source_service,
         )
         titles.extend(t)
         failed_ids.extend(f)
@@ -328,12 +403,17 @@ async def fetch_search_novels(
     months: int = 1,
     minlike: int = 500,
     force: bool = False,
-    client: PixivClient,
+    client: PixivClient | None,
     file_storage: Any,
     image_downloader: Any,
     child_uow_factory: Callable[[], SqlUnitOfWork],
+    source_registry: Any | None = None,
+    source_service: Any | None = None,
 ) -> TaskResult:
     """Search novels by keyword over a time range and fan out author catalogues."""
+    _ensure_pixiv_enabled(source_service)
+    if client is None:
+        raise RuntimeError("TaskContext.client is not set")
     end = datetime.now().astimezone() - timedelta(days=1)
     end_date = datetime(end.year, end.month, end.day)
 
@@ -362,6 +442,8 @@ async def fetch_search_novels(
                 image_downloader=image_downloader,
                 child_uow_factory=child_uow_factory,
                 seen_authors=seen_authors,
+                source_registry=source_registry,
+                source_service=source_service,
             )
             all_titles.extend(t)
             failed_ids.extend(f)
@@ -370,22 +452,97 @@ async def fetch_search_novels(
 
 
 async def retry_failed_novels(
-    novel_ids: list[int],
+    novel_ids: list[int] | None = None,
     *,
+    ids: list[int] | None = None,
     session_factory: Any,
     client: PixivClient | None,
     file_storage: Any,
     image_downloader: Any,
+    source_registry: Any | None = None,
+    source_service: Any | None = None,
 ) -> TaskResult:
     """Retry failed downloads from the 「下载失败」 ledger."""
-    ids = list(dict.fromkeys(novel_ids))
-    if not ids:
+    if novel_ids is not None:
+        _ensure_pixiv_enabled(source_service)
+        target_ids = list(dict.fromkeys(novel_ids))
+        if not target_ids:
+            return TaskResult(summary="重试列表为空", new_novel_titles=[])
+
+        new_titles: list[str] = []
+        failed_ids: list[int] = []
+        for i in range(0, len(target_ids), _RETRY_BATCH_SIZE):
+            chunk = target_ids[i : i + _RETRY_BATCH_SIZE]
+            out = await ingest(
+                ids=chunk,
+                force=True,
+                session_factory=session_factory,
+                client=client,
+                file_storage=file_storage,
+                image_downloader=image_downloader,
+            )
+            new_titles.extend(out.new_titles)
+            failed_ids.extend(out.failed_ids)
+        failed_ids = list(dict.fromkeys(failed_ids))
+        ok = len(target_ids) - len(failed_ids)
+        return TaskResult(
+            summary=f"重试失败小说: 成功 {ok}/{len(target_ids)}",
+            new_novel_titles=new_titles,
+            failed_ids=failed_ids,
+        )
+
+    failed_row_ids = list(dict.fromkeys(ids or []))
+    if not failed_row_ids:
         return TaskResult(summary="重试列表为空", new_novel_titles=[])
 
-    new_titles: list[str] = []
-    failed_ids: list[int] = []
-    for i in range(0, len(ids), _RETRY_BATCH_SIZE):
-        chunk = ids[i : i + _RETRY_BATCH_SIZE]
+    uow = SqlUnitOfWork(session_factory)
+    row_tuples: list[tuple[int, str, str, int | None]] = await read_transaction(
+        uow,
+        lambda uw: [
+            (r.id, r.source, r.source_key, r.novel_id)
+            for r in FailedNovelRepository(uw.session).get_by_ids(failed_row_ids)
+        ],
+    )
+    if not row_tuples:
+        return TaskResult(summary="重试列表为空", new_novel_titles=[])
+
+    registry = _resolve_registry(source_registry, source_service) or SourceRegistry(
+        [PixivSourcePlugin(), LocalSourcePlugin()]
+    )
+
+    by_source: dict[str, list[tuple[int, str, int | None]]] = {}
+    for row_id, src, source_key, nid in row_tuples:
+        by_source.setdefault(src, []).append((row_id, source_key, nid))
+
+    pixiv_ids: list[int] = []
+    skipped = 0
+    for src, items in by_source.items():
+        if source_service is not None and not source_service.is_enabled(src):
+            logger.warning(f"retry_failed_novels: 数据源 {src} 已禁用，跳过 {len(items)} 条失败记录")
+            skipped += len(items)
+            continue
+        if not registry.has_capability(src, SourceCapability.RETRY_FAILURE):
+            logger.warning(f"retry_failed_novels: 数据源 {src} 不支持重试，跳过 {len(items)} 条失败记录")
+            skipped += len(items)
+            continue
+        if src == SOURCE_PIXIV:
+            for _row_id, source_key, nid in items:
+                try:
+                    pixiv_ids.append(int(source_key))
+                except (TypeError, ValueError):
+                    if nid is not None:
+                        pixiv_ids.append(int(nid))
+                    else:
+                        skipped += 1
+        else:
+            logger.warning(f"retry_failed_novels: 数据源 {src} 暂未接入重试管线，跳过 {len(items)} 条记录")
+            skipped += len(items)
+
+    pixiv_ids = list(dict.fromkeys(pixiv_ids))
+    new_titles = []
+    failed_ids = []
+    for i in range(0, len(pixiv_ids), _RETRY_BATCH_SIZE):
+        chunk = pixiv_ids[i : i + _RETRY_BATCH_SIZE]
         out = await ingest(
             ids=chunk,
             force=True,
@@ -396,10 +553,17 @@ async def retry_failed_novels(
         )
         new_titles.extend(out.new_titles)
         failed_ids.extend(out.failed_ids)
+
     failed_ids = list(dict.fromkeys(failed_ids))
-    ok = len(ids) - len(failed_ids)
+    ok = len(pixiv_ids) - len(failed_ids)
+    if skipped and not pixiv_ids:
+        summary = f"重试失败记录: 跳过 {skipped} 条不支持或已禁用来源"
+    elif skipped:
+        summary = f"重试失败小说: 成功 {ok}/{len(pixiv_ids)}（跳过 {skipped} 条不支持或已禁用来源）"
+    else:
+        summary = f"重试失败小说: 成功 {ok}/{len(pixiv_ids)}"
     return TaskResult(
-        summary=f"重试失败小说: 成功 {ok}/{len(ids)}",
+        summary=summary,
         new_novel_titles=new_titles,
         failed_ids=failed_ids,
     )

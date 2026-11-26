@@ -7,8 +7,9 @@ from typing import Literal
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from copixiv.core.models import SOURCE_PIXIV
 from copixiv.db.tx import read_transaction
-from copixiv.deps import PixivClientDep, UowDep
+from copixiv.deps import PixivClientDep, SourceServiceDep, UowDep
 from copixiv.features.series.repo import SQLAlchemySeriesRepository
 from copixiv.features.series.service import lookup_series_profile
 
@@ -34,6 +35,7 @@ async def lookup_series(
     series_id: int,
     uow: UowDep,
     client: PixivClientDep,
+    source_service: SourceServiceDep,
 ):
     """系列 ID → 系列名预览（编辑器「系列」一栏的即时反馈）。
 
@@ -42,7 +44,8 @@ async def lookup_series(
     行 → 同系列的 novel 行 → pixiv ``novel_series``（前两步都是本地查询）。
     """
 
-    profile = await lookup_series_profile(series_id, uow=uow, client=client)
+    active_client = client if source_service.is_enabled(SOURCE_PIXIV) else None
+    profile = await lookup_series_profile(series_id, uow=uow, client=active_client)
     novel_count = await read_transaction(
         uow,
         lambda tx: SQLAlchemySeriesRepository(tx.session).count_novels_by_series(series_id),

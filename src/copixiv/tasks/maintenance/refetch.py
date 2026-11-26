@@ -50,6 +50,7 @@ async def refetch_missing_source(
         client=ctx.client,
         file_storage=ctx.file_storage,
         image_downloader=ctx.image_downloader,
+        source_service=ctx.source_service,
     )
 
 

@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import contextlib
-import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -13,14 +12,24 @@ from sqlalchemy import event
 
 from copixiv.core import naming as formats
 from copixiv.core.models import UNKNOWN_AUTHOR, EpubStatus
-from copixiv.core.text import sha256_text
 from copixiv.db.base import ensure_parent_rows
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 from copixiv.features.library.repo import LocalLibraryRepository
+from copixiv.features.tags.resolver import TagAliasResolver
 from copixiv.log import logger
+from copixiv.sources.local import (
+    EMPTY_ERROR,
+    UNNAMED_TITLE,
+    ParsedUpload,
+    UploadUnreadable,
+    body_fingerprint,
+    clean_filename,
+    normalize_text,
+    parse_filename,
+    parse_upload,
+    resolve_metadata,
+)
 from copixiv.storage import atomic
-from copixiv.storage.encoding import DECODE_ERROR, TextDecodeError, decode_text_bytes
-from copixiv.storage.epub import reader
 from copixiv.storage.file_storage import FileStorage
 
 __all__ = [
@@ -42,156 +51,10 @@ __all__ = [
     "resolve_metadata",
 ]
 
-UNNAMED_TITLE = "未命名"
-
-# ``【作者】标题`` / ``[作者] 标题`` —— 方括号（中英文）打头即作者。
-_BRACKET_RE = re.compile(r"^\s*[【\[]\s*(?P<author>[^】\]]+?)\s*[】\]]\s*(?P<title>.+?)\s*$")
-
-# ``作者 - 标题`` 的分隔符：半角/全角连字符**两侧要有空白**，破折号（– —）可无空白。
-_DASH_SEPARATORS = (" - ", " － ", " – ", " — ", " –", "—", "–")
-
-_STATUS_MARKERS = frozenset(
-    {
-        "完结",
-        "已完结",
-        "完结文",
-        "全本",
-        "全集",
-        "完",
-        "连载",
-        "未完结",
-        "txt",
-        "精校",
-        "校对",
-    }
-)
-_TRAILING_GROUP_RE = re.compile(r"[（(\[【]\s*([^）)\]】]{0,16}?)\s*[）)\]】]\s*$")
-_KNOWN_SUFFIXES = (".txt", ".epub")
-
-
-def clean_filename(filename: str) -> str:
-    """取出文件名本体（去掉上传客户端可能带上的目录部分）。"""
-    name = (filename or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
-    return name or "未命名.txt"
-
-
-def _strip_status_markers(title: str) -> str:
-    """剥掉尾部的 ``(完结)`` / ``（全本）`` / ``[txt]`` 一类状态标记。"""
-    current = title.strip()
-    while True:
-        match = _TRAILING_GROUP_RE.search(current)
-        if not match:
-            return current
-        if match.group(1).strip().lower() not in _STATUS_MARKERS:
-            return current
-        stripped = current[: match.start()].strip()
-        if not stripped:
-            return current
-        current = stripped
-
-
-def _split_dash(stem: str) -> tuple[str, str] | None:
-    """``作者 - 标题`` → ``(author, title)``；没有分隔符返回 None。"""
-    for separator in _DASH_SEPARATORS:
-        index = stem.find(separator)
-        if index <= 0:
-            continue
-        author = stem[:index].strip()
-        title = stem[index + len(separator) :].strip()
-        if author and title:
-            return author, title
-    return None
-
-
-def parse_filename(filename: str) -> tuple[str, str]:
-    """从文件名解析 ``(title, author_name)``。
-
-    支持 ``【作者】标题(完结).txt`` / ``[作者] 标题.txt`` / ``作者 - 标题.txt``
-    / 纯 ``标题.txt``（§4-5；``.epub`` 后缀同样先剥掉）。**``author_name``
-    永不为空**：解析不出即「未知作者」。EPUB 上传时它只是**兜底**：
-    ``dc:title`` / ``dc:creator`` 才是首选来源（见 :func:`resolve_metadata`）。
-    """
-    stem = clean_filename(filename)
-    lower = stem.lower()
-    for suffix in _KNOWN_SUFFIXES:
-        if lower.endswith(suffix):
-            stem = stem[: -len(suffix)]
-            break
-    stem = stem.strip()
-
-    author = ""
-    title = stem
-    match = _BRACKET_RE.match(stem)
-    if match:
-        author, title = match.group("author"), match.group("title")
-    else:
-        split = _split_dash(stem)
-        if split:
-            author, title = split
-
-    title = _strip_status_markers(title).strip() or title.strip() or stem or UNNAMED_TITLE
-    return title, (author.strip() or UNKNOWN_AUTHOR)
-
-
-EMPTY_ERROR = "文件内容为空"
-
 UploadStatus = Literal["created", "duplicate", "failed"]
 STATUS_CREATED: UploadStatus = "created"
 STATUS_DUPLICATE: UploadStatus = "duplicate"
 STATUS_FAILED: UploadStatus = "failed"
-
-
-class UploadUnreadable(ValueError):
-    """本文件读不出可用正文（TXT 解码失败 / EPUB 读失败）—— 单条 ``failed``。"""
-
-
-@dataclass(frozen=True)
-class ParsedUpload:
-    """一个上传文件解析后的形状 —— 管线其余部分只认它。"""
-
-    body: str
-    title: str | None = None
-    author_name: str | None = None
-    original: bytes | None = None
-
-
-def parse_upload(name: str, data: bytes) -> ParsedUpload:
-    """把 ``(文件名, 字节)`` 读成 :class:`ParsedUpload`；失败抛 :class:`UploadUnreadable`."""
-    if reader.looks_like_epub(name, data):
-        try:
-            content = reader.read_epub(data)
-        except reader.EpubReadError as exc:
-            raise UploadUnreadable(str(exc)) from exc
-        return ParsedUpload(
-            body=content.body,
-            title=content.title,
-            author_name=content.author_name,
-            original=data,
-        )
-
-    try:
-        return ParsedUpload(body=decode_text_bytes(data, strict=True))
-    except TextDecodeError as exc:
-        raise UploadUnreadable(DECODE_ERROR) from exc
-
-
-def normalize_text(text: str) -> str:
-    """规范化：``\\r\\n`` → ``\\n``，去首尾空白（§4-2）。"""
-    return text.replace("\r\n", "\n").strip()
-
-
-def body_fingerprint(normalized: str) -> str:
-    """规范化正文的 sha256（§4-3）—— 去重键，也是将来的合并锚。"""
-    return sha256_text(normalized)
-
-
-def resolve_metadata(filename: str, parsed: ParsedUpload) -> tuple[str, str]:
-    """``(title, author_name)`` —— EPUB 元数据优先，文件名解析兜底（§4.1）。"""
-    title, author_name = parse_filename(filename)
-    return (
-        (parsed.title or "").strip() or title,
-        (parsed.author_name or "").strip() or author_name,
-    )
 
 
 @dataclass(frozen=True)
@@ -354,9 +217,17 @@ def _create_row(
     root: Path,
     ensure_preset_author: Callable[[], None],
     created_paths: list[Path],
+    parse_filename_metadata: bool = True,
+    default_unknown_author: str = UNKNOWN_AUTHOR,
+    tags: list[str] | None = None,
 ) -> tuple[IngestResult, bool]:
     """新书：取号 → 落盘 → 插行 → ``(结果, 这次是否真的写了预设作者)``."""
-    title, parsed_author_name = resolve_metadata(name, parsed)
+    title, parsed_author_name = resolve_metadata(
+        name,
+        parsed,
+        parse_filename_metadata=parse_filename_metadata,
+        default_unknown_author=default_unknown_author,
+    )
     if preset_author_id is None:
         author_id: int | None = None
         author_name: str | None = parsed_author_name
@@ -396,6 +267,7 @@ def _create_row(
         text_length=len(body),
         has_epub=(EpubStatus.DONE if epub_path is not None else EpubStatus.NO_IMAGES),
         source_key=source_key,
+        tags=tags,
     )
 
     return (
@@ -418,10 +290,16 @@ def ingest_uploads(
     *,
     preset_author_id: int | None = None,
     preset_author_name: str | None = None,
+    parse_filename_metadata: bool = True,
+    default_unknown_author: str = UNKNOWN_AUTHOR,
+    tags: Iterable[str] | None = None,
 ) -> list[IngestResult]:
     """把一批 ``(filename, raw_bytes)`` 收进库，逐条返回结果。"""
     if preset_author_id is None:
         preset_author_name = None
+
+    raw_tags = list(tags) if tags is not None else []
+    resolved_tags = TagAliasResolver(session).resolve(raw_tags) if raw_tags else []
 
     lib_repo = LocalLibraryRepository(session)
     root = Path(storage.download_dir)
@@ -478,6 +356,9 @@ def ingest_uploads(
                 root=root,
                 ensure_preset_author=_ensure_preset_author,
                 created_paths=created_paths,
+                parse_filename_metadata=parse_filename_metadata,
+                default_unknown_author=default_unknown_author,
+                tags=resolved_tags,
             )
         preset_written = preset_written or wrote_preset
         results.append(result)

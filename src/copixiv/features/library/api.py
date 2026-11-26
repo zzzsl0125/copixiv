@@ -43,11 +43,13 @@ from fastapi import APIRouter, File, Form, UploadFile
 from pydantic import BaseModel
 
 from copixiv.core.exceptions import ValidationError
+from copixiv.core.models import SOURCE_LOCAL, UNKNOWN_AUTHOR
 from copixiv.core.models import author_id as _author_id
 from copixiv.db.tx import run_write_transaction
 from copixiv.deps import (
     FileStorageDep,
     PixivClientDep,
+    SourceServiceDep,
     UowDep,
 )
 from copixiv.features.authors.service import lookup_author_profile
@@ -134,6 +136,7 @@ async def upload_novels(
     file_storage: FileStorageDep,
     uow: UowDep,
     client: PixivClientDep,
+    source_service: SourceServiceDep,
     files: Annotated[list[UploadFile] | None, File()] = None,
     # ``int | None``：multipart 送来的是字符串，由 FastAPI 转换 —— ``"abc"``
     # 在这一步就是 422（类型不是业务规则）；``0`` / ``-5`` 能转成 int，落到下面
@@ -158,6 +161,7 @@ async def upload_novels(
     **解析在写事务之外**（模块 docstring 第 1 条）：防的是"写事务里等 pixiv"
     ——咨询锁与一个开着的事务被慢对端攥着。失败不致命：名字是缓存，id 是身份。
     """
+    source_service.require_enabled(SOURCE_LOCAL)
     if not files:
         raise ValidationError("请选择要上传的 TXT / EPUB 文件")
 
@@ -183,6 +187,10 @@ async def upload_novels(
         )
         preset_author_name = profile.author_name
 
+    runtime = source_service.get_runtime_config(SOURCE_LOCAL)
+    parse_filename_metadata = bool(runtime.values.get("parse_filename_metadata", True))
+    default_unknown_author = str(runtime.values.get("default_unknown_author") or UNKNOWN_AUTHOR)
+
     # ---- 落库：写事务（咨询锁在里面），无网络 ----
     results = await run_write_transaction(
         uow,
@@ -192,6 +200,8 @@ async def upload_novels(
             payloads,
             preset_author_id=preset_author_id,
             preset_author_name=preset_author_name,
+            parse_filename_metadata=parse_filename_metadata,
+            default_unknown_author=default_unknown_author,
         ),
     )
 

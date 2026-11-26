@@ -168,47 +168,53 @@ def test_tokens_lifecycle_masks_secrets_and_reloads_account_pool(
 ):
     app = _build_test_app(db_session_factory, tmp_path)
     with TestClient(app, base_url="http://localhost") as client:
-        # Create two tokens, marking the second as follow
+        # Create two Pixiv credentials via /api/sources, marking the second as follow
         r1 = client.post(
-            "/api/tokens",
-            json={"name": "acc1", "token": "tok_abcdef1234", "premium": False, "valid": True},
+            "/api/sources/pixiv/credentials",
+            json={
+                "name": "acc1",
+                "kind": "refresh_token",
+                "secret": {"refresh_token": "tok_abcdef1234"},
+                "valid": True,
+                "meta": {"premium": False, "is_follow": False},
+            },
         )
         assert r1.status_code == 200
         d1 = r1.json()
-        assert d1["token"] == "****1234"
+        assert d1["secret"]["refresh_token"] == "****1234"
 
         r2 = client.post(
-            "/api/tokens",
+            "/api/sources/pixiv/credentials",
             json={
                 "name": "acc2",
-                "token": "tok_secret9999",
-                "premium": True,
+                "kind": "refresh_token",
+                "secret": {"refresh_token": "tok_secret9999"},
                 "valid": True,
-                "is_follow": True,
+                "meta": {"premium": True, "is_follow": True},
             },
         )
         assert r2.status_code == 200
         d2 = r2.json()
-        assert d2["token"] == "****9999"
-        assert d2["is_follow"] is True
+        assert d2["secret"]["refresh_token"] == "****9999"
+        assert d2["meta"]["is_follow"] is True
 
         pool_accounts = {a.username: a for a in app.state.account_pool.accounts}
         assert set(pool_accounts) == {"acc1", "acc2"}
         assert pool_accounts["acc2"].token_info.follow is True
 
         # Switch follow to acc1 via PUT -> single-follow invariant & hot reload
-        upd = client.put(f"/api/tokens/{d1['id']}", json={"is_follow": True})
+        upd = client.put(f"/api/sources/pixiv/credentials/{d1['id']}", json={"meta": {"is_follow": True}})
         assert upd.status_code == 200
-        listing = client.get("/api/tokens").json()
-        follow_map = {item["name"]: item["is_follow"] for item in listing}
+        listing = client.get("/api/sources/pixiv/credentials").json()
+        follow_map = {item["name"]: item["meta"]["is_follow"] for item in listing}
         assert follow_map == {"acc1": True, "acc2": False}
-        assert all("tok_" not in item["token"] for item in listing)
+        assert all("tok_" not in item["secret"]["refresh_token"] for item in listing)
 
         pool_follow = {a.username: a.token_info.follow for a in app.state.account_pool.accounts}
         assert pool_follow == {"acc1": True, "acc2": False}
 
         # Delete acc2 -> immediately disappears from pool
-        dele = client.delete(f"/api/tokens/{d2['id']}")
+        dele = client.delete(f"/api/sources/pixiv/credentials/{d2['id']}")
         assert dele.status_code == 204
         assert [a.username for a in app.state.account_pool.accounts] == ["acc1"]
 
@@ -285,10 +291,16 @@ def test_lifespan_defers_runtime_init_and_cleans_up_resources(
 def test_integrity_error_maps_to_chinese_400(db_session_factory, tmp_path: Path):
     app = _build_test_app(db_session_factory, tmp_path)
     with TestClient(app, base_url="http://localhost") as client:
-        # Duplicate token name -> 400 with Chinese detail
-        tok_payload = {"name": "dup_acc", "token": "tok_dup_1234", "premium": False, "valid": True}
-        assert client.post("/api/tokens", json=tok_payload).status_code == 200
-        dup_tok = client.post("/api/tokens", json=tok_payload)
+        # Duplicate credential name -> 400 with Chinese detail
+        tok_payload = {
+            "name": "dup_acc",
+            "kind": "refresh_token",
+            "secret": {"refresh_token": "tok_dup_1234"},
+            "valid": True,
+            "meta": {"premium": False},
+        }
+        assert client.post("/api/sources/pixiv/credentials", json=tok_payload).status_code == 200
+        dup_tok = client.post("/api/sources/pixiv/credentials", json=tok_payload)
         assert dup_tok.status_code == 400
         assert "同名账号已存在" in dup_tok.json()["detail"]
 
@@ -415,29 +427,50 @@ def test_token_validation_and_reorder_skips_pool_reload(
     with TestClient(app, base_url="http://localhost") as client:
         # Whitespace-only token is rejected
         bad_create = client.post(
-            "/api/tokens",
-            json={"name": "blank", "token": "   ", "premium": False, "valid": True},
+            "/api/sources/pixiv/credentials",
+            json={
+                "name": "blank",
+                "kind": "refresh_token",
+                "secret": {"refresh_token": "   "},
+                "valid": True,
+            },
         )
-        assert bad_create.status_code == 422
+        assert bad_create.status_code == 400
 
         # Leading/trailing whitespace is stripped
         r1 = client.post(
-            "/api/tokens",
-            json={"name": "t1", "token": "  tok_strip_1234  ", "premium": False, "valid": True},
+            "/api/sources/pixiv/credentials",
+            json={
+                "name": "t1",
+                "kind": "refresh_token",
+                "secret": {"refresh_token": "  tok_strip_1234  "},
+                "valid": True,
+                "meta": {"premium": False},
+            },
         )
         assert r1.status_code == 200
         t1_id = r1.json()["id"]
-        assert r1.json()["token"] == "****1234"
+        assert r1.json()["secret"]["refresh_token"] == "****1234"
 
-        bad_upd = client.put(f"/api/tokens/{t1_id}", json={"token": "   "})
-        assert bad_upd.status_code == 422
+        # Whitespace-only secret on update is rejected (400); empty/masked secret preserves existing
+        bad_upd = client.put(
+            f"/api/sources/pixiv/credentials/{t1_id}",
+            json={"secret": {"refresh_token": "   "}},
+        )
+        assert bad_upd.status_code == 400
+        keep_upd = client.put(
+            f"/api/sources/pixiv/credentials/{t1_id}",
+            json={"secret": {"refresh_token": ""}},
+        )
+        assert keep_upd.status_code == 200
+        assert keep_upd.json()["secret"]["refresh_token"] == "****1234"
 
         # Reorder must NOT trigger account_pool.reload_from_tokens
         reloads: list[object] = []
         monkeypatch.setattr(
             app.state.account_pool, "reload_from_tokens", lambda tokens: reloads.append(tokens)
         )
-        reord = client.post("/api/tokens/reorder", json=[t1_id])
+        reord = client.post("/api/sources/pixiv/credentials/reorder", json=[t1_id])
         assert reord.status_code == 200
         assert reloads == []
 
@@ -450,7 +483,7 @@ def test_failed_novels_list_join_and_removed_endpoints(
 
     uow = SqlUnitOfWork(db_session_factory)
     with uow.begin():
-        uow.session.add(models.Novel(id=501, title="Joined Novel Title"))
+        uow.session.add(models.Novel(id=501, title="Joined Novel Title", source_key="501"))
         repo = FailedNovelRepository(uow.session)
         repo.record(501, "download", "network timeout", title=None)
         repo.record(502, "download", "not found", title="Explicit Title")
@@ -466,9 +499,10 @@ def test_failed_novels_list_join_and_removed_endpoints(
         assert [item["novel_id"] for item in data["items"]] == [501, 502]
         assert data["items"][0]["title"] == "Joined Novel Title"
         assert data["items"][1]["title"] == "Explicit Title"
+        failed_id = data["items"][0]["id"]
 
         # 204 reset endpoints
-        assert client.post("/api/failed-novels/501/reset-count").status_code == 204
+        assert client.post(f"/api/failed-novels/{failed_id}/reset-count").status_code == 204
         assert client.post("/api/failed-novels/reset-count").status_code == 204
 
         # Removed dead endpoints

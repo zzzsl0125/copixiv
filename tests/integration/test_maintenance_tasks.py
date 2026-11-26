@@ -78,22 +78,50 @@ async def test_check_epub_covers_positive_and_negative_ids(uow: SqlUnitOfWork, t
         )
         uow.session.add_all(
             [
-                models.FailedNovel(novel_id=101, error_message="stale img err", failed_times=2),
-                models.FailedNovel(novel_id=102, error_message="reverted err", failed_times=1),
-                models.FailedNovel(novel_id=103, error_message="resolved img err", failed_times=1),
+                models.FailedNovel(
+                    source="pixiv",
+                    source_key="101",
+                    novel_id=101,
+                    error_message="stale img err",
+                    failed_times=2,
+                ),
+                models.FailedNovel(
+                    source="pixiv",
+                    source_key="102",
+                    novel_id=102,
+                    error_message="reverted err",
+                    failed_times=1,
+                ),
+                models.FailedNovel(
+                    source="pixiv",
+                    source_key="103",
+                    novel_id=103,
+                    error_message="resolved img err",
+                    failed_times=1,
+                ),
             ]
         )
 
     await check_epub(TaskContext(uow=uow))
+
+    from sqlalchemy import select
+
+    def _get_failed(session, nid: int):
+        return session.execute(
+            select(models.FailedNovel).where(
+                models.FailedNovel.source == "pixiv",
+                models.FailedNovel.source_key == str(nid),
+            )
+        ).scalar_one_or_none()
 
     with uow.begin():
         assert uow.session.get(models.Novel, 101).has_epub == EpubStatus.NO_IMAGES
         assert uow.session.get(models.Novel, 102).has_epub == EpubStatus.PENDING
         assert uow.session.get(models.Novel, 103).has_epub == EpubStatus.DONE
         assert uow.session.get(models.Novel, -50).has_epub == EpubStatus.MISSING_SOURCE
-        assert uow.session.get(models.FailedNovel, 101) is None
-        assert uow.session.get(models.FailedNovel, 102) is not None
-        assert uow.session.get(models.FailedNovel, 103) is None
+        assert _get_failed(uow.session, 101) is None
+        assert _get_failed(uow.session, 102) is not None
+        assert _get_failed(uow.session, 103) is None
 
 
 def test_fix_series_index_args_accepts_legacy_extra_fields():
@@ -371,11 +399,12 @@ async def test_fetch_author_novels_skips_updated_today_and_processes_stale(
     with uow.begin():
         uow.session.add_all(
             [
-                models.Author(author_id=101, author_name="FreshAuthor", last_update=now),
+                models.Author(author_id=101, author_name="FreshAuthor", last_update=now, source_key="101"),
                 models.Author(
                     author_id=102,
                     author_name="StaleAuthor",
                     last_update=now - timedelta(days=2),
+                    source_key="102",
                 ),
             ]
         )
@@ -482,9 +511,17 @@ async def test_fetch_author_novels_skips_updated_today_and_processes_stale(
         uow.session.add_all(
             [
                 models.Author(
-                    author_id=103, author_name="DriftOk", last_update=now - timedelta(hours=23, minutes=5)
+                    author_id=103,
+                    author_name="DriftOk",
+                    last_update=now - timedelta(hours=23, minutes=5),
+                    source_key="103",
                 ),
-                models.Author(author_id=104, author_name="Cooldown", last_update=now - timedelta(hours=22)),
+                models.Author(
+                    author_id=104,
+                    author_name="Cooldown",
+                    last_update=now - timedelta(hours=22),
+                    source_key="104",
+                ),
             ]
         )
     fake_pixiv_client.user_novels_responses[103] = {"novels": []}

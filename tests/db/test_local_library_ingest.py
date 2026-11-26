@@ -234,6 +234,7 @@ async def test_batch_export_packages_local_and_pixiv_novels(
                     tags=[],
                     is_favourite=False,
                     source="pixiv",
+                    source_key="10000000",
                 ),
                 models.Novel(
                     id=25_000_000,
@@ -249,6 +250,7 @@ async def test_batch_export_packages_local_and_pixiv_novels(
                     tags=[],
                     is_favourite=False,
                     source="pixiv",
+                    source_key="25000000",
                 ),
                 models.Novel(
                     id=-30_000_000,

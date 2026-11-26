@@ -19,7 +19,7 @@ from copixiv.tasks.registry import register
 @register("check_epub", description="核对 EPUB 状态与磁盘文件是否一致", lane="general")
 async def check_epub(ctx: TaskContext) -> TaskResult:
     """Synchronise ``has_epub`` status with actual files on disk."""
-    return await reconcile_epub_status(ctx.require_uow())
+    return await reconcile_epub_status(ctx.require_uow(), source_registry=ctx.source_registry)
 
 
 __all__ = [

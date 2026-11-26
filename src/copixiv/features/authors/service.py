@@ -24,16 +24,19 @@ Resolves Pixiv author names in two independent phases:
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from copixiv.core.draft import safe_get
-from copixiv.core.models import TaskResult
+from copixiv.core.models import SOURCE_PIXIV, TaskResult
+from copixiv.core.sources import SourceCredentialRecord, SourceRuntimeConfig
 from copixiv.db.tx import read_transaction, run_write_transaction
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 from copixiv.log import logger
 from copixiv.pixiv.client import PixivClient
+from copixiv.sources.pixiv import PixivSourcePlugin
 from copixiv.storage.file_storage import FileStorage
 
 
@@ -95,11 +98,12 @@ async def fetch_author_name(
 ) -> str | None:
     """Ask Pixiv for one author's display name.
 
-    ``None`` on every failure path — no client, API error, empty name.  The
-    caller decides whether that is fatal; none of today's callers treat it as
-    such (the name is a cache, the ``author_id`` is the identity).
+    ``None`` on every failure path — no client, non-positive id, API error,
+    empty name.  The caller decides whether that is fatal; none of today's
+    callers treat it as such (the name is a cache, the ``author_id`` is the
+    identity).
     """
-    if client is None:
+    if client is None or author_id <= 0:
         return None
     try:
         result = await client.user_detail(author_id)
@@ -172,18 +176,59 @@ async def delete_author(
     *,
     uow: SqlUnitOfWork,
     file_storage: FileStorage,
-    client: PixivClient,
+    client: PixivClient | None = None,
+    source_registry: Any | None = None,
+    source_service: Any | None = None,
 ) -> TaskResult:
-    """Delete an author and all their stored data from PG, disk, and Pixiv follow list."""
-    paths = await run_write_transaction(
-        uow,
-        lambda uw: SQLAlchemyAuthorRepository(uw.session).delete_author_and_data(author_id),
-    )
+    """Delete an author and all their stored data from PG, disk, and remote follow list."""
+
+    def _delete_in_tx(
+        uw: SqlUnitOfWork,
+    ) -> tuple[
+        dict[str, Any] | None,
+        list[str],
+        bool,
+        SourceRuntimeConfig | None,
+        Sequence[SourceCredentialRecord],
+    ]:
+        repo = SQLAlchemyAuthorRepository(uw.session)
+        author_info = repo.get_by_id(author_id)
+        paths = repo.delete_author_and_data(author_id)
+        if author_info is None:
+            return None, paths, False, None, ()
+
+        src = str(author_info.get("source") or SOURCE_PIXIV)
+        if source_service is not None:
+            enabled = bool(source_service.is_enabled(src))
+            if not enabled:
+                return author_info, paths, False, None, ()
+            runtime = source_service.get_runtime_config(src, session=uw.session)
+            creds = source_service.get_credentials(src, session=uw.session)
+            return author_info, paths, True, runtime, creds
+        return author_info, paths, True, SourceRuntimeConfig(source=src, enabled=True), ()
+
+    author_info, paths, enabled, runtime, creds = await run_write_transaction(uow, _delete_in_tx)
 
     for path in paths:
         await asyncio.to_thread(file_storage.delete_novel_files, path)
 
-    async with client.account_rule(force_follow=True):
-        await client.user_follow_delete(author_id)
+    if author_info is not None and enabled:
+        src = str(author_info.get("source") or SOURCE_PIXIV)
+        src_key = str(author_info.get("source_key") or "")
+        registry = (
+            source_service.registry
+            if source_service is not None and getattr(source_service, "registry", None) is not None
+            else source_registry
+        )
+        plugin = registry.get(src) if registry is not None else None
+        if (plugin is None and registry is None and src == SOURCE_PIXIV and client is not None) or (
+            isinstance(plugin, PixivSourcePlugin) and plugin._client is None and client is not None
+        ):
+            plugin = PixivSourcePlugin(client=client)
+        if plugin is not None and src_key:
+            effective_runtime = (
+                runtime if runtime is not None else SourceRuntimeConfig(source=src, enabled=True)
+            )
+            await plugin.on_author_deleted(src_key, effective_runtime, creds)
 
     return TaskResult(summary=f"已删除作者 #{author_id} 及其全部小说")

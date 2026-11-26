@@ -30,27 +30,40 @@
 from __future__ import annotations
 
 from copixiv.core.models import SOURCE_LOCAL, SOURCE_PIXIV
+from copixiv.core.sources import FALLBACK_EDITABLE_FIELDS, FallbackSourcePolicy
+from copixiv.sources.local import LocalSourcePlugin
+from copixiv.sources.pixiv import PixivSourcePlugin
+from copixiv.sources.registry import SourceRegistry
+
+_source_registry: SourceRegistry | None = None
+_default_registry: SourceRegistry | None = None
+
+
+def set_source_registry(registry: SourceRegistry | None) -> None:
+    """Bind the active runtime :class:`SourceRegistry` for metadata policy lookups."""
+    global _source_registry
+    _source_registry = registry
+
+
+def _get_registry() -> SourceRegistry:
+    global _default_registry
+    if _source_registry is not None:
+        return _source_registry
+    if _default_registry is None:
+        _default_registry = SourceRegistry([PixivSourcePlugin(), LocalSourcePlugin()])
+    return _default_registry
+
 
 # 每个来源可编辑的字段。元组顺序 = 响应里 ``editable_fields`` 的顺序。
-#
-# 未知来源按 pixiv 处理（最保守）：来源没认领的行本来就不该被手改，宁可少放开
-# 一个字段，也不要让一条来源不明的行接受手改后被某次刷新顶掉。
 EDITABLE_FIELDS: dict[str, tuple[str, ...]] = {
-    SOURCE_LOCAL: (
-        "title",
-        "author_id",
-        "series_id",
-        "series_index",
-        "tags",
-        "create_time",
-    ),
-    SOURCE_PIXIV: ("series_index", "tags", "create_time"),
+    SOURCE_LOCAL: LocalSourcePlugin.manifest.editable_fields,
+    SOURCE_PIXIV: PixivSourcePlugin().manifest.editable_fields,
 }
 
-# 仅本地书可编辑的字段：**从表派生**（local 有、pixiv 没有），不手写第二份清单。
+# 仅本地书可编辑的字段：**从表派生**（local 有、fallback/pixiv 没有），不手写第二份清单。
 # 顺序即 400 报错顺序——同一请求提交多个非法字段时，报的是这里最靠前的那个。
 LOCAL_ONLY_FIELDS: tuple[str, ...] = tuple(
-    field for field in EDITABLE_FIELDS[SOURCE_LOCAL] if field not in EDITABLE_FIELDS[SOURCE_PIXIV]
+    field for field in EDITABLE_FIELDS[SOURCE_LOCAL] if field not in FALLBACK_EDITABLE_FIELDS
 )
 
 FIELD_LABELS = {
@@ -65,8 +78,10 @@ AUTHOR_LOCAL_ONLY_REASON = "作者仅本地书可编辑（pixiv 书的作者身�
 
 
 def editable_fields(source: str | None) -> tuple[str, ...]:
-    """该来源可编辑的字段；未知来源按 pixiv（最保守）。"""
-    return EDITABLE_FIELDS.get(source or SOURCE_PIXIV, EDITABLE_FIELDS[SOURCE_PIXIV])
+    """该来源可编辑的字段；未知或空来源按保守 fallback 策略处理。"""
+    if not source:
+        return FallbackSourcePolicy.editable_fields
+    return _get_registry().editable_fields(source)
 
 
 def is_editable(source: str | None, field: str) -> bool:
@@ -74,16 +89,20 @@ def is_editable(source: str | None, field: str) -> bool:
     return field in editable_fields(source)
 
 
-def rejection_reason(field: str) -> str:
-    """pixiv 书提交仅本地字段时的 400 文案——按字段给，集中在这里。
+def rejection_reason(field: str, source: str | None = None) -> str:
+    """不可编辑字段提交时的 400 文案——按字段给，集中在这里。
 
     title / series_id 共用一个模板（同一个"来源会覆盖"的理由），
     author_id 单独一句（见 :data:`AUTHOR_LOCAL_ONLY_REASON`）。两句话都带
     「仅本地书可编辑」，前端按这句话做统一提示即可。
     """
     if field == "author_id":
-        return AUTHOR_LOCAL_ONLY_REASON
-    return f"{FIELD_LABELS[field]}仅本地书可编辑（pixiv 来源会覆盖该字段）"
+        if source is None or source == SOURCE_PIXIV:
+            return AUTHOR_LOCAL_ONLY_REASON
+        return f"作者仅本地书可编辑（{source} 书的作者身份以来源为准，可用「同步」修正）"
+    label = FIELD_LABELS.get(field, field)
+    src_label = source or SOURCE_PIXIV
+    return f"{label}仅本地书可编辑（{src_label} 来源会覆盖该字段）"
 
 
 __all__ = [
@@ -96,4 +115,5 @@ __all__ = [
     "editable_fields",
     "is_editable",
     "rejection_reason",
+    "set_source_registry",
 ]

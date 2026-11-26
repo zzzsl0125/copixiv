@@ -16,6 +16,7 @@ forbidden_modules =
     copixiv.features
     copixiv.tasks
     copixiv.pixiv
+    copixiv.sources
     copixiv.storage
     copixiv.notify
     copixiv.query_engine
@@ -24,11 +25,12 @@ forbidden_modules =
     sqlalchemy
 
 [importlinter:contract:adapters-are-leaves]
-name = 适配层（db/pixiv/storage/notify/query_engine）不被 features/tasks/app 反向依赖
+name = 适配层（db/pixiv/sources/storage/notify/query_engine）不被 features/tasks/app 反向依赖
 type = forbidden
 source_modules =
     copixiv.db
     copixiv.pixiv
+    copixiv.sources
     copixiv.storage
     copixiv.notify
     copixiv.query_engine
@@ -50,12 +52,13 @@ forbidden_modules =
 allow_indirect_imports = false
 
 [importlinter:contract:storage-isolated-from-pixiv]
-name = storage 层不得反向依赖 pixiv 协议层
+name = storage 层不得反向依赖 pixiv/sources 协议层
 type = forbidden
 source_modules =
     copixiv.storage
 forbidden_modules =
     copixiv.pixiv
+    copixiv.sources
 
 [importlinter:contract:httpx-in-transport-only]
 name = httpx 仅允许被传输适配层（pixiv/storage/notify）及 lifespan 直接 import
@@ -76,6 +79,7 @@ type = forbidden
 source_modules =
     copixiv.core
     copixiv.pixiv
+    copixiv.sources
     copixiv.storage
     copixiv.notify
     copixiv.query_engine
@@ -104,13 +108,13 @@ type = forbidden
 source_modules =
     copixiv.tasks
 forbidden_modules =
-    copixiv.features.accounts
     copixiv.features.authors.api
     copixiv.features.failures.api
     copixiv.features.library.api
     copixiv.features.novels.routes
     copixiv.features.search_history
     copixiv.features.series.api
+    copixiv.features.sources.api
     copixiv.features.system.api
     copixiv.features.tags.aliases
     copixiv.features.tags.preferences
@@ -127,12 +131,12 @@ forbidden_modules =
 name = 叶子 feature 切片不反向依赖 features.novels
 type = forbidden
 source_modules =
-    copixiv.features.accounts
     copixiv.features.authors
     copixiv.features.failures
     copixiv.features.library
     copixiv.features.search_history
     copixiv.features.series
+    copixiv.features.sources
     copixiv.features.system
     copixiv.features.tags
 forbidden_modules =

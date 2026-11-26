@@ -17,8 +17,11 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from copixiv.config import AppConfig
 from copixiv.db.uow import SqlUnitOfWork
+from copixiv.features.sources.service import SourceService
 from copixiv.pixiv.accounts import AccountPool
 from copixiv.pixiv.client import PixivClient
+from copixiv.sources.http import SourceHttpManager
+from copixiv.sources.registry import SourceRegistry
 from copixiv.storage.file_storage import FileStorage
 
 
@@ -73,12 +76,30 @@ def get_task_manager(request: Request) -> TaskManagerProtocol:
     return request.app.state.task_manager
 
 
+def get_source_registry(request: Request) -> SourceRegistry:
+    """The process-wide source plugin registry (app.state)."""
+    return request.app.state.source_registry
+
+
+def get_source_service(request: Request) -> SourceService:
+    """The multi-source config/credential application service (app.state)."""
+    return request.app.state.source_service
+
+
+def get_source_http_manager(request: Request) -> SourceHttpManager:
+    """The per-source HTTP client manager (app.state)."""
+    return request.app.state.http_manager
+
+
 SessionFactoryDep = Annotated[sessionmaker[Session], Depends(get_session_factory)]
 AppConfigDep = Annotated[AppConfig, Depends(get_app_config)]
 AccountPoolDep = Annotated[AccountPool, Depends(get_account_pool)]
 FileStorageDep = Annotated[FileStorage, Depends(get_file_storage)]
 PixivClientDep = Annotated[PixivClient, Depends(get_pixiv_client)]
 TaskManagerDep = Annotated[TaskManagerProtocol, Depends(get_task_manager)]
+SourceRegistryDep = Annotated[SourceRegistry, Depends(get_source_registry)]
+SourceServiceDep = Annotated[SourceService, Depends(get_source_service)]
+SourceHttpManagerDep = Annotated[SourceHttpManager, Depends(get_source_http_manager)]
 
 
 def get_uow(session_factory: SessionFactoryDep) -> SqlUnitOfWork:

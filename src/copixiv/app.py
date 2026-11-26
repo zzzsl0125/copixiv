@@ -32,13 +32,13 @@ def mount_routers(app: FastAPI) -> None:
     from fastapi import Depends
 
     from copixiv.deps import require_api_key
-    from copixiv.features import accounts as tokens
     from copixiv.features import search_history
     from copixiv.features.authors import api as authors
     from copixiv.features.failures import api as failed_novels
     from copixiv.features.library import api as library
     from copixiv.features.novels import routes as novels
     from copixiv.features.series import api as series
+    from copixiv.features.sources import api as sources
     from copixiv.features.system import api as system
     from copixiv.features.tags import aliases as tag_aliases
     from copixiv.features.tags import preferences as tag_preferences
@@ -93,9 +93,9 @@ def mount_routers(app: FastAPI) -> None:
         dependencies=auth,
     )
     app.include_router(
-        tokens.router,
-        prefix="/api/tokens",
-        tags=["tokens"],
+        sources.router,
+        prefix="/api/sources",
+        tags=["sources"],
         dependencies=auth,
     )
     app.include_router(

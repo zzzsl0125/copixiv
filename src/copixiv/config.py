@@ -30,6 +30,7 @@ from pydantic_settings import (
 )
 
 from copixiv.core.naming import DEFAULT_NAMING_TEMPLATE
+from copixiv.core.sources import normalize_proxy_url
 
 # ---------------------------------------------------------------------------
 # Config models
@@ -52,18 +53,6 @@ class PixivClientConfig(BaseModel):
     min_interval: int = 2  # seconds between requests
     cooling_duration: int = 120  # seconds after rate-limit hit
     max_concurrency: int = 5
-
-
-def normalize_proxy_url(proxy_url: str | None) -> str | None:
-    """Normalise a proxy string (``127.0.0.1:20172`` → ``http://127.0.0.1:20172``)."""
-    if not proxy_url:
-        return None
-    cleaned = proxy_url.strip()
-    if not cleaned:
-        return None
-    if "://" not in cleaned:
-        return f"http://{cleaned}"
-    return cleaned
 
 
 class ProxyConfig(BaseModel):

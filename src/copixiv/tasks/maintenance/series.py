@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from copixiv.core.models import TaskResult
+from copixiv.core.models import SOURCE_PIXIV, TaskResult
 from copixiv.features.series.service import run_series_repair
 from copixiv.tasks.executor import TaskContext
 from copixiv.tasks.registry import register
@@ -37,6 +37,8 @@ async def fix_series_index(
     ctx: TaskContext,
 ) -> TaskResult:
     """Repair missing/mismatched ``series_index`` values using Pixiv series rosters."""
+    if ctx.source_service is not None:
+        ctx.source_service.require_enabled(SOURCE_PIXIV)
     return await run_series_repair(
         uow=ctx.require_uow(),
         client=ctx.require_client(),

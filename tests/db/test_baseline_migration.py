@@ -44,7 +44,7 @@ def test_baseline_upgrade_downgrade_upgrade_and_metadata_parity(pg_test_engine):
 
         with isolated_engine.begin() as conn:
             ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-            assert ver == "0006_drop_tag_table"
+            assert ver == "0007_multi_source_foundation"
 
             # ORM Base.metadata parity (types & server defaults)
             mc = MigrationContext.configure(
@@ -122,16 +122,27 @@ def test_baseline_upgrade_downgrade_upgrade_and_metadata_parity(pg_test_engine):
             )
             assert {"tag_alias_pkey", "tag_alias_source_key", "ck_tag_alias_distinct"} <= alias_constraints
 
-            # Custom sequence, analyze tuning, and basic novel writes without tag table
+            # Custom sequences, analyze tuning, and basic novel writes without tag table
             assert conn.execute(text("SELECT nextval('novel_local_coord_seq')")).scalar_one() == 1
+            assert conn.execute(text("SELECT nextval('author_ext_id_seq')")).scalar_one() == 1
+            assert conn.execute(text("SELECT nextval('series_ext_id_seq')")).scalar_one() == 1
 
-            conn.execute(text("INSERT INTO author (author_id, author_name) VALUES (1, 'A')"))
+            conn.execute(text("INSERT INTO author (author_id, author_name, source_key) VALUES (1, 'A', '1')"))
             conn.execute(
-                text("INSERT INTO novel (id, title, author_id, tags) VALUES (1, 'N1', 1, ARRAY['t1', 't2'])")
+                text(
+                    "INSERT INTO novel (id, title, author_id, tags, source_key) "
+                    "VALUES (1, 'N1', 1, ARRAY['t1', 't2'], '1')"
+                )
             )
             conn.execute(text("UPDATE novel SET tags = ARRAY['t2', 't3'] WHERE id = 1"))
             conn.execute(text("DELETE FROM novel WHERE id = 1"))
-            conn.execute(text("INSERT INTO token (name, token, is_follow) VALUES ('acc1', 'tok1', true)"))
+            conn.execute(
+                text(
+                    "INSERT INTO source_credential (source, name, kind, secret, meta) "
+                    "VALUES ('pixiv', 'acc1', 'refresh_token', '{\"refresh_token\":\"tok1\"}'::jsonb, "
+                    "'{\"is_follow\": true}'::jsonb)"
+                )
+            )
             conn.execute(text("INSERT INTO tag_alias (source, target) VALUES ('src_a', 'tgt_a')"))
 
             novel_relopts = conn.execute(
@@ -145,15 +156,21 @@ def test_baseline_upgrade_downgrade_upgrade_and_metadata_parity(pg_test_engine):
             assert novel_relopts is not None
             assert any("autovacuum_analyze_scale_factor=0.02" in opt for opt in novel_relopts)
 
-        # Unique & distinct constraints on tag_alias and ux_token_follow
+        # Unique & distinct constraints on tag_alias and ux_source_credential_pixiv_follow
         with pytest.raises(IntegrityError), isolated_engine.begin() as conn:
-            conn.execute(text("INSERT INTO token (name, token, is_follow) VALUES ('acc2', 'tok2', true)"))
+            conn.execute(
+                text(
+                    "INSERT INTO source_credential (source, name, kind, secret, meta) "
+                    "VALUES ('pixiv', 'acc2', 'refresh_token', '{\"refresh_token\":\"tok2\"}'::jsonb, "
+                    "'{\"is_follow\": true}'::jsonb)"
+                )
+            )
         with pytest.raises(IntegrityError), isolated_engine.begin() as conn:
             conn.execute(text("INSERT INTO tag_alias (source, target) VALUES ('src_a', 'other')"))
         with pytest.raises(IntegrityError), isolated_engine.begin() as conn:
             conn.execute(text("INSERT INTO tag_alias (source, target) VALUES ('same', 'same')"))
 
-        # 2) Downgrade back to base drops all tables, triggers, function, and sequence
+        # 2) Downgrade back to base drops all tables, triggers, function, and sequences
         command.downgrade(alembic_cfg, "base")
 
         with isolated_engine.connect() as conn:
@@ -170,6 +187,8 @@ def test_baseline_upgrade_downgrade_upgrade_and_metadata_parity(pg_test_engine):
             )
             assert remaining_tables == []
             assert conn.execute(text("SELECT to_regclass('novel_local_coord_seq')")).scalar() is None
+            assert conn.execute(text("SELECT to_regclass('author_ext_id_seq')")).scalar() is None
+            assert conn.execute(text("SELECT to_regclass('series_ext_id_seq')")).scalar() is None
             assert (
                 conn.execute(
                     text(
@@ -190,7 +209,11 @@ def test_baseline_upgrade_downgrade_upgrade_and_metadata_parity(pg_test_engine):
                 opts={"compare_type": True, "compare_server_default": True},
             )
             assert compare_metadata(mc, Base.metadata) == []
-            conn.execute(text("INSERT INTO novel (id, title, tags) VALUES (2, 'N2', ARRAY['rebuilt'])"))
+            conn.execute(
+                text(
+                    "INSERT INTO novel (id, title, tags, source_key) VALUES (2, 'N2', ARRAY['rebuilt'], '2')"
+                )
+            )
     finally:
         isolated_engine.dispose()
         with pg_test_engine.begin() as admin_conn:
@@ -344,6 +367,100 @@ def test_0006_drop_tag_table_preserves_aliases_and_repopulates_on_downgrade(pg_t
             assert conn.execute(text("SELECT to_regclass('tag')")).scalar() is None
             alias_rows = set(conn.execute(text("SELECT source, target FROM tag_alias ORDER BY id")).all())
             assert alias_rows == {("beta", "alpha"), ("orphan_src", "alpha")}
+    finally:
+        isolated_engine.dispose()
+        with pg_test_engine.begin() as admin_conn:
+            admin_conn.execute(text(f"DROP SCHEMA IF EXISTS {schema} CASCADE"))
+
+
+def test_0007_multi_source_roundtrip(pg_test_engine):
+    schema = "_test_mig_0007_roundtrip"
+    with pg_test_engine.begin() as admin_conn:
+        admin_conn.execute(text(f"DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        admin_conn.execute(text(f"CREATE SCHEMA {schema}"))
+
+    isolated_url = _isolated_schema_url(pg_test_engine.url, schema)
+    isolated_engine = create_engine(isolated_url)
+    alembic_cfg = _alembic_config_for_url(isolated_url)
+    try:
+        command.upgrade(alembic_cfg, "0006_drop_tag_table")
+
+        with isolated_engine.begin() as conn:
+            conn.execute(text("INSERT INTO author (author_id, author_name) VALUES (1, 'A1')"))
+            conn.execute(text("INSERT INTO series (series_id, series_name, author_id) VALUES (10, 'S10', 1)"))
+            conn.execute(
+                text(
+                    "INSERT INTO novel (id, title, author_id, series_id, source, source_key) VALUES "
+                    "(100, 'P100', 1, 10, 'pixiv', NULL), "
+                    "(-1, 'L1', NULL, NULL, 'local', 'sha_l1')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO failed_novel (novel_id, error_message, failed_times) VALUES (200, 'err', 1)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO token (name, token, premium, valid, sort_index, is_follow) VALUES "
+                    "('acc1', 'tok_1', false, true, 0, false), "
+                    "('acc2', 'tok_2', true, true, 1, true)"
+                )
+            )
+
+        # Upgrade 0006 -> 0007 (head)
+        command.upgrade(alembic_cfg, "head")
+        with isolated_engine.begin() as conn:
+            assert conn.execute(text("SELECT to_regclass('token')")).scalar() is None
+            assert conn.execute(text("SELECT source_key FROM author WHERE author_id = 1")).scalar_one() == "1"
+            assert (
+                conn.execute(text("SELECT source_key FROM series WHERE series_id = 10")).scalar_one() == "10"
+            )
+            assert conn.execute(text("SELECT source_key FROM novel WHERE id = 100")).scalar_one() == "100"
+            assert conn.execute(text("SELECT source_key FROM novel WHERE id = -1")).scalar_one() == "sha_l1"
+
+            creds = conn.execute(
+                text(
+                    "SELECT name, kind, secret->>'refresh_token', (meta->>'premium')::boolean, "
+                    "(meta->>'is_follow')::boolean "
+                    "FROM source_credential WHERE source = 'pixiv' ORDER BY sort_index"
+                )
+            ).all()
+            assert creds == [
+                ("acc1", "refresh_token", "tok_1", False, False),
+                ("acc2", "refresh_token", "tok_2", True, True),
+            ]
+            assert conn.execute(text("SELECT nextval('author_ext_id_seq')")).scalar_one() == 1
+            assert conn.execute(text("SELECT nextval('series_ext_id_seq')")).scalar_one() == 1
+
+            # Verify non-pixiv failure row without novel_id is accepted at 0007
+            conn.execute(
+                text(
+                    "INSERT INTO failed_novel (source, source_key, novel_id, error_message) "
+                    "VALUES ('esj', 'book1:1', NULL, 'blocked')"
+                )
+            )
+
+            mc = MigrationContext.configure(
+                conn,
+                opts={"compare_type": True, "compare_server_default": True},
+            )
+            assert compare_metadata(mc, Base.metadata) == []
+
+        # Downgrade 0007 -> 0006
+        command.downgrade(alembic_cfg, "0006_drop_tag_table")
+        with isolated_engine.begin() as conn:
+            assert conn.execute(text("SELECT to_regclass('source_credential')")).scalar() is None
+            assert conn.execute(text("SELECT to_regclass('source_config')")).scalar() is None
+            restored_tokens = conn.execute(
+                text("SELECT name, token, premium, is_follow FROM token ORDER BY sort_index")
+            ).all()
+            assert restored_tokens == [("acc1", "tok_1", False, False), ("acc2", "tok_2", True, True)]
+            failed_rows = conn.execute(text("SELECT novel_id FROM failed_novel")).scalars().all()
+            assert failed_rows == [200]
+
+        # Re-upgrade 0006 -> head
+        command.upgrade(alembic_cfg, "head")
     finally:
         isolated_engine.dispose()
         with pg_test_engine.begin() as admin_conn:

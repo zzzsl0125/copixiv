@@ -73,6 +73,13 @@ class Author(Base):
     is_special_follow: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default=sa_text("false"), nullable=False
     )
+    source: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="pixiv",
+        server_default=sa_text("'pixiv'::text"),
+    )
+    source_key: Mapped[str] = mapped_column(Text, nullable=False)
 
     __table_args__ = (
         Index(
@@ -80,6 +87,8 @@ class Author(Base):
             "author_id",
             postgresql_where=sa_text("is_special_follow"),
         ),
+        Index("ux_author_source_key", "source", "source_key", unique=True),
+        Index("ix_author_source", "source"),
     )
 
     def __repr__(self) -> str:
@@ -94,8 +103,19 @@ class Series(Base):
     author_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("author.author_id", ondelete="SET NULL")
     )
+    source: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="pixiv",
+        server_default=sa_text("'pixiv'::text"),
+    )
+    source_key: Mapped[str] = mapped_column(Text, nullable=False)
 
-    __table_args__ = (Index("ix_series_author_id", "author_id"),)
+    __table_args__ = (
+        Index("ix_series_author_id", "author_id"),
+        Index("ux_series_source_key", "source", "source_key", unique=True),
+        Index("ix_series_source", "source"),
+    )
 
     def __repr__(self) -> str:
         return f"<Series(id={self.series_id}, name='{self.series_name}')>"
@@ -146,18 +166,12 @@ class Novel(Base):
         default="pixiv",
         server_default=sa_text("'pixiv'::text"),
     )
-    source_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_key: Mapped[str] = mapped_column(Text, nullable=False)
 
     __table_args__ = (
         Index("ix_novel_author_id", "author_id", "id"),
         Index("ix_novel_series_id", "series_id", "id"),
-        Index(
-            "ux_novel_source_key",
-            "source",
-            "source_key",
-            unique=True,
-            postgresql_where=sa_text("source_key IS NOT NULL"),
-        ),
+        Index("ux_novel_source_key", "source", "source_key", unique=True),
         Index(
             "ix_novel_missing_source",
             "id",
@@ -255,27 +269,49 @@ class TaskHistory(Base):
     )
 
 
-class Token(Base):
-    __tablename__ = "token"
+class SourceConfig(Base):
+    __tablename__ = "source_config"
+
+    source: Mapped[str] = mapped_column(Text, primary_key=True)
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=sa_text("true"), nullable=False
+    )
+    config: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, server_default=sa_text("'{}'::jsonb"), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=sa_text("now()"), nullable=False
+    )
+
+
+class SourceCredential(Base):
+    __tablename__ = "source_credential"
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    name: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
-    token: Mapped[str] = mapped_column(Text, nullable=False)
-    premium: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default=sa_text("false"), nullable=False
-    )
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    secret: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     valid: Mapped[bool] = mapped_column(Boolean, default=True, server_default=sa_text("true"), nullable=False)
     sort_index: Mapped[int] = mapped_column(Integer, default=0, server_default=sa_text("0"), nullable=False)
-    is_follow: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default=sa_text("false"), nullable=False
+    meta: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, server_default=sa_text("'{}'::jsonb"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=sa_text("now()"), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=sa_text("now()"), nullable=False
     )
 
     __table_args__ = (
+        UniqueConstraint("source", "name", name="uq_source_credential_source_name"),
+        Index("ix_source_credential_source_sort", "source", "sort_index"),
         Index(
-            "ux_token_follow",
-            "is_follow",
+            "ux_source_credential_pixiv_follow",
+            "source",
             unique=True,
-            postgresql_where=sa_text("is_follow"),
+            postgresql_where=sa_text("source = 'pixiv' AND ((meta ->> 'is_follow')::boolean IS TRUE)"),
         ),
     )
 
@@ -288,15 +324,29 @@ class FailedNovel(Base):
     # such records must still be captured in the failure ledger.  Deleting
     # a novel cleans its ledger rows explicitly in the repository layer
     # (``SQLAlchemyNovelWriteRepository.delete`` / ``delete_many``).
-    novel_id: Mapped[int] = mapped_column(
-        BigInteger,
-        primary_key=True,
-        autoincrement=False,
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    source: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="pixiv",
+        server_default=sa_text("'pixiv'::text"),
     )
+    source_key: Mapped[str] = mapped_column(Text, nullable=False)
+    novel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text)
     failed_times: Mapped[int] = mapped_column(Integer, default=1, server_default=sa_text("1"), nullable=False)
-    title: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    extra: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+
+    __table_args__ = (
+        Index("ux_failed_novel_source_key", "source", "source_key", unique=True),
+        Index(
+            "ix_failed_novel_novel_id",
+            "novel_id",
+            postgresql_where=sa_text("novel_id IS NOT NULL"),
+        ),
+    )
 
 
 class SeriesDeadLetter(Base):

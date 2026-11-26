@@ -7,28 +7,33 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING
 
 import httpx
-from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from copixiv.config import AppConfig, load_config
-from copixiv.db import models
+from copixiv.core.models import SOURCE_PIXIV
 from copixiv.db.engine import (
     create_database_engine,
     create_session_factory,
     init_database,
 )
 from copixiv.db.novel_snapshot import PgSnapshotStore
+from copixiv.features.novels import field_policy
 from copixiv.features.novels.ingest.asset_pipeline import NovelAssetPipeline
+from copixiv.features.sources.service import SourceService
 from copixiv.log import logger
 from copixiv.notify.telegram import TelegramNotifier
 from copixiv.pixiv.accounts import AccountPool
 from copixiv.pixiv.client import PixivClient
-from copixiv.pixiv.http import PIXIV_IMAGE_HEADERS
 from copixiv.query_engine import attach_and_start_engine
+from copixiv.sources import (
+    LocalSourcePlugin,
+    PixivSourcePlugin,
+    SourceHttpManager,
+    SourceRegistry,
+)
 from copixiv.storage.epub.builder import EpubBuilder
 from copixiv.storage.file_storage import FileStorage
-from copixiv.storage.image_downloader import ImageDownloader
 from copixiv.tasks.manager import TaskManagerSystem
 
 if TYPE_CHECKING:
@@ -40,35 +45,6 @@ def resolve_config(config_source: str | AppConfig | None = None) -> AppConfig:
     if isinstance(config_source, AppConfig):
         return config_source
     return load_config(config_source)
-
-
-def load_accounts(
-    session_factory: sessionmaker[Session],
-    account_pool: AccountPool,
-) -> None:
-    """Load active Pixiv accounts from the database ``token`` table."""
-    try:
-        with session_factory() as session:
-            tokens = session.execute(select(models.Token).where(models.Token.valid == True)).scalars().all()
-            if tokens:
-                account_pool.reload_from_tokens(
-                    [
-                        {
-                            "name": t.name,
-                            "token": t.token,
-                            "premium": t.premium,
-                            "valid": t.valid,
-                            "is_follow": bool(t.is_follow),
-                        }
-                        for t in tokens
-                    ]
-                )
-                logger.info(f"Loaded {len(tokens)} Pixiv accounts from database.")
-                return
-    except Exception:
-        logger.exception("Failed to load accounts from database.")
-
-    logger.warning("No Pixiv accounts loaded — add tokens in Web UI; API calls will fail until then.")
 
 
 def create_lifespan(
@@ -99,55 +75,60 @@ def create_lifespan(
                     )
                     logger.info("Database initialized (Alembic migrations applied).")
 
-            async def _strip_request_cookies(request: httpx.Request) -> None:
-                request.headers.pop("cookie", None)
-                http_client.cookies.clear()
+            proxy_url = config.proxy.normalized_url()
+            http_manager = SourceHttpManager(proxy_url)
+            stack.push_async_callback(http_manager.aclose)
 
-            async def _strip_response_cookies(response: httpx.Response) -> None:
-                response.cookies.clear()
-                http_client.cookies.clear()
-
-            http_client = httpx.AsyncClient(
-                proxy=config.proxy.normalized_url(),
+            shared_http_client = httpx.AsyncClient(
+                proxy=proxy_url,
                 timeout=30.0,
                 limits=httpx.Limits(
                     max_connections=32,
                     max_keepalive_connections=16,
                 ),
-                event_hooks={
-                    "request": [_strip_request_cookies],
-                    "response": [_strip_response_cookies],
-                },
             )
-            stack.push_async_callback(http_client.aclose)
-
-            file_storage = FileStorage(config.path.download or "download")
-            epub_builder = EpubBuilder()
-            raw_image_downloader = ImageDownloader(
-                http_client=http_client,
-                max_concurrency=4,
-                default_headers=PIXIV_IMAGE_HEADERS,
-            )
-            image_downloader = NovelAssetPipeline(
-                raw_image_downloader,
-                epub_builder=epub_builder,
-                download_root=file_storage.download_dir,
-            )
+            stack.push_async_callback(shared_http_client.aclose)
 
             account_pool = AccountPool(
-                http_client=http_client,
+                http_client=http_manager.get_client(SOURCE_PIXIV),
                 min_interval=config.pixiv_client.min_interval,
                 cooling_duration=config.pixiv_client.cooling_duration,
             )
-            await asyncio.to_thread(load_accounts, sf, account_pool)
-            stack.push_async_callback(image_downloader.aclose)
-
             client = PixivClient(
                 account_pool=account_pool,
                 max_concurrency=config.pixiv_client.max_concurrency,
             )
 
-            notifier = TelegramNotifier.from_config(config, http_client)
+            source_registry = SourceRegistry(
+                [
+                    PixivSourcePlugin(
+                        http_manager=http_manager,
+                        account_pool=account_pool,
+                        client=client,
+                        default_min_interval=config.pixiv_client.min_interval,
+                        default_cooling_duration=config.pixiv_client.cooling_duration,
+                        default_max_concurrency=config.pixiv_client.max_concurrency,
+                    ),
+                    LocalSourcePlugin(),
+                ]
+            )
+            source_service = SourceService(sf, source_registry, http_manager, config)
+            await asyncio.to_thread(source_service.bootstrap)
+            await http_manager.aclose_retired()
+
+            field_policy.set_source_registry(source_registry)
+
+            file_storage = FileStorage(config.path.download or "download")
+            epub_builder = EpubBuilder()
+            raw_image_downloader = http_manager.get_image_downloader(SOURCE_PIXIV)
+            image_downloader = NovelAssetPipeline(
+                raw_image_downloader,
+                epub_builder=epub_builder,
+                download_root=file_storage.download_dir,
+            )
+            stack.push_async_callback(image_downloader.aclose)
+
+            notifier = TelegramNotifier.from_config(config, shared_http_client)
 
             snapshot_store = PgSnapshotStore(sf)
             query_engine = await asyncio.to_thread(
@@ -164,6 +145,9 @@ def create_lifespan(
                 image_downloader=image_downloader,
                 config=config,
                 notifier=notifier,
+                source_registry=source_registry,
+                source_service=source_service,
+                http_manager=http_manager,
             )
             stack.push_async_callback(task_manager.stop)
 
@@ -174,8 +158,11 @@ def create_lifespan(
             app.state.account_pool = account_pool
             app.state.task_manager = task_manager
             app.state.query_engine = query_engine
-            app.state.http_client = http_client
+            app.state.http_client = shared_http_client
             app.state.engine = owned_engine
+            app.state.source_registry = source_registry
+            app.state.source_service = source_service
+            app.state.http_manager = http_manager
             logger.info("Container built successfully.")
 
             if run_background_tasks:

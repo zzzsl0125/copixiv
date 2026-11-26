@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
 from tests.factories import make_local_novel
 
 from copixiv.core.exceptions import NotFoundError, ValidationError
@@ -132,7 +133,14 @@ async def test_ingest_persists_new_updates_existing_metadata_and_records_failure
         author10 = session.get(models.Author, 10)
         assert author10 is not None
         assert author10.author_name == "AuthorTen"
-        assert session.get(models.FailedNovel, 102) is not None
+        failed102 = session.execute(
+            select(models.FailedNovel).where(
+                models.FailedNovel.source == "pixiv",
+                models.FailedNovel.source_key == "102",
+            )
+        ).scalar_one_or_none()
+        assert failed102 is not None
+        assert failed102.novel_id == 102
 
         # Mark 101 DONE manually; a metadata-only ingest via novelInfo must preserve DONE
         n101.has_epub = EpubStatus.DONE
@@ -165,8 +173,8 @@ async def test_update_novel_metadata_policy_and_unlink_semantics(
 
     uow = SqlUnitOfWork(committed_session_factory)
     with uow.begin():
-        uow.session.add(models.Author(author_id=77, author_name="LocalAuth"))
-        uow.session.add(models.Series(series_id=88, series_name="LocalSeries", author_id=77))
+        uow.session.add(models.Author(author_id=77, author_name="LocalAuth", source_key="77"))
+        uow.session.add(models.Series(series_id=88, series_name="LocalSeries", author_id=77, source_key="88"))
         uow.session.add(
             models.Novel(
                 id=501,
@@ -175,6 +183,7 @@ async def test_update_novel_metadata_policy_and_unlink_semantics(
                 author_name="LocalAuth",
                 path=str(tmp_path / "501.txt"),
                 source="pixiv",
+                source_key="501",
                 has_epub=EpubStatus.NO_IMAGES,
             )
         )
@@ -248,7 +257,7 @@ async def test_batch_tag_delete_and_download_by_ids(
 
     uow = SqlUnitOfWork(committed_session_factory)
     with uow.begin():
-        uow.session.add(models.Author(author_id=10, author_name="Auth10"))
+        uow.session.add(models.Author(author_id=10, author_name="Auth10", source_key="10"))
         uow.session.add_all(
             [
                 models.Novel(
@@ -263,6 +272,7 @@ async def test_batch_tag_delete_and_download_by_ids(
                     has_epub=EpubStatus.NO_IMAGES,
                     tags=["old"],
                     source="pixiv",
+                    source_key="1001",
                 ),
                 models.Novel(
                     id=1002,
@@ -276,10 +286,13 @@ async def test_batch_tag_delete_and_download_by_ids(
                     has_epub=EpubStatus.NO_IMAGES,
                     tags=[],
                     source="pixiv",
+                    source_key="1002",
                 ),
             ]
         )
-        uow.session.add(models.FailedNovel(novel_id=1001, error_message="err"))
+        uow.session.add(
+            models.FailedNovel(source="pixiv", source_key="1001", novel_id=1001, error_message="err")
+        )
         tag_repo = SQLAlchemyTagRepository(uow.session)
         tag_repo.create_alias({"source": "alias_src", "target": "alias_dst"})
 
@@ -346,8 +359,8 @@ async def test_sync_novel_preserves_author_name_on_fetch_failure_and_clears_seri
 
     uow = SqlUnitOfWork(committed_session_factory)
     with uow.begin():
-        uow.session.add(models.Author(author_id=20, author_name=None))
-        uow.session.add(models.Series(series_id=300, series_name="OldSeries", author_id=20))
+        uow.session.add(models.Author(author_id=20, author_name=None, source_key="20"))
+        uow.session.add(models.Series(series_id=300, series_name="OldSeries", author_id=20, source_key="300"))
         uow.session.flush()
         uow.session.add(
             models.Novel(
@@ -360,6 +373,7 @@ async def test_sync_novel_preserves_author_name_on_fetch_failure_and_clears_seri
                 series_index=5,
                 path=str(tmp_path / "2001.txt"),
                 source="pixiv",
+                source_key="2001",
             )
         )
 
@@ -395,7 +409,7 @@ def test_delete_novel_single_lookup_and_oserror_resilience(
     file_path = storage.save_novel_text(3001, "ToDel", "body")
 
     with uow.begin():
-        uow.session.add(models.Author(author_id=30, author_name="Auth30"))
+        uow.session.add(models.Author(author_id=30, author_name="Auth30", source_key="30"))
         uow.session.flush()
         uow.session.add(
             models.Novel(
@@ -405,6 +419,7 @@ def test_delete_novel_single_lookup_and_oserror_resilience(
                 author_name="Auth30",
                 path=str(file_path),
                 source="pixiv",
+                source_key="3001",
             )
         )
 
@@ -490,11 +505,11 @@ async def test_ingest_existing_meta_resolves_missing_series_index_and_skips_reti
     downloader = _DummyImageDownloader()
 
     with committed_session_factory() as session:
-        session.add(models.Author(author_id=50, author_name="Auth50"))
+        session.add(models.Author(author_id=50, author_name="Auth50", source_key="50"))
         session.add_all(
             [
-                models.Series(series_id=500, series_name="S500", author_id=50),
-                models.Series(series_id=501, series_name="S501", author_id=50),
+                models.Series(series_id=500, series_name="S500", author_id=50, source_key="500"),
+                models.Series(series_id=501, series_name="S501", author_id=50, source_key="501"),
                 models.SeriesDeadLetter(
                     series_id=501,
                     consecutive_failures=3,
@@ -507,7 +522,13 @@ async def test_ingest_existing_meta_resolves_missing_series_index_and_skips_reti
         session.add_all(
             [
                 # Standalone novel later added to series 500 -> must resolve index
-                models.Novel(id=5001, title="Standalone->Series", author_id=50, author_name="Auth50"),
+                models.Novel(
+                    id=5001,
+                    title="Standalone->Series",
+                    author_id=50,
+                    author_name="Auth50",
+                    source_key="5001",
+                ),
                 # Already indexed in series 500 -> must NOT trigger roster fetch on its own
                 models.Novel(
                     id=5002,
@@ -517,6 +538,7 @@ async def test_ingest_existing_meta_resolves_missing_series_index_and_skips_reti
                     series_id=500,
                     series_name="S500",
                     series_index=1,
+                    source_key="5002",
                 ),
                 # Missing index in retired series 501 -> must NOT poll roster every round
                 models.Novel(
@@ -527,6 +549,7 @@ async def test_ingest_existing_meta_resolves_missing_series_index_and_skips_reti
                     series_id=501,
                     series_name="S501",
                     series_index=None,
+                    source_key="5003",
                 ),
             ]
         )
@@ -604,8 +627,8 @@ async def test_sync_novel_resolves_series_index_when_added_to_or_moved_between_s
 
     uow = SqlUnitOfWork(committed_session_factory)
     with uow.begin():
-        uow.session.add(models.Author(author_id=60, author_name="Auth60"))
-        uow.session.add(models.Series(series_id=600, series_name="OldS", author_id=60))
+        uow.session.add(models.Author(author_id=60, author_name="Auth60", source_key="60"))
+        uow.session.add(models.Series(series_id=600, series_name="OldS", author_id=60, source_key="600"))
         uow.session.flush()
         uow.session.add(
             models.Novel(
@@ -618,6 +641,7 @@ async def test_sync_novel_resolves_series_index_when_added_to_or_moved_between_s
                 series_index=5,
                 path=str(tmp_path / "6001.txt"),
                 source="pixiv",
+                source_key="6001",
             )
         )
 
@@ -653,7 +677,7 @@ async def test_ingest_retries_existing_novel_with_retryable_failure_and_stops_at
     downloader = _DummyImageDownloader()
 
     with committed_session_factory() as session:
-        session.add(models.Author(author_id=70, author_name="Auth70"))
+        session.add(models.Author(author_id=70, author_name="Auth70", source_key="70"))
         session.flush()
         session.add_all(
             [
@@ -663,6 +687,7 @@ async def test_ingest_retries_existing_novel_with_retryable_failure_and_stops_at
                     author_id=70,
                     author_name="Auth70",
                     has_epub=EpubStatus.PENDING,
+                    source_key="7001",
                 ),
                 models.Novel(
                     id=7002,
@@ -670,13 +695,26 @@ async def test_ingest_retries_existing_novel_with_retryable_failure_and_stops_at
                     author_id=70,
                     author_name="Auth70",
                     has_epub=EpubStatus.PENDING,
+                    source_key="7002",
                 ),
             ]
         )
         session.add_all(
             [
-                models.FailedNovel(novel_id=7001, error_message="EPUB 不完整", failed_times=1),
-                models.FailedNovel(novel_id=7002, error_message="EPUB 不完整", failed_times=MAX_RETRIES),
+                models.FailedNovel(
+                    source="pixiv",
+                    source_key="7001",
+                    novel_id=7001,
+                    error_message="EPUB 不完整",
+                    failed_times=1,
+                ),
+                models.FailedNovel(
+                    source="pixiv",
+                    source_key="7002",
+                    novel_id=7002,
+                    error_message="EPUB 不完整",
+                    failed_times=MAX_RETRIES,
+                ),
             ]
         )
         session.commit()
@@ -695,5 +733,21 @@ async def test_ingest_retries_existing_novel_with_retryable_failure_and_stops_at
     assert ("webview_novel", 7001) in fake_pixiv_client.calls
     assert ("webview_novel", 7002) not in fake_pixiv_client.calls
     with committed_session_factory() as session:
-        assert session.get(models.FailedNovel, 7001) is None
-        assert session.get(models.FailedNovel, 7002) is not None
+        assert (
+            session.execute(
+                select(models.FailedNovel).where(
+                    models.FailedNovel.source == "pixiv",
+                    models.FailedNovel.source_key == "7001",
+                )
+            ).scalar_one_or_none()
+            is None
+        )
+        assert (
+            session.execute(
+                select(models.FailedNovel).where(
+                    models.FailedNovel.source == "pixiv",
+                    models.FailedNovel.source_key == "7002",
+                )
+            ).scalar_one_or_none()
+            is not None
+        )

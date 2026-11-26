@@ -147,11 +147,13 @@ def test_passive_upsert_skips_view_and_small_like_churn(uow: SqlUnitOfWork):
 @pytest.mark.asyncio
 async def test_batch_edit_metadata_dry_run_with_empty_fields(uow: SqlUnitOfWork):
     with uow.begin():
-        uow.session.add(models.Author(author_id=1, author_name="Author"))
+        uow.session.add(models.Author(author_id=1, author_name="Author", source_key="1"))
         uow.session.flush()
         local_novel = make_local_novel(-1, title="LocalBook", author_id=1, source_key="dryrun1")
         uow.session.add(local_novel)
-        uow.session.add(models.Novel(id=8001, title="PixivBook", source="pixiv", path="p/8001.txt"))
+        uow.session.add(
+            models.Novel(id=8001, title="PixivBook", source="pixiv", source_key="8001", path="p/8001.txt")
+        )
         local_id = local_novel.id
 
     counts = await batch_edit_metadata([local_id, 8001], uow=uow, apply=False)

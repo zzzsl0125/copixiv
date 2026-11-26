@@ -7,8 +7,9 @@ from typing import Literal
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from copixiv.core.models import SOURCE_PIXIV
 from copixiv.db.tx import read_transaction, run_write_transaction_sync
-from copixiv.deps import PixivClientDep, UowDep
+from copixiv.deps import PixivClientDep, SourceServiceDep, UowDep
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 from copixiv.features.authors.service import lookup_author_profile
 
@@ -46,6 +47,7 @@ async def lookup_author(
     author_id: int,
     uow: UowDep,
     client: PixivClientDep,
+    source_service: SourceServiceDep,
 ):
     """作者 ID → 显示名预览（编辑器「作者」一栏的即时反馈）。
 
@@ -60,7 +62,8 @@ async def lookup_author(
     也不用动路由前缀的接线测试。
     """
 
-    profile = await lookup_author_profile(author_id, uow=uow, client=client)
+    active_client = client if source_service.is_enabled(SOURCE_PIXIV) else None
+    profile = await lookup_author_profile(author_id, uow=uow, client=active_client)
     novel_count = await read_transaction(
         uow,
         lambda tx: SQLAlchemyAuthorRepository(tx.session).count_novels_by_author(author_id),

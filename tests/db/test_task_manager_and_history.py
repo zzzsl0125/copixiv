@@ -148,6 +148,7 @@ async def test_refetch_pre_limit_and_batch_export_progress(
                     path=str(tmp_path / "1.txt"),
                     has_epub=EpubStatus.MISSING_SOURCE,
                     source="pixiv",
+                    source_key="1",
                 ),
                 models.Novel(
                     id=2,
@@ -155,6 +156,7 @@ async def test_refetch_pre_limit_and_batch_export_progress(
                     path=str(tmp_path / "2.txt"),
                     has_epub=EpubStatus.MISSING_SOURCE,
                     source="pixiv",
+                    source_key="2",
                 ),
                 models.Novel(
                     id=3,
@@ -162,6 +164,7 @@ async def test_refetch_pre_limit_and_batch_export_progress(
                     path=str(tmp_path / "3.txt"),
                     has_epub=EpubStatus.MISSING_SOURCE,
                     source="pixiv",
+                    source_key="3",
                 ),
                 models.Novel(
                     id=4,
@@ -169,10 +172,32 @@ async def test_refetch_pre_limit_and_batch_export_progress(
                     path=str(tmp_path / "4.txt"),
                     has_epub=EpubStatus.MISSING_SOURCE,
                     source="pixiv",
+                    source_key="4",
                 ),
-                models.FailedNovel(novel_id=1, error_message="dead", failed_times=3, last_failed_at=now),
-                models.FailedNovel(novel_id=2, error_message="dead", failed_times=3, last_failed_at=now),
-                models.FailedNovel(novel_id=3, error_message="recent", failed_times=1, last_failed_at=now),
+                models.FailedNovel(
+                    source="pixiv",
+                    source_key="1",
+                    novel_id=1,
+                    error_message="dead",
+                    failed_times=3,
+                    last_failed_at=now,
+                ),
+                models.FailedNovel(
+                    source="pixiv",
+                    source_key="2",
+                    novel_id=2,
+                    error_message="dead",
+                    failed_times=3,
+                    last_failed_at=now,
+                ),
+                models.FailedNovel(
+                    source="pixiv",
+                    source_key="3",
+                    novel_id=3,
+                    error_message="recent",
+                    failed_times=1,
+                    last_failed_at=now,
+                ),
             ]
         )
         session.commit()

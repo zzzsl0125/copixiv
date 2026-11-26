@@ -36,6 +36,9 @@ class TaskContext:
     image_downloader: NovelAssetPipeline | None = None
     backup_dir: str = "backups"
     task_id: int | None = None
+    source_registry: Any = None
+    source_service: Any = None
+    http_manager: Any = None
 
     def child_uow(self) -> SqlUnitOfWork:
         """Return a fresh UnitOfWork sharing the process session factory."""
@@ -317,6 +320,9 @@ class TaskExecutor:
             image_downloader=self._deps.get("image_downloader"),
             backup_dir=self._deps.get("backup_dir", "backups"),
             task_id=task_id,
+            source_registry=self._deps.get("source_registry"),
+            source_service=self._deps.get("source_service"),
+            http_manager=self._deps.get("http_manager"),
         )
 
     async def _execute(self, spec: TaskSpec, params: dict, ctx: TaskContext) -> Any:

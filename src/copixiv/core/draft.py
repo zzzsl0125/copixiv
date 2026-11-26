@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from copixiv.core.models import EpubStatus
+from copixiv.core.models import SOURCE_PIXIV, EpubStatus
 from copixiv.core.naming import build_path
 from copixiv.core.text import has_image_placeholders, parse_tags
 
@@ -52,11 +52,11 @@ def guess_series_order(navigation: Any) -> int | None:
 
 @dataclass(frozen=True)
 class NovelDraft:
-    """Frozen write-path carrier built from raw Pixiv API payloads."""
+    """Frozen write-path carrier built from raw or normalized source payloads."""
 
     id: int
     title: str
-    author_id: int
+    author_id: int | None = None
     author_name: str | None = None
     path: str = ""
     like: int = 0
@@ -74,6 +74,12 @@ class NovelDraft:
     images: dict | None = None
     illusts: dict | None = None
     cover_url: str | None = None
+    source: str = SOURCE_PIXIV
+    source_key: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.source_key is None and self.source == SOURCE_PIXIV and self.id:
+            object.__setattr__(self, "source_key", str(self.id))
 
 
 class UserInfoLike(Protocol):
@@ -110,7 +116,7 @@ def build_novel(
     *,
     id: int,
     title: str,
-    author_id: int,
+    author_id: int | None = None,
     author_name: str | None = None,
     path: str | None = None,
     like: int = 0,
@@ -127,9 +133,12 @@ def build_novel(
     images: dict | None = None,
     illusts: dict | None = None,
     cover_url: str | None = None,
+    source: str = SOURCE_PIXIV,
+    source_key: str | None = None,
     download_dir: str = "download",
 ) -> NovelDraft:
-    """Build a canonical :class:`NovelDraft` from raw Pixiv API fields."""
+    """Build a canonical :class:`NovelDraft` from raw source fields."""
+    resolved_key = source_key if source_key is not None else str(id)
     return NovelDraft(
         id=id,
         title=title,
@@ -150,6 +159,8 @@ def build_novel(
         images=images,
         illusts=illusts,
         cover_url=cover_url,
+        source=source,
+        source_key=resolved_key,
     )
 
 

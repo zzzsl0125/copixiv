@@ -62,7 +62,15 @@ def test_delete_author_cleans_novels_failures_empty_series_and_recomputes_shared
         assert s200 is not None
         s200.author_id = 10
 
-        uow.session.add(models.FailedNovel(novel_id=101, error_message="404", failed_times=1))
+        uow.session.add(
+            models.FailedNovel(
+                source="pixiv",
+                source_key="101",
+                novel_id=101,
+                error_message="404",
+                failed_times=1,
+            )
+        )
         uow.session.flush()
 
     with uow.begin():

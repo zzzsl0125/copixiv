@@ -158,7 +158,7 @@ async def fetch_series_name(
     series_id: int,
 ) -> str | None:
     """Ask Pixiv what one series is called, degrading to ``None`` on error."""
-    if client is None:
+    if client is None or series_id <= 0:
         return None
     try:
         resp = await client.novel_series(series_id)

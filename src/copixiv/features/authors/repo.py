@@ -2,8 +2,8 @@
 
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import ColumnElement, func, or_, tuple_
 from sqlalchemy import delete as _delete
-from sqlalchemy import func
 from sqlalchemy import select as _select
 from sqlalchemy import update as _update
 from sqlalchemy.orm import Session
@@ -105,11 +105,14 @@ class SQLAlchemyAuthorRepository:
                 models.Novel.id,
                 models.Novel.path,
                 models.Novel.series_id,
+                models.Novel.source,
+                models.Novel.source_key,
             ).where(models.Novel.author_id == author_id)
         ).all()
         novel_ids = [r[0] for r in rows]
         paths = [r[1] for r in rows if r[1]]
         affected_series_ids = {r[2] for r in rows if r[2] is not None}
+        source_key_pairs = [(r[3], r[4]) for r in rows if r[3] and r[4]]
 
         owned_series_ids = set(
             self.session.execute(_select(models.Series.series_id).where(models.Series.author_id == author_id))
@@ -119,9 +122,13 @@ class SQLAlchemyAuthorRepository:
 
         if novel_ids:
             # failed_novel has no FK to novel; clear ledger rows explicitly.
-            self.session.execute(
-                _delete(models.FailedNovel).where(models.FailedNovel.novel_id.in_(novel_ids))
-            )
+            failure_pred: ColumnElement[bool] = models.FailedNovel.novel_id.in_(novel_ids)
+            if source_key_pairs:
+                failure_pred = or_(
+                    failure_pred,
+                    tuple_(models.FailedNovel.source, models.FailedNovel.source_key).in_(source_key_pairs),
+                )
+            self.session.execute(_delete(models.FailedNovel).where(failure_pred))
             self.session.execute(_delete(models.Novel).where(models.Novel.id.in_(novel_ids)))
             engine_delta.record_novel_deletes(self.session, novel_ids)
             self.session.flush()
@@ -167,6 +174,19 @@ class SQLAlchemyAuthorRepository:
             .scalars()
             .all()
         )
+
+    def get_special_follow_authors_by_source(self) -> dict[str, list[str]]:
+        """Return ``{source: [source_key, ...]}`` for specially-followed authors."""
+        rows = self.session.execute(
+            _select(models.Author.source, models.Author.source_key)
+            .where(models.Author.is_special_follow == True)
+            .order_by(models.Author.source, models.Author.author_id)
+        ).all()
+        grouped: dict[str, list[str]] = {}
+        for source, source_key in rows:
+            if source and source_key:
+                grouped.setdefault(str(source), []).append(str(source_key))
+        return grouped
 
     def toggle_special_follow(self, author_id: int) -> None:
         result = self.session.execute(

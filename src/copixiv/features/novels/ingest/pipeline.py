@@ -22,7 +22,7 @@ import asyncio
 from dataclasses import dataclass, field, replace
 
 from copixiv.core.draft import NovelDraft, NovelInfoLike, build_from_novel_info
-from copixiv.core.models import EpubStatus
+from copixiv.core.models import SOURCE_PIXIV, EpubStatus
 from copixiv.db.tx import read_transaction, run_write_transaction
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.authors.service import collect_author_names, writeback_author_names
@@ -241,7 +241,14 @@ def _upsert_batch(
         logger.info(f"_upsert_batch: {len(downloaded)} novels downloaded and upserted")
 
     for nid, reason in failed_records:
-        failed_repo.record(nid, "download", reason, title=titles.get(nid))
+        failed_repo.record(
+            nid,
+            "download",
+            reason,
+            title=titles.get(nid),
+            source=SOURCE_PIXIV,
+            source_key=str(nid),
+        )
 
     return titles_out, new_titles_out, new_count
 

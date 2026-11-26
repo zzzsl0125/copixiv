@@ -7,7 +7,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from copixiv.core.models import TaskResult
+from copixiv.core.models import SOURCE_PIXIV, TaskResult
 from copixiv.db.tx import read_transaction
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.failures.repo import MAX_RETRIES
@@ -49,8 +49,11 @@ async def refetch_missing_novels(
     client: PixivClient | None,
     file_storage: Any,
     image_downloader: Any,
+    source_service: Any = None,
 ) -> TaskResult:
     """Re-download novels whose local text file is gone."""
+    if source_service is not None:
+        source_service.require_enabled(SOURCE_PIXIV)
     if client is None or file_storage is None:
         return TaskResult(summary="重抓丢失正文: 缺少 pixiv 客户端或文件存储，跳过")
 

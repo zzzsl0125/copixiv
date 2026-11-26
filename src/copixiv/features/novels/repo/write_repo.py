@@ -4,18 +4,18 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-from sqlalchemy import any_, func, or_, select, update
+from sqlalchemy import and_, any_, func, or_, select, tuple_, update
 from sqlalchemy import delete as _delete
 from sqlalchemy.orm import Session
 
 from copixiv.core.draft import NovelDraft
 from copixiv.core.exceptions import NotFoundError
-from copixiv.core.models import EpubStatus
+from copixiv.core.models import SOURCE_PIXIV, EpubStatus
 from copixiv.core.time import parse_pixiv_time
 from copixiv.db import delta as engine_delta
 from copixiv.db import models
-from copixiv.db.base import ensure_parent_rows
-from copixiv.features.tags.repo import SQLAlchemyTagRepository
+from copixiv.features.sources.entity_resolver import EntityResolver
+from copixiv.features.tags.resolver import TagAliasResolver
 from copixiv.log import logger
 
 from .read_repo import SQLAlchemyNovelReadRepository
@@ -68,8 +68,7 @@ class SQLAlchemyNovelWriteRepository:
         """Ensure author + series placeholder rows exist before novel writes."""
         author_ids = {n["author_id"] for n in novels if n.get("author_id")}
         series_ids = {n["series_id"] for n in novels if n.get("series_id")}
-        ensure_parent_rows(
-            self.session,
+        EntityResolver(self.session).ensure_pixiv_parents(
             author_ids=author_ids,
             series_ids=series_ids,
         )
@@ -80,12 +79,11 @@ class SQLAlchemyNovelWriteRepository:
         self,
         novels: list[dict],
     ) -> dict[int, set[str]]:
-        tag_repo = SQLAlchemyTagRepository(self.session)
-        alias_map = tag_repo.get_alias_map()
+        resolver = TagAliasResolver(self.session)
         novel_tags_map: dict[int, set[str]] = {}
         for n in novels:
             raw_tags = n.pop("tags", None) or []
-            mapped_tags = {alias_map.get(t, t) for t in raw_tags}
+            mapped_tags = resolver.resolve_set(raw_tags)
             nid = n.get("id")
             if nid is not None:
                 novel_tags_map[nid] = mapped_tags
@@ -162,6 +160,10 @@ class SQLAlchemyNovelWriteRepository:
                 if novel_tags_map and nid is not None:
                     normalized_tags = sorted(novel_tags_map.get(nid, []))
                     filtered = {**filtered, "tags": normalized_tags}
+                if not filtered.get("source"):
+                    filtered["source"] = SOURCE_PIXIV
+                if filtered.get("source_key") is None and nid is not None:
+                    filtered["source_key"] = str(nid)
                 new_novel = models.Novel(**filtered)
                 self.session.add(new_novel)
                 if nid is not None:
@@ -196,11 +198,22 @@ class SQLAlchemyNovelWriteRepository:
         Returns ``(deleted, stored_path)``.
         """
         row = self.session.execute(
-            _delete(models.Novel).where(models.Novel.id == novel_id).returning(models.Novel.path)
+            _delete(models.Novel)
+            .where(models.Novel.id == novel_id)
+            .returning(models.Novel.path, models.Novel.source, models.Novel.source_key)
         ).one_or_none()
         if row is None:
             return False, None
-        self.session.execute(_delete(models.FailedNovel).where(models.FailedNovel.novel_id == novel_id))
+        cond = models.FailedNovel.novel_id == novel_id
+        if row.source and row.source_key:
+            cond = or_(
+                cond,
+                and_(
+                    models.FailedNovel.source == row.source,
+                    models.FailedNovel.source_key == row.source_key,
+                ),
+            )
+        self.session.execute(_delete(models.FailedNovel).where(cond))
         engine_delta.record_novel_deletes(self.session, [novel_id])
         self.session.flush()
         return True, row.path
@@ -239,15 +252,32 @@ class SQLAlchemyNovelWriteRepository:
         """Delete many novels and return ``(deleted_count, stored_paths)``."""
         if not novel_ids:
             return 0, []
-        self.session.execute(
-            _delete(models.FailedNovel).where(models.FailedNovel.novel_id == any_(cast(Any, novel_ids)))
-        )
         rows = self.session.execute(
             _delete(models.Novel)
             .where(models.Novel.id == any_(cast(Any, novel_ids)))
-            .returning(models.Novel.id, models.Novel.path)
+            .returning(models.Novel.id, models.Novel.path, models.Novel.source, models.Novel.source_key)
         ).all()
         deleted_ids = [row.id for row in rows]
+        source_key_pairs = [(row.source, row.source_key) for row in rows if row.source and row.source_key]
+        if len(source_key_pairs) <= 5000:
+            cond = models.FailedNovel.novel_id == any_(cast(Any, novel_ids))
+            if source_key_pairs:
+                cond = or_(
+                    cond,
+                    tuple_(models.FailedNovel.source, models.FailedNovel.source_key).in_(source_key_pairs),
+                )
+            self.session.execute(_delete(models.FailedNovel).where(cond))
+        else:
+            self.session.execute(
+                _delete(models.FailedNovel).where(models.FailedNovel.novel_id == any_(cast(Any, novel_ids)))
+            )
+            for i in range(0, len(source_key_pairs), 5000):
+                pair_chunk = source_key_pairs[i : i + 5000]
+                self.session.execute(
+                    _delete(models.FailedNovel).where(
+                        tuple_(models.FailedNovel.source, models.FailedNovel.source_key).in_(pair_chunk)
+                    )
+                )
         if deleted_ids:
             engine_delta.record_novel_deletes(self.session, deleted_ids)
         self.session.flush()

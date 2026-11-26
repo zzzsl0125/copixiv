@@ -481,6 +481,7 @@ def test_raw_session_bypass_uow_and_savepoint_isolation(committed_session_factor
                 author_name="AuthorTen",
                 like=777,
                 tags=["raw_tag"],
+                source_key="501",
             )
         )
     with committed_session_factory() as s:
@@ -492,10 +493,25 @@ def test_raw_session_bypass_uow_and_savepoint_isolation(committed_session_factor
     # Scenario A: outer commits while inner begin_nested() savepoint rolls back -> phantom write NOT synced
     with committed_session_factory() as s, s.begin():
         s.add(
-            models.Novel(id=502, title="OuterKept", author_id=10, author_name="AuthorTen", tags=["kept_tag"])
+            models.Novel(
+                id=502,
+                title="OuterKept",
+                author_id=10,
+                author_name="AuthorTen",
+                tags=["kept_tag"],
+                source_key="502",
+            )
         )
         with suppress(ValueError), s.begin_nested():
-            s.add(models.Novel(id=503, title="InnerSavepointAborted", author_id=10, tags=["aborted_sp_tag"]))
+            s.add(
+                models.Novel(
+                    id=503,
+                    title="InnerSavepointAborted",
+                    author_id=10,
+                    tags=["aborted_sp_tag"],
+                    source_key="503",
+                )
+            )
             s.flush()
             raise ValueError("savepoint failure")
     _assert_db_oracle_parity(
@@ -507,7 +523,7 @@ def test_raw_session_bypass_uow_and_savepoint_isolation(committed_session_factor
     # Scenario B: inner savepoint commits, outer rolls back -> nothing synced
     with committed_session_factory() as s, suppress(ValueError), s.begin():
         with s.begin_nested():
-            s.add(models.Novel(id=504, title="InnerCommitOuterAbort", author_id=10))
+            s.add(models.Novel(id=504, title="InnerCommitOuterAbort", author_id=10, source_key="504"))
         raise ValueError("outer failure")
     with committed_session_factory() as s:
         assert (
@@ -532,7 +548,7 @@ def test_pool_size_one_no_deadlock_on_after_transaction_end(pg_test_engine, comm
     eng = attach_and_start_engine(store, build_initial=True)
     try:
         with sf() as s, s.begin():
-            s.add(models.Novel(id=801, title="PoolOneCheck", like=42, tags=["pool1"]))
+            s.add(models.Novel(id=801, title="PoolOneCheck", like=42, tags=["pool1"], source_key="801"))
         with sf() as s:
             hits = SQLAlchemyNovelRepository(s, query_engine=eng).list_matching_ids(
                 QuerySpec(conditions=[("tags", "pool1")])
@@ -629,12 +645,12 @@ def test_concurrent_readers_writers_and_self_healing_rebuild(committed_session_f
 
     monkeypatch.setattr(PgSnapshotStore, "stream_snapshot", _flaky_stream)
     with committed_session_factory() as s, s.begin():
-        s.add(models.Novel(id=3001, title="NeedRebuildRow", author_id=10))
+        s.add(models.Novel(id=3001, title="NeedRebuildRow", author_id=10, source_key="3001"))
     assert eng2.needs_rebuild() is True
 
     # Next commit succeeds in full self-healing rebuild and clears needs_rebuild
     with committed_session_factory() as s, s.begin():
-        s.add(models.Novel(id=3002, title="HealedRow", author_id=10))
+        s.add(models.Novel(id=3002, title="HealedRow", author_id=10, source_key="3002"))
     assert eng2.needs_rebuild() is False
     with committed_session_factory() as s:
         assert set(

@@ -52,6 +52,28 @@ class AccountPool:
         with self._lock:
             return list(self._accounts)
 
+    def reconfigure(
+        self,
+        *,
+        http_client: httpx.AsyncClient | None = None,
+        min_interval: float | None = None,
+        cooling_duration: float | None = None,
+    ) -> None:
+        """Update HTTP client and pacing parameters for the pool and existing accounts."""
+        with self._lock:
+            if http_client is not None:
+                self._http_client = http_client
+                for acc in self._accounts:
+                    acc._http_client = http_client
+            if min_interval is not None:
+                self._min_interval = min_interval
+                for acc in self._accounts:
+                    acc.min_interval = min_interval
+            if cooling_duration is not None:
+                self._cooling_duration = cooling_duration
+                for acc in self._accounts:
+                    acc.cooling_duration = cooling_duration
+
     def reload_from_tokens(self, tokens: list[dict]) -> None:
         """Rebuild the in-memory pool from persisted token rows.
 

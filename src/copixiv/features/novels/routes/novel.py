@@ -6,6 +6,8 @@ from copixiv.db.tx import run_write_transaction_sync
 from copixiv.deps import (
     FileStorageDep,
     PixivClientDep,
+    SourceRegistryDep,
+    SourceServiceDep,
     UowDep,
     require_api_key,
 )
@@ -69,15 +71,17 @@ async def sync_novel(
     uow: UowDep,
     client: PixivClientDep,
     file_storage: FileStorageDep,
+    source_registry: SourceRegistryDep,
+    source_service: SourceServiceDep,
 ):
-    """按 id 从 pixiv 重抓这一本的元数据并落库（编辑器的「同步」）。
+    """按 id 从来源重抓这一本的元数据并落库（编辑器的「同步」）。
 
     修的是"手改会与来源打架"那类错配：pixiv 书的 ``title`` / ``author_id`` /
     ``series_id`` 都是只读（``field_policy.py``），错配之后的出口就是这里 ——
     把来源值拉回来（docs/NOVEL_EDIT_DESIGN.md §4.3 的单本版）。
 
     **无请求体**：动作的输入只有路径上的 id。响应与 PATCH 同形状（更新后的完整
-    ``NovelBase``），前端同样原地替换卡片。本地书 → 400（没有来源可恢复）；
+    ``NovelBase``），前端同样原地替换卡片。本地书或未启用来源 → 400；
     pixiv 上已不存在 / 受限（webview 返回空）→ 404。
 
     依赖用 ``UowDep`` 而**不是** ``get_write_uow``：抓取必须在写事务
@@ -88,6 +92,8 @@ async def sync_novel(
         uow=uow,
         client=client,
         download_dir=file_storage.download_dir,
+        source_registry=source_registry,
+        source_service=source_service,
     )
 
 

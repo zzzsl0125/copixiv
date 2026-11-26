@@ -1,6 +1,6 @@
 """Background task adapters for novel discovery and author removal (fetch lane)."""
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from copixiv.core.models import TaskResult
 from copixiv.features.authors.service import delete_author
@@ -50,7 +50,8 @@ class NovelSearchArgs(BaseModel):
 
 
 class FailedRetryArgs(BaseModel):
-    novel_ids: list[int]
+    ids: list[int] = Field(default_factory=list)
+    novel_ids: list[int] = Field(default_factory=list)
 
 
 @register(
@@ -68,6 +69,8 @@ async def novel_fetch(args: NovelFetchArgs, ctx: TaskContext) -> TaskResult:
         client=ctx.client,
         file_storage=ctx.file_storage,
         image_downloader=ctx.image_downloader,
+        source_registry=ctx.source_registry,
+        source_service=ctx.source_service,
     )
 
 
@@ -83,9 +86,11 @@ async def novel_follow(args: NovelFollowArgs, ctx: TaskContext) -> TaskResult:
         days=args.days,
         force=args.force,
         session_factory=ctx.session_factory,
-        client=ctx.require_client(),
+        client=ctx.client,
         file_storage=ctx.file_storage,
         image_downloader=ctx.image_downloader,
+        source_registry=ctx.source_registry,
+        source_service=ctx.source_service,
     )
 
 
@@ -101,9 +106,11 @@ async def author_fetch(args: AuthorFetchArgs, ctx: TaskContext) -> TaskResult:
         args.author_id,
         force=args.force,
         uow=ctx.require_uow(),
-        client=ctx.require_client(),
+        client=ctx.client,
         file_storage=ctx.file_storage,
         image_downloader=ctx.image_downloader,
+        source_registry=ctx.source_registry,
+        source_service=ctx.source_service,
     )
 
 
@@ -119,7 +126,9 @@ async def author_delete(args: AuthorDeleteArgs, ctx: TaskContext) -> TaskResult:
         args.author_id,
         uow=ctx.require_uow(),
         file_storage=ctx.require_file_storage(),
-        client=ctx.require_client(),
+        client=ctx.client,
+        source_registry=ctx.source_registry,
+        source_service=ctx.source_service,
     )
 
 
@@ -132,9 +141,11 @@ async def author_special_follow(ctx: TaskContext) -> TaskResult:
     """Check for new novels from specially-followed authors."""
     return await fetch_special_follow_novels(
         uow=ctx.require_uow(),
-        client=ctx.require_client(),
+        client=ctx.client,
         file_storage=ctx.file_storage,
         image_downloader=ctx.image_downloader,
+        source_registry=ctx.source_registry,
+        source_service=ctx.source_service,
     )
 
 
@@ -150,10 +161,12 @@ async def novel_ranking(args: NovelRankingArgs, ctx: TaskContext) -> TaskResult:
         mode=args.mode,
         days=args.days,
         force=args.force,
-        client=ctx.require_client(),
+        client=ctx.client,
         file_storage=ctx.file_storage,
         image_downloader=ctx.image_downloader,
         child_uow_factory=ctx.child_uow,
+        source_registry=ctx.source_registry,
+        source_service=ctx.source_service,
     )
 
 
@@ -170,10 +183,12 @@ async def novel_search(args: NovelSearchArgs, ctx: TaskContext) -> TaskResult:
         months=args.months,
         minlike=args.minlike,
         force=args.force,
-        client=ctx.require_client(),
+        client=ctx.client,
         file_storage=ctx.file_storage,
         image_downloader=ctx.image_downloader,
         child_uow_factory=ctx.child_uow,
+        source_registry=ctx.source_registry,
+        source_service=ctx.source_service,
     )
 
 
@@ -186,9 +201,12 @@ async def novel_search(args: NovelSearchArgs, ctx: TaskContext) -> TaskResult:
 async def failed_retry(args: FailedRetryArgs, ctx: TaskContext) -> TaskResult:
     """Manually retry failed downloads from the 「下载失败」 ledger."""
     return await retry_failed_novels(
-        args.novel_ids,
+        args.novel_ids or None,
+        ids=args.ids or None,
         session_factory=ctx.session_factory,
         client=ctx.client,
         file_storage=ctx.file_storage,
         image_downloader=ctx.image_downloader,
+        source_registry=ctx.source_registry,
+        source_service=ctx.source_service,
     )

@@ -63,7 +63,7 @@ from copixiv.features.novels import field_policy
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository, StoredNovel
 from copixiv.features.series.repo import SQLAlchemySeriesRepository
 from copixiv.features.series.service import lookup_series_profile
-from copixiv.features.tags.repo import SQLAlchemyTagRepository
+from copixiv.features.tags.resolver import TagAliasResolver
 from copixiv.pixiv.client import PixivClient
 
 # 本地书的 ``author_name`` 在上传时永不为 NULL（LIBRARY_DESIGN.md §3.3）：解析
@@ -113,8 +113,8 @@ async def update_novel_metadata(
         novel = novel_repo.get_by_id(novel_id)
         if novel is None:
             raise NotFoundError(f"Novel {novel_id} not found")
-        tag_repo = SQLAlchemyTagRepository(tx.session)
-        return novel, _build_values(novel, changes, tag_repo)
+        tag_resolver = TagAliasResolver(tx.session)
+        return novel, _build_values(novel, changes, tag_resolver)
 
     novel, values = await read_transaction(uow, _prepare)
 
@@ -157,6 +157,20 @@ async def update_novel_metadata(
                 {values["series_id"]} if "series_id" in values and values["series_id"] is not None else ()
             ),
         )
+        target_author_id = values.get("author_id")
+        if (
+            target_author_id is not None
+            and target_author_id < 0
+            and author_repo.get_by_id(target_author_id) is None
+        ):
+            raise ValidationError("本地或外部作者不存在，请先从搜索结果中选择")
+        target_series_id = values.get("series_id")
+        if (
+            target_series_id is not None
+            and target_series_id < 0
+            and series_repo.get_by_id(target_series_id) is None
+        ):
+            raise ValidationError("本地或外部系列不存在，请先从搜索结果中选择")
 
         novel_repo.update_metadata(novel_id, values)
 
@@ -181,7 +195,7 @@ async def update_novel_metadata(
 def _build_values(
     novel: StoredNovel,
     changes: dict[str, Any],
-    tag_repo: SQLAlchemyTagRepository,
+    tag_resolver: TagAliasResolver,
 ) -> dict[str, Any]:
     """逐字段校验并归一，返回可直接 setattr 的列值字典。"""
     # 先判"这个字段这本书能不能改"：pixiv 书的只读字段即便传的是合法值也拒。
@@ -194,7 +208,7 @@ def _build_values(
             novel.source,
             field,
         ):
-            raise ValidationError(field_policy.rejection_reason(field))
+            raise ValidationError(field_policy.rejection_reason(field, novel.source))
 
     values: dict[str, Any] = {}
 
@@ -209,7 +223,7 @@ def _build_values(
         values["series_index"] = _series_index(changes["series_index"])
 
     if "tags" in changes:
-        values["tags"] = _normalize_tags(changes["tags"], tag_repo)
+        values["tags"] = _normalize_tags(changes["tags"], tag_resolver)
 
     if "create_time" in changes:
         values["create_time"] = _create_time(changes["create_time"])
@@ -232,6 +246,14 @@ async def _author_columns(
         return values, None
 
     author_id = _author_id(raw)
+    if author_id < 0:
+        row = await read_transaction(
+            uow,
+            lambda tx: SQLAlchemyAuthorRepository(tx.session).get_by_id(author_id),
+        )
+        if row is None:
+            raise ValidationError("本地或外部作者不存在，请先从搜索结果中选择")
+        return {"author_id": author_id, "author_name": row.get("author_name")}, None
 
     profile = await lookup_author_profile(
         author_id,
@@ -258,6 +280,14 @@ async def _series_columns(
         }, None
 
     series_id = _series_id(raw)
+    if series_id < 0:
+        row = await read_transaction(
+            uow,
+            lambda tx: SQLAlchemySeriesRepository(tx.session).get_by_id(series_id),
+        )
+        if row is None:
+            raise ValidationError("本地或外部系列不存在，请先从搜索结果中选择")
+        return {"series_id": series_id, "series_name": row.get("series_name")}, None
 
     profile = await lookup_series_profile(
         series_id,
@@ -269,15 +299,14 @@ async def _series_columns(
     return values, resolved
 
 
-def _normalize_tags(raw: Any, tag_repo: SQLAlchemyTagRepository) -> list[str]:
+def _normalize_tags(raw: Any, tag_resolver: TagAliasResolver) -> list[str]:
     if raw is None:
         raw = []
     if not isinstance(raw, list):
         raise ValidationError("标签必须是字符串数组")
 
     cleaned = parse_tags(raw)
-    alias_map = tag_repo.get_alias_map()
-    merged = sorted({alias_map.get(tag, tag) for tag in cleaned})
+    merged = tag_resolver.resolve(cleaned, sort=True)
 
     if len(merged) > MAX_TAGS:
         raise ValidationError(f"标签过多（最多 {MAX_TAGS} 个）")

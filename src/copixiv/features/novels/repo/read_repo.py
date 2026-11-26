@@ -457,8 +457,8 @@ class SQLAlchemyNovelReadRepository:
         return [(int(nid), path) for nid, path in rows]
 
     def iter_epub_sweep_page(self, after_id: int | None, limit: int) -> list[Any]:
-        """Return one keyset page of ``(id, path, has_epub)`` ordered by ``id``."""
-        stmt = select(models.Novel.id, models.Novel.path, models.Novel.has_epub)
+        """Return one keyset page of ``(id, path, has_epub, source)`` ordered by ``id``."""
+        stmt = select(models.Novel.id, models.Novel.path, models.Novel.has_epub, models.Novel.source)
         if after_id is not None:
             stmt = stmt.where(models.Novel.id > after_id)
         return list(self.session.execute(stmt.order_by(models.Novel.id).limit(limit)).fetchall())
@@ -499,6 +499,7 @@ class SQLAlchemyNovelReadRepository:
 
         failed_skip_exists = exists().where(
             models.FailedNovel.novel_id == models.Novel.id,
+            models.FailedNovel.source == SOURCE_PIXIV,
             skip_cond,
         )
 

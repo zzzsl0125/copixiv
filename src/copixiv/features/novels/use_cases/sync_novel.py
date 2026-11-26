@@ -43,6 +43,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Any
 
 from copixiv.core.draft import NovelDraft, build_from_webview
 from copixiv.core.exceptions import (
@@ -51,6 +52,7 @@ from copixiv.core.exceptions import (
     ValidationError,
 )
 from copixiv.core.models import SOURCE_PIXIV
+from copixiv.core.sources import SourceCapability
 from copixiv.db.tx import read_transaction, run_write_transaction
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.authors.service import (
@@ -82,10 +84,12 @@ async def sync_novel(
     novel_id: int,
     *,
     uow: SqlUnitOfWork,
-    client: PixivClient,
+    client: PixivClient | None,
     download_dir: str,
+    source_registry: Any | None = None,
+    source_service: Any | None = None,
 ) -> StoredNovel:
-    """把一行 pixiv 小说按 id 重抓一遍，恢复来源值。
+    """把一行小说按 id 重抓一遍，恢复来源值。
 
     调用方（``routes/novel.py``）传请求级的 ``Depends(get_uow)`` 单元 —— **不是**
     ``get_write_uow``：写事务由 :func:`run_write_transaction` 自己开（与
@@ -95,7 +99,7 @@ async def sync_novel(
     Raises:
         NotFoundError: 库里没有这一行 → 404；或 pixiv 上已不存在 / 受限
             （webview 返回空）→ 404。
-        ValidationError: 本地书 → 400（没有来源可同步）。
+        ValidationError: 本地书或来源不可同步 / 已禁用 → 400。
     """
     novel = await read_transaction(
         uow,
@@ -103,8 +107,26 @@ async def sync_novel(
     )
     if novel is None:
         raise NotFoundError(f"Novel {novel_id} not found")
-    if novel.source != SOURCE_PIXIV:
+
+    novel_source = str(novel.source)
+    registry = (
+        source_service.registry
+        if source_service is not None and getattr(source_service, "registry", None) is not None
+        else source_registry
+    )
+    can_sync = (
+        registry.has_capability(novel_source, SourceCapability.SYNC_NOVEL)
+        if registry is not None
+        else novel_source == SOURCE_PIXIV
+    )
+    if not can_sync:
         raise ValidationError(LOCAL_BOOK_HAS_NO_SOURCE)
+    if source_service is not None and not source_service.is_enabled(novel_source):
+        raise ValidationError(f"数据源 {novel_source} 已禁用，无法同步")
+    if novel_source != SOURCE_PIXIV:
+        raise ValidationError(f"数据源 {novel_source} 暂不支持同步")
+    if client is None:
+        raise ValidationError("Pixiv 客户端未配置，无法同步")
 
     # ---- 以下两步都是网络 I/O，必须在写事务之外 ----
     draft = await _fetch_draft(client, novel_id, download_dir)
@@ -222,7 +244,7 @@ def _persist_sync(uow: SqlUnitOfWork, draft: NovelDraft, *, series_changed: bool
             draft = replace(draft, series_index=None)
         force_update.append("series_index")
     persist_novels(uow, [draft], force_update=force_update)
-    if draft.author_name:
+    if draft.author_id is not None and draft.author_name:
         writeback_author_names(
             {draft.author_id: draft.author_name},
             uow,

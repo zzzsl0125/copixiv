@@ -12,13 +12,17 @@ import time
 from pathlib import Path
 
 from copixiv.core import naming as formats
-from copixiv.core.models import EpubStatus, TaskResult
+from copixiv.core.models import SOURCE_LOCAL, SOURCE_PIXIV, EpubStatus, TaskResult
+from copixiv.core.sources import EpubPolicy
 from copixiv.core.text import MARKER_OVERLAP, has_image_placeholders_bytes
 from copixiv.db.tx import read_transaction, run_write_transaction
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.failures.repo import FailedNovelRepository
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.log import logger
+from copixiv.sources.local import LocalSourcePlugin
+from copixiv.sources.pixiv import PixivSourcePlugin
+from copixiv.sources.registry import SourceRegistry
 from copixiv.storage import assets
 from copixiv.storage.epub import state
 
@@ -33,9 +37,18 @@ _SWEEP_CHUNK = 4000
 _SWEEP_READ_PAGE = 20_000
 
 
-async def reconcile_epub_status(uow: SqlUnitOfWork) -> TaskResult:
+def _default_registry() -> SourceRegistry:
+    return SourceRegistry([PixivSourcePlugin(), LocalSourcePlugin()])
+
+
+async def reconcile_epub_status(
+    uow: SqlUnitOfWork,
+    *,
+    source_registry: SourceRegistry | None = None,
+) -> TaskResult:
     """Synchronise ``has_epub`` status with actual files on disk."""
     started = time.monotonic()
+    registry = source_registry or _default_registry()
 
     async def _page(after_id: int | None) -> list:
         return await read_transaction(
@@ -79,7 +92,7 @@ async def reconcile_epub_status(uow: SqlUnitOfWork) -> TaskResult:
                 c_enable,
                 c_pending,
                 c_missing,
-            ) = await asyncio.to_thread(_sweep, chunk, examined)
+            ) = await asyncio.to_thread(_sweep, chunk, examined, source_registry=registry)
             examined += len(chunk)
             pending_count += len(c_pending)
             for ids, status, key, clear_failures in (
@@ -126,8 +139,11 @@ async def reconcile_epub_status(uow: SqlUnitOfWork) -> TaskResult:
 def _sweep(
     rows: list,
     offset: int = 0,
+    *,
+    source_registry: SourceRegistry | None = None,
 ) -> tuple[list[int], list[int], list[int], list[int], list[int], list[int]]:
     """Classify *rows* against the files on disk (runs in a worker thread)."""
+    registry = source_registry or _default_registry()
     completed_ids: list[int] = []
     revert_ids: list[int] = []
     no_image_ids: list[int] = []
@@ -135,7 +151,12 @@ def _sweep(
     pending_ids: list[int] = []
     missing_ids: list[int] = []
 
-    for row_no, (novel_id, path_str, status) in enumerate(rows, 1):
+    for row_no, row in enumerate(rows, 1):
+        if len(row) == 4:
+            novel_id, path_str, status, source = row
+        else:
+            novel_id, path_str, status = row
+            source = SOURCE_LOCAL if novel_id < 0 else SOURCE_PIXIV
         if (offset + row_no) % 50000 == 0:
             logger.info(f"check_epub: 已检查 {offset + row_no} 行")
 
@@ -155,12 +176,22 @@ def _sweep(
         epub_path = formats.sibling_path(txt_path, formats.EPUB)
         epub_ok, epub_complete = state.inspect_epub(epub_path)
 
-        # 本地上传书（负 ID）不由 Pixiv 图片目录规则判定完整性，仅校验可读容器即可
-        if novel_id < 0:
+        policy = registry.epub_policy(source)
+        if policy == EpubPolicy.CONTAINER_ONLY:
             if status == EpubStatus.DONE and not epub_ok:
                 no_image_ids.append(novel_id)
             elif status == EpubStatus.NO_IMAGES and epub_ok:
                 completed_ids.append(novel_id)
+            continue
+
+        if policy == EpubPolicy.BEST_EFFORT_EXTERNAL:
+            if status == EpubStatus.DONE:
+                if not epub_ok:
+                    no_image_ids.append(novel_id)
+            elif epub_ok:
+                completed_ids.append(novel_id)
+            elif status in (EpubStatus.PENDING, EpubStatus.NO, EpubStatus.MISSING_SOURCE):
+                no_image_ids.append(novel_id)
             continue
 
         if status == EpubStatus.DONE:

@@ -15,10 +15,12 @@ class NovelSource(StrEnum):
 
     PIXIV = "pixiv"
     LOCAL = "local"
+    ESJ = "esj"
 
 
 SOURCE_PIXIV = NovelSource.PIXIV.value
 SOURCE_LOCAL = NovelSource.LOCAL.value
+SOURCE_ESJ = NovelSource.ESJ.value
 UNKNOWN_AUTHOR = "未知作者"
 
 
@@ -72,6 +74,17 @@ class TaskResult(BaseModel):
         return len(self.new_novel_titles)
 
 
+def entity_id(raw: Any, label: str) -> int:
+    """Validate a non-zero 64-bit integer entity ID (author or series)."""
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ValidationError(f"{label} ID 必须是整数")
+    if raw == 0:
+        raise ValidationError(f"{label} ID 不能为 0")
+    if raw < -(2**63) or raw > 2**63 - 1:
+        raise ValidationError(f"{label} ID 超出取值范围")
+    return raw
+
+
 def positive_pixiv_id(raw: Any, label: str, hint: str) -> int:
     """Validate a positive 64-bit integer Pixiv ID (author or series)."""
     if isinstance(raw, bool) or not isinstance(raw, int):
@@ -84,23 +97,25 @@ def positive_pixiv_id(raw: Any, label: str, hint: str) -> int:
 
 
 def author_id(raw: Any) -> int:
-    """Validate a positive Pixiv author ID."""
-    return positive_pixiv_id(raw, "作者", "pixiv 用户 ID")
+    """Validate a non-zero 64-bit author ID (positive Pixiv or negative external)."""
+    return entity_id(raw, "作者")
 
 
 def series_id(raw: Any) -> int:
-    """Validate a positive Pixiv series ID."""
-    return positive_pixiv_id(raw, "系列", "pixiv 系列 ID")
+    """Validate a non-zero 64-bit series ID (positive Pixiv or negative external)."""
+    return entity_id(raw, "系列")
 
 
 __all__ = [
     "EpubStatus",
     "NovelSource",
+    "SOURCE_ESJ",
     "SOURCE_LOCAL",
     "SOURCE_PIXIV",
     "TaskResult",
     "UNKNOWN_AUTHOR",
     "author_id",
+    "entity_id",
     "positive_pixiv_id",
     "series_id",
 ]

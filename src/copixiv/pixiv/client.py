@@ -90,6 +90,15 @@ class PixivClient:
         self.max_concurrency = max_concurrency
         self._semaphore = asyncio.Semaphore(max_concurrency)
 
+    def reconfigure(self, *, max_concurrency: int | None = None) -> None:
+        """Update request concurrency limit, recreating the semaphore if changed."""
+        if max_concurrency is None:
+            return
+        clamped = max(1, int(max_concurrency))
+        if clamped != self.max_concurrency:
+            self.max_concurrency = clamped
+            self._semaphore = asyncio.Semaphore(clamped)
+
     @asynccontextmanager
     async def account_rule(
         self,

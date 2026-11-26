@@ -29,19 +29,19 @@ def ensure_parent_rows(
     author_ids: Iterable[int | None] = (),
     series_ids: Iterable[int | None] = (),
 ) -> None:
-    """INSERT ... ON CONFLICT DO NOTHING placeholder rows for FK safety."""
-    a_ids = sorted({aid for aid in author_ids if aid})
-    s_ids = sorted({sid for sid in series_ids if sid})
+    """INSERT ... ON CONFLICT DO NOTHING Pixiv placeholder rows for positive FK safety."""
+    a_ids = sorted({aid for aid in author_ids if aid is not None and aid > 0})
+    s_ids = sorted({sid for sid in series_ids if sid is not None and sid > 0})
     if a_ids:
         session.execute(
             postgresql_insert(models.Author)
-            .values([{"author_id": aid} for aid in a_ids])
+            .values([{"author_id": aid, "source": "pixiv", "source_key": str(aid)} for aid in a_ids])
             .on_conflict_do_nothing()
         )
     if s_ids:
         session.execute(
             postgresql_insert(models.Series)
-            .values([{"series_id": sid} for sid in s_ids])
+            .values([{"series_id": sid, "source": "pixiv", "source_key": str(sid)} for sid in s_ids])
             .on_conflict_do_nothing()
         )
 

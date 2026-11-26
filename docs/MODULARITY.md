@@ -8,32 +8,33 @@
 |---|---|
 | `app.py` / `middleware.py` / `error_handlers.py` / `lifespan.py` | 组合根：FastAPI 工厂、中间件、域异常映射、生命周期装配（含查询引擎启动与 UoW 提交后钩子绑定）与 SPA 静态托管 |
 | `config.py` | Pydantic 配置模型、严格校验（`extra="forbid"`）与加载 |
-| `deps.py` | FastAPI DI 依赖（`get_uow` / `get_pixiv_client` / `get_task_manager` / API Key 鉴权及 `TaskManagerProtocol` 等） |
+| `deps.py` | FastAPI DI 依赖（`get_uow` / `get_pixiv_client` / `get_source_registry` / `get_source_service` / `get_source_http_manager` / `get_task_manager` / API Key 鉴权及 `TaskManagerProtocol` 等） |
 | `export_openapi.py` | 无 DB / 网络依赖导出 OpenAPI schema（`python -m copixiv.export_openapi`） |
-| `core/` | 纯 Python 核心：`models.py`、`draft.py`、`naming.py`、`search.py`、`text.py`、`time.py`、`snapshot_types.py`、`exceptions.py` |
-| `db/` | PostgreSQL 唯一适配层：`engine.py` / `uow.py` / `tx.py`（`read_transaction`、`run_write_transaction[_sync]` 与重试退避）/ `backup.py` / `models.py`（12 张业务与任务表，无独立 `tag` 表）/ `pg_objects.py` / `base.py` / `delta.py`（事务提交后增量缓冲）/ `novel_snapshot.py`（窄列快照投影） |
+| `core/` | 纯 Python 核心：`models.py`、`sources.py`、`draft.py`、`naming.py`、`search.py`、`text.py`、`time.py`、`snapshot_types.py`、`exceptions.py` |
+| `db/` | PostgreSQL 唯一适配层：`engine.py` / `uow.py` / `tx.py`（`read_transaction`、`run_write_transaction[_sync]` 与重试退避）/ `backup.py` / `models.py`（13 张业务与任务表：含 `source_config` 与 `source_credential`，已移除 `token` 与 `tag` 表）/ `pg_objects.py` / `base.py` / `delta.py`（事务提交后增量缓冲）/ `novel_snapshot.py`（窄列快照投影） |
 | `query_engine/` | 进程内查询引擎叶子适配层：`port.py`（协议与 DTO）/ `adapter.py`（封装 `copixiv_rs`）/ `sync.py`（启动快照与串行增量同步） |
 | `crates/copixiv_rs/` | Rust PyO3 原生检索引擎 crate：`arena.rs` / `engine.rs` / `filter.rs` / `hydrate.rs` / `interner.rs` / `lib.rs` / `model.rs` / `mutation.rs` / `postings.rs` / `query/`（`mod.rs`, `executor.rs`, `mask.rs`, `planner.rs`）/ `random.rs` / `staging.rs` / `storage.rs` / `tag_index.rs`（惰性派生 `TagIndex`）/ `text_index.rs` / `tracks.rs` |
 | `pixiv/` | 原生异步 `httpx` Pixiv 客户端与 DTO：`client.py` / `http.py` / `models.py` / `account.py` / `accounts.py` / `errors.py` |
+| `sources/` | 多数据源协议插件适配层：`base.py` / `http.py`（按数据源隔离的 `httpx.AsyncClient` 与 `ImageDownloader`）/ `registry.py` / `pixiv.py` / `local.py` |
 | `storage/` | 本地存储与文件处理：`file_storage.py` / `image_downloader.py` / `encoding.py` / `orphan_cleanup.py` / `zip.py` / `atomic.py` / `assets.py` / `epub/`（`builder.py`, `reader.py`, `state.py`） |
 | `notify/` | 通知后端适配：`telegram.py` |
 | `tasks/` | 任务内核（`registry.py` / `executor.py` / `cron.py` / `manager.py`）+ `history_repo.py` / `api.py` / `schemas.py` / 业务任务（`novels.py`、`batch.py` 统一异步 `batch_export`、`maintenance/` 含 `backup.py`, `epub.py`, `files.py`, `refetch.py`, `series.py`） |
-| `features/` | 业务功能切片：单文件切片 `accounts.py`、`search_history.py`；子包切片 `authors/`（`api.py`, `repo.py`, `service.py`）、`failures/`（`api.py`, `repo.py`）、`library/`（`api.py`, `ingest.py`, `repo.py`）、`series/`（`api.py`, `repo.py`, `service.py`）、`system/`（`api.py`, `repo.py`）、`tags/`（`aliases.py`, `preferences.py`, `repo.py`）、`novels/`（`field_policy.py`, `schemas.py`, `repo/{read_repo,write_repo}.py`, `routes/{novel,query,batch,downloads}.py`, `ingest/{pipeline,download,persist,asset_pipeline}.py`, 扁平函数式 `use_cases/`） |
+| `features/` | 业务功能切片：单文件切片 `search_history.py`；子包切片 `authors/`（`api.py`, `repo.py`, `service.py`）、`failures/`（`api.py`, `repo.py`）、`library/`（`api.py`, `ingest.py`, `repo.py`）、`series/`（`api.py`, `repo.py`, `service.py`）、`sources/`（`api.py`, `entity_resolver.py`, `repo.py`, `schemas.py`, `service.py`）、`system/`（`api.py`, `repo.py`）、`tags/`（`aliases.py`, `preferences.py`, `repo.py`, `resolver.py`）、`novels/`（`field_policy.py`, `schemas.py`, `repo/{read_repo,write_repo}.py`, `routes/{novel,query,batch,downloads}.py`, `ingest/{pipeline,download,persist,asset_pipeline}.py`, 扁平函数式 `use_cases/`） |
 
 ## 2. 架构契约（由 `lint-imports` 强制执行）
 
 根目录 `.importlinter` 定义了 12 条静态契约，运行 `.venv/bin/lint-imports` 检查：
 
-1. **`core-is-pure`**：`copixiv.core` 为纯 Python 层，禁止导入 `copixiv.{db,features,tasks,pixiv,storage,notify,query_engine,app}` 以及 `fastapi` / `sqlalchemy`。
-2. **`adapters-are-leaves`**：适配层 `copixiv.{db,pixiv,storage,notify,query_engine}` 为底层叶子，禁止反向依赖 `copixiv.{features,tasks,app}`。
+1. **`core-is-pure`**：`copixiv.core` 为纯 Python 层，禁止导入 `copixiv.{db,features,tasks,pixiv,sources,storage,notify,query_engine,app}` 以及 `fastapi` / `sqlalchemy`。
+2. **`adapters-are-leaves`**：适配层 `copixiv.{db,pixiv,sources,storage,notify,query_engine}` 为底层叶子，禁止反向依赖 `copixiv.{features,tasks,app}`。
 3. **`no-removed-vendors`**：全仓禁止引入已淘汰的第三方依赖（`pixivpy3` / `requests` / `ebooklib` / `lxml`）。
-4. **`storage-isolated-from-pixiv`**：`copixiv.storage` 不得反向依赖 `copixiv.pixiv`。
-5. **`httpx-in-transport-only`**：`httpx` 仅允许被传输适配层（`pixiv` / `storage` / `notify`）及 `lifespan` 直接导入。
-6. **`db-is-the-only-sql-layer`**：`copixiv.{core,pixiv,storage,notify,query_engine}` 禁止导入 `sqlalchemy`。
+4. **`storage-isolated-from-pixiv`**：`copixiv.storage` 不得反向依赖 `copixiv.pixiv` 或 `copixiv.sources`。
+5. **`httpx-in-transport-only`**：`httpx` 仅允许被传输适配层（`pixiv` / `sources` / `storage` / `notify`）及 `lifespan` 直接导入。
+6. **`db-is-the-only-sql-layer`**：`copixiv.{core,pixiv,sources,storage,notify,query_engine}` 禁止导入 `sqlalchemy`。
 7. **`tasks-no-fastapi`**：`tasks/` 运行时与业务任务适配器（除 `tasks.api`）禁止依赖 `fastapi`。
-8. **`tasks-no-feature-apis`**：`copixiv.tasks` 不依赖 `features/*/api`、`features.novels.routes` 或单文件路由切片（`accounts` / `search_history` / `tags.{aliases,preferences}`）。
+8. **`tasks-no-feature-apis`**：`copixiv.tasks` 不依赖 `features/*/api`、`features.novels.routes` 或单文件路由切片（`search_history` / `tags.{aliases,preferences}`）。
 9. **`features-no-tasks`**：`copixiv.features` 不反向依赖 `copixiv.tasks`。
-10. **`leaf-features-no-novels`**：叶子切片（`accounts` / `authors` / `failures` / `library` / `search_history` / `series` / `system` / `tags`）不反向依赖 `features.novels`。
+10. **`leaf-features-no-novels`**：叶子切片（`authors` / `failures` / `library` / `search_history` / `series` / `sources` / `system` / `tags`）不反向依赖 `features.novels`。
 11. **`novels-isolated-from-library`**：`features.novels` 不反向依赖 `features.library`。
 12. **`library-isolated-from-failures`**：`features.library` 不依赖 `features.failures`。
 

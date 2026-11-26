@@ -56,6 +56,9 @@ class TaskManagerSystem:
         image_downloader=None,
         config=None,
         notifier=None,
+        source_registry=None,
+        source_service=None,
+        http_manager=None,
     ):
         discover_tasks()
 
@@ -70,6 +73,9 @@ class TaskManagerSystem:
                 "file_storage": file_storage,
                 "image_downloader": image_downloader,
                 "backup_dir": (config.backup.dir if config is not None else "backups"),
+                "source_registry": source_registry,
+                "source_service": source_service,
+                "http_manager": http_manager,
             },
         )
         self._ticker = CronTicker(session_factory)

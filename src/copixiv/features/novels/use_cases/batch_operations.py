@@ -9,7 +9,7 @@ from copixiv.core.text import MAX_TAG_LENGTH, validate_tags
 from copixiv.db.tx import run_write_transaction_sync
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
-from copixiv.features.tags.repo import SQLAlchemyTagRepository
+from copixiv.features.tags.resolver import TagAliasResolver
 from copixiv.log import logger
 from copixiv.storage.file_storage import FileStorage
 
@@ -107,9 +107,7 @@ def batch_tag(
 
         def _tag_chunk(tx: SqlUnitOfWork, chunk: list[int] = chunk) -> int:
             novel_repo = SQLAlchemyNovelRepository(tx.session)
-            tag_repo = SQLAlchemyTagRepository(tx.session)
-            alias_map = tag_repo.get_alias_map()
-            resolved = {alias_map.get(t, t) for t in tag_set}
+            resolved = TagAliasResolver(tx.session).resolve_set(tag_set)
             if operation == "add_tags":
                 return novel_repo.add_tags_to_novels(chunk, resolved)
             return novel_repo.remove_tags_from_novels(chunk, resolved)

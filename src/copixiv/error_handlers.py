@@ -40,9 +40,10 @@ def _integrity_error_detail(exc: IntegrityError) -> str:
     if pgcode == "23505":
         if "tag_preference" in constraint:
             return "该标签偏好已存在"
-        if "token" in constraint and "follow" in constraint:
+        is_credential = "token" in constraint or "source_credential" in constraint
+        if "follow" in constraint and (is_credential or "pixiv_follow" in constraint):
             return "已有其他账号被设为追更账号，请重试"
-        if "token" in constraint:
+        if is_credential:
             return "同名账号已存在"
         if "tag_alias" in constraint:
             return "该标签别名已存在"
