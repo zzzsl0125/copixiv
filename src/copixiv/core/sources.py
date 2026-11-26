@@ -136,6 +136,7 @@ class SourceManifest(BaseModel):
     credential_kinds: tuple[CredentialKindSpec, ...] = ()
     shelf: SourceShelfDef | None = None
     allow_proxy_config: bool = True
+    enabled_by_default: bool = True
 
     def has_capability(self, cap: SourceCapability) -> bool:
         """Return whether *cap* is supported by this source."""

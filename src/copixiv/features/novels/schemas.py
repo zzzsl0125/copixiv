@@ -18,7 +18,7 @@ from pydantic import (
     field_validator,
 )
 
-from copixiv.core.models import EpubStatus, NovelSource
+from copixiv.core.models import SOURCE_PIXIV, EpubStatus
 from copixiv.core.naming import FormatMode
 from copixiv.core.search import OrderBy, OrderDirection, SortableOrderBy
 from copixiv.features.novels import field_policy
@@ -53,9 +53,11 @@ class NovelBase(BaseModel):
     series_id: int | None = None
     series_name: str | None = None
     series_index: int | None = None
-    # 行来源：``'pixiv'`` 抓取 / ``'local'`` 本地上传的 TXT / EPUB
-    # （docs/LIBRARY_DESIGN.md §2）——前端据此在卡片上显示「本地」徽章。
-    source: NovelSource = NovelSource.PIXIV
+    # 行来源：``'pixiv'`` / ``'local'`` / ``'esj'`` 等插件标识
+    # （docs/LIBRARY_DESIGN.md §2）——前端据此展示来源徽章。
+    source: str = SOURCE_PIXIV
+    external_url: str | None = None
+    can_sync: bool = False
     model_config = ConfigDict(from_attributes=True)
 
     # Coerce int columns from DB into proper types

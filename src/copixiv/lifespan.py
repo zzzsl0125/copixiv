@@ -32,6 +32,7 @@ from copixiv.sources import (
     SourceHttpManager,
     SourceRegistry,
 )
+from copixiv.sources.esj import EsjSourcePlugin
 from copixiv.storage.epub.builder import EpubBuilder
 from copixiv.storage.file_storage import FileStorage
 from copixiv.tasks.manager import TaskManagerSystem
@@ -110,6 +111,7 @@ def create_lifespan(
                         default_max_concurrency=config.pixiv_client.max_concurrency,
                     ),
                     LocalSourcePlugin(),
+                    EsjSourcePlugin(http_manager=http_manager),
                 ]
             )
             source_service = SourceService(sf, source_registry, http_manager, config)
@@ -125,6 +127,8 @@ def create_lifespan(
                 raw_image_downloader,
                 epub_builder=epub_builder,
                 download_root=file_storage.download_dir,
+                http_manager=http_manager,
+                source_registry=source_registry,
             )
             stack.push_async_callback(image_downloader.aclose)
 
@@ -155,6 +159,7 @@ def create_lifespan(
             app.state.config = config
             app.state.client = client
             app.state.file_storage = file_storage
+            app.state.image_downloader = image_downloader
             app.state.account_pool = account_pool
             app.state.task_manager = task_manager
             app.state.query_engine = query_engine

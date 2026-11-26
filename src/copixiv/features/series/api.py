@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
 from copixiv.core.models import SOURCE_PIXIV
@@ -12,6 +12,16 @@ from copixiv.db.tx import read_transaction
 from copixiv.deps import PixivClientDep, SourceServiceDep, UowDep
 from copixiv.features.series.repo import SQLAlchemySeriesRepository
 from copixiv.features.series.service import lookup_series_profile
+
+
+class SeriesSearchItem(BaseModel):
+    """Series search result item (``GET /api/novels/series/search``)."""
+
+    series_id: int
+    series_name: str | None = None
+    source: str
+    author_id: int | None = None
+    novel_count: int = 0
 
 
 class SeriesLookupResponse(BaseModel):
@@ -28,6 +38,23 @@ class SeriesLookupResponse(BaseModel):
 
 
 router = APIRouter()
+
+
+@router.get("/search", response_model=list[SeriesSearchItem])
+def search_series(
+    uow: UowDep,
+    q: str = "",
+    source: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+):
+    """Search known series by exact ID or name substring, optionally filtered by source."""
+    with uow.begin(read_only=True):
+        rows = SQLAlchemySeriesRepository(uow.session).search_series(
+            q,
+            source=source,
+            limit=limit,
+        )
+    return [SeriesSearchItem(**row) for row in rows]
 
 
 @router.get("/{series_id}", response_model=SeriesLookupResponse)

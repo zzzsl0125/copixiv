@@ -56,7 +56,7 @@ from __future__ import annotations
 from typing import Any, TypedDict
 
 from copixiv.core.exceptions import ValidationError
-from copixiv.core.models import SOURCE_LOCAL, UNKNOWN_AUTHOR
+from copixiv.core.models import UNKNOWN_AUTHOR
 from copixiv.core.models import author_id as _author_id
 from copixiv.core.models import series_id as _series_id
 from copixiv.db.base import ensure_parent_rows
@@ -64,6 +64,7 @@ from copixiv.db.tx import read_transaction, run_write_transaction
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 from copixiv.features.authors.service import lookup_author_profile
+from copixiv.features.novels import field_policy
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.features.series.repo import SQLAlchemySeriesRepository
 from copixiv.features.series.service import lookup_series_profile
@@ -104,12 +105,13 @@ async def batch_edit_metadata(
     author_id: int | None | _Unset = _UNSET,
     series_id: int | None | _Unset = _UNSET,
     apply: bool = False,
+    source_registry: Any | None = None,
 ) -> BatchMetadataCounts:
-    """把"一个作者 id / 一个系列 id"写到一批**本地书**上（计数 ``apply=False`` 或落库 ``apply=True``）。
+    """把"一个作者 id / 一个系列 id"写到一批**可编辑该字段的书**上（计数 ``apply=False`` 或落库 ``apply=True``）。
 
     与 :func:`~copixiv.features.novels.use_cases.update_metadata.update_novel_metadata`
     同构（同样的仓库装配、同样的三态、同样的解析链），差别全在"批量"这两个字上：
-    选择集先按来源收窄、pixiv 书跳过而不是 400、解析只做一次、落库是一条 UPDATE。
+    选择集先按来源与可编辑字段收窄、不可编辑来源跳过而不是 400、解析只做一次、落库是一条 UPDATE。
     """
     if apply and author_id is _UNSET and series_id is _UNSET:
         raise ValidationError("没有要修改的字段")
@@ -121,11 +123,24 @@ async def batch_edit_metadata(
     if series_id is not _UNSET and series_id is not None:
         series_id = _series_id(series_id)
 
+    fields_to_check = [
+        name for name, value in (("author_id", author_id), ("series_id", series_id)) if value is not _UNSET
+    ]
+    if not fields_to_check:
+        fields_to_check = ["author_id", "series_id"]
+
+    registry = source_registry if source_registry is not None else field_policy._get_registry()
+    editable_sources = {
+        plugin.manifest.source
+        for plugin in registry.all_plugins()
+        if all(field_name in plugin.manifest.editable_fields for field_name in fields_to_check)
+    }
+
     applicable = await read_transaction(
         uow,
         lambda tx: SQLAlchemyNovelRepository(tx.session).filter_ids_by_source(
             eligible_ids,
-            {SOURCE_LOCAL},
+            editable_sources,
         ),
     )
     counts = BatchMetadataCounts(
@@ -144,29 +159,49 @@ async def batch_edit_metadata(
     backfill_unknown_author = False
 
     if isinstance(author_id, int):
-        author_profile = await lookup_author_profile(
-            author_id,
-            uow=uow,
-            client=client,
-        )
-        values["author_id"] = author_id
-        values["author_name"] = author_profile.author_name
-        if author_profile.author_name:
-            resolved_author = (author_id, author_profile.author_name)
+        if author_id < 0:
+            author_row = await read_transaction(
+                uow,
+                lambda tx: SQLAlchemyAuthorRepository(tx.session).get_by_id(author_id),
+            )
+            if author_row is None:
+                raise ValidationError("本地或外部作者不存在，请先从搜索结果中选择")
+            values["author_id"] = author_id
+            values["author_name"] = author_row.get("author_name")
+        else:
+            author_profile = await lookup_author_profile(
+                author_id,
+                uow=uow,
+                client=client,
+            )
+            values["author_id"] = author_id
+            values["author_name"] = author_profile.author_name
+            if author_profile.author_name:
+                resolved_author = (author_id, author_profile.author_name)
     elif author_id is None:
         values["author_id"] = None
         backfill_unknown_author = True
 
     if isinstance(series_id, int):
-        series_profile = await lookup_series_profile(
-            series_id,
-            uow=uow,
-            client=client,
-        )
-        values["series_id"] = series_id
-        values["series_name"] = series_profile.series_name
-        if series_profile.series_name:
-            resolved_series = (series_id, series_profile.series_name)
+        if series_id < 0:
+            series_row = await read_transaction(
+                uow,
+                lambda tx: SQLAlchemySeriesRepository(tx.session).get_by_id(series_id),
+            )
+            if series_row is None:
+                raise ValidationError("本地或外部系列不存在，请先从搜索结果中选择")
+            values["series_id"] = series_id
+            values["series_name"] = series_row.get("series_name")
+        else:
+            series_profile = await lookup_series_profile(
+                series_id,
+                uow=uow,
+                client=client,
+            )
+            values["series_id"] = series_id
+            values["series_name"] = series_profile.series_name
+            if series_profile.series_name:
+                resolved_series = (series_id, series_profile.series_name)
     elif series_id is None:
         values["series_id"] = None
         values["series_name"] = None
@@ -176,6 +211,11 @@ async def batch_edit_metadata(
         write_repo = SQLAlchemyNovelRepository(tx.session)
         author_repo = SQLAlchemyAuthorRepository(tx.session)
         series_repo = SQLAlchemySeriesRepository(tx.session)
+
+        if isinstance(author_id, int) and author_id < 0 and author_repo.get_by_id(author_id) is None:
+            raise ValidationError("本地或外部作者不存在，请先从搜索结果中选择")
+        if isinstance(series_id, int) and series_id < 0 and series_repo.get_by_id(series_id) is None:
+            raise ValidationError("本地或外部系列不存在，请先从搜索结果中选择")
 
         ensure_parent_rows(
             tx.session,

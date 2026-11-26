@@ -6,12 +6,16 @@ import asyncio
 
 from fastapi import APIRouter
 
-from copixiv.deps import SourceHttpManagerDep, SourceServiceDep, UowDep
+from copixiv.core.exceptions import ValidationError
+from copixiv.core.sources import SourceCapability
+from copixiv.deps import SourceHttpManagerDep, SourceServiceDep, TaskManagerDep, UowDep
 from copixiv.features.sources.schemas import (
     SourceConfigUpdateRequest,
     SourceCredentialCreateRequest,
     SourceCredentialResponse,
     SourceCredentialUpdateRequest,
+    SourceFetchRequest,
+    SourceFetchResponse,
     SourceItemResponse,
     SourceTestResponse,
 )
@@ -24,6 +28,63 @@ def list_sources(uow: UowDep, source_service: SourceServiceDep):
     """List all registered sources with runtime configs, manifests, and credential counts."""
     with uow.begin(read_only=True):
         return source_service.list_sources(uow.session)
+
+
+@router.post("/fetch", response_model=SourceFetchResponse)
+def fetch_by_refs(
+    data: SourceFetchRequest,
+    source_service: SourceServiceDep,
+    task_manager: TaskManagerDep,
+):
+    """Validate source references and enqueue a ``source_fetch`` background task."""
+    cleaned_refs = [ref.strip() for ref in data.refs if isinstance(ref, str) and ref.strip()]
+    if not cleaned_refs:
+        raise ValidationError("请提供至少一条有效引用")
+
+    preferred_source = data.source.strip() if isinstance(data.source, str) else None
+    if preferred_source == "":
+        preferred_source = None
+    if preferred_source is not None:
+        pref_plugin = source_service.require_enabled(preferred_source)
+        if not pref_plugin.manifest.has_capability(SourceCapability.FETCH_BY_REF):
+            raise ValidationError(f"数据源 {pref_plugin.manifest.display_name} 不支持按引用抓取")
+
+    normalized_refs: list[str] = []
+    resolved_sources: list[str] = []
+    checked_sources: set[str] = set()
+    for ref in cleaned_refs:
+        parsed = source_service.registry.parse_ref(ref, preferred_source=preferred_source)
+        if parsed is None:
+            raise ValidationError(f"无法识别的引用: {ref}")
+        if parsed.source not in checked_sources:
+            plugin = source_service.require_enabled(parsed.source)
+            if not plugin.manifest.has_capability(SourceCapability.FETCH_BY_REF):
+                raise ValidationError(f"数据源 {plugin.manifest.display_name} 不支持按引用抓取")
+            checked_sources.add(parsed.source)
+        resolved_sources.append(parsed.source)
+        normalized_refs.append(parsed.normalized_ref or ref)
+
+    unique_sources = list(dict.fromkeys(resolved_sources))
+    if len(unique_sources) == 1:
+        resolved_source_or_none: str | None = unique_sources[0]
+        resolved_source_label = unique_sources[0]
+    else:
+        resolved_source_or_none = preferred_source
+        resolved_source_label = preferred_source or "mixed"
+
+    task_id = task_manager.run_task(
+        "source_fetch",
+        {
+            "source": resolved_source_or_none,
+            "refs": normalized_refs,
+            "force": data.force,
+        },
+    )
+    return SourceFetchResponse(
+        task_id=task_id,
+        source=resolved_source_label,
+        ref_count=len(normalized_refs),
+    )
 
 
 @router.put("/{source}/config", response_model=SourceItemResponse)

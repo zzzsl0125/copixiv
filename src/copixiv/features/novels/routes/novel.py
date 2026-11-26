@@ -2,9 +2,10 @@
 
 from fastapi import APIRouter, Depends
 
-from copixiv.db.tx import run_write_transaction_sync
+from copixiv.db.tx import read_transaction, run_write_transaction_sync
 from copixiv.deps import (
     FileStorageDep,
+    ImageDownloaderDep,
     PixivClientDep,
     SourceRegistryDep,
     SourceServiceDep,
@@ -35,6 +36,8 @@ async def update_novel_metadata(
     body: NovelUpdateRequest,
     uow: UowDep,
     client: PixivClientDep,
+    source_registry: SourceRegistryDep,
+    source_service: SourceServiceDep,
 ):
     """编辑单本小说的元数据（卡片「编辑」按钮）—— docs/NOVEL_EDIT_DESIGN.md §5。
 
@@ -57,12 +60,21 @@ async def update_novel_metadata(
     ``author_id`` / ``series_id`` 是仅有的可能触发网络请求的字段（本地表没有
     这个名字时问一次 Pixiv）。失败**不致命**：id 照写，名字留 NULL 待补。
     """
-    return await _update_novel_metadata(
+    updated = await _update_novel_metadata(
         novel_id,
         body.model_dump(exclude_unset=True),
         uow=uow,
         client=client,
     )
+    await read_transaction(
+        uow,
+        lambda tx: SQLAlchemyNovelRepository(tx.session).hydrate_links(
+            [updated],
+            source_service=source_service,
+            source_registry=source_registry,
+        ),
+    )
+    return updated
 
 
 @router.post("/{novel_id}/sync", response_model=NovelBase)
@@ -71,6 +83,7 @@ async def sync_novel(
     uow: UowDep,
     client: PixivClientDep,
     file_storage: FileStorageDep,
+    image_downloader: ImageDownloaderDep,
     source_registry: SourceRegistryDep,
     source_service: SourceServiceDep,
 ):
@@ -87,14 +100,25 @@ async def sync_novel(
     依赖用 ``UowDep`` 而**不是** ``get_write_uow``：抓取必须在写事务
     之外，写事务由用例里的 ``run_write_transaction`` 自己开。
     """
-    return await _sync_novel(
+    updated = await _sync_novel(
         novel_id,
         uow=uow,
         client=client,
         download_dir=file_storage.download_dir,
+        file_storage=file_storage,
+        image_downloader=image_downloader,
         source_registry=source_registry,
         source_service=source_service,
     )
+    await read_transaction(
+        uow,
+        lambda tx: SQLAlchemyNovelRepository(tx.session).hydrate_links(
+            [updated],
+            source_service=source_service,
+            source_registry=source_registry,
+        ),
+    )
+    return updated
 
 
 @router.delete("/{novel_id}", status_code=204)

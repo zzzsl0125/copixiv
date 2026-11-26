@@ -59,11 +59,13 @@ from copixiv.features.authors.service import (
     collect_author_names,
     writeback_author_names,
 )
+from copixiv.features.novels.ingest.book_chapter import BookChapterIngestor
 from copixiv.features.novels.ingest.persist import persist_novels
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository, StoredNovel
 from copixiv.features.series.service import resolve_series_indices
 from copixiv.log import logger
 from copixiv.pixiv.client import PixivClient
+from copixiv.storage.file_storage import FileStorage
 
 # 本次覆盖的来源权威字段。刻意**不含** ``series_index``（猜测值，None 会抹掉
 # 库里已有的）与 ``path``（文件锚，只在库中为 NULL 时才允许被填）——原因见模块
@@ -88,6 +90,8 @@ async def sync_novel(
     download_dir: str,
     source_registry: Any | None = None,
     source_service: Any | None = None,
+    file_storage: Any | None = None,
+    image_downloader: Any | None = None,
 ) -> StoredNovel:
     """把一行小说按 id 重抓一遍，恢复来源值。
 
@@ -124,7 +128,14 @@ async def sync_novel(
     if source_service is not None and not source_service.is_enabled(novel_source):
         raise ValidationError(f"数据源 {novel_source} 已禁用，无法同步")
     if novel_source != SOURCE_PIXIV:
-        raise ValidationError(f"数据源 {novel_source} 暂不支持同步")
+        ingestor = BookChapterIngestor(
+            session_factory=uow.session_factory,
+            file_storage=file_storage or FileStorage(download_dir),
+            image_downloader=image_downloader,
+            source_registry=registry,
+            source_service=source_service,
+        )
+        return await ingestor.sync_chapter(novel_id, uow=uow)
     if client is None:
         raise ValidationError("Pixiv 客户端未配置，无法同步")
 

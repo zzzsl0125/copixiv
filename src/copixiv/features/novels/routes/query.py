@@ -9,7 +9,13 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 
 from copixiv.core.search import QuerySpec, SearchConditions, parse_search_keyword
 from copixiv.db.uow import SqlUnitOfWork
-from copixiv.deps import SessionFactoryDep, UowDep, require_api_key
+from copixiv.deps import (
+    SessionFactoryDep,
+    SourceRegistryDep,
+    SourceServiceDep,
+    UowDep,
+    require_api_key,
+)
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.features.novels.schemas import (
     MatchIdsRequest,
@@ -56,6 +62,8 @@ def get_novels(
     background_tasks: BackgroundTasks,
     session_factory: SessionFactoryDep,
     uow: UowDep,
+    source_service: SourceServiceDep,
+    source_registry: SourceRegistryDep,
     params: Annotated[NovelListParams, Query()],
 ):
     conditions = parse_search_keyword(params.keyword) if params.keyword else None
@@ -74,6 +82,11 @@ def get_novels(
     with uow.begin(read_only=True):
         repo = SQLAlchemyNovelRepository(uow.session)
         results = repo.get_novels(spec, only_blocked=params.only_blocked)
+        repo.hydrate_links(
+            results["novels"],
+            source_service=source_service,
+            source_registry=source_registry,
+        )
 
         if conditions and cursor_dict is None and not params.only_blocked:
             results["has_excluded"] = repo.has_excluded_novels(spec)
@@ -165,13 +178,21 @@ def sort_novel_ids(
 def get_novels_by_ids(
     body: NovelsByIdsRequest,
     uow: UowDep,
+    source_service: SourceServiceDep,
+    source_registry: SourceRegistryDep,
 ):
     """Novel details for an explicit ID list — powers the 「查看已选」view.
 
     Preserves the caller's ID order; missing IDs are dropped.
     """
     with uow.begin(read_only=True):
-        novels = SQLAlchemyNovelRepository(uow.session).get_novel_cards_by_ids(body.novel_ids)
+        repo = SQLAlchemyNovelRepository(uow.session)
+        novels = repo.get_novel_cards_by_ids(body.novel_ids)
+        repo.hydrate_links(
+            novels,
+            source_service=source_service,
+            source_registry=source_registry,
+        )
     return NovelsByIdsResponse(novels=novels)
 
 

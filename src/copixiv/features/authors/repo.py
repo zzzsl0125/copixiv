@@ -1,8 +1,12 @@
 """Author repository."""
 
-from datetime import UTC, datetime, timedelta
+from __future__ import annotations
 
-from sqlalchemy import ColumnElement, func, or_, tuple_
+import re
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from sqlalchemy import ColumnElement, case, func, or_, tuple_
 from sqlalchemy import delete as _delete
 from sqlalchemy import select as _select
 from sqlalchemy import update as _update
@@ -14,6 +18,20 @@ from copixiv.db import models
 from copixiv.db.base import model_to_dict
 
 _AUTHOR_UPDATE_COOLDOWN = timedelta(hours=23)
+_SIGNED_INT_RE = re.compile(r"^-?\d+$")
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
+
+
+def _parse_signed_int64(text: str) -> int | None:
+    if not text or not _SIGNED_INT_RE.fullmatch(text):
+        return None
+    value = int(text)
+    return value if _INT64_MIN <= value <= _INT64_MAX else None
+
+
+def _escape_like(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 class SQLAlchemyAuthorRepository:
@@ -198,3 +216,60 @@ class SQLAlchemyAuthorRepository:
         if result is None:
             raise NotFoundError(f"Author {author_id} not found")
         engine_delta.record_authors_dirty(self.session, [author_id])
+
+    def search_authors(
+        self,
+        q: str = "",
+        *,
+        source: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Search authors by exact ID or name substring, ordered by relevance and novel count."""
+        capped_limit = max(1, min(int(limit), 50))
+        cleaned = (q or "").strip()
+        parsed_id = _parse_signed_int64(cleaned)
+        novel_count_expr = func.count(models.Novel.id).label("novel_count")
+
+        stmt = (
+            _select(
+                models.Author.author_id,
+                models.Author.author_name,
+                models.Author.source,
+                novel_count_expr,
+            )
+            .outerjoin(models.Novel, models.Novel.author_id == models.Author.author_id)
+            .group_by(
+                models.Author.author_id,
+                models.Author.author_name,
+                models.Author.source,
+            )
+        )
+
+        if source is not None:
+            cleaned_source = source.strip()
+            if cleaned_source:
+                stmt = stmt.where(models.Author.source == cleaned_source)
+
+        if cleaned:
+            pattern = f"%{_escape_like(cleaned)}%"
+            name_match = models.Author.author_name.ilike(pattern, escape="\\")
+            if parsed_id is not None:
+                stmt = stmt.where(or_(models.Author.author_id == parsed_id, name_match))
+            else:
+                stmt = stmt.where(name_match)
+
+        order_by: list[Any] = []
+        if parsed_id is not None:
+            order_by.append(case((models.Author.author_id == parsed_id, 0), else_=1))
+        order_by.extend([novel_count_expr.desc(), models.Author.author_id.asc()])
+
+        rows = self.session.execute(stmt.order_by(*order_by).limit(capped_limit)).all()
+        return [
+            {
+                "author_id": int(row.author_id),
+                "author_name": row.author_name,
+                "source": str(row.source),
+                "novel_count": int(row.novel_count or 0),
+            }
+            for row in rows
+        ]

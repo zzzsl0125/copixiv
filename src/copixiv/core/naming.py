@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from copixiv.core.models import UNKNOWN_AUTHOR
+from copixiv.core.models import SOURCE_PIXIV, UNKNOWN_AUTHOR
 
 _JST = ZoneInfo("Asia/Tokyo")
 
@@ -86,20 +86,32 @@ def safe_filename(text: str, max_length: int = 240) -> str:
 LOCAL_SUBDIR = "local"
 
 
+def _safe_source_subdir(source: str) -> str:
+    """Sanitize a source identifier into a single safe subdirectory name."""
+    cleaned = _ILLEGAL_CHARS.sub("_", source.strip()).strip(".")
+    return cleaned or "external"
+
+
 def build_path(
     novel_id: int | str,
     title: str,
     download_dir: str = "download",
     *,
     kind: str = TEXT,
+    source: str | None = None,
 ) -> str:
     """Generate ``{download_dir}/{subdir}/{safe_title}_{novel_id}{ext}`` within NAME_MAX.
 
-    Negative IDs (local uploads) are routed to ``local/``; non-negative IDs
-    (Pixiv novels) are sharded by leading digits (``0000`` below 10,000,000).
+    When *source* is provided and not ``SOURCE_PIXIV``, files are placed under
+    ``{download_dir}/{safe_source}/``. Otherwise, negative IDs (local uploads)
+    route to ``local/`` and non-negative IDs (Pixiv novels) are sharded by
+    leading digits (``0000`` below 10,000,000).
     """
     id_int = int(novel_id)
-    if id_int < 0:
+    normalized_source = source.strip() if source is not None else ""
+    if normalized_source and normalized_source != SOURCE_PIXIV:
+        subdir = _safe_source_subdir(normalized_source)
+    elif id_int < 0:
         subdir = LOCAL_SUBDIR
     elif id_int < 10_000_000:
         subdir = "0000"
@@ -269,6 +281,9 @@ class NovelNamingTemplate:
 
         if "{date}" in self._template:
             yield "date", _format_date(novel.create_time)
+
+        if "{source}" in self._template:
+            yield "source", str(getattr(novel, "source", "") or "")
 
         for key in (
             "title",

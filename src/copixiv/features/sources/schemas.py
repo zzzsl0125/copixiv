@@ -97,6 +97,7 @@ class SourceManifestSchema(BaseModel):
     credential_kinds: list[CredentialKindSpecSchema] = Field(default_factory=list)
     shelf: SourceShelfDefSchema | None = None
     allow_proxy_config: bool = True
+    enabled_by_default: bool = True
 
 
 class SourceItemResponse(BaseModel):
@@ -172,6 +173,22 @@ class SourceCredentialUpdateRequest(BaseModel):
         return _strip_nonempty_name(value)
 
 
+class SourceFetchRequest(BaseModel):
+    """Request payload for ``POST /api/sources/fetch``."""
+
+    source: str | None = None
+    refs: list[str] = Field(min_length=1)
+    force: bool = False
+
+
+class SourceFetchResponse(BaseModel):
+    """Response payload for ``POST /api/sources/fetch``."""
+
+    task_id: int
+    source: str
+    ref_count: int
+
+
 __all__ = [
     "CredentialFieldSpecSchema",
     "CredentialKindSpecSchema",
@@ -181,6 +198,8 @@ __all__ = [
     "SourceCredentialCreateRequest",
     "SourceCredentialResponse",
     "SourceCredentialUpdateRequest",
+    "SourceFetchRequest",
+    "SourceFetchResponse",
     "SourceItemResponse",
     "SourceManifestSchema",
     "SourceShelfDefSchema",

@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from copixiv.core import naming as formats
-from copixiv.core.naming import build_path
+from copixiv.core.models import SOURCE_LOCAL
 from copixiv.log import logger
 from copixiv.storage import assets
 from copixiv.storage.atomic import resolve_within_root, write_text_atomic
@@ -20,8 +20,8 @@ class FileStorage:
         self.download_dir = download_dir
         self._root = Path(download_dir).resolve()
 
-    def novel_text_path(self, novel_id: int, title: str) -> Path:
-        return Path(build_path(novel_id, title, self.download_dir))
+    def novel_text_path(self, novel_id: int, title: str, source: str | None = None) -> Path:
+        return Path(formats.build_path(novel_id, title, self.download_dir, source=source))
 
     def adopt_anchor(self, anchor: str | None) -> str | None:
         """Return *anchor* when it is a usable write target, else ``None``.
@@ -75,9 +75,9 @@ class FileStorage:
     ) -> Path:
         """``{download_dir}/local/{安全标题}_{id}{后缀}``（§3.2）。
 
-        委托 :func:`build_path` 统一处理负数 id 路由到 ``local/`` 与 ``NAME_MAX`` 截断。
+        委托 :func:`formats.build_path` 统一处理 ``local/`` 路由与 ``NAME_MAX`` 截断。
         """
-        return Path(build_path(novel_id, title, self.download_dir, kind=kind))
+        return Path(formats.build_path(novel_id, title, self.download_dir, kind=kind, source=SOURCE_LOCAL))
 
     def save_novel_text(
         self,
@@ -85,6 +85,7 @@ class FileStorage:
         title: str,
         content: str,
         anchor: str | Path | None = None,
+        source: str | None = None,
     ) -> Path:
         """Write novel text to disk. Returns the file path.
 
@@ -97,7 +98,7 @@ class FileStorage:
         comparing against a file that does not exist).  Omitted → derive from
         ``(novel_id, title)``, which is correct only for first-time writes.
         """
-        path = Path(anchor) if anchor else self.novel_text_path(novel_id, title)
+        path = Path(anchor) if anchor else self.novel_text_path(novel_id, title, source=source)
         write_text_atomic(path, content, root=self._root)
         logger.info(
             f'下载: #{novel_id} "{title}" → {path} ({len(content)} 字符)',
@@ -109,6 +110,7 @@ class FileStorage:
         novel_id: int,
         title: str,
         anchor: str | Path | None = None,
+        source: str | None = None,
     ) -> str | None:
         """Read the stored text — ``None`` when there is no usable local copy.
 
@@ -120,7 +122,7 @@ class FileStorage:
         *anchor* must match what :meth:`save_novel_text` was given, or the
         comparison reads a different file than the one being written.
         """
-        path = Path(anchor) if anchor else self.novel_text_path(novel_id, title)
+        path = Path(anchor) if anchor else self.novel_text_path(novel_id, title, source=source)
         try:
             if not path.is_file() or path.stat().st_size == 0:
                 return None
@@ -156,7 +158,7 @@ class FileStorage:
             _unlink(resolved.with_suffix(suffix))
 
         nid_str = str(novel_id) if novel_id is not None else resolved.stem.rsplit("_", 1)[-1]
-        if nid_str.isdigit():
+        if assets.is_novel_id_str(nid_str):
             for asset in assets.iter_novel_asset_files(resolved.parent, nid_str):
                 _unlink(asset)
 
@@ -180,7 +182,7 @@ class FileStorage:
             for suffix in formats.ALL_SUFFIXES:
                 _unlink(resolved.with_suffix(suffix))
             nid_str = resolved.stem.rsplit("_", 1)[-1]
-            if nid_str.isdigit():
+            if assets.is_novel_id_str(nid_str):
                 by_parent[resolved.parent].append(nid_str)
             else:
                 by_parent.setdefault(resolved.parent, [])

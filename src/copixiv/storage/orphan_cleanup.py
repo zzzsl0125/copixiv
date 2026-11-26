@@ -24,7 +24,7 @@ def extract_managed_novel_id(name_stem: str) -> int | None:
 
     tokens = name_stem.split("_")
     last = tokens[-1]
-    if last.isdigit() or (last.startswith("-") and len(last) > 1 and last[1:].isdigit()):
+    if assets.is_novel_id_str(last):
         return int(last)
     return None
 

@@ -37,7 +37,13 @@ ILLUSTRATION = "p"
 IMAGE_SUFFIXES: tuple[str, ...] = (".jpg", ".png", ".jpeg", ".gif", ".webp")
 
 # ``{novel_id}_{kind}_{asset_id}`` —— 用于反解孤儿文件。
-_ASSET_STEM_RE = re.compile(r"^(?P<novel_id>\d+)_(?P<kind>[cup])_(?P<asset>.+)$")
+_ASSET_STEM_RE = re.compile(r"^(?P<novel_id>-?\d+)_(?P<kind>[cup])_(?P<asset>.+)$")
+_NOVEL_ID_STR_RE = re.compile(r"-?\d+", re.ASCII)
+
+
+def is_novel_id_str(value: str) -> bool:
+    """Return ``True`` when *value* is a signed integer string (e.g. ``123`` or ``-456``)."""
+    return bool(_NOVEL_ID_STR_RE.fullmatch(value))
 
 
 def asset_path(
@@ -137,7 +143,7 @@ def has_illustration_assets(directory: Path, novel_id: int | str) -> bool:
 
 def iter_batch_novel_asset_files(directory: Path, novel_ids: Iterable[int | str]) -> list[Path]:
     """通过单次 ``os.scandir`` 返回目录下属于 *novel_ids* 的全部资产文件。"""
-    id_set = {str(nid) for nid in novel_ids if str(nid).isdigit()}
+    id_set = {str(nid) for nid in novel_ids if is_novel_id_str(str(nid))}
     if not id_set:
         return []
     matched: list[Path] = []
@@ -174,6 +180,7 @@ __all__ = [
     "asset_suffix",
     "find_cover",
     "has_illustration_assets",
+    "is_novel_id_str",
     "iter_assets",
     "iter_batch_novel_asset_files",
     "iter_novel_asset_files",

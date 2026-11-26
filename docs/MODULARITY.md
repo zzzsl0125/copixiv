@@ -8,18 +8,18 @@
 |---|---|
 | `app.py` / `middleware.py` / `error_handlers.py` / `lifespan.py` | 组合根：FastAPI 工厂、中间件、域异常映射、生命周期装配（含查询引擎启动与 UoW 提交后钩子绑定）与 SPA 静态托管 |
 | `config.py` | Pydantic 配置模型、严格校验（`extra="forbid"`）与加载 |
-| `deps.py` | FastAPI DI 依赖（`get_uow` / `get_pixiv_client` / `get_source_registry` / `get_source_service` / `get_source_http_manager` / `get_task_manager` / API Key 鉴权及 `TaskManagerProtocol` 等） |
+| `deps.py` | FastAPI DI 依赖（`get_uow` / `get_pixiv_client` / `get_source_registry` / `get_source_service` / `get_source_http_manager` / `get_image_downloader` / `get_task_manager` / API Key 鉴权及 `TaskManagerProtocol` 等） |
 | `export_openapi.py` | 无 DB / 网络依赖导出 OpenAPI schema（`python -m copixiv.export_openapi`） |
 | `core/` | 纯 Python 核心：`models.py`、`sources.py`、`draft.py`、`naming.py`、`search.py`、`text.py`、`time.py`、`snapshot_types.py`、`exceptions.py` |
 | `db/` | PostgreSQL 唯一适配层：`engine.py` / `uow.py` / `tx.py`（`read_transaction`、`run_write_transaction[_sync]` 与重试退避）/ `backup.py` / `models.py`（13 张业务与任务表：含 `source_config` 与 `source_credential`，已移除 `token` 与 `tag` 表）/ `pg_objects.py` / `base.py` / `delta.py`（事务提交后增量缓冲）/ `novel_snapshot.py`（窄列快照投影） |
 | `query_engine/` | 进程内查询引擎叶子适配层：`port.py`（协议与 DTO）/ `adapter.py`（封装 `copixiv_rs`）/ `sync.py`（启动快照与串行增量同步） |
 | `crates/copixiv_rs/` | Rust PyO3 原生检索引擎 crate：`arena.rs` / `engine.rs` / `filter.rs` / `hydrate.rs` / `interner.rs` / `lib.rs` / `model.rs` / `mutation.rs` / `postings.rs` / `query/`（`mod.rs`, `executor.rs`, `mask.rs`, `planner.rs`）/ `random.rs` / `staging.rs` / `storage.rs` / `tag_index.rs`（惰性派生 `TagIndex`）/ `text_index.rs` / `tracks.rs` |
 | `pixiv/` | 原生异步 `httpx` Pixiv 客户端与 DTO：`client.py` / `http.py` / `models.py` / `account.py` / `accounts.py` / `errors.py` |
-| `sources/` | 多数据源协议插件适配层：`base.py` / `http.py`（按数据源隔离的 `httpx.AsyncClient` 与 `ImageDownloader`）/ `registry.py` / `pixiv.py` / `local.py` |
+| `sources/` | 多数据源协议插件适配层：`base.py` / `http.py`（按数据源隔离的 `httpx.AsyncClient` 与 `ImageDownloader`）/ `registry.py` / `pixiv.py` / `local.py` / `esj/`（`plugin.py`, `client.py`, `parser.py`） |
 | `storage/` | 本地存储与文件处理：`file_storage.py` / `image_downloader.py` / `encoding.py` / `orphan_cleanup.py` / `zip.py` / `atomic.py` / `assets.py` / `epub/`（`builder.py`, `reader.py`, `state.py`） |
 | `notify/` | 通知后端适配：`telegram.py` |
-| `tasks/` | 任务内核（`registry.py` / `executor.py` / `cron.py` / `manager.py`）+ `history_repo.py` / `api.py` / `schemas.py` / 业务任务（`novels.py`、`batch.py` 统一异步 `batch_export`、`maintenance/` 含 `backup.py`, `epub.py`, `files.py`, `refetch.py`, `series.py`） |
-| `features/` | 业务功能切片：单文件切片 `search_history.py`；子包切片 `authors/`（`api.py`, `repo.py`, `service.py`）、`failures/`（`api.py`, `repo.py`）、`library/`（`api.py`, `ingest.py`, `repo.py`）、`series/`（`api.py`, `repo.py`, `service.py`）、`sources/`（`api.py`, `entity_resolver.py`, `repo.py`, `schemas.py`, `service.py`）、`system/`（`api.py`, `repo.py`）、`tags/`（`aliases.py`, `preferences.py`, `repo.py`, `resolver.py`）、`novels/`（`field_policy.py`, `schemas.py`, `repo/{read_repo,write_repo}.py`, `routes/{novel,query,batch,downloads}.py`, `ingest/{pipeline,download,persist,asset_pipeline}.py`, 扁平函数式 `use_cases/`） |
+| `tasks/` | 任务内核（`registry.py` / `executor.py` / `cron.py` / `manager.py`）+ `history_repo.py` / `api.py` / `schemas.py` / 业务任务（`novels.py`、`batch.py` 统一异步 `batch_export`、`sources.py` 通用 `source_fetch`、`maintenance/` 含 `backup.py`, `epub.py`, `files.py`, `refetch.py`, `series.py`） |
+| `features/` | 业务功能切片：单文件切片 `search_history.py`；子包切片 `authors/`（`api.py` 含 `/api/novels/author/search`, `repo.py`, `service.py`）、`failures/`（`api.py`, `repo.py`）、`library/`（`api.py`, `ingest.py`, `repo.py`）、`series/`（`api.py` 含 `/api/novels/series/search`, `repo.py`, `service.py`）、`sources/`（`api.py` 含 `/api/sources/fetch`, `entity_resolver.py`, `repo.py`, `schemas.py`, `service.py`）、`system/`（`api.py`, `repo.py`）、`tags/`（`aliases.py`, `preferences.py`, `repo.py`, `resolver.py`）、`novels/`（`field_policy.py`, `schemas.py`, `repo/{read_repo,write_repo}.py`, `routes/{novel,query,batch,downloads}.py`, `ingest/{pipeline,download,persist,asset_pipeline,book_chapter}.py`, 扁平函数式 `use_cases/`） |
 
 ## 2. 架构契约（由 `lint-imports` 强制执行）
 

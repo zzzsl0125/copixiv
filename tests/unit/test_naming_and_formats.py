@@ -232,3 +232,243 @@ def test_assets_int_dedup_tmp_filter_and_file_storage_guards(tmp_path: Path):
     assert list(dl_root.glob("*.tmp")) == []
     with pytest.raises(OSError, match="download 根之外"):
         write_text_atomic(tmp_path / "outside.txt", "nope", root=dl_root)
+
+
+def test_build_path_multi_source_and_naming_template_source(tmp_path: Path):
+    # Explicit external source routes to {download_dir}/{source}/
+    esj_path = Path(build_path(42, "ESJ书名", download_dir="dl", source="esj"))
+    assert esj_path == Path("dl/esj/ESJ书名_42.txt")
+
+    # Explicit local source routes to local/
+    local_path = Path(build_path(-5, "Local书名", download_dir="dl", source="local"))
+    assert local_path == Path("dl/local/Local书名_-5.txt")
+
+    # source="pixiv" and source=None preserve ID-based sharding
+    for src in (None, "pixiv"):
+        assert Path(build_path(-5, "T", download_dir="dl", source=src)).parent == Path("dl/local")
+        assert Path(build_path(123, "T", download_dir="dl", source=src)).parent == Path("dl/0000")
+        assert Path(build_path(12345678, "T", download_dir="dl", source=src)).parent == Path("dl/1234")
+
+    # Traversal attempts cannot escape download_dir
+    base = tmp_path / "dl"
+    for bad_source in ("../escape", "esj/sub", "..", "/abs/path", "a\\b"):
+        built = Path(build_path(1, "T", download_dir=str(base), source=bad_source))
+        assert ".." not in built.parts
+        assert built.resolve().parent.parent == base.resolve()
+
+    # {source} placeholder in NovelNamingTemplate
+    tpl = NovelNamingTemplate("{source}/{author_name}/{title}_{id}")
+    with_source = SimpleNamespace(id=10, title="Book", author_name="Auth", source="esj")
+    assert tpl.resolve(with_source) == "esj/Auth/Book_10"
+
+    without_source = SimpleNamespace(id=11, title="Book", author_name="Auth", source=None)
+    assert tpl.resolve(without_source) == "Auth/Book_11"
+
+    missing_attr = SimpleNamespace(id=12, title="Book", author_name="Auth")
+    assert tpl.resolve(missing_attr) == "Auth/Book_12"
+
+
+def test_negative_id_assets_file_storage_and_orphan_cleanup(tmp_path: Path):
+    from copixiv.storage.orphan_cleanup import extract_managed_novel_id
+
+    for valid in ("0", "123", "-456"):
+        assert assets.is_novel_id_str(valid) is True
+    for invalid in ("", "-", "abc", "+123", "12.3", "123\n", " 1"):
+        assert assets.is_novel_id_str(invalid) is False
+
+    # Negative-ID assets alongside positive-ID assets with same digits
+    neg_cover = assets.asset_path(tmp_path, -456, assets.COVER, suffix=".png")
+    neg_u = assets.asset_path(tmp_path, -456, assets.UPLOADED, "1", suffix=".jpg")
+    neg_p = assets.asset_path(tmp_path, -456, assets.ILLUSTRATION, "2", suffix=".gif")
+    pos_u = assets.asset_path(tmp_path, 456, assets.UPLOADED, "1", suffix=".jpg")
+    neg_tmp = tmp_path / "-456_u_9.jpg.tmp"
+    for p in (neg_cover, neg_u, neg_p, pos_u, neg_tmp):
+        p.write_bytes(b"img")
+
+    assert assets.novel_id_of(neg_cover.stem) == -456
+    assert assets.novel_id_of(neg_u.stem) == -456
+    assert assets.novel_id_of(neg_p.stem) == -456
+    assert assets.find_cover(tmp_path, -456) == neg_cover
+    assert assets.has_illustration_assets(tmp_path, -456) is True
+    assert assets.scan_assets(tmp_path, -456) == {"1": neg_u, "2": neg_p}
+    assert set(assets.iter_batch_novel_asset_files(tmp_path, [-456, "bad", "-"])) == {
+        neg_cover,
+        neg_u,
+        neg_p,
+    }
+    assert set(assets.iter_novel_asset_files(tmp_path, -456)) == {neg_cover, neg_u, neg_p}
+
+    # Cover-only negative-ID directory has_illustration_assets -> False
+    cover_only_dir = tmp_path / "cover_only"
+    cover_only_dir.mkdir()
+    (cover_only_dir / "-777_c_cover.jpg").write_bytes(b"c")
+    assert assets.has_illustration_assets(cover_only_dir, -777) is False
+
+    # orphan_cleanup.extract_managed_novel_id handles negative text and asset stems
+    assert extract_managed_novel_id("local_title_-123") == -123
+    assert extract_managed_novel_id("-123_c_cover") == -123
+    assert extract_managed_novel_id("-123_u_1") == -123
+    assert extract_managed_novel_id("-123_p_99") == -123
+    assert extract_managed_novel_id("bad_-") is None
+    assert extract_managed_novel_id("bad_") is None
+    assert extract_managed_novel_id("notes") is None
+    assert extract_managed_novel_id("batch_export_-1") is None
+
+    # FileStorage with source="esj" + deleting negative-ID cover/image assets
+    dl_root = tmp_path / "dl"
+    storage = FileStorage(str(dl_root))
+    assert storage.novel_text_path(42, "ESJ", source="esj") == dl_root / "esj" / "ESJ_42.txt"
+    saved_esj = storage.save_novel_text(42, "ESJ", "ESJ正文", source="esj")
+    assert saved_esj == dl_root / "esj" / "ESJ_42.txt"
+    assert storage.read_novel_text(42, "ESJ", source="esj") == "ESJ正文"
+
+    neg_txt = storage.local_novel_path(-123, "LocalBook")
+    neg_txt.parent.mkdir(parents=True, exist_ok=True)
+    neg_txt.write_text("本地正文", encoding="utf-8")
+    neg_epub = neg_txt.with_suffix(".epub")
+    neg_epub.write_bytes(b"epub")
+    neg_assets = [
+        neg_txt.parent / "-123_c_cover.jpg",
+        neg_txt.parent / "-123_u_1.png",
+        neg_txt.parent / "-123_p_2.gif",
+    ]
+    for asset in neg_assets:
+        asset.write_bytes(b"a")
+
+    storage.delete_novel_files(str(neg_txt))
+    assert not neg_txt.exists()
+    assert not neg_epub.exists()
+    for asset in neg_assets:
+        assert not asset.exists()
+    assert not neg_txt.parent.exists()
+
+    # Batch delete cleans up negative-ID and positive-ID assets too
+    neg_txt2 = storage.local_novel_path(-200, "LocalBatch")
+    neg_txt2.parent.mkdir(parents=True, exist_ok=True)
+    neg_txt2.write_text("b1", encoding="utf-8")
+    neg_asset2 = neg_txt2.parent / "-200_u_5.jpg"
+    neg_asset2.write_bytes(b"img")
+    storage.delete_novels_files([str(neg_txt2), str(saved_esj)])
+    assert not neg_txt2.exists()
+    assert not neg_asset2.exists()
+    assert not saved_esj.exists()
+
+
+def test_epub_builder_negative_id_partial_and_allow_missing_images(tmp_path: Path):
+    import zipfile
+
+    from PIL import Image
+
+    from copixiv.core.draft import build_novel
+    from copixiv.storage.epub.builder import EpubBuilder
+
+    novel_id = -123
+    draft = build_novel(
+        id=novel_id,
+        title="负ID插图",
+        author_id=-10,
+        author_name="本地作者",
+        content="段1\n[uploadedimage:1]\n段2\n[uploadedimage:2]",
+        source="esj",
+        download_dir=str(tmp_path),
+    )
+    txt_path = Path(draft.path)
+    txt_path.parent.mkdir(parents=True, exist_ok=True)
+    txt_path.write_text(draft.content or "", encoding="utf-8")
+
+    cover_file = txt_path.parent / f"{novel_id}_c_cover.jpg"
+    img_file = txt_path.parent / f"{novel_id}_u_1.png"
+    Image.new("RGB", (12, 12), (10, 20, 30)).save(cover_file, format="JPEG")
+    Image.new("RGBA", (12, 12), (200, 10, 10, 255)).save(img_file, format="PNG")
+
+    # 1. Scanning parent_dir without manifest dicts resolves negative-ID cover + partial image
+    res_scan = EpubBuilder().create_epub(draft)
+    assert res_scan.ok is True
+    assert res_scan.written is True
+    assert res_scan.has_cover is True
+    assert res_scan.embedded_images == 1
+    assert res_scan.missing_images == 1
+    with zipfile.ZipFile(txt_path.with_suffix(".epub")) as zf:
+        assert "EPUB/cover.jpg" in zf.namelist()
+        assert "EPUB/images/1.jpg" in zf.namelist()
+        xhtml = zf.read("EPUB/content.xhtml").decode("utf-8")
+        assert "illust-missing" in xhtml
+
+    # 2. Passing asset_paths resolves negative-ID cover + image identically
+    res_passed = EpubBuilder().create_epub(draft, asset_paths=[cover_file, img_file])
+    assert res_passed.ok is True
+    assert res_passed.written is True
+    assert res_passed.has_cover is True
+    assert res_passed.embedded_images == 1
+    assert res_passed.missing_images == 1
+
+    # 3. Cover-only when body image is missing: default keeps STRICT_PLACEHOLDERS guard,
+    #    allow_missing_images=True emits cover + placeholder EPUB.
+    img_file.unlink()
+    sentinel = b"preserve-existing"
+    epub_path = txt_path.with_suffix(".epub")
+    epub_path.write_bytes(sentinel)
+
+    res_strict = EpubBuilder().create_epub(draft)
+    assert res_strict.ok is False
+    assert res_strict.written is False
+    assert res_strict.has_cover is True
+    assert res_strict.embedded_images == 0
+    assert res_strict.missing_images == 2
+    assert epub_path.read_bytes() == sentinel
+
+    res_best_effort = EpubBuilder().create_epub(draft, allow_missing_images=True)
+    assert res_best_effort.ok is True
+    assert res_best_effort.written is True
+    assert res_best_effort.has_cover is True
+    assert res_best_effort.embedded_images == 0
+    assert res_best_effort.missing_images == 2
+    assert res_best_effort.has_raw_markers is False
+    with zipfile.ZipFile(epub_path) as zf:
+        assert "EPUB/cover.jpg" in zf.namelist()
+        assert "illust-missing" in zf.read("EPUB/content.xhtml").decode("utf-8")
+
+
+def test_search_history_resolves_negative_author_and_series_ids():
+    from contextlib import contextmanager
+    from unittest.mock import MagicMock, patch
+
+    from copixiv.features.search_history import record_search_history
+
+    session = MagicMock()
+    uow = MagicMock()
+
+    @contextmanager
+    def _begin():
+        yield
+
+    uow.begin = _begin
+    uow.session = session
+
+    with (
+        patch("copixiv.features.search_history.SQLAlchemyAuthorRepository") as author_cls,
+        patch("copixiv.features.search_history.SQLAlchemySeriesRepository") as series_cls,
+        patch("copixiv.features.search_history.SQLAlchemySearchHistoryRepository") as history_cls,
+    ):
+        author_cls.return_value.get_by_id.return_value = {"author_name": "ESJAuthor"}
+        series_cls.return_value.get_by_id.return_value = {"series_name": "ESJSeries"}
+
+        record_search_history(
+            [
+                ("author_id", "-456"),
+                ("series_id", "-789"),
+                ("author_id", "abc"),
+                ("author_id", ""),
+                ("series_id", "-"),
+            ],
+            lambda: uow,
+        )
+
+    author_cls.return_value.get_by_id.assert_called_once_with(-456)
+    series_cls.return_value.get_by_id.assert_called_once_with(-789)
+    history_repo = history_cls.return_value
+    history_repo.add_or_update.assert_any_call("author_id", "-456", "ESJAuthor")
+    history_repo.add_or_update.assert_any_call("series_id", "-789", "ESJSeries")
+    history_repo.add_or_update.assert_any_call("author_id", "abc", None)
+    history_repo.add_or_update.assert_any_call("author_id", "", None)
+    history_repo.add_or_update.assert_any_call("series_id", "-", None)

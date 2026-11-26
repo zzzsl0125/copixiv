@@ -151,7 +151,11 @@ class SourceService:
     ) -> SourceRuntimeConfig:
         defaults = self._default_values_for(plugin)
         if row is None:
-            return SourceRuntimeConfig.from_values(plugin.manifest.source, True, defaults)
+            return SourceRuntimeConfig.from_values(
+                plugin.manifest.source,
+                plugin.manifest.enabled_by_default,
+                defaults,
+            )
         merged = {**defaults, **(row.config or {})}
         return SourceRuntimeConfig.from_values(plugin.manifest.source, bool(row.enabled), merged)
 
@@ -174,7 +178,7 @@ class SourceService:
             defaults = self._default_values_for(plugin)
             repo.seed_config_if_missing(
                 plugin.manifest.source,
-                enabled=True,
+                enabled=plugin.manifest.enabled_by_default,
                 config=defaults,
             )
 
@@ -376,7 +380,7 @@ class SourceService:
         def _write(tx: SqlUnitOfWork) -> None:
             repo = SQLAlchemySourceRepository(tx.session)
             row = repo.get_config(source)
-            current_enabled = bool(row.enabled) if row is not None else True
+            current_enabled = bool(row.enabled) if row is not None else plugin.manifest.enabled_by_default
             current_config = {**defaults, **(row.config or {})} if row is not None else dict(defaults)
             next_enabled = current_enabled if enabled is None else bool(enabled)
             merged_raw = {**current_config, **(config or {})}

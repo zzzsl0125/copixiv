@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
 from copixiv.core.models import SOURCE_PIXIV
@@ -12,6 +12,15 @@ from copixiv.db.tx import read_transaction, run_write_transaction_sync
 from copixiv.deps import PixivClientDep, SourceServiceDep, UowDep
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 from copixiv.features.authors.service import lookup_author_profile
+
+
+class AuthorSearchItem(BaseModel):
+    """Author search result item (``GET /api/novels/author/search``)."""
+
+    author_id: int
+    author_name: str | None = None
+    source: str
+    novel_count: int = 0
 
 
 class AuthorLookupResponse(BaseModel):
@@ -32,6 +41,23 @@ class AuthorLookupResponse(BaseModel):
 
 
 router = APIRouter()
+
+
+@router.get("/search", response_model=list[AuthorSearchItem])
+def search_authors(
+    uow: UowDep,
+    q: str = "",
+    source: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+):
+    """Search known authors by exact ID or name substring, optionally filtered by source."""
+    with uow.begin(read_only=True):
+        rows = SQLAlchemyAuthorRepository(uow.session).search_authors(
+            q,
+            source=source,
+            limit=limit,
+        )
+    return [AuthorSearchItem(**row) for row in rows]
 
 
 @router.post("/{author_id}/follow", status_code=204)

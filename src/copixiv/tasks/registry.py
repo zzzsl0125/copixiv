@@ -20,6 +20,7 @@ DEFAULT_TASK_MODULES: tuple[str, ...] = (
     "copixiv.tasks.novels",
     "copixiv.tasks.batch",
     "copixiv.tasks.maintenance",
+    "copixiv.tasks.sources",
 )
 
 

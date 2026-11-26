@@ -213,7 +213,7 @@ impl NovelIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filter::{HotTrack, NumericField};
+    use crate::filter::{HotTrack, IntFilterField, NumericField, StrFilterField};
     use crate::random::hex16_decode;
     use crate::staging::StagingBuilder;
     use rustc_hash::FxHashSet;
@@ -237,6 +237,66 @@ mod tests {
             is_special_follow: false,
             tags: tags.into_iter().map(str::to_string).collect(),
         }
+    }
+
+    fn custom_row(
+        id: i64,
+        source: &str,
+        author_id: Option<i64>,
+        series_id: Option<i64>,
+        title: &str,
+        tags: Vec<&str>,
+    ) -> NovelRecord {
+        let mut row = sample_row(id, title, tags);
+        row.source = source.to_string();
+        row.author_id = author_id;
+        row.author_name = author_id.map(|aid| format!("Author{aid}"));
+        row.series_id = series_id;
+        row.series_name = series_id.map(|sid| format!("Series{sid}"));
+        row.series_index = series_id.map(|_| 1);
+        row
+    }
+
+    fn paginate_abs_id(
+        engine: &NovelIndex,
+        filter: &QueryFilter,
+        descending: bool,
+        limit: usize,
+    ) -> Vec<i64> {
+        let mut collected = Vec::new();
+        let mut seen = FxHashSet::default();
+        let mut cursor: Option<TrackCursor> = None;
+        loop {
+            let (rows, has_more, rand_out) = engine
+                .query_novel_rows(
+                    filter,
+                    SortAxis::Numeric(NumericField::AbsId),
+                    descending,
+                    limit,
+                    cursor.as_ref(),
+                )
+                .unwrap();
+            assert!(rand_out.is_none());
+            if has_more {
+                assert_eq!(rows.len(), limit);
+            } else {
+                assert!(rows.len() <= limit);
+            }
+            for row in &rows {
+                assert!(
+                    seen.insert(row.id),
+                    "duplicate id {} across AbsId page boundary",
+                    row.id
+                );
+                collected.push(row.id);
+            }
+            if !has_more {
+                break;
+            }
+            let last = rows.last().expect("has_more implies non-empty page");
+            cursor = Some(TrackCursor::Int(Some(last.id), last.id));
+        }
+        collected
     }
 
     #[test]
@@ -531,5 +591,417 @@ mod tests {
             .suggest_tag_aliases(5, 0, Some("unique_small"))
             .0
             .is_empty());
+    }
+
+    #[test]
+    fn non_pixiv_sources_interned_and_filtered() {
+        assert_eq!(StrFilterField::parse("source"), Ok(StrFilterField::Source));
+
+        let mut b = StagingBuilder::new(8);
+        b.push_batch(vec![
+            custom_row(10, "pixiv", Some(1), None, "Pixiv Story", vec!["isekai"]),
+            custom_row(20, "local", Some(2), None, "Local Story", vec!["isekai"]),
+            custom_row(
+                -30,
+                "esj",
+                Some(-3),
+                Some(-30),
+                "ESJ Dragon",
+                vec!["isekai", "magic"],
+            ),
+            custom_row(-40, "esj", Some(-4), None, "ESJ Slice", vec!["slice"]),
+            custom_row(
+                -50,
+                "ao3",
+                Some(-5),
+                Some(-50),
+                "AO3 Dragon",
+                vec!["fantasy", "isekai"],
+            ),
+            custom_row(
+                -60,
+                "ao3",
+                Some(-6),
+                None,
+                "AO3 Blocked",
+                vec!["blocked_tag"],
+            ),
+        ]);
+        let engine = NovelIndex::new();
+        engine.swap_state(b.finalize(vec!["blocked_tag".into()], true, vec![]));
+
+        // Verify source_interner & local_bitmap invariants for arbitrary non-Pixiv sources.
+        {
+            let state = engine.inner.read();
+            assert_eq!(state.source_interner.len(), 4);
+            let esj_sid = state.source_interner.get_id("esj").unwrap();
+            let ao3_sid = state.source_interner.get_id("ao3").unwrap();
+            assert_ne!(esj_sid, ao3_sid);
+
+            let doc_esj = *state.id_to_doc.get(&-30).unwrap();
+            let doc_ao3 = *state.id_to_doc.get(&-50).unwrap();
+            let doc_local = *state.id_to_doc.get(&20).unwrap();
+            assert_eq!(
+                state
+                    .source_interner
+                    .get_str(state.doc_source[doc_esj as usize]),
+                "esj"
+            );
+            assert_eq!(
+                state
+                    .source_interner
+                    .get_str(state.doc_source[doc_ao3 as usize]),
+                "ao3"
+            );
+            assert!(!state.local_bitmap.contains(doc_esj));
+            assert!(!state.local_bitmap.contains(doc_ao3));
+            assert!(state.local_bitmap.contains(doc_local));
+        }
+
+        // Single-source filters: source:esj;, source:ao3;, source:pixiv;, source:local;, unknown
+        let f_esj = QueryFilter {
+            str_filters: vec![(StrFilterField::Source, "esj".into())],
+            ..Default::default()
+        };
+        assert_eq!(engine.list_matching_ids(&f_esj), vec![-40, -30]);
+        assert_eq!(engine.count_novels(&f_esj, 100), (2, false));
+        assert!(engine.has_match(&f_esj));
+        let esj_rows = engine
+            .query_novel_rows(
+                &f_esj,
+                SortAxis::Numeric(NumericField::AbsId),
+                true,
+                10,
+                None,
+            )
+            .unwrap()
+            .0;
+        assert_eq!(
+            esj_rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![-40, -30]
+        );
+        assert!(esj_rows.iter().all(|r| r.source == "esj"));
+
+        let f_ao3 = QueryFilter {
+            str_filters: vec![(StrFilterField::Source, "ao3".into())],
+            ..Default::default()
+        };
+        assert_eq!(engine.list_matching_ids(&f_ao3), vec![-50]);
+        assert_eq!(engine.count_novels(&f_ao3, 100), (1, false));
+        let f_ao3_unblocked = QueryFilter {
+            exclude_blocked_tags: Some(false),
+            ..f_ao3.clone()
+        };
+        assert_eq!(engine.list_matching_ids(&f_ao3_unblocked), vec![-60, -50]);
+        let ao3_rows = engine
+            .query_novel_rows(
+                &f_ao3_unblocked,
+                SortAxis::Numeric(NumericField::AbsId),
+                false,
+                10,
+                None,
+            )
+            .unwrap()
+            .0;
+        assert_eq!(
+            ao3_rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![-50, -60]
+        );
+        assert!(ao3_rows.iter().all(|r| r.source == "ao3"));
+
+        // With >2 sources present, source:pixiv; must NOT match esj/ao3 rows.
+        let f_pixiv = QueryFilter {
+            str_filters: vec![(StrFilterField::Source, "pixiv".into())],
+            ..Default::default()
+        };
+        assert_eq!(engine.list_matching_ids(&f_pixiv), vec![10]);
+
+        let f_local = QueryFilter {
+            str_filters: vec![(StrFilterField::Source, "local".into())],
+            ..Default::default()
+        };
+        assert_eq!(engine.list_matching_ids(&f_local), vec![20]);
+
+        let f_missing = QueryFilter {
+            str_filters: vec![(StrFilterField::Source, "syosetsu".into())],
+            ..Default::default()
+        };
+        assert!(engine.list_matching_ids(&f_missing).is_empty());
+        assert_eq!(engine.count_novels(&f_missing, 100), (0, false));
+        assert!(!engine.has_match(&f_missing));
+
+        // Compound queries: `source:esj; isekai` and `source:ao3; isekai dragon`
+        let f_esj_tag = QueryFilter {
+            str_filters: vec![(StrFilterField::Source, "esj".into())],
+            tags: vec!["isekai".into()],
+            ..Default::default()
+        };
+        assert_eq!(engine.list_matching_ids(&f_esj_tag), vec![-30]);
+        assert_eq!(engine.count_novels(&f_esj_tag, 100), (1, false));
+
+        let f_ao3_compound = QueryFilter {
+            str_filters: vec![(StrFilterField::Source, "ao3".into())],
+            tags: vec!["fantasy".into()],
+            keyword_segments: vec!["dragon".into()],
+            ..Default::default()
+        };
+        assert_eq!(engine.list_matching_ids(&f_ao3_compound), vec![-50]);
+
+        // Two-source edge cases around planner's <=2 source_interner branch:
+        // Case A: only "local" and "esj" (no "pixiv" interned) -> source:pixiv; must be empty.
+        let mut b_local_esj = StagingBuilder::new(2);
+        b_local_esj.push_batch(vec![
+            custom_row(1, "local", Some(1), None, "Local", vec![]),
+            custom_row(-2, "esj", Some(-2), None, "ESJ", vec![]),
+        ]);
+        let eng_local_esj = NovelIndex::new();
+        eng_local_esj.swap_state(b_local_esj.finalize(vec![], true, vec![]));
+        assert!(eng_local_esj.list_matching_ids(&f_pixiv).is_empty());
+        assert_eq!(eng_local_esj.list_matching_ids(&f_esj), vec![-2]);
+        assert_eq!(eng_local_esj.list_matching_ids(&f_local), vec![1]);
+
+        // Case B: only "pixiv" and "esj" (no "local" interned) -> source:pixiv; must exclude esj.
+        let mut b_pixiv_esj = StagingBuilder::new(2);
+        b_pixiv_esj.push_batch(vec![
+            custom_row(1, "pixiv", Some(1), None, "Pixiv", vec![]),
+            custom_row(-2, "esj", Some(-2), None, "ESJ", vec![]),
+        ]);
+        let eng_pixiv_esj = NovelIndex::new();
+        eng_pixiv_esj.swap_state(b_pixiv_esj.finalize(vec![], true, vec![]));
+        assert_eq!(eng_pixiv_esj.list_matching_ids(&f_pixiv), vec![1]);
+        assert_eq!(eng_pixiv_esj.list_matching_ids(&f_esj), vec![-2]);
+    }
+
+    #[test]
+    fn negative_ids_filter_count_and_hydrate() {
+        let large_neg_novel = -9_000_000_001_i64;
+        let large_neg_author = -9_000_000_002_i64;
+        let large_neg_series = -9_000_000_003_i64;
+
+        let mut r1 = custom_row(-10, "esj", Some(-100), Some(-300), "Neg One", vec!["t_neg"]);
+        r1.series_index = Some(1);
+        r1.is_special_follow = true;
+
+        let mut r2 = custom_row(
+            -20,
+            "esj",
+            Some(-100),
+            Some(-300),
+            "Neg Two",
+            vec!["t_neg", "t_two"],
+        );
+        r2.series_index = Some(2);
+        r2.is_special_follow = true;
+
+        let mut r3 = custom_row(
+            -30,
+            "ao3",
+            Some(-100),
+            Some(-400),
+            "Neg Three",
+            vec!["t_neg"],
+        );
+        r3.series_index = Some(1);
+        r3.is_special_follow = true;
+
+        let mut r4 = custom_row(
+            large_neg_novel,
+            "ao3",
+            Some(large_neg_author),
+            Some(large_neg_series),
+            "Large Neg",
+            vec!["t_big"],
+        );
+        r4.series_index = Some(7);
+
+        // Positive decoy with same magnitudes (+100/+300) and a NULL author/series decoy.
+        let r_pos_decoy = custom_row(
+            10,
+            "pixiv",
+            Some(100),
+            Some(300),
+            "Pos Decoy",
+            vec!["t_pos"],
+        );
+        let r_null_decoy = custom_row(-40, "esj", None, None, "Null Author Series", vec![]);
+
+        let mut b = StagingBuilder::new(8);
+        b.push_batch(vec![r1, r2, r3, r4, r_pos_decoy, r_null_decoy]);
+        let engine = NovelIndex::new();
+        engine.swap_state(b.finalize(vec![], true, vec![]));
+
+        // Filter by negative author_id
+        let f_author = QueryFilter {
+            int_filters: vec![(IntFilterField::AuthorId, -100)],
+            ..Default::default()
+        };
+        assert_eq!(engine.list_matching_ids(&f_author), vec![-30, -20, -10]);
+        assert_eq!(engine.count_novels(&f_author, 100), (3, false));
+        assert!(engine.has_match(&f_author));
+
+        // Filter by negative series_id
+        let f_series = QueryFilter {
+            int_filters: vec![(IntFilterField::SeriesId, -300)],
+            ..Default::default()
+        };
+        assert_eq!(engine.list_matching_ids(&f_series), vec![-20, -10]);
+        assert_eq!(engine.count_novels(&f_series, 100), (2, false));
+
+        // Hydrate filtered query rows and verify negative IDs preserved
+        let series_rows = engine
+            .query_novel_rows(
+                &f_series,
+                SortAxis::Numeric(NumericField::AbsId),
+                false,
+                10,
+                None,
+            )
+            .unwrap()
+            .0;
+        assert_eq!(series_rows.len(), 2);
+        assert_eq!(series_rows[0].id, -10);
+        assert_eq!(series_rows[0].author_id, Some(-100));
+        assert_eq!(series_rows[0].series_id, Some(-300));
+        assert_eq!(series_rows[0].series_index, Some(1));
+        assert_eq!(series_rows[0].source, "esj");
+        assert_eq!(series_rows[1].id, -20);
+        assert_eq!(series_rows[1].series_index, Some(2));
+
+        // Large 64-bit negative IDs across novel_id, author_id, series_id
+        let f_big = QueryFilter {
+            int_filters: vec![
+                (IntFilterField::AuthorId, large_neg_author),
+                (IntFilterField::SeriesId, large_neg_series),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(engine.list_matching_ids(&f_big), vec![large_neg_novel]);
+        assert_eq!(engine.count_novels(&f_big, 10), (1, false));
+
+        let f_neg_id = QueryFilter {
+            int_filters: vec![(IntFilterField::Id, large_neg_novel)],
+            ..Default::default()
+        };
+        assert_eq!(engine.list_matching_ids(&f_neg_id), vec![large_neg_novel]);
+
+        // Special follow filtering on negative author_id
+        let f_sf = QueryFilter {
+            only_special_follow: true,
+            ..Default::default()
+        };
+        assert_eq!(engine.list_matching_ids(&f_sf), vec![-30, -20, -10]);
+
+        // Hydrate directly via get_novel_rows_by_ids (missing negative ID skipped cleanly)
+        let hydrated = engine.get_novel_rows_by_ids(&[large_neg_novel, -999_999, -40, 10]);
+        assert_eq!(hydrated.len(), 3);
+        assert_eq!(hydrated[0].id, large_neg_novel);
+        assert_eq!(hydrated[0].author_id, Some(large_neg_author));
+        assert_eq!(hydrated[0].series_id, Some(large_neg_series));
+        assert_eq!(hydrated[0].source, "ao3");
+        assert_eq!(hydrated[0].tags, vec!["t_big".to_string()]);
+        assert_eq!(hydrated[1].id, -40);
+        assert_eq!(hydrated[1].author_id, None);
+        assert_eq!(hydrated[1].series_id, None);
+        assert_eq!(hydrated[2].id, 10);
+        assert_eq!(hydrated[2].author_id, Some(100));
+    }
+
+    #[test]
+    fn abs_id_interleaved_cursor_pagination_desc_and_asc() {
+        assert_eq!(
+            SortAxis::parse("id"),
+            Ok(SortAxis::Numeric(NumericField::AbsId))
+        );
+
+        // Mixed positive/negative IDs with interleaved magnitudes and tied abs(id) pairs (+25/-25, +75/-75).
+        let spec_rows = vec![
+            (-5, "esj", vec!["multi"]),
+            (10, "pixiv", vec![]),
+            (-25, "esj", vec!["multi"]),
+            (25, "pixiv", vec!["multi"]),
+            (-40, "ao3", vec![]),
+            (60, "local", vec!["multi"]),
+            (-75, "esj", vec!["multi"]),
+            (75, "pixiv", vec!["multi"]),
+            (-90, "ao3", vec![]),
+            (100, "pixiv", vec![]),
+            (-120, "esj", vec!["multi"]),
+        ];
+        let mut b = StagingBuilder::new(spec_rows.len());
+        b.push_batch(
+            spec_rows
+                .into_iter()
+                .map(|(id, src, tags)| {
+                    custom_row(id, src, Some(id * 10), None, &format!("N{id}"), tags)
+                })
+                .collect(),
+        );
+        let engine = NovelIndex::new();
+        engine.swap_state(b.finalize(vec![], true, vec![]));
+
+        let expected_desc = vec![-120, 100, -90, 75, -75, 60, -40, 25, -25, 10, -5];
+        let expected_asc = vec![-5, 10, -25, 25, -40, 60, -75, 75, -90, 100, -120];
+        let expected_filtered_desc = vec![-120, 75, -75, 60, 25, -25, -5];
+        let expected_filtered_asc = vec![-5, -25, 25, 60, -75, 75, -120];
+
+        // 1) Clean AllAlive pre-sorted track path across page sizes splitting ties and boundaries
+        let f_all = QueryFilter::default();
+        for limit in [1, 2, 3, 4, 5, 11, 20] {
+            assert_eq!(paginate_abs_id(&engine, &f_all, true, limit), expected_desc);
+            assert_eq!(paginate_abs_id(&engine, &f_all, false, limit), expected_asc);
+        }
+
+        // 2) CandidateMask::Bitmap path (top-k heap cursor path) across multiple page sizes
+        let f_multi = QueryFilter {
+            tags: vec!["multi".into()],
+            ..Default::default()
+        };
+        for limit in [1, 2, 3, 4, 10] {
+            assert_eq!(
+                paginate_abs_id(&engine, &f_multi, true, limit),
+                expected_filtered_desc
+            );
+            assert_eq!(
+                paginate_abs_id(&engine, &f_multi, false, limit),
+                expected_filtered_asc
+            );
+        }
+
+        // 3) sort_ids parity on shuffled positive/negative IDs
+        let shuffled = vec![-25, 100, -5, 75, -120, 10, -75, 25, -90, 60, -40];
+        assert_eq!(
+            engine.sort_ids(&shuffled, SortAxis::Numeric(NumericField::AbsId), true),
+            expected_desc
+        );
+        assert_eq!(
+            engine.sort_ids(&shuffled, SortAxis::Numeric(NumericField::AbsId), false),
+            expected_asc
+        );
+
+        // 4) Dirty AbsId track: insert -80 (esj, "multi") and delete 100, then verify both
+        //    filtered (dirty top-k path) and unfiltered (triggers lazy AbsId track rebuild).
+        let row_neg80 = custom_row(-80, "esj", Some(-800), None, "N-80", vec!["multi"]);
+        engine.apply_delta(&[100], vec![row_neg80], None, None, &[], None);
+        assert!(engine.inner.read().tracks_dirty[HotTrack::AbsId as usize]);
+
+        assert_eq!(
+            paginate_abs_id(&engine, &f_multi, true, 2),
+            vec![-120, -80, 75, -75, 60, 25, -25, -5]
+        );
+        assert_eq!(
+            paginate_abs_id(&engine, &f_multi, false, 2),
+            vec![-5, -25, 25, 60, -75, 75, -80, -120]
+        );
+        assert!(engine.inner.read().tracks_dirty[HotTrack::AbsId as usize]);
+
+        assert_eq!(
+            paginate_abs_id(&engine, &f_all, true, 3),
+            vec![-120, -90, -80, 75, -75, 60, -40, 25, -25, 10, -5]
+        );
+        assert!(!engine.inner.read().tracks_dirty[HotTrack::AbsId as usize]);
+        assert_eq!(
+            paginate_abs_id(&engine, &f_all, false, 3),
+            vec![-5, 10, -25, 25, -40, 60, -75, 75, -80, -90, -120]
+        );
     }
 }

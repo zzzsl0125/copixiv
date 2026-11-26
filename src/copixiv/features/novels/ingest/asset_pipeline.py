@@ -12,6 +12,8 @@ from typing import Any
 
 from copixiv.core import naming as formats
 from copixiv.core.draft import NovelDraft
+from copixiv.core.models import SOURCE_PIXIV
+from copixiv.core.sources import EpubPolicy
 from copixiv.log import logger
 from copixiv.pixiv.http import pick_image_url
 from copixiv.storage import assets
@@ -34,6 +36,22 @@ def _remove_downloaded_files(paths: Iterable[Path]) -> None:
     for path in paths:
         with contextlib.suppress(OSError):
             os.remove(path)
+
+
+def _extract_uploaded_image_url(img_info: Any) -> str | None:
+    """Extract an image URL from Pixiv ``{"urls": ...}``, ``{"url": ...}``, or plain strings."""
+    if isinstance(img_info, str):
+        cleaned = img_info.strip()
+        return cleaned or None
+    if isinstance(img_info, Mapping):
+        url = pick_image_url(img_info.get("urls"))
+        if url:
+            return url
+        raw_url = img_info.get("url")
+        if isinstance(raw_url, str):
+            cleaned = raw_url.strip()
+            return cleaned or None
+    return None
 
 
 class AssetBatch:
@@ -92,20 +110,24 @@ class AssetBatch:
 
 
 class NovelAssetPipeline:
-    """Coordinates Pixiv novel image downloads and EPUB generation."""
+    """Coordinates novel image downloads and EPUB generation across sources."""
 
     def __init__(
         self,
-        image_downloader: ImageDownloader,
+        image_downloader: ImageDownloader | None = None,
         epub_builder: Any | None = None,
         *,
         image_headers: Mapping[str, str] | None = None,
         download_root: str | Path | None = None,
+        http_manager: Any | None = None,
+        source_registry: Any | None = None,
     ) -> None:
         self._downloader = image_downloader
         self._epub_builder = epub_builder
         self._image_headers = dict(image_headers) if image_headers is not None else None
         self._download_root = Path(download_root) if download_root is not None else None
+        self._http_manager = http_manager
+        self._source_registry = source_registry
         self._in_flight: dict[int, asyncio.Task[tuple[str | None, str | None]]] = {}
 
     def new_batch(self) -> AssetBatch:
@@ -195,6 +217,16 @@ class NovelAssetPipeline:
             if downloaded:
                 await asyncio.to_thread(_remove_downloaded_files, downloaded)
 
+    def _select_downloader(self, source: str) -> ImageDownloader | None:
+        if self._http_manager is not None:
+            try:
+                source_downloader = self._http_manager.get_image_downloader(source)
+            except Exception:
+                source_downloader = None
+            if source_downloader is not None:
+                return source_downloader
+        return self._downloader
+
     async def _download_all_images(
         self,
         novel: NovelDraft,
@@ -205,7 +237,7 @@ class NovelAssetPipeline:
         if novel.cover_url:
             jobs.append((assets.COVER, "", novel.cover_url))
         for img_id, img_info in (novel.images or {}).items():
-            url = pick_image_url(img_info.get("urls"))
+            url = _extract_uploaded_image_url(img_info)
             if url:
                 jobs.append((assets.UPLOADED, img_id, url))
         for illust_id, wrapper in (novel.illusts or {}).items():
@@ -221,6 +253,11 @@ class NovelAssetPipeline:
         if not jobs:
             return []
 
+        downloader = self._select_downloader(novel.source)
+        if downloader is None:
+            return []
+        headers = self._image_headers if novel.source == SOURCE_PIXIV else None
+
         paths = [
             assets.asset_path(
                 base_dir,
@@ -233,10 +270,10 @@ class NovelAssetPipeline:
         ]
         results = await asyncio.gather(
             *[
-                self._downloader.download_image(
+                downloader.download_image(
                     url,
                     path,
-                    headers=self._image_headers,
+                    headers=headers,
                     root=self._download_root,
                 )
                 for (_kind, _aid, url), path in zip(jobs, paths, strict=True)
@@ -269,6 +306,31 @@ class NovelAssetPipeline:
             novel,
             **build_kwargs,
         )
+
+        policy = (
+            self._source_registry.epub_policy(novel.source)
+            if self._source_registry is not None
+            else (EpubPolicy.CONTAINER_ONLY if int(novel.id) < 0 else EpubPolicy.STRICT_PLACEHOLDERS)
+        )
+
+        if policy == EpubPolicy.BEST_EFFORT_EXTERNAL:
+            if needs_epub is False:
+                return "skipped", None
+            if result.is_complete:
+                logger.info(
+                    f"下载: #{novel_id} EPUB 完成 (已清理 {len(downloaded)} 张临时图片)",
+                )
+                return "done", None
+            if result.written and result.output_path is not None:
+                await asyncio.to_thread(_remove_downloaded_files, [result.output_path])
+            if result.embedded_images == 0 and (not result.ok or not result.is_complete):
+                logger.warning(
+                    f"下载: #{novel_id} 外部来源图片未能嵌入（缺失 {result.missing_images} 张），降级为无图",
+                )
+            else:
+                logger.warning(f"下载: #{novel_id} 外部来源 EPUB 不完整，降级为无图")
+            return "no_images", None
+
         has_source_images = bool(novel.images or novel.illusts)
 
         if not result.ok:

@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import and_, exists, func, or_, select
+from sqlalchemy import and_, any_, exists, func, or_, select
 from sqlalchemy.orm import Session
 
 from copixiv.core.exceptions import ValidationError
-from copixiv.core.models import SOURCE_PIXIV, EpubStatus, NovelSource
+from copixiv.core.models import SOURCE_LOCAL, SOURCE_PIXIV, EpubStatus
 from copixiv.core.search import QuerySpec, normalize_search_segments
+from copixiv.core.sources import SourceCapability, SourceRuntimeConfig
 from copixiv.core.time import datetime_to_us, us_to_datetime
 from copixiv.db import delta as engine_delta
 from copixiv.db import models
+from copixiv.features.novels import field_policy
 from copixiv.features.novels.schemas import NovelBase
 from copixiv.query_engine.adapter import RustNovelQueryEngine
 from copixiv.query_engine.port import EngineCursor, EngineQuery
@@ -90,7 +93,9 @@ class StoredNovel:
     series_index: int | None = None
     create_time: datetime | None = None
     has_epub: EpubStatus = EpubStatus.NO
-    source: NovelSource = NovelSource.PIXIV
+    source: str = SOURCE_PIXIV
+    external_url: str | None = None
+    can_sync: bool = False
     tags: list[str] = field(default_factory=list)
     is_favourite: bool = False
     is_special_follow: bool = False
@@ -161,7 +166,9 @@ def _novel_from_record(rec: copixiv_rs.NovelRecord) -> NovelBase:
         series_id=rec.series_id,
         series_name=rec.series_name,
         series_index=rec.series_index,
-        source=NovelSource(rec.source),
+        source=str(rec.source),
+        external_url=None,
+        can_sync=False,
     )
 
 
@@ -181,11 +188,67 @@ def _novel_from_orm(obj: models.Novel, *, is_special_follow: bool = False) -> St
         series_index=obj.series_index,
         create_time=obj.create_time,
         has_epub=EpubStatus(obj.has_epub),
-        source=NovelSource(obj.source),
+        source=str(obj.source),
         tags=list(obj.tags) if obj.tags else [],
         is_favourite=obj.is_favourite,
         is_special_follow=is_special_follow,
     )
+
+
+def hydrate_novel_links(
+    session: Session,
+    novels: Sequence[NovelBase | StoredNovel],
+    *,
+    source_service: Any | None = None,
+    source_registry: Any | None = None,
+) -> None:
+    """Populate ``external_url`` and ``can_sync`` on materialized novels in-place."""
+    if not novels:
+        return
+
+    registry = (
+        source_service.registry
+        if source_service is not None and getattr(source_service, "registry", None) is not None
+        else (source_registry or field_policy._get_registry())
+    )
+
+    extra_ids = sorted(
+        {int(novel.id) for novel in novels if str(novel.source) not in (SOURCE_PIXIV, SOURCE_LOCAL)}
+    )
+    source_keys: dict[int, str] = {}
+    if extra_ids:
+        rows = session.execute(
+            select(models.Novel.id, models.Novel.source_key).where(
+                models.Novel.id == any_(cast(Any, extra_ids))
+            )
+        ).all()
+        source_keys = {int(nid): str(skey) for nid, skey in rows if skey}
+
+    runtime_cache: dict[str, SourceRuntimeConfig] = {}
+    for novel in novels:
+        src = str(novel.source)
+        if src not in runtime_cache:
+            if source_service is not None:
+                runtime_cache[src] = source_service.get_runtime_config(src)
+            else:
+                runtime_cache[src] = SourceRuntimeConfig(
+                    source=src,
+                    enabled=registry.get(src) is not None,
+                )
+        runtime = runtime_cache[src]
+
+        if src == SOURCE_PIXIV:
+            skey: str | None = str(novel.id)
+        elif src == SOURCE_LOCAL:
+            skey = None
+        else:
+            skey = source_keys.get(int(novel.id))
+
+        novel.external_url = registry.build_external_url(src, "novel", skey, runtime) if skey else None
+        novel.can_sync = bool(
+            registry.has_capability(src, SourceCapability.SYNC_NOVEL)
+            and (source_service is None or source_service.is_enabled(src))
+        )
 
 
 class SQLAlchemyNovelReadRepository:
@@ -200,6 +263,21 @@ class SQLAlchemyNovelReadRepository:
         self.session = session
         self._query_engine: RustNovelQueryEngine | None = (
             query_engine if query_engine is not None else session.info.get(engine_delta.SESSION_ENGINE_KEY)
+        )
+
+    def hydrate_links(
+        self,
+        novels: Sequence[NovelBase | StoredNovel],
+        *,
+        source_service: Any | None = None,
+        source_registry: Any | None = None,
+    ) -> None:
+        """Populate ``external_url`` and ``can_sync`` on materialized novels."""
+        hydrate_novel_links(
+            self.session,
+            novels,
+            source_service=source_service,
+            source_registry=source_registry,
         )
 
     def _require_engine(self) -> RustNovelQueryEngine:

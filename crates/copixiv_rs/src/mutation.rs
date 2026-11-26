@@ -460,7 +460,9 @@ impl EngineState {
 mod tests {
     use super::*;
     use crate::engine::NovelIndex;
-    use crate::filter::QueryFilter;
+    use crate::filter::{
+        IntFilterField, NumericField, QueryFilter, SortAxis, StrFilterField, TrackCursor,
+    };
     use crate::staging::StagingBuilder;
 
     fn novel(id: i64, tags: Vec<&str>) -> NovelRecord {
@@ -481,6 +483,215 @@ mod tests {
             is_favourite: false,
             is_special_follow: false,
             tags: tags.into_iter().map(str::to_string).collect(),
+        }
+    }
+
+    fn sourced_novel(
+        id: i64,
+        source: &str,
+        author_id: Option<i64>,
+        series_id: Option<i64>,
+        tags: Vec<&str>,
+    ) -> NovelRecord {
+        let mut r = novel(id, tags);
+        r.source = source.to_string();
+        r.author_id = author_id;
+        r.author_name = author_id.map(|aid| format!("Author {aid}"));
+        r.series_id = series_id;
+        r.series_name = series_id.map(|sid| format!("Series {sid}"));
+        r.series_index = series_id.map(|_| 1);
+        r.like = id.abs() * 10;
+        r.create_time_us = Some(id.abs() * 1_000_000);
+        r
+    }
+
+    fn assert_record_eq(actual: &NovelRecord, expected: &NovelRecord) {
+        assert_eq!(actual.id, expected.id);
+        assert_eq!(actual.title, expected.title);
+        assert_eq!(actual.author_id, expected.author_id);
+        assert_eq!(actual.author_name, expected.author_name);
+        assert_eq!(actual.series_id, expected.series_id);
+        assert_eq!(actual.series_name, expected.series_name);
+        assert_eq!(actual.series_index, expected.series_index);
+        assert_eq!(actual.text, expected.text);
+        assert_eq!(actual.like, expected.like);
+        assert_eq!(actual.view, expected.view);
+        assert_eq!(actual.has_epub, expected.has_epub);
+        assert_eq!(actual.create_time_us, expected.create_time_us);
+        assert_eq!(actual.source, expected.source);
+        assert_eq!(actual.is_favourite, expected.is_favourite);
+        assert_eq!(actual.is_special_follow, expected.is_special_follow);
+        assert_eq!(actual.tags, expected.tags);
+    }
+
+    fn collect_abs_id_pages(
+        engine: &NovelIndex,
+        filter: &QueryFilter,
+        descending: bool,
+        limit: usize,
+    ) -> Vec<i64> {
+        let mut ids = Vec::new();
+        let mut cursor: Option<TrackCursor> = None;
+        loop {
+            let (rows, has_more, _) = engine
+                .query_novel_rows(
+                    filter,
+                    SortAxis::Numeric(NumericField::AbsId),
+                    descending,
+                    limit,
+                    cursor.as_ref(),
+                )
+                .unwrap();
+            for row in &rows {
+                ids.push(row.id);
+            }
+            if !has_more {
+                break;
+            }
+            let last = rows.last().unwrap();
+            cursor = Some(TrackCursor::Int(Some(last.id), last.id));
+        }
+        ids
+    }
+
+    fn assert_query_parity(
+        mutated: &NovelIndex,
+        expected_rows: &[NovelRecord],
+        blocked_tags: &[&str],
+        probe_ids: &[i64],
+    ) {
+        let mut b = StagingBuilder::new(expected_rows.len());
+        b.push_batch(expected_rows.to_vec());
+        let reference = NovelIndex::new();
+        reference.swap_state(b.finalize(
+            blocked_tags.iter().map(|s| (*s).to_string()).collect(),
+            true,
+            vec![],
+        ));
+
+        let filters = vec![
+            QueryFilter::default(),
+            QueryFilter {
+                str_filters: vec![(StrFilterField::Source, "esj".into())],
+                ..Default::default()
+            },
+            QueryFilter {
+                str_filters: vec![(StrFilterField::Source, "ao3".into())],
+                ..Default::default()
+            },
+            QueryFilter {
+                str_filters: vec![(StrFilterField::Source, "pixiv".into())],
+                ..Default::default()
+            },
+            QueryFilter {
+                str_filters: vec![(StrFilterField::Source, "local".into())],
+                ..Default::default()
+            },
+            QueryFilter {
+                str_filters: vec![(StrFilterField::Source, "esj".into())],
+                tags: vec!["isekai".into()],
+                ..Default::default()
+            },
+            QueryFilter {
+                str_filters: vec![(StrFilterField::Source, "ao3".into())],
+                tags: vec!["fanfic".into()],
+                ..Default::default()
+            },
+            QueryFilter {
+                str_filters: vec![(StrFilterField::Source, "ao3".into())],
+                keyword_segments: vec!["Rewritten".into()],
+                ..Default::default()
+            },
+            QueryFilter {
+                int_filters: vec![(IntFilterField::AuthorId, -100)],
+                ..Default::default()
+            },
+            QueryFilter {
+                int_filters: vec![(IntFilterField::AuthorId, -200)],
+                ..Default::default()
+            },
+            QueryFilter {
+                int_filters: vec![(IntFilterField::SeriesId, -300)],
+                ..Default::default()
+            },
+            QueryFilter {
+                int_filters: vec![(IntFilterField::SeriesId, -400)],
+                ..Default::default()
+            },
+            QueryFilter {
+                tags: vec!["old".into()],
+                ..Default::default()
+            },
+            QueryFilter {
+                tags: vec!["magic".into()],
+                ..Default::default()
+            },
+            QueryFilter {
+                only_special_follow: true,
+                ..Default::default()
+            },
+            QueryFilter {
+                only_favourite: true,
+                ..Default::default()
+            },
+            QueryFilter {
+                exclude_blocked_tags: Some(false),
+                ..Default::default()
+            },
+            QueryFilter {
+                count_blocked: true,
+                ..Default::default()
+            },
+        ];
+
+        for f in &filters {
+            assert_eq!(
+                mutated.list_matching_ids(f),
+                reference.list_matching_ids(f),
+                "list_matching_ids parity mismatch for filter {f:?}"
+            );
+            assert_eq!(
+                mutated.count_novels(f, 100),
+                reference.count_novels(f, 100),
+                "count_novels parity mismatch for filter {f:?}"
+            );
+            assert_eq!(
+                mutated.has_match(f),
+                reference.has_match(f),
+                "has_match parity mismatch for filter {f:?}"
+            );
+            assert_eq!(
+                collect_abs_id_pages(mutated, f, true, 2),
+                collect_abs_id_pages(&reference, f, true, 2),
+                "AbsId DESC pagination parity mismatch for filter {f:?}"
+            );
+            assert_eq!(
+                collect_abs_id_pages(mutated, f, false, 2),
+                collect_abs_id_pages(&reference, f, false, 2),
+                "AbsId ASC pagination parity mismatch for filter {f:?}"
+            );
+            let mut_like: Vec<i64> = mutated
+                .query_novel_rows(f, SortAxis::Numeric(NumericField::Like), true, 20, None)
+                .unwrap()
+                .0
+                .into_iter()
+                .map(|r| r.id)
+                .collect();
+            let ref_like: Vec<i64> = reference
+                .query_novel_rows(f, SortAxis::Numeric(NumericField::Like), true, 20, None)
+                .unwrap()
+                .0
+                .into_iter()
+                .map(|r| r.id)
+                .collect();
+            assert_eq!(mut_like, ref_like, "Like sort parity mismatch for {f:?}");
+        }
+
+        let got_rows = mutated.get_novel_rows_by_ids(probe_ids);
+        let exp_rows = reference.get_novel_rows_by_ids(probe_ids);
+        assert_eq!(got_rows.len(), exp_rows.len());
+        for (actual, expected) in got_rows.iter().zip(exp_rows.iter()) {
+            assert_record_eq(actual, expected);
         }
     }
 
@@ -520,5 +731,211 @@ mod tests {
             None,
         );
         assert_eq!(engine.count_novels(&f, 100), (6, false));
+    }
+
+    #[test]
+    fn upsert_and_delete_non_pixiv_sources_and_negative_ids_maintains_postings() {
+        let mut b = StagingBuilder::new(4);
+        b.push_batch(vec![
+            sourced_novel(10, "pixiv", Some(1), None, vec!["pixiv_tag"]),
+            sourced_novel(-101, "esj", Some(-10), Some(-20), vec!["old_tag", "shared"]),
+        ]);
+        let mut state = b.finalize(vec![], true, vec![]);
+
+        // Insert new "ao3" row with negative novel/author/series IDs.
+        let r_ao3 = sourced_novel(-102, "ao3", Some(-10), Some(-30), vec!["ao3_tag"]);
+        assert!(state.upsert_batch(vec![r_ao3]));
+        assert!(state.source_interner.get_id("ao3").is_some());
+        assert!(state.local_bitmap.is_empty());
+        assert_eq!(
+            state.list_matching_ids(&QueryFilter {
+                str_filters: vec![(StrFilterField::Source, "ao3".into())],
+                ..Default::default()
+            }),
+            vec![-102]
+        );
+        assert_eq!(
+            state.list_matching_ids(&QueryFilter {
+                int_filters: vec![(IntFilterField::AuthorId, -10)],
+                ..Default::default()
+            }),
+            vec![-102, -101]
+        );
+
+        // Update -101 changing source/author/series without changing tags -> tags_changed == false.
+        let r_reassigned =
+            sourced_novel(-101, "ao3", Some(-11), Some(-21), vec!["old_tag", "shared"]);
+        assert!(!state.upsert_batch(vec![r_reassigned]));
+        assert!(!state.series_postings.contains_key(&-20));
+        assert!(state.series_postings.contains_key(&-21));
+        assert_eq!(
+            state.list_matching_ids(&QueryFilter {
+                str_filters: vec![(StrFilterField::Source, "esj".into())],
+                ..Default::default()
+            }),
+            Vec::<i64>::new()
+        );
+        assert_eq!(
+            state.list_matching_ids(&QueryFilter {
+                str_filters: vec![(StrFilterField::Source, "ao3".into())],
+                ..Default::default()
+            }),
+            vec![-102, -101]
+        );
+        assert_eq!(
+            state.list_matching_ids(&QueryFilter {
+                int_filters: vec![(IntFilterField::AuthorId, -10)],
+                ..Default::default()
+            }),
+            vec![-102]
+        );
+        assert_eq!(
+            state.list_matching_ids(&QueryFilter {
+                int_filters: vec![(IntFilterField::AuthorId, -11)],
+                ..Default::default()
+            }),
+            vec![-101]
+        );
+
+        // Update tags on -101 -> tags_changed == true and old tag posting is cleared.
+        let r_retagged =
+            sourced_novel(-101, "ao3", Some(-11), Some(-21), vec!["new_tag", "shared"]);
+        assert!(state.upsert_batch(vec![r_retagged]));
+        assert!(state
+            .list_matching_ids(&QueryFilter {
+                tags: vec!["old_tag".into()],
+                ..Default::default()
+            })
+            .is_empty());
+        assert_eq!(
+            state.list_matching_ids(&QueryFilter {
+                tags: vec!["new_tag".into()],
+                ..Default::default()
+            }),
+            vec![-101]
+        );
+
+        // Delete -101 (with duplicate & missing negative IDs) -> frees 1 doc slot, prunes postings.
+        assert!(state.delete_ids(&[-101, -101, -999_999]));
+        assert_eq!(state.free_docs.len(), 1);
+        assert!(!state.id_to_doc.contains_key(&-101));
+        assert!(!state.author_postings.contains_key(&-11));
+        assert!(!state.series_postings.contains_key(&-21));
+        assert!(state
+            .list_matching_ids(&QueryFilter {
+                tags: vec!["new_tag".into()],
+                ..Default::default()
+            })
+            .is_empty());
+
+        // Reusing freed slot for a new "esj" row with NULL author/series must not leak old state.
+        let r_reused = sourced_novel(-103, "esj", None, None, vec!["reused_slot"]);
+        assert!(state.upsert_batch(vec![r_reused]));
+        assert!(state.free_docs.is_empty());
+        let doc_103 = *state.id_to_doc.get(&-103).unwrap();
+        assert!(state.null_author_id.contains(doc_103));
+        assert!(state.null_series_id.contains(doc_103));
+        assert_eq!(
+            state.list_matching_ids(&QueryFilter {
+                str_filters: vec![(StrFilterField::Source, "esj".into())],
+                ..Default::default()
+            }),
+            vec![-103]
+        );
+        assert_eq!(
+            state.list_matching_ids(&QueryFilter {
+                str_filters: vec![(StrFilterField::Source, "ao3".into())],
+                ..Default::default()
+            }),
+            vec![-102]
+        );
+    }
+
+    #[test]
+    fn incremental_delta_mutations_match_fresh_rebuild_parity() {
+        let mut r_pos10 = sourced_novel(10, "pixiv", Some(100), Some(300), vec!["magic"]);
+        r_pos10.is_favourite = true;
+        let r_local20 = sourced_novel(20, "local", Some(200), None, vec!["isekai"]);
+        let r_neg15 = sourced_novel(-15, "esj", Some(-100), Some(-300), vec!["isekai", "old"]);
+        let r_neg25 = sourced_novel(-25, "esj", Some(-100), Some(-300), vec!["isekai"]);
+        let r_neg35 = sourced_novel(-35, "ao3", Some(-200), Some(-400), vec!["fanfic"]);
+
+        let mut expected = vec![r_pos10, r_local20, r_neg15, r_neg25, r_neg35];
+        let probe_ids = [-65, -55, -45, -35, -25, -15, 10, 20, -999];
+
+        let mut b = StagingBuilder::new(expected.len());
+        b.push_batch(expected.clone());
+        let engine = NovelIndex::new();
+        engine.swap_state(b.finalize(vec![], true, vec![]));
+        assert_query_parity(&engine, &expected, &[], &probe_ids);
+
+        // Step 1: Insert new "esj" (-45) and "ao3" (-55) rows, and mutate -15 across
+        // source ("esj" -> "ao3"), negative author/series, title, tags, and like.
+        let r_neg45 = sourced_novel(-45, "esj", Some(-100), Some(-301), vec!["isekai", "magic"]);
+        let mut r_neg55 = sourced_novel(-55, "ao3", Some(-201), None, vec!["fanfic"]);
+        r_neg55.is_favourite = true;
+
+        let mut r_neg15_mod =
+            sourced_novel(-15, "ao3", Some(-200), Some(-400), vec!["fanfic", "magic"]);
+        r_neg15_mod.title = "Rewritten ESJ to AO3".to_string();
+        r_neg15_mod.series_index = Some(2);
+        r_neg15_mod.like = 999;
+
+        engine.apply_delta(
+            &[],
+            vec![r_neg45.clone(), r_neg55.clone(), r_neg15_mod.clone()],
+            None,
+            None,
+            &[],
+            None,
+        );
+        expected.retain(|r| r.id != -15);
+        expected.extend([r_neg45, r_neg55, r_neg15_mod]);
+        assert_query_parity(&engine, &expected, &[], &probe_ids);
+
+        // Step 2: Delete negative IDs (-35, -45), clear author/series on -25 + apply blocked tag,
+        // update blocked tags case-insensitively, and toggle special_follow on negative author -200.
+        let mut r_neg25_cleared = sourced_novel(-25, "esj", None, None, vec!["blocked_neg"]);
+        r_neg25_cleared.title = "Blocked Neg ESJ".to_string();
+
+        engine.apply_delta(
+            &[-35, -45, -35],
+            vec![r_neg25_cleared.clone()],
+            Some(vec!["BLOCKED_NEG".into()]),
+            None,
+            &[(-200, true)],
+            None,
+        );
+        expected.retain(|r| !matches!(r.id, -35 | -45 | -25));
+        expected.push(r_neg25_cleared);
+        for row in &mut expected {
+            if row.author_id == Some(-200) {
+                row.is_special_follow = true;
+            }
+        }
+        assert_query_parity(&engine, &expected, &["BLOCKED_NEG"], &probe_ids);
+
+        // Step 3: Delete -55, insert new "esj" row -65 (reusing freed doc slot),
+        // and unset special_follow on negative author -200.
+        let mut r_neg65 =
+            sourced_novel(-65, "esj", Some(-100), Some(-300), vec!["isekai", "magic"]);
+        r_neg65.is_favourite = true;
+
+        engine.apply_delta(
+            &[-55],
+            vec![r_neg65.clone()],
+            None,
+            None,
+            &[(-200, false)],
+            None,
+        );
+        expected.retain(|r| r.id != -55);
+        expected.push(r_neg65);
+        for row in &mut expected {
+            if row.author_id == Some(-200) {
+                row.is_special_follow = false;
+            }
+        }
+        assert_query_parity(&engine, &expected, &["BLOCKED_NEG"], &probe_ids);
     }
 }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Annotated, Any, cast
@@ -106,20 +107,34 @@ def record_search_history(
         logger.exception("Failed to record search history")
 
 
+_SIGNED_INT_RE = re.compile(r"-?\d+", re.ASCII)
+
+
+def _parse_entity_id(value: str) -> int | None:
+    """Parse a signed decimal entity ID string, returning ``None`` if invalid."""
+    if not _SIGNED_INT_RE.fullmatch(value):
+        return None
+    return int(value)
+
+
 def _record_in_transaction(uow: SqlUnitOfWork, conditions: SearchConditions) -> None:
     author_repo = SQLAlchemyAuthorRepository(uow.session)
     series_repo = SQLAlchemySeriesRepository(uow.session)
     history_repo = SQLAlchemySearchHistoryRepository(uow.session)
     for qtype, value in conditions:
         display_value = None
-        if qtype == "author_id" and value.isdigit():
-            author = author_repo.get_by_id(int(value))
-            if author:
-                display_value = author.get("author_name")
-        elif qtype == "series_id" and value.isdigit():
-            series = series_repo.get_by_id(int(value))
-            if series:
-                display_value = series.get("series_name")
+        if qtype == "author_id":
+            parsed_id = _parse_entity_id(value)
+            if parsed_id is not None:
+                author = author_repo.get_by_id(parsed_id)
+                if author:
+                    display_value = author.get("author_name")
+        elif qtype == "series_id":
+            parsed_id = _parse_entity_id(value)
+            if parsed_id is not None:
+                series = series_repo.get_by_id(parsed_id)
+                if series:
+                    display_value = series.get("series_name")
         history_repo.add_or_update(qtype, value, display_value)
     history_repo.prune_old(keep=50)
 

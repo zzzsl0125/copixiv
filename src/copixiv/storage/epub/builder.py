@@ -84,11 +84,19 @@ class EpubBuilder:
         compress_quality: int = 75,
         needs_epub: bool | None = None,
         asset_paths: Sequence[Path] | None = None,
+        allow_missing_images: bool = False,
     ) -> EpubBuildResult:
         """Build an EPUB3 archive from *novel*.
 
         When *needs_epub* is ``False``, skips writing and returns
         ``EpubBuildResult(ok=True, written=False)``.
+
+        By default (``allow_missing_images=False``), if the novel expects
+        illustrations yet zero body images could be embedded, writing is
+        skipped so an existing EPUB is not overwritten (preserving
+        ``STRICT_PLACEHOLDERS`` semantics). Callers handling
+        ``BEST_EFFORT_EXTERNAL`` sources may pass ``allow_missing_images=True``
+        to still emit a cover-only or placeholder-marked EPUB.
         """
         if needs_epub is False:
             return EpubBuildResult(ok=True, written=False)
@@ -130,7 +138,7 @@ class EpubBuilder:
 
         output_path = formats.sibling_path(novel_path, formats.EPUB)
         expects_images = missing_images > 0 or bool(novel.images or novel.illusts)
-        if not embedded_images and expects_images:
+        if not allow_missing_images and not embedded_images and expects_images:
             logger.warning(
                 f"EPUB 未嵌入任何图片（缺失 {missing_images} 张），跳过写入以防覆盖已有文件: {output_path.name}"
             )

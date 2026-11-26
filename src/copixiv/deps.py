@@ -91,6 +91,11 @@ def get_source_http_manager(request: Request) -> SourceHttpManager:
     return request.app.state.http_manager
 
 
+def get_image_downloader(request: Request) -> Any:
+    """The shared novel asset pipeline (app.state)."""
+    return request.app.state.image_downloader
+
+
 SessionFactoryDep = Annotated[sessionmaker[Session], Depends(get_session_factory)]
 AppConfigDep = Annotated[AppConfig, Depends(get_app_config)]
 AccountPoolDep = Annotated[AccountPool, Depends(get_account_pool)]
@@ -100,6 +105,7 @@ TaskManagerDep = Annotated[TaskManagerProtocol, Depends(get_task_manager)]
 SourceRegistryDep = Annotated[SourceRegistry, Depends(get_source_registry)]
 SourceServiceDep = Annotated[SourceService, Depends(get_source_service)]
 SourceHttpManagerDep = Annotated[SourceHttpManager, Depends(get_source_http_manager)]
+ImageDownloaderDep = Annotated[Any, Depends(get_image_downloader)]
 
 
 def get_uow(session_factory: SessionFactoryDep) -> SqlUnitOfWork:

@@ -23,7 +23,7 @@ from copixiv.db.tx import read_transaction, run_write_transaction
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 from copixiv.features.failures.repo import FailedNovelRepository
-from copixiv.features.novels.ingest import ingest
+from copixiv.features.novels.ingest import BookChapterIngestor, ingest
 from copixiv.log import logger
 from copixiv.pixiv.client import PixivClient
 from copixiv.sources.local import LocalSourcePlugin
@@ -496,10 +496,16 @@ async def retry_failed_novels(
         return TaskResult(summary="重试列表为空", new_novel_titles=[])
 
     uow = SqlUnitOfWork(session_factory)
-    row_tuples: list[tuple[int, str, str, int | None]] = await read_transaction(
+    row_tuples: list[tuple[int, str, str, int | None, dict[str, Any] | None]] = await read_transaction(
         uow,
         lambda uw: [
-            (r.id, r.source, r.source_key, r.novel_id)
+            (
+                r.id,
+                r.source,
+                r.source_key,
+                r.novel_id,
+                dict(r.extra) if r.extra is not None else None,
+            )
             for r in FailedNovelRepository(uw.session).get_by_ids(failed_row_ids)
         ],
     )
@@ -510,11 +516,12 @@ async def retry_failed_novels(
         [PixivSourcePlugin(), LocalSourcePlugin()]
     )
 
-    by_source: dict[str, list[tuple[int, str, int | None]]] = {}
-    for row_id, src, source_key, nid in row_tuples:
-        by_source.setdefault(src, []).append((row_id, source_key, nid))
+    by_source: dict[str, list[tuple[int, str, int | None, dict[str, Any] | None]]] = {}
+    for row_id, src, source_key, nid, extra in row_tuples:
+        by_source.setdefault(src, []).append((row_id, source_key, nid, extra))
 
     pixiv_ids: list[int] = []
+    external_batches: list[tuple[str, list[tuple[int, str, int | None, dict[str, Any] | None]]]] = []
     skipped = 0
     for src, items in by_source.items():
         if source_service is not None and not source_service.is_enabled(src):
@@ -526,7 +533,7 @@ async def retry_failed_novels(
             skipped += len(items)
             continue
         if src == SOURCE_PIXIV:
-            for _row_id, source_key, nid in items:
+            for _row_id, source_key, nid, _extra in items:
                 try:
                     pixiv_ids.append(int(source_key))
                 except (TypeError, ValueError):
@@ -535,8 +542,7 @@ async def retry_failed_novels(
                     else:
                         skipped += 1
         else:
-            logger.warning(f"retry_failed_novels: 数据源 {src} 暂未接入重试管线，跳过 {len(items)} 条记录")
-            skipped += len(items)
+            external_batches.append((src, items))
 
     pixiv_ids = list(dict.fromkeys(pixiv_ids))
     new_titles = []
@@ -554,14 +560,35 @@ async def retry_failed_novels(
         new_titles.extend(out.new_titles)
         failed_ids.extend(out.failed_ids)
 
+    pixiv_failed_count = len(list(dict.fromkeys(failed_ids)))
+    ext_attempted = 0
+    ext_ok = 0
+
+    if external_batches:
+        ingestor = BookChapterIngestor(
+            session_factory=session_factory,
+            file_storage=file_storage,
+            image_downloader=image_downloader,
+            source_registry=registry,
+            source_service=source_service,
+        )
+        for src, raw_rows in external_batches:
+            ext_out = await ingestor.retry_failures(src, raw_rows)
+            new_titles.extend(ext_out.new_titles)
+            failed_ids.extend(ext_out.failed_ids)
+            ext_attempted += len(raw_rows)
+            src_failed = ext_out.failure_count
+            ext_ok += max(len(raw_rows) - src_failed, 0)
+
     failed_ids = list(dict.fromkeys(failed_ids))
-    ok = len(pixiv_ids) - len(failed_ids)
-    if skipped and not pixiv_ids:
+    total_attempted = len(pixiv_ids) + ext_attempted
+    ok = (len(pixiv_ids) - pixiv_failed_count) + ext_ok
+    if skipped and not total_attempted:
         summary = f"重试失败记录: 跳过 {skipped} 条不支持或已禁用来源"
     elif skipped:
-        summary = f"重试失败小说: 成功 {ok}/{len(pixiv_ids)}（跳过 {skipped} 条不支持或已禁用来源）"
+        summary = f"重试失败小说: 成功 {ok}/{total_attempted}（跳过 {skipped} 条不支持或已禁用来源）"
     else:
-        summary = f"重试失败小说: 成功 {ok}/{len(pixiv_ids)}"
+        summary = f"重试失败小说: 成功 {ok}/{total_attempted}"
     return TaskResult(
         summary=summary,
         new_novel_titles=new_titles,

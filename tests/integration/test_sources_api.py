@@ -17,7 +17,7 @@ from tests.factories import make_local_novel, make_test_app
 
 from copixiv.core.draft import build_novel
 from copixiv.core.exceptions import ValidationError
-from copixiv.core.models import SOURCE_LOCAL, SOURCE_PIXIV, EpubStatus
+from copixiv.core.models import SOURCE_ESJ, SOURCE_LOCAL, SOURCE_PIXIV, EpubStatus
 from copixiv.db import models
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.authors.service import delete_author
@@ -143,13 +143,18 @@ def test_list_sources_returns_seeded_manifests_and_credential_counts(
     committed_session_factory,
     tmp_path: Path,
 ):
-    """``GET /api/sources`` returns seeded pixiv & local manifests, defaults, and credential counts."""
+    """``GET /api/sources`` returns seeded pixiv, local & esj manifests, defaults, and credential counts."""
     app = make_test_app(committed_session_factory, tmp_path)
     with TestClient(app, base_url="http://localhost") as client:
         res = client.get("/api/sources")
         assert res.status_code == 200
         by_source = {item["source"]: item for item in res.json()}
-        assert set(by_source) == {SOURCE_PIXIV, SOURCE_LOCAL}
+        assert set(by_source) == {SOURCE_PIXIV, SOURCE_LOCAL, SOURCE_ESJ}
+
+        esj = by_source[SOURCE_ESJ]
+        assert esj["enabled"] is False
+        assert esj["manifest"]["epub_policy"] == "best_effort_external"
+        assert esj["manifest"]["badge_label"] == "ESJ"
 
         pixiv = by_source[SOURCE_PIXIV]
         assert pixiv["enabled"] is True
