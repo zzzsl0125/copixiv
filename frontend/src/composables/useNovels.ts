@@ -5,28 +5,35 @@ import { DEFAULT_PAGE_SIZE, excludeBlockedOverride } from '../config'
 import type { Novel, NovelFilters, NovelListResult } from '../types'
 import { useNovelQueryState } from './useNovelQueryState'
 import { useNovelShellState } from './useNovelShellState'
+import { useSources } from './useSources'
 
 export function useNovels(options?: { onlyBlocked?: MaybeRefOrGetter<boolean> }) {
   const queryClient = useQueryClient()
   const { filters, activeSection, navigateToSection, navigateSearch, navigateCardSearch } =
     useNovelQueryState()
   const { refreshNonce } = useNovelShellState()
+  const { shelves } = useSources()
 
   const onlyBlocked = computed(() => Boolean(toValue(options?.onlyBlocked)))
+  const extraShelves = computed(() => shelves.value.map((entry) => entry.shelf))
+  const effectiveKeyword = computed(() => filters.value.keyword.trim() || 'source:pixiv;')
 
   const listParams = computed(() => ({
-    keyword: filters.value.keyword.trim() || undefined,
+    keyword: effectiveKeyword.value,
     order_by: filters.value.order_by,
     order_direction: filters.value.order_direction,
     min_like: filters.value.min_like,
     min_text: filters.value.min_text,
-    exclude_blocked: onlyBlocked.value ? undefined : excludeBlockedOverride(filters.value.keyword),
+    exclude_blocked: onlyBlocked.value
+      ? undefined
+      : excludeBlockedOverride(filters.value.keyword, extraShelves.value),
     only_blocked: onlyBlocked.value || undefined,
   }))
 
   const query = useInfiniteQuery({
     queryKey: computed(() => queryKeys.novelsList(listParams.value, refreshNonce.value)),
     queryFn: async ({ pageParam, signal }) => {
+      const hasUserKeyword = Boolean(filters.value.keyword.trim())
       const result = await novelApi.getNovels(
         {
           ...listParams.value,
@@ -35,7 +42,7 @@ export function useNovels(options?: { onlyBlocked?: MaybeRefOrGetter<boolean> })
         },
         signal,
       )
-      if (!pageParam && listParams.value.keyword) {
+      if (!pageParam && hasUserKeyword) {
         void queryClient.invalidateQueries({ queryKey: queryKeys.searchHistory() })
       }
       return result

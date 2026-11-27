@@ -4,6 +4,7 @@ import { getApiErrorMessage, novelApi, queryKeys } from '../api'
 import { DEFAULT_PAGE_SIZE, excludeBlockedOverride } from '../config'
 import type { BatchScope, Novel, NovelFilters, OrderBy } from '../types'
 import { useNovelShellState } from './useNovelShellState'
+import { useSources } from './useSources'
 import { useToast } from './useToast'
 
 export interface UseBatchModeOptions {
@@ -21,16 +22,19 @@ export function useBatchMode(
 ) {
   const shell = useNovelShellState()
   const toast = useToast()
+  const { shelves } = useSources()
 
   const filters = computed(() => toValue(filtersInput))
   const isBatchMode = shell.isBatchMode
   const selectedIds = shell.selectedIds
   const selectAllLoading = ref(false)
 
-  const excludeBlocked = () => excludeBlockedOverride(filters.value.keyword)
+  const extraShelves = computed(() => shelves.value.map((entry) => entry.shelf))
+  const effectiveKeyword = computed(() => filters.value.keyword.trim() || 'source:pixiv;')
+  const excludeBlocked = () => excludeBlockedOverride(filters.value.keyword, extraShelves.value)
 
   const countParams = computed(() => ({
-    keyword: filters.value.keyword.trim() || undefined,
+    keyword: effectiveKeyword.value,
     min_like: filters.value.min_like,
     min_text: filters.value.min_text,
     exclude_blocked: excludeBlocked(),
@@ -281,7 +285,7 @@ export function useBatchMode(
     try {
       const result = await novelApi.matchNovelIds({
         novel_ids: ids,
-        keyword: filters.value.keyword.trim() || undefined,
+        keyword: effectiveKeyword.value,
         min_like: filters.value.min_like,
         min_text: filters.value.min_text,
         exclude_blocked: excludeBlocked(),
@@ -305,7 +309,7 @@ export function useBatchMode(
     selectAllLoading.value = true
     try {
       const result = await novelApi.getNovelIds({
-        keyword: filters.value.keyword.trim() || undefined,
+        keyword: effectiveKeyword.value,
         min_like: filters.value.min_like,
         min_text: filters.value.min_text,
         exclude_blocked: excludeBlocked(),

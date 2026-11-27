@@ -8,7 +8,7 @@ import EmptyState from '../components/ui/EmptyState.vue'
 import CardSkeleton from '../components/ui/CardSkeleton.vue'
 import ErrorAlert from '../components/ui/ErrorAlert.vue'
 import BatchBar from '../components/features/BatchBar.vue'
-import UploadBar from '../components/features/UploadBar.vue'
+import SourceShelfBar from '../components/features/SourceShelfBar.vue'
 import ExclusionBar from '../components/features/ExclusionBar.vue'
 import NovelModalsHost from '../components/features/NovelModalsHost.vue'
 import {
@@ -17,6 +17,7 @@ import {
   useToast,
   useVirtualMasonry,
 } from '../composables'
+import { useSources } from '../composables/useSources'
 import { getApiErrorMessage, novelApi, queryKeys, tagPreferenceApi } from '../api'
 import { downloadUrl } from '../lib/utils'
 import type {
@@ -40,7 +41,6 @@ const {
   error,
   noMoreData,
   filters,
-  activeSection,
   hasExcluded,
   handleSearch,
   handleLoadMore: loadMoreNovels,
@@ -51,6 +51,13 @@ const {
   patchNovelStateInCache,
   removeNovelFromCache,
 } = useNovels({ onlyBlocked: viewingExcluded })
+
+const { shelves } = useSources()
+const activeSourceShelf = computed(() => {
+  const keyword = filters.value.keyword.trim()
+  if (!keyword) return null
+  return shelves.value.find((entry) => entry.shelf.keyword.trim() === keyword) ?? null
+})
 
 const {
   isBatchMode: batchMode,
@@ -321,8 +328,11 @@ const handleNovelDeleted = (novelId: number) => {
         @remove-tags="tagOperation = 'remove_tags'; tagModalOpen = true"
         @delete="deleteOpen = true"
       />
-      <UploadBar
-        v-if="activeSection === 'uploads' && !batchMode"
+      <SourceShelfBar
+        v-if="activeSourceShelf && activeSourceShelf.shelf.intake_action !== 'none' && !batchMode"
+        :source="activeSourceShelf.source"
+        :display-name="activeSourceShelf.displayName"
+        :shelf="activeSourceShelf.shelf"
         @upload="isUploadModalOpen = true"
       />
     </div>

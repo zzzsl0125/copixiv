@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import BaseModal from '../ui/BaseModal.vue'
-import PixivIdLookupField from './PixivIdLookupField.vue'
+import EntityLookupField from './EntityLookupField.vue'
+import type { EntitySearchOption } from './EntityLookupField.vue'
 import { getApiErrorMessage, novelApi } from '../../api'
 import type { BatchMetadataRequest, BatchMetadataResult, BatchScope } from '../../types'
 
@@ -24,8 +25,28 @@ const unlinkAuthor = ref(false)
 const unlinkSeries = ref(false)
 const authorIdNumber = ref<number | null | undefined>(null)
 const seriesIdNumber = ref<number | null | undefined>(null)
-const authorFieldRef = ref<InstanceType<typeof PixivIdLookupField> | null>(null)
-const seriesFieldRef = ref<InstanceType<typeof PixivIdLookupField> | null>(null)
+const authorFieldRef = ref<InstanceType<typeof EntityLookupField> | null>(null)
+const seriesFieldRef = ref<InstanceType<typeof EntityLookupField> | null>(null)
+
+async function searchAuthors(q: string, signal?: AbortSignal): Promise<EntitySearchOption[]> {
+  const items = (await novelApi.searchAuthors?.(q, { signal })) ?? []
+  return items.map((item) => ({
+    id: item.author_id,
+    name: item.author_name ?? null,
+    source: item.source,
+    novelCount: item.novel_count,
+  }))
+}
+
+async function searchSeries(q: string, signal?: AbortSignal): Promise<EntitySearchOption[]> {
+  const items = (await novelApi.searchSeries?.(q, { signal })) ?? []
+  return items.map((item) => ({
+    id: item.series_id,
+    name: item.series_name ?? null,
+    source: item.source,
+    novelCount: item.novel_count,
+  }))
+}
 
 const preview = ref<BatchMetadataResult | null>(null)
 const previewLoading = ref(false)
@@ -42,10 +63,10 @@ const hasChanges = computed(
 
 const validationError = computed<string | null>(() => {
   if (!unlinkAuthor.value && authorIdNumber.value === undefined) {
-    return '作者 ID 必须是正整数'
+    return '作者 ID 必须是非零整数'
   }
   if (!unlinkSeries.value && seriesIdNumber.value === undefined) {
-    return '系列 ID 必须是正整数'
+    return '系列 ID 必须是非零整数'
   }
   return null
 })
@@ -64,8 +85,8 @@ const previewText = computed(() => {
   const result = preview.value
   if (!result) return '统计暂不可用；仍可提交，跳过数以服务端结果为准'
   return (
-    `已勾选 ${result.matched} 篇：${result.applicable} 篇本地书将被修改，` +
-    `${result.skipped} 篇 pixiv 书跳过`
+    `已勾选 ${result.matched} 篇：${result.applicable} 篇可编辑书将被修改，` +
+    `${result.skipped} 篇只读/不可编辑书跳过`
   )
 })
 
@@ -162,14 +183,15 @@ async function handleConfirm() {
       </p>
 
       <div class="grid gap-x-3 gap-y-4 sm:grid-cols-2">
-        <PixivIdLookupField
+        <EntityLookupField
           ref="authorFieldRef"
           v-model="authorId"
           v-model:unlinked="unlinkAuthor"
           entity="作者"
           label="作者 ID"
           :fetch="novelApi.lookupAuthor"
-          placeholder="如 1234567"
+          :search="searchAuthors"
+          placeholder="输入名称或数字 ID"
           empty-note="留空 = 不修改作者"
           unlink-note="勾选 = 解除作者关联；显示名保留（来自文件名解析）"
           :allow-unlink="true"
@@ -180,14 +202,15 @@ async function handleConfirm() {
           @update:id-number="authorIdNumber = $event"
         />
 
-        <PixivIdLookupField
+        <EntityLookupField
           ref="seriesFieldRef"
           v-model="seriesId"
           v-model:unlinked="unlinkSeries"
           entity="系列"
           label="系列 ID"
           :fetch="novelApi.lookupSeries"
-          placeholder="如 123456"
+          :search="searchSeries"
+          placeholder="输入名称或数字 ID"
           empty-note="留空 = 不修改系列"
           unlink-note="勾选 = 解除系列关联，并清掉显示名与章节号"
           :allow-unlink="true"

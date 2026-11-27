@@ -148,4 +148,39 @@ describe('UploadModal', () => {
     expect(wrapper.emitted('uploaded')).toEqual([[{ created: 0, duplicate: 2, failed: 0 }]])
     wrapper.unmount()
   })
+
+  it('accepts negative preset author ID and passes it to uploadFiles', async () => {
+    mocks.uploadFiles.mockResolvedValue({
+      results: [{ filename: 'ext.txt', status: 'created', novel_id: -5, title: 'Ext', author_name: 'ExtAuthor' }],
+      created: 1,
+      duplicate: 0,
+      failed: 0,
+    })
+
+    const wrapper = mount(UploadModal, {
+      props: { isOpen: true },
+      global: { stubs: { teleport: true } },
+    })
+    await flushPromises()
+
+    await wrapper.find('[data-testid="upload-preset-toggle"]').trigger('click')
+    await nextTick()
+    await wrapper.find('[data-testid="upload-preset-author-input"]').setValue('-12')
+    await nextTick()
+
+    const fileInput = wrapper.find('[data-testid="upload-file-input"]')
+    const file = new File(['ext'], 'ext.txt', { type: 'text/plain' })
+    Object.defineProperty(fileInput.element, 'files', { value: [file], configurable: true })
+    await fileInput.trigger('change')
+    await nextTick()
+
+    const confirmBtn = wrapper.findAll('button').find((b) => b.text().trim() === '上传')!
+    expect(confirmBtn.attributes('disabled')).toBeUndefined()
+
+    await wrapper.get('[data-testid="base-modal"] form').trigger('submit')
+    await flushPromises()
+
+    expect(mocks.uploadFiles).toHaveBeenCalledWith([file], expect.any(Function), -12)
+    wrapper.unmount()
+  })
 })

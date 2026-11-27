@@ -17,6 +17,10 @@ export type NovelUpdatePayload = S['NovelUpdateRequest']
 export type AuthorLookup = S['AuthorLookupResponse']
 /** 系列 ID 预览（`GET /api/novels/series/{series_id}`）—— 与作者那份同构。 */
 export type SeriesLookup = S['SeriesLookupResponse']
+/** 作者名称 / ID 搜索结果项（`GET /api/novels/author/search`）。 */
+export type AuthorSearchItem = S['AuthorSearchItem']
+/** 系列名称 / ID 搜索结果项（`GET /api/novels/series/search`）。 */
+export type SeriesSearchItem = S['SeriesSearchItem']
 
 /** `/api/novels/count` 响应：total 可见数，truncated 是否达到服务端计数上限。 */
 export type NovelCountResult = S['NovelCountResponse']

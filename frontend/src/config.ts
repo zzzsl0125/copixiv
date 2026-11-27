@@ -1,4 +1,5 @@
-import type { OrderBy, OrderDirection } from './types/novels'
+import { isOrderBy, isOrderDirection, type OrderBy, type OrderDirection } from './types/novels'
+import type { SourceShelfDef } from './types/sources'
 
 /**
  * Frontend-bundled config defaults.
@@ -75,29 +76,77 @@ export function resolveSection(keyword: string): SectionId | null {
   return found ?? null
 }
 
+/** Return whether *keyword* is a single `source:<name>;` filter condition. */
+export function isSingleSourceFilter(keyword: string): boolean {
+  const conditions = keyword
+    .split(/[;；]/)
+    .map((cond) => cond.trim())
+    .filter(Boolean)
+  if (conditions.length !== 1) return false
+  const cond = conditions[0]!
+  const colonIndex = cond.indexOf(':')
+  if (colonIndex <= 0) return false
+  const type = cond.substring(0, colonIndex).trim()
+  const value = cond.substring(colonIndex + 1).trim()
+  return type === 'source' && value.length > 0
+}
+
+/** Convert a backend `SourceShelfDef` into a validated `SectionDef`. */
+export function shelfToSectionDef(shelf: SourceShelfDef): SectionDef {
+  return {
+    keyword: shelf.keyword,
+    min_like: shelf.min_like,
+    min_text: shelf.min_text,
+    order_by: isOrderBy(shelf.order_by) ? shelf.order_by : 'id',
+    order_direction: isOrderDirection(shelf.order_direction) ? shelf.order_direction : 'DESC',
+  }
+}
+
+function findMatchingShelf(
+  keyword: string,
+  extraShelves?: readonly SourceShelfDef[],
+): SourceShelfDef | undefined {
+  const trimmed = keyword.trim()
+  if (!trimmed || !extraShelves?.length) return undefined
+  return extraShelves.find((shelf) => shelf.keyword.trim() === trimmed)
+}
+
 /**
- * 该 keyword 生效的 section 定义：命中某 section 用它，自由搜索回落到
+ * 该 keyword 生效的 section 定义：命中静态或动态书架用它，自由搜索回落到
  * `novels`（阈值/排序的缺省语义）。
  *
  * 注意与 `resolveSection()` 的区别：后者返回 null 表示「侧边栏无高亮」，
  * 但阈值仍要有确定取值——自由搜索不能继承上一个 section 的 0/0 阈值，
  * 否则「我的上传」之后再搜别的关键词会悄悄失去 min_like 过滤。
  */
-export function sectionFor(keyword: string): SectionDef {
-  return resolveSection(keyword) ? SECTIONS[resolveSection(keyword) as SectionId] : SECTIONS.novels
+export function sectionFor(
+  keyword: string,
+  extraShelves?: readonly SourceShelfDef[],
+): SectionDef {
+  const section = resolveSection(keyword)
+  if (section) return SECTIONS[section]
+  const matchedShelf = findMatchingShelf(keyword, extraShelves)
+  if (matchedShelf) return shelfToSectionDef(matchedShelf)
+  return SECTIONS.novels
 }
 
 /**
  * Return an explicit `exclude_blocked` query override for *sectionOrKeyword*.
  *
- * Shelf sections (`favourites`, `special_follow`, `uploads`) return `false` so
- * personal lists never hide blocked-tag novels; browse/search views return
- * `undefined` so the backend applies its own `exclude_blocked_tag_novels` setting.
+ * Shelf sections (`favourites`, `special_follow`, `uploads`, dynamic shelves,
+ * and single `source:<name>;` filters) return `false` so personal/source lists
+ * never hide blocked-tag novels; browse/search views return `undefined` so the
+ * backend applies its own `exclude_blocked_tag_novels` setting.
  */
-export function excludeBlockedOverride(sectionOrKeyword: string): false | undefined {
+export function excludeBlockedOverride(
+  sectionOrKeyword: string,
+  extraShelves?: readonly SourceShelfDef[],
+): false | undefined {
   const trimmed = sectionOrKeyword.trim()
   const section = trimmed in SECTIONS ? (trimmed as SectionId) : resolveSection(trimmed)
   if (section && section !== 'novels') return false
+  if (!trimmed) return undefined
+  if (findMatchingShelf(trimmed, extraShelves) || isSingleSourceFilter(trimmed)) return false
   return undefined
 }
 

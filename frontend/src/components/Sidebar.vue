@@ -1,10 +1,24 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, type Component } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Search, Settings, ListChecks, AlertTriangle, Upload } from '@lucide/vue'
+import {
+  AlertTriangle,
+  BookOpen,
+  Compass,
+  Database,
+  Globe,
+  Heart,
+  ListChecks,
+  Settings,
+  Sparkles,
+  Star,
+  Upload,
+} from '@lucide/vue'
 import type { SectionId } from '../config'
 import type { NovelFilters } from '../types'
+import type { SourceShelfDef } from '../types/sources'
 import { useNovelQueryState, useNovelShellState } from '../composables'
+import { useSources } from '../composables/useSources'
 
 defineProps<{
   isOpen: boolean
@@ -16,13 +30,29 @@ const emit = defineEmits<{
 
 const route = useRoute()
 const router = useRouter()
-const { filters, activeSection, navigateToSection, updateFilters } = useNovelQueryState()
+const { filters, activeSection, navigateToSection, navigateToShelf, updateFilters } =
+  useNovelQueryState()
 const { isBatchMode, isInCollectionView, enterBatchMode, toggleBatchMode } = useNovelShellState()
+const { shelves } = useSources()
 
 const isNovelsRoute = computed(() => route.path === '/')
+const currentKeyword = computed(() => filters.value.keyword.trim())
+
+const SHELF_ICONS: Record<string, Component> = {
+  sparkles: Sparkles,
+  globe: Globe,
+  upload: Upload,
+  book: BookOpen,
+}
+const getShelfIcon = (icon: string): Component => SHELF_ICONS[icon] ?? BookOpen
 
 const handleSectionClick = (section: SectionId) => {
   void navigateToSection(section)
+  emit('close')
+}
+
+const handleDynamicShelfClick = (shelf: SourceShelfDef) => {
+  void navigateToShelf(shelf)
   emit('close')
 }
 
@@ -79,7 +109,7 @@ const navIconClass = 'mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500'
           data-testid="nav-novels"
           @click="handleSectionClick('novels')"
         >
-          <Search :class="navIconClass" /> 小说列表
+          <Compass :class="navIconClass" /> 随机发现
         </button>
         <button
           type="button"
@@ -87,7 +117,7 @@ const navIconClass = 'mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500'
           data-testid="nav-favourites"
           @click="handleSectionClick('favourites')"
         >
-          <Search :class="navIconClass" /> 我的收藏
+          <Heart :class="navIconClass" /> 我的收藏
         </button>
         <button
           type="button"
@@ -95,27 +125,49 @@ const navIconClass = 'mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500'
           data-testid="nav-special-follow"
           @click="handleSectionClick('special_follow')"
         >
-          <Search :class="navIconClass" /> 特别关注
+          <Star :class="navIconClass" /> 特别关注
         </button>
-        <button
-          type="button"
-          :class="[navItemClass(isNovelsRoute && activeSection === 'uploads'), 'w-full']"
-          data-testid="nav-uploads"
-          @click="handleSectionClick('uploads')"
-        >
-          <Upload :class="navIconClass" /> 我的上传
-        </button>
+
+        <!-- 来源书架 -->
+        <template v-if="shelves.length > 0">
+          <h3 class="pt-4 text-sm font-semibold text-gray-500 uppercase tracking-wider mb-1">
+            来源书架
+          </h3>
+          <button
+            v-for="entry in shelves"
+            :key="entry.source"
+            type="button"
+            :class="[
+              navItemClass(isNovelsRoute && currentKeyword === entry.shelf.keyword.trim()),
+              'w-full',
+            ]"
+            :data-testid="`nav-shelf-${entry.source}`"
+            @click="handleDynamicShelfClick(entry.shelf)"
+          >
+            <component :is="getShelfIcon(entry.shelf.icon)" :class="navIconClass" />
+            {{ entry.shelf.label || entry.displayName }}
+          </button>
+        </template>
 
         <!-- 配置 -->
         <h3 class="pt-4 text-sm font-semibold text-gray-500 uppercase tracking-wider mb-1">配置</h3>
-        <router-link to="/tasks" :class="[navItemClass(false), route.path === '/tasks' ? 'bg-gray-100' : '']" @click="$emit('close')">
+        <router-link to="/tasks" :class="navItemClass(route.path === '/tasks')" @click="$emit('close')">
           <Settings :class="navIconClass" /> 任务管理
         </router-link>
-        <router-link to="/tag-management" :class="[navItemClass(false), route.path === '/tag-management' ? 'bg-gray-100' : '']" @click="$emit('close')">
+        <router-link
+          to="/tag-management"
+          :class="navItemClass(route.path === '/tag-management')"
+          @click="$emit('close')"
+        >
           <Settings :class="navIconClass" /> 标签管理
         </router-link>
-        <router-link to="/tokens" :class="[navItemClass(false), route.path === '/tokens' ? 'bg-gray-100' : '']" @click="$emit('close')">
-          <Settings :class="navIconClass" /> 账号管理
+        <router-link
+          to="/sources"
+          :class="navItemClass(route.path === '/sources')"
+          data-testid="nav-sources"
+          @click="$emit('close')"
+        >
+          <Database :class="navIconClass" /> 数据源管理
         </router-link>
 
         <!-- 其他 -->

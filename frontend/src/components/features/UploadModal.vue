@@ -3,7 +3,8 @@ import { computed, ref, watch } from 'vue'
 import { CollapsibleContent, CollapsibleRoot, CollapsibleTrigger } from 'reka-ui'
 import { AlertCircle, CheckCircle2, FileUp as FileUpIcon, X } from '@lucide/vue'
 import BaseModal from '../ui/BaseModal.vue'
-import PixivIdLookupField from './PixivIdLookupField.vue'
+import EntityLookupField from './EntityLookupField.vue'
+import type { EntitySearchOption } from './EntityLookupField.vue'
 import { getApiErrorMessage, libraryApi, novelApi } from '../../api'
 import { parseIdInput, useToast } from '../../composables'
 import { UPLOAD_STATUS_LABEL, formatFileSize } from '../../types'
@@ -31,7 +32,17 @@ const batchTotal = ref(0)
 
 const presetOpen = ref(false)
 const presetAuthorId = ref('')
-const presetFieldRef = ref<InstanceType<typeof PixivIdLookupField> | null>(null)
+const presetFieldRef = ref<InstanceType<typeof EntityLookupField> | null>(null)
+
+async function searchAuthors(q: string, signal?: AbortSignal): Promise<EntitySearchOption[]> {
+  const items = (await novelApi.searchAuthors?.(q, { signal })) ?? []
+  return items.map((item) => ({
+    id: item.author_id,
+    name: item.author_name ?? null,
+    source: item.source,
+    novelCount: item.novel_count,
+  }))
+}
 
 const presetIdNumber = computed(() => parseIdInput(presetAuthorId.value))
 const presetInvalid = computed(() => presetIdNumber.value === undefined)
@@ -204,13 +215,14 @@ const uploadMore = () => {
         </CollapsibleTrigger>
 
         <CollapsibleContent class="mt-2">
-          <PixivIdLookupField
+          <EntityLookupField
             ref="presetFieldRef"
             v-model="presetAuthorId"
             entity="作者"
             label="作者 ID"
             :fetch="novelApi.lookupAuthor"
-            placeholder="如 1234567"
+            :search="searchAuthors"
+            placeholder="输入名称或数字 ID"
             empty-note="留空 = 按文件名解析作者"
             unlink-note="留空 = 按文件名解析作者"
             input-test-id="upload-preset-author-input"

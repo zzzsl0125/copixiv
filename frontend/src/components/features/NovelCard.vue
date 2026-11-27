@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useSources } from '../../composables/useSources'
 import { formatNumber } from '../../lib/utils'
 import type { Novel, TagPreference } from '../../types'
 
@@ -27,19 +28,21 @@ const emit = defineEmits<{
   edit: [novel: Novel]
 }>()
 
+const { getBadge } = useSources()
+
 const showMobileActions = computed(() => props.isActive)
 const hasEpubReady = computed(() => props.novel.has_epub === 2)
 const isMissingSource = computed(() => props.novel.has_epub === 4)
-const isLocal = computed(() => props.novel.source === 'local')
+const sourceBadge = computed(() => getBadge(props.novel.source))
 
 const badges = computed(() => {
   const list: { key: string; label: string; class: string; title: string }[] = []
-  if (isLocal.value) {
+  if (sourceBadge.value) {
     list.push({
-      key: 'local',
-      label: '本地',
-      class: 'bg-amber-100 text-amber-800',
-      title: '本地上传（source=local）',
+      key: props.novel.source,
+      label: sourceBadge.value.label,
+      class: sourceBadge.value.class,
+      title: sourceBadge.value.title,
     })
   }
   if (hasEpubReady.value) {
@@ -142,17 +145,9 @@ const getTagClass = (tag: string) => {
     </button>
     <div class="p-5 grow flex flex-col">
       <div class="mb-1">
-        <span
-          v-if="isLocal"
-          class="text-lg font-bold text-gray-900 inline-block"
-          :title="novel.title"
-          @click="handleTitleClick"
-        >
-          {{ novel.title }}
-        </span>
         <a
-          v-else
-          :href="`https://www.pixiv.net/novel/show.php?id=${novel.id}`"
+          v-if="novel.external_url"
+          :href="novel.external_url"
           target="_blank"
           rel="noopener noreferrer"
           class="text-lg font-bold text-gray-900 hover:text-blue-600 inline-block"
@@ -161,6 +156,14 @@ const getTagClass = (tag: string) => {
         >
           {{ novel.title }}
         </a>
+        <span
+          v-else
+          class="text-lg font-bold text-gray-900 inline-block"
+          :title="novel.title"
+          @click="handleTitleClick"
+        >
+          {{ novel.title }}
+        </span>
       </div>
       <div v-if="novel.series_name || novel.series_id" class="text-sm text-gray-500 mb-1 flex items-start">
         <span class="shrink-0 whitespace-nowrap">系列：</span>

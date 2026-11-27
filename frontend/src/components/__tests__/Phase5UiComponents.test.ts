@@ -4,7 +4,9 @@ import { defineComponent, nextTick, ref } from 'vue'
 import ConfirmDialog from '../ui/ConfirmDialog.vue'
 import CronInput from '../features/CronInput.vue'
 import TagChipInput from '../features/TagChipInput.vue'
-import PixivIdLookupField from '../features/PixivIdLookupField.vue'
+import EntityLookupField from '../features/EntityLookupField.vue'
+import type { EntitySearchOption } from '../features/EntityLookupField.vue'
+import EditNovelModal from '../features/EditNovelModal.vue'
 import NovelCard from '../features/NovelCard.vue'
 import LogViewer from '../features/LogViewer.vue'
 import LoadMore from '../features/LoadMore.vue'
@@ -29,6 +31,7 @@ function makeSampleNovel(overrides: Partial<Novel> = {}): Novel {
     has_epub: 1,
     is_favourite: false,
     is_special_follow: false,
+    can_sync: true,
     source: 'pixiv',
     editable_fields: ['tags'],
     ...overrides,
@@ -163,7 +166,7 @@ describe('Phase 5 UI components', () => {
     expect(liveWrapper.text()).toContain('共 3 个')
   })
 
-  it('PixivIdLookupField debounces valid lookups, rejects non-numeric IDs, and supports unlink disable state', async () => {
+  it('EntityLookupField debounces valid lookups, rejects non-numeric IDs without search, and supports unlink disable state', async () => {
     vi.useFakeTimers()
 
     const fetchMock = vi.fn(async (id: number) => ({
@@ -172,14 +175,14 @@ describe('Phase 5 UI components', () => {
     }))
 
     const Host = defineComponent({
-      components: { PixivIdLookupField },
+      components: { EntityLookupField },
       setup() {
         const idText = ref('')
         const unlinked = ref(false)
         return { idText, unlinked, fetchMock }
       },
       template: `
-        <PixivIdLookupField
+        <EntityLookupField
           v-model="idText"
           entity="作者"
           label="作者 ID"
@@ -376,7 +379,7 @@ describe('Phase 5 UI components', () => {
     expect(wrapper.vm.chipRef?.hasDraft).toBe(false)
   })
 
-  it('PixivIdLookupField computes and exposes hint even when showHint is false', async () => {
+  it('EntityLookupField computes and exposes hint even when showHint is false', async () => {
     vi.useFakeTimers()
     const fetchMock = vi.fn(async (id: number) => ({
       name: `作者-${id}`,
@@ -384,14 +387,14 @@ describe('Phase 5 UI components', () => {
     }))
 
     const Host = defineComponent({
-      components: { PixivIdLookupField },
+      components: { EntityLookupField },
       setup() {
         const idText = ref('')
-        const fieldRef = ref<InstanceType<typeof PixivIdLookupField> | null>(null)
+        const fieldRef = ref<InstanceType<typeof EntityLookupField> | null>(null)
         return { idText, fieldRef, fetchMock }
       },
       template: `
-        <PixivIdLookupField
+        <EntityLookupField
           ref="fieldRef"
           v-model="idText"
           entity="作者"
@@ -417,5 +420,182 @@ describe('Phase 5 UI components', () => {
 
     expect(wrapper.find('[data-testid="hidden-hint-el"]').exists()).toBe(false)
     expect(wrapper.vm.fieldRef?.hint?.text).toContain('✓ 作者-777 · 库内已有 5 本')
+  })
+
+  it('EntityLookupField supports name search dropdown selection, Escape/blur dismissal, and negative ID lookup', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn(async (id: number) => ({
+      name: `外部作者-${id}`,
+      novel_count: 2,
+    }))
+    const searchMock = vi.fn(async (_q: string): Promise<EntitySearchOption[]> => [
+      { id: -101, name: 'Alice', source: 'syosetu', novelCount: 4 },
+      { id: 202, name: 'Alice-Local', source: 'local', novelCount: 1 },
+    ])
+
+    const Host = defineComponent({
+      components: { EntityLookupField },
+      setup() {
+        const idText = ref('')
+        return { idText, fetchMock, searchMock }
+      },
+      template: `
+        <EntityLookupField
+          v-model="idText"
+          entity="作者"
+          label="作者 ID"
+          :fetch="fetchMock"
+          :search="searchMock"
+          empty-note="留空保持不变"
+          unlink-note="解除作者关联"
+          input-test-id="search-author-input"
+          hint-test-id="search-author-hint"
+        />
+      `,
+    })
+
+    const wrapper = mount(Host)
+    const input = wrapper.get('[data-testid="search-author-input"]')
+
+    // Typing a name triggers debounced search instead of showing ID-only error
+    await input.setValue('Alice')
+    await nextTick()
+    expect(wrapper.get('[data-testid="search-author-hint"]').text()).toBe('搜索中…')
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(350)
+    await flushPromises()
+
+    expect(searchMock).toHaveBeenCalledWith('Alice', expect.any(AbortSignal))
+    const dropdown = wrapper.get('[data-testid="search-author-input-dropdown"]')
+    expect(dropdown.attributes('role')).toBe('listbox')
+    expect(dropdown.text()).toContain('Alice')
+    expect(dropdown.text()).toContain('syosetu')
+    expect(dropdown.text()).toContain('4 篇')
+    expect(dropdown.text()).toContain('本地')
+    expect(dropdown.text()).toContain('1 篇')
+
+    // Escape closes dropdown without altering input
+    await input.trigger('keydown', { key: 'Escape' })
+    await nextTick()
+    expect(wrapper.find('[data-testid="search-author-input-dropdown"]').exists()).toBe(false)
+
+    // ArrowDown re-opens dropdown and clicking an option selects its ID
+    await input.trigger('keydown', { key: 'ArrowDown' })
+    await nextTick()
+    expect(wrapper.find('[data-testid="search-author-input-dropdown"]').exists()).toBe(true)
+
+    await wrapper.get('[data-testid="search-author-input-option--101"]').trigger('click')
+    await nextTick()
+
+    expect(wrapper.vm.idText).toBe('-101')
+    expect(wrapper.find('[data-testid="search-author-input-dropdown"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="search-author-hint"]').text()).toBe('✓ Alice · 库内已有 4 本')
+
+    // Direct negative ID entry triggers fetch(id) after debounce
+    await input.setValue('-99')
+    await vi.advanceTimersByTimeAsync(350)
+    await flushPromises()
+
+    expect(fetchMock).toHaveBeenCalledWith(-99, expect.any(AbortSignal))
+    expect(wrapper.get('[data-testid="search-author-hint"]').text()).toBe('✓ 外部作者--99 · 库内已有 2 本')
+
+    // Blur aborts pending search and closes dropdown
+    await input.setValue('Bob')
+    await vi.advanceTimersByTimeAsync(350)
+    await flushPromises()
+    expect(wrapper.find('[data-testid="search-author-input-dropdown"]').exists()).toBe(true)
+    await input.trigger('blur')
+    await nextTick()
+    expect(wrapper.find('[data-testid="search-author-input-dropdown"]').exists()).toBe(false)
+  })
+
+  it('EntityLookupField aborts superseded search requests and discards stale responses', async () => {
+    vi.useFakeTimers()
+    const resolvers = new Map<string, (items: EntitySearchOption[]) => void>()
+    const signals: AbortSignal[] = []
+    const searchMock = vi.fn((q: string, signal?: AbortSignal) => {
+      if (signal) signals.push(signal)
+      return new Promise<EntitySearchOption[]>((resolve) => {
+        resolvers.set(q, resolve)
+      })
+    })
+    const fetchMock = vi.fn(async (id: number) => ({ name: `Author-${id}`, novel_count: 0 }))
+
+    const Host = defineComponent({
+      components: { EntityLookupField },
+      setup() {
+        const idText = ref('')
+        return { idText, fetchMock, searchMock }
+      },
+      template: `
+        <EntityLookupField
+          v-model="idText"
+          entity="作者"
+          label="作者 ID"
+          :fetch="fetchMock"
+          :search="searchMock"
+          empty-note="留空保持不变"
+          unlink-note="解除作者关联"
+          input-test-id="race-author-input"
+          hint-test-id="race-author-hint"
+        />
+      `,
+    })
+
+    const wrapper = mount(Host)
+    const input = wrapper.get('[data-testid="race-author-input"]')
+
+    await input.setValue('First')
+    await vi.advanceTimersByTimeAsync(350)
+    expect(signals).toHaveLength(1)
+    expect(signals[0]!.aborted).toBe(false)
+
+    // Typing a new query aborts the first in-flight search
+    await input.setValue('Second')
+    await nextTick()
+    expect(signals[0]!.aborted).toBe(true)
+
+    await vi.advanceTimersByTimeAsync(350)
+    expect(signals).toHaveLength(2)
+    expect(signals[1]!.aborted).toBe(false)
+
+    // Newer search resolves, then stale first search resolves
+    resolvers.get('Second')!([{ id: 88, name: 'FreshMatch', source: 'pixiv', novelCount: 2 }])
+    await flushPromises()
+    resolvers.get('First')!([{ id: 11, name: 'StaleMatch', source: 'local', novelCount: 1 }])
+    await flushPromises()
+
+    const dropdown = wrapper.get('[data-testid="race-author-input-dropdown"]')
+    expect(dropdown.text()).toContain('FreshMatch')
+    expect(dropdown.text()).not.toContain('StaleMatch')
+  })
+
+  it('EditNovelModal sync button visibility honors novel.can_sync', async () => {
+    const syncableNovel = makeSampleNovel({ source: 'syosetu', can_sync: true })
+    const wrapper = mount(EditNovelModal, {
+      props: {
+        isOpen: true,
+        novel: syncableNovel,
+      },
+    })
+    await nextTick()
+    expect(wrapper.find('[data-testid="edit-sync"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="edit-source-badge"]').text()).toBe('syosetu')
+
+    await wrapper.setProps({
+      novel: makeSampleNovel({ source: 'pixiv', can_sync: false }),
+    })
+    await nextTick()
+    expect(wrapper.find('[data-testid="edit-sync"]').exists()).toBe(false)
+
+    await wrapper.setProps({
+      novel: makeSampleNovel({ source: 'local', can_sync: false }),
+    })
+    await nextTick()
+    expect(wrapper.find('[data-testid="edit-sync"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="edit-source-badge"]').text()).toBe('本地')
+
+    wrapper.unmount()
   })
 })

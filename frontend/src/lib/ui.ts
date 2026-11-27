@@ -1,7 +1,7 @@
 /**
  * 列表顶部栏的共用样式（docs/LIBRARY_DESIGN.md §5）。
  *
- * BatchBar（批量模式）/ ExclusionBar（厌恶标签排除）/ UploadBar（我的上传）
+ * BatchBar（批量模式）/ ExclusionBar（厌恶标签排除）/ SourceShelfBar（来源书架工具条）
  * 三条栏过去各抄一份同样的 Tailwind 串——收成单源，避免改一处漏两处。
  *
  * 为什么共享「类名」而不是抽一层外壳组件：三条栏的 DOM 结构本就一致

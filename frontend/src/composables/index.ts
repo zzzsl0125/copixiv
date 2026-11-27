@@ -11,7 +11,14 @@ export {
   type NovelShellState,
 } from './useNovelShellState'
 export { useSystem } from './useSystem'
-export { useTokens } from './useTokens'
+export {
+  useSources,
+  useSourceCredentials,
+  sourceBadgeFor,
+  isMaskedSecret,
+  type DynamicShelfEntry,
+  type SourceBadge,
+} from './useSources'
 export {
   useVirtualMasonry,
   MASONRY_GAP_PX,

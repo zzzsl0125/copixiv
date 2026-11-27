@@ -52,7 +52,7 @@ export interface paths {
         put?: never;
         /**
          * Retry Failed Novels
-         * @description Enqueue a background ``failed_retry`` task for the given ids.
+         * @description Enqueue a background ``failed_retry`` task for the given failure records or novel ids.
          */
         post: operations["retry_failed_novels_api_failed_novels_retry_post"];
         delete?: never;
@@ -87,7 +87,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/failed-novels/{novel_id}/reset-count": {
+    "/api/failed-novels/{failed_id}/reset-count": {
         parameters: {
             query?: never;
             header?: never;
@@ -104,7 +104,7 @@ export interface paths {
          *     info) remains visible in the 「失败记录」 view while the novel is
          *     unblocked for automatic retry.
          */
-        post: operations["reset_failed_novel_count_api_failed_novels__novel_id__reset_count_post"];
+        post: operations["reset_failed_novel_count_api_failed_novels__failed_id__reset_count_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -154,6 +154,26 @@ export interface paths {
         };
         /** Get Novels */
         get: operations["get_novels_api_novels_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/novels/author/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Search Authors
+         * @description Search known authors by exact ID or name substring, optionally filtered by source.
+         */
+        get: operations["search_authors_api_novels_author_search_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -420,6 +440,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/novels/series/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Search Series
+         * @description Search known series by exact ID or name substring, optionally filtered by source.
+         */
+        get: operations["search_series_api_novels_series_search_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/novels/series/{series_id}": {
         parameters: {
             query?: never;
@@ -551,14 +591,14 @@ export interface paths {
         put?: never;
         /**
          * Sync Novel
-         * @description 按 id 从 pixiv 重抓这一本的元数据并落库（编辑器的「同步」）。
+         * @description 按 id 从来源重抓这一本的元数据并落库（编辑器的「同步」）。
          *
          *     修的是"手改会与来源打架"那类错配：pixiv 书的 ``title`` / ``author_id`` /
          *     ``series_id`` 都是只读（``field_policy.py``），错配之后的出口就是这里 ——
          *     把来源值拉回来（docs/NOVEL_EDIT_DESIGN.md §4.3 的单本版）。
          *
          *     **无请求体**：动作的输入只有路径上的 id。响应与 PATCH 同形状（更新后的完整
-         *     ``NovelBase``），前端同样原地替换卡片。本地书 → 400（没有来源可恢复）；
+         *     ``NovelBase``），前端同样原地替换卡片。本地书或未启用来源 → 400；
          *     pixiv 上已不存在 / 受限（webview 返回空）→ 404。
          *
          *     依赖用 ``UowDep`` 而**不是** ``get_write_uow``：抓取必须在写事务
@@ -604,6 +644,154 @@ export interface paths {
         post?: never;
         /** Delete Search History */
         delete: operations["delete_search_history_api_search_history__history_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sources": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Sources
+         * @description List all registered sources with runtime configs, manifests, and credential counts.
+         */
+        get: operations["list_sources_api_sources_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sources/fetch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Fetch By Refs
+         * @description Validate source references and enqueue a ``source_fetch`` background task.
+         */
+        post: operations["fetch_by_refs_api_sources_fetch_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sources/{source}/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Update Source Config
+         * @description Update a source's enabled flag or settings and hot-reload its runtime.
+         */
+        put: operations["update_source_config_api_sources__source__config_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sources/{source}/credentials": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Source Credentials
+         * @description List masked credentials configured for *source*.
+         */
+        get: operations["list_source_credentials_api_sources__source__credentials_get"];
+        put?: never;
+        /**
+         * Create Source Credential
+         * @description Create a new credential for *source* and hot-reload its runtime.
+         */
+        post: operations["create_source_credential_api_sources__source__credentials_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sources/{source}/credentials/reorder": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reorder Source Credentials
+         * @description Reorder credential priority for *source* without triggering runtime reload.
+         */
+        post: operations["reorder_source_credentials_api_sources__source__credentials_reorder_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sources/{source}/credentials/{cred_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Update Source Credential
+         * @description Update an existing credential for *source* and hot-reload its runtime.
+         */
+        put: operations["update_source_credential_api_sources__source__credentials__cred_id__put"];
+        post?: never;
+        /**
+         * Delete Source Credential
+         * @description Delete a credential from *source* and hot-reload its runtime.
+         */
+        delete: operations["delete_source_credential_api_sources__source__credentials__cred_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sources/{source}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test Source Connection
+         * @description Run an active connectivity check against *source*.
+         */
+        post: operations["test_source_connection_api_sources__source__test_post"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -902,59 +1090,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/tokens": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get Tokens */
-        get: operations["get_tokens_api_tokens_get"];
-        put?: never;
-        /** Create Token */
-        post: operations["create_token_api_tokens_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/tokens/reorder": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Reorder Tokens */
-        post: operations["reorder_tokens_api_tokens_reorder_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/tokens/{token_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        /** Update Token */
-        put: operations["update_token_api_tokens__token_id__put"];
-        post?: never;
-        /** Delete Token */
-        delete: operations["delete_token_api_tokens__token_id__delete"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -986,6 +1121,23 @@ export interface components {
              * @enum {string}
              */
             source: "local" | "pixiv" | "unknown";
+        };
+        /**
+         * AuthorSearchItem
+         * @description Author search result item (``GET /api/novels/author/search``).
+         */
+        AuthorSearchItem: {
+            /** Author Id */
+            author_id: number;
+            /** Author Name */
+            author_name?: string | null;
+            /**
+             * Novel Count
+             * @default 0
+             */
+            novel_count: number;
+            /** Source */
+            source: string;
         };
         /**
          * BatchExportPreviewRequest
@@ -1125,6 +1277,65 @@ export interface components {
             files?: string[] | null;
         };
         /**
+         * CredentialFieldSpecSchema
+         * @description Schema describing one secret or metadata field for a source credential.
+         */
+        CredentialFieldSpecSchema: {
+            /** Default */
+            default?: unknown;
+            /**
+             * Description
+             * @default
+             */
+            description: string;
+            /**
+             * Field Type
+             * @enum {string}
+             */
+            field_type: "string" | "secret" | "boolean";
+            /** Key */
+            key: string;
+            /** Label */
+            label: string;
+            /**
+             * Placeholder
+             * @default
+             */
+            placeholder: string;
+            /**
+             * Required
+             * @default false
+             */
+            required: boolean;
+        };
+        /**
+         * CredentialKindSpecSchema
+         * @description Schema describing one credential kind supported by a source.
+         */
+        CredentialKindSpecSchema: {
+            /** Kind */
+            kind: string;
+            /** Label */
+            label: string;
+            /** Meta Fields */
+            meta_fields?: components["schemas"]["CredentialFieldSpecSchema"][];
+            /** Secret Fields */
+            secret_fields?: components["schemas"]["CredentialFieldSpecSchema"][];
+            /**
+             * Supports Reorder
+             * @default false
+             */
+            supports_reorder: boolean;
+            /** Unique Meta Flags */
+            unique_meta_flags?: string[];
+        };
+        /**
+         * EpubPolicy
+         * @description How EPUB reconciliation validates novels belonging to a source.
+         * @enum {string}
+         */
+        EpubPolicy: "container_only" | "strict_placeholders" | "best_effort_external";
+        /**
          * EpubStatus
          * @description EPUB conversion status for a novel.
          *
@@ -1166,6 +1377,8 @@ export interface components {
         FailedNovelItem: {
             /** Error Message */
             error_message?: string | null;
+            /** External Url */
+            external_url?: string | null;
             /**
              * Failed Times
              * @default 1
@@ -1173,10 +1386,22 @@ export interface components {
             failed_times: number;
             /** Failure Type */
             failure_type?: string | null;
+            /** Id */
+            id: number;
             /** Last Failed At */
             last_failed_at?: string | null;
             /** Novel Id */
-            novel_id: number;
+            novel_id?: number | null;
+            /**
+             * Source
+             * @default pixiv
+             */
+            source: string;
+            /**
+             * Source Key
+             * @default
+             */
+            source_key: string;
             /** Title */
             title?: string | null;
         };
@@ -1199,8 +1424,10 @@ export interface components {
         };
         /** FailedNovelRetryRequest */
         FailedNovelRetryRequest: {
+            /** Ids */
+            ids?: number[];
             /** Novel Ids */
-            novel_ids: number[];
+            novel_ids?: number[];
         };
         /**
          * FormatMode
@@ -1247,6 +1474,11 @@ export interface components {
             author_id?: number | null;
             /** Author Name */
             author_name?: string | null;
+            /**
+             * Can Sync
+             * @default false
+             */
+            can_sync: boolean;
             /** Create Time */
             create_time?: string | null;
             /**
@@ -1262,6 +1494,8 @@ export interface components {
              *     服务端下发，而不是让客户端猜。
              */
             readonly editable_fields: string[];
+            /** External Url */
+            external_url?: string | null;
             /** @default 0 */
             has_epub: components["schemas"]["EpubStatus"];
             /** Id */
@@ -1287,8 +1521,11 @@ export interface components {
             series_index?: number | null;
             /** Series Name */
             series_name?: string | null;
-            /** @default pixiv */
-            source: components["schemas"]["NovelSource"];
+            /**
+             * Source
+             * @default pixiv
+             */
+            source: string;
             /**
              * Tags
              * @default []
@@ -1347,12 +1584,6 @@ export interface components {
             /** Novels */
             novels: components["schemas"]["NovelBase"][];
         };
-        /**
-         * NovelSource
-         * @description Origin of a novel row in ``novel.source``.
-         * @enum {string}
-         */
-        NovelSource: "pixiv" | "local";
         /**
          * NovelUpdateRequest
          * @description 单本元数据编辑的部分更新体。
@@ -1531,6 +1762,67 @@ export interface components {
             source: "local" | "pixiv" | "unknown";
         };
         /**
+         * SeriesSearchItem
+         * @description Series search result item (``GET /api/novels/series/search``).
+         */
+        SeriesSearchItem: {
+            /** Author Id */
+            author_id?: number | null;
+            /**
+             * Novel Count
+             * @default 0
+             */
+            novel_count: number;
+            /** Series Id */
+            series_id: number;
+            /** Series Name */
+            series_name?: string | null;
+            /** Source */
+            source: string;
+        };
+        /**
+         * SettingFieldOptionSchema
+         * @description Select option entry rendered in source settings UI.
+         */
+        SettingFieldOptionSchema: {
+            /** Label */
+            label: string;
+            /** Value */
+            value: string;
+        };
+        /**
+         * SettingFieldSpecSchema
+         * @description Schema describing one configurable setting for a source.
+         */
+        SettingFieldSpecSchema: {
+            /** Default */
+            default?: unknown;
+            /**
+             * Description
+             * @default
+             */
+            description: string;
+            /**
+             * Field Type
+             * @enum {string}
+             */
+            field_type: "string" | "number" | "boolean" | "select" | "key_value";
+            /** Key */
+            key: string;
+            /** Label */
+            label: string;
+            /** Max Value */
+            max_value?: number | null;
+            /** Min Value */
+            min_value?: number | null;
+            /** Options */
+            options?: components["schemas"]["SettingFieldOptionSchema"][];
+            /** Visible When */
+            visible_when?: {
+                [key: string]: unknown;
+            } | null;
+        };
+        /**
          * SortIdsRequest
          * @description Order an explicit id list by a novel column — 「查看已选」排序.
          */
@@ -1547,6 +1839,248 @@ export interface components {
          * @enum {string}
          */
         SortableOrderBy: "id" | "like" | "view" | "text" | "create_time";
+        /**
+         * SourceConfigUpdateRequest
+         * @description Request payload for ``PUT /api/sources/{source}/config``.
+         */
+        SourceConfigUpdateRequest: {
+            /** Config */
+            config?: {
+                [key: string]: unknown;
+            } | null;
+            /** Enabled */
+            enabled?: boolean | null;
+        };
+        /**
+         * SourceCredentialCreateRequest
+         * @description Request payload for ``POST /api/sources/{source}/credentials``.
+         */
+        SourceCredentialCreateRequest: {
+            /** Kind */
+            kind?: string | null;
+            /** Meta */
+            meta?: {
+                [key: string]: unknown;
+            };
+            /** Name */
+            name: string;
+            /** Secret */
+            secret?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Valid
+             * @default true
+             */
+            valid: boolean;
+        };
+        /**
+         * SourceCredentialResponse
+         * @description Credential representation returned by credential CRUD endpoints (secrets masked).
+         */
+        SourceCredentialResponse: {
+            /** Id */
+            id: number;
+            /** Kind */
+            kind: string;
+            /** Meta */
+            meta: {
+                [key: string]: unknown;
+            };
+            /** Name */
+            name: string;
+            /** Secret */
+            secret: {
+                [key: string]: unknown;
+            };
+            /** Sort Index */
+            sort_index: number;
+            /** Source */
+            source: string;
+            /** Valid */
+            valid: boolean;
+        };
+        /**
+         * SourceCredentialUpdateRequest
+         * @description Request payload for ``PUT /api/sources/{source}/credentials/{cred_id}``.
+         */
+        SourceCredentialUpdateRequest: {
+            /** Meta */
+            meta?: {
+                [key: string]: unknown;
+            } | null;
+            /** Name */
+            name?: string | null;
+            /** Secret */
+            secret?: {
+                [key: string]: unknown;
+            } | null;
+            /** Valid */
+            valid?: boolean | null;
+        };
+        /**
+         * SourceFetchRequest
+         * @description Request payload for ``POST /api/sources/fetch``.
+         */
+        SourceFetchRequest: {
+            /**
+             * Force
+             * @default false
+             */
+            force: boolean;
+            /** Refs */
+            refs: string[];
+            /** Source */
+            source?: string | null;
+        };
+        /**
+         * SourceFetchResponse
+         * @description Response payload for ``POST /api/sources/fetch``.
+         */
+        SourceFetchResponse: {
+            /** Ref Count */
+            ref_count: number;
+            /** Source */
+            source: string;
+            /** Task Id */
+            task_id: number;
+        };
+        /**
+         * SourceItemResponse
+         * @description Summary item returned by ``GET /api/sources`` and ``PUT /api/sources/{source}/config``.
+         */
+        SourceItemResponse: {
+            /** Config */
+            config: {
+                [key: string]: unknown;
+            };
+            /**
+             * Credential Count
+             * @default 0
+             */
+            credential_count: number;
+            /** Enabled */
+            enabled: boolean;
+            manifest: components["schemas"]["SourceManifestSchema"];
+            /** Source */
+            source: string;
+            /**
+             * Valid Credential Count
+             * @default 0
+             */
+            valid_credential_count: number;
+        };
+        /**
+         * SourceManifestSchema
+         * @description Static capability and UI manifest for a registered source plugin.
+         */
+        SourceManifestSchema: {
+            /**
+             * Allow Proxy Config
+             * @default true
+             */
+            allow_proxy_config: boolean;
+            /**
+             * Badge Class
+             * @default
+             */
+            badge_class: string;
+            /**
+             * Badge Label
+             * @default
+             */
+            badge_label: string;
+            /** Capabilities */
+            capabilities?: string[];
+            /** Credential Kinds */
+            credential_kinds?: components["schemas"]["CredentialKindSpecSchema"][];
+            /** Display Name */
+            display_name: string;
+            /** Editable Fields */
+            editable_fields?: string[];
+            /**
+             * Enabled By Default
+             * @default true
+             */
+            enabled_by_default: boolean;
+            /** @default container_only */
+            epub_policy: components["schemas"]["EpubPolicy"];
+            /** Settings Schema */
+            settings_schema?: components["schemas"]["SettingFieldSpecSchema"][];
+            shelf?: components["schemas"]["SourceShelfDefSchema"] | null;
+            /** Source */
+            source: string;
+        };
+        /**
+         * SourceShelfDefSchema
+         * @description Sidebar shelf and intake definition advertised by a source.
+         */
+        SourceShelfDefSchema: {
+            /**
+             * Icon
+             * @default book
+             */
+            icon: string;
+            /**
+             * Intake Action
+             * @default none
+             * @enum {string}
+             */
+            intake_action: "none" | "file_upload" | "ref_fetch";
+            /**
+             * Intake Button Text
+             * @default
+             */
+            intake_button_text: string;
+            /**
+             * Intake Placeholder
+             * @default
+             */
+            intake_placeholder: string;
+            /** Keyword */
+            keyword: string;
+            /** Label */
+            label: string;
+            /**
+             * Min Like
+             * @default 0
+             */
+            min_like: number;
+            /**
+             * Min Text
+             * @default 0
+             */
+            min_text: number;
+            /**
+             * Order By
+             * @default id
+             */
+            order_by: string;
+            /**
+             * Order Direction
+             * @default DESC
+             */
+            order_direction: string;
+            /** Section Id */
+            section_id: string;
+        };
+        /**
+         * SourceTestResponse
+         * @description Response payload for ``POST /api/sources/{source}/test``.
+         */
+        SourceTestResponse: {
+            /** Account Summary */
+            account_summary?: string | null;
+            /** Latency Ms */
+            latency_ms?: number | null;
+            /**
+             * Message
+             * @default
+             */
+            message: string;
+            /** Ok */
+            ok: boolean;
+        };
         /** SystemConfigResponse */
         SystemConfigResponse: {
             /** Batch Download Naming */
@@ -1733,65 +2267,6 @@ export interface components {
             /** Name */
             name: string;
         };
-        /** TokenBase */
-        TokenBase: {
-            /**
-             * Is Follow
-             * @default false
-             */
-            is_follow: boolean;
-            /** Name */
-            name: string;
-            /**
-             * Premium
-             * @default false
-             */
-            premium: boolean;
-            /** Token */
-            token: string;
-            /**
-             * Valid
-             * @default true
-             */
-            valid: boolean;
-        };
-        /** TokenResponse */
-        TokenResponse: {
-            /** Id */
-            id: number;
-            /**
-             * Is Follow
-             * @default false
-             */
-            is_follow: boolean;
-            /** Name */
-            name: string;
-            /**
-             * Premium
-             * @default false
-             */
-            premium: boolean;
-            /** Token */
-            token: string;
-            /**
-             * Valid
-             * @default true
-             */
-            valid: boolean;
-        };
-        /** TokenUpdate */
-        TokenUpdate: {
-            /** Is Follow */
-            is_follow?: boolean | null;
-            /** Name */
-            name?: string | null;
-            /** Premium */
-            premium?: boolean | null;
-            /** Token */
-            token?: string | null;
-            /** Valid */
-            valid?: boolean | null;
-        };
         /** UploadResponse */
         UploadResponse: {
             /**
@@ -1976,12 +2451,12 @@ export interface operations {
             };
         };
     };
-    reset_failed_novel_count_api_failed_novels__novel_id__reset_count_post: {
+    reset_failed_novel_count_api_failed_novels__failed_id__reset_count_post: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                novel_id: number;
+                failed_id: number;
             };
             cookie?: never;
         };
@@ -2064,6 +2539,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["NovelListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    search_authors_api_novels_author_search_get: {
+        parameters: {
+            query?: {
+                q?: string;
+                source?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthorSearchItem"][];
                 };
             };
             /** @description Validation Error */
@@ -2436,6 +2944,39 @@ export interface operations {
             };
         };
     };
+    search_series_api_novels_series_search_get: {
+        parameters: {
+            query?: {
+                q?: string;
+                source?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SeriesSearchItem"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     lookup_series_api_novels_series__series_id__get: {
         parameters: {
             query?: never;
@@ -2724,6 +3265,292 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_sources_api_sources_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceItemResponse"][];
+                };
+            };
+        };
+    };
+    fetch_by_refs_api_sources_fetch_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SourceFetchRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceFetchResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_source_config_api_sources__source__config_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                source: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SourceConfigUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceItemResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_source_credentials_api_sources__source__credentials_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                source: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceCredentialResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_source_credential_api_sources__source__credentials_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                source: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SourceCredentialCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceCredentialResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reorder_source_credentials_api_sources__source__credentials_reorder_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                source: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": number[];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_source_credential_api_sources__source__credentials__cred_id__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                source: string;
+                cred_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SourceCredentialUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceCredentialResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_source_credential_api_sources__source__credentials__cred_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                source: string;
+                cred_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    test_source_connection_api_sources__source__test_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                source: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceTestResponse"];
+                };
             };
             /** @description Validation Error */
             422: {
@@ -3335,156 +4162,6 @@ export interface operations {
                 content: {
                     "application/json": unknown;
                 };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_tokens_api_tokens_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TokenResponse"][];
-                };
-            };
-        };
-    };
-    create_token_api_tokens_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["TokenBase"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TokenResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    reorder_tokens_api_tokens_reorder_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": number[];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    update_token_api_tokens__token_id__put: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                token_id: number;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["TokenUpdate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TokenResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    delete_token_api_tokens__token_id__delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                token_id: number;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
             };
             /** @description Validation Error */
             422: {

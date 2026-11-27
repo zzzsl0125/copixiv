@@ -19,9 +19,13 @@ export const routes = [
     component: () => import('../views/TagManagement.vue'),
   },
   {
+    path: '/sources',
+    name: 'sources',
+    component: () => import('../views/Sources.vue'),
+  },
+  {
     path: '/tokens',
-    name: 'tokens',
-    component: () => import('../views/Tokens.vue'),
+    redirect: '/sources',
   },
   {
     path: '/failed-novels',

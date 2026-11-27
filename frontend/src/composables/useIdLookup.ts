@@ -2,7 +2,7 @@ import { computed, onUnmounted, ref, watch, type ComputedRef, type Ref } from 'v
 import { useDebounceFn } from '@vueuse/core'
 
 /**
- * 「填 pixiv ID → 预览解析出的名字」这条交互的**唯一实现**。
+ * 「填数字 ID → 预览解析出的名字」这条交互的**唯一实现**。
  *
  * 作者与系列两个字段用的是同一套行为（docs/NOVEL_EDIT_DESIGN.md §5.5/§5.6）：
  * 输入防抖、过期响应丢弃、"与当前值相同就不查"、失败不拦保存。抽成组合式
@@ -23,15 +23,15 @@ export const ID_LOOKUP_DEBOUNCE_MS = 350
 /**
  * 输入框文本 → 值：空 = `null`（解除关联），非法 = `undefined`（拦保存）。
  *
- * 只收纯数字的**正整数**：pixiv 的作者 / 系列 ID 都是正数，`0`、`-1`、`1e3`、
- * `１２３`（全角）一律算非法——这条字段是身份，不是展示值。
+ * 接受非零安全整数（正整数及外部来源使用的负整数），`0`、`-0`、`1e3`、
+ * `１２３`（全角）、`-` 一律算非法——这条字段是身份，不是展示值。
  */
 export function parseIdInput(raw: string): number | null | undefined {
   const text = raw.trim()
   if (!text) return null
-  if (!/^\d+$/.test(text)) return undefined
+  if (!/^-?\d+$/.test(text)) return undefined
   const parsed = Number(text)
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) return undefined
+  if (!Number.isSafeInteger(parsed) || parsed === 0) return undefined
   return parsed
 }
 
@@ -42,12 +42,12 @@ export interface UseIdLookupOptions<T> {
   currentId: () => number | null
   /** 真正的查询（作者 / 系列各一个端点） */
   fetch: (id: number, signal?: AbortSignal) => Promise<T>
-  /** 允许查询吗（字段只读时不该发请求：pixiv 书的作者 / 系列都不可改） */
+  /** 允许查询吗（字段只读时不该发请求：非本地书的作者 / 系列不可改） */
   enabled?: () => boolean
 }
 
 export interface IdLookup<T> {
-  /** 输入解析结果：`null` = 空、`undefined` = 非法、正整数 = 要查的 id */
+  /** 输入解析结果：`null` = 空、`undefined` = 非法、非零整数 = 要查的 id */
   idNumber: ComputedRef<number | null | undefined>
   result: Ref<T | null>
   loading: Ref<boolean>
@@ -181,7 +181,7 @@ export function formatIdLookupHint(ctx: IdHintContext): IdLookupHint {
     return { tone: 'muted', text: ctx.unlinkNote }
   }
   if (ctx.idNumber === undefined) {
-    return { tone: 'error', text: `只能填数字 ID（pixiv ${ctx.entity} ID）` }
+    return { tone: 'error', text: `只能填数字 ID（${ctx.entity} ID，非零整数）` }
   }
   if (ctx.currentId != null && ctx.idNumber === null) {
     return { tone: 'muted', text: ctx.unlinkNote }
@@ -194,13 +194,13 @@ export function formatIdLookupHint(ctx: IdHintContext): IdLookupHint {
   if (ctx.failed) {
     return { tone: 'warn', text: '查询失败；仍可保存，保存时将再次尝试解析' }
   }
-  if (!ctx.found) return { tone: 'muted', text: `将按此 ID 关联 pixiv ${ctx.entity}` }
+  if (!ctx.found) return { tone: 'muted', text: `将按此 ID 关联${ctx.entity}` }
   if (ctx.found.name) {
     const extra = ctx.found.novelCount > 0 ? ` · 库内已有 ${ctx.found.novelCount} 本` : ''
     return { tone: 'ok', text: `✓ ${ctx.found.name}${extra}` }
   }
   return {
     tone: 'warn',
-    text: `未查到该${ctx.entity}（ID 不存在或 pixiv 暂不可达）；仍可保存，保存时将再次尝试解析`,
+    text: `未查到该${ctx.entity}（ID 不存在或来源暂不可达）；仍可保存，保存时将再次尝试解析`,
   }
 }

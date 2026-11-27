@@ -1,8 +1,16 @@
 import { computed } from 'vue'
 import { useRoute, useRouter, type LocationQuery, type LocationQueryRaw } from 'vue-router'
-import { resolveSection, SECTIONS, type SectionId } from '../config'
+import {
+  isSingleSourceFilter,
+  resolveSection,
+  SECTIONS,
+  shelfToSectionDef,
+  type SectionId,
+} from '../config'
 import { isOrderBy, isOrderDirection, type NovelFilters } from '../types'
+import type { SourceShelfDef } from '../types/sources'
 import { useNovelShellState } from './useNovelShellState'
+import { useSources } from './useSources'
 
 function readQueryString(value: LocationQuery[string]): string | null {
   if (typeof value === 'string') return value
@@ -22,7 +30,10 @@ function parseNonNegInt(raw: string | null): number | undefined {
 }
 
 /** Resolve default ordering + thresholds when submitting a search string. */
-export function computeSearchFilters(keyword: string): NovelFilters {
+export function computeSearchFilters(
+  keyword: string,
+  extraShelves?: readonly SourceShelfDef[],
+): NovelFilters {
   const trimmed = keyword.trim()
   if (!trimmed) {
     return {
@@ -34,9 +45,21 @@ export function computeSearchFilters(keyword: string): NovelFilters {
     }
   }
 
-  const section = resolveSection(keyword)
+  const section = resolveSection(trimmed)
   if (section) {
     const def = SECTIONS[section]
+    return {
+      keyword,
+      order_by: def.order_by,
+      order_direction: def.order_direction,
+      min_like: def.min_like,
+      min_text: def.min_text,
+    }
+  }
+
+  const matchedShelf = extraShelves?.find((shelf) => shelf.keyword.trim() === trimmed)
+  if (matchedShelf) {
+    const def = shelfToSectionDef(matchedShelf)
     return {
       keyword,
       order_by: def.order_by,
@@ -55,14 +78,14 @@ export function computeSearchFilters(keyword: string): NovelFilters {
     const colonIndex = condition.indexOf(':')
     if (colonIndex > 0) {
       const type = condition.substring(0, colonIndex).trim()
-      if (type === 'id' || type === 'author_id') {
+      if (type === 'id' || type === 'author_id' || isSingleSourceFilter(keyword)) {
         orderBy = 'id'
         orderDirection = 'DESC'
       } else if (type === 'series_id') {
         orderBy = 'id'
         orderDirection = 'ASC'
       }
-    } else if (/^\d{7,}$/.test(condition.trim())) {
+    } else if (/^-?\d{7,}$/.test(condition.trim())) {
       orderBy = 'id'
       orderDirection = 'DESC'
     }
@@ -83,8 +106,11 @@ export function computeSearchFilters(keyword: string): NovelFilters {
  * and search/shelf links stay clean, while explicit overrides (e.g. `min_like=0`
  * under browse mode) are preserved in the URL.
  */
-export function buildNovelQuery(filters: NovelFilters): LocationQueryRaw {
-  const defaults = computeSearchFilters(filters.keyword)
+export function buildNovelQuery(
+  filters: NovelFilters,
+  extraShelves?: readonly SourceShelfDef[],
+): LocationQueryRaw {
+  const defaults = computeSearchFilters(filters.keyword, extraShelves)
   const query: LocationQueryRaw = {}
 
   if (filters.keyword) query.keyword = filters.keyword
@@ -102,9 +128,12 @@ export function buildNovelQuery(filters: NovelFilters): LocationQueryRaw {
 }
 
 /** Derive validated `NovelFilters` from a raw `vue-router` query map. */
-export function parseNovelQuery(query: LocationQuery): NovelFilters {
+export function parseNovelQuery(
+  query: LocationQuery,
+  extraShelves?: readonly SourceShelfDef[],
+): NovelFilters {
   const keyword = readQueryString(query.keyword) ?? ''
-  const defaults = computeSearchFilters(keyword)
+  const defaults = computeSearchFilters(keyword, extraShelves)
 
   const rawOrderBy = readQueryString(query.order_by)
   const rawOrderDir = readQueryString(query.order_direction)
@@ -138,12 +167,14 @@ export function useNovelQueryState() {
   const route = useRoute()
   const router = useRouter()
   const shell = useNovelShellState()
+  const { shelves } = useSources()
 
-  const filters = computed<NovelFilters>(() => parseNovelQuery(route.query))
+  const extraShelves = computed(() => shelves.value.map((entry) => entry.shelf))
+  const filters = computed<NovelFilters>(() => parseNovelQuery(route.query, extraShelves.value))
   const activeSection = computed<SectionId | null>(() => resolveSection(filters.value.keyword))
 
   async function commitFilters(next: NovelFilters) {
-    const query = buildNovelQuery(next)
+    const query = buildNovelQuery(next, extraShelves.value)
     if (route.path === '/' && queriesEqual(route.query, query)) {
       shell.bumpRefreshNonce()
       return
@@ -162,8 +193,19 @@ export function useNovelQueryState() {
     })
   }
 
+  async function navigateToShelf(shelf: SourceShelfDef) {
+    const def = shelfToSectionDef(shelf)
+    await commitFilters({
+      keyword: def.keyword,
+      order_by: def.order_by,
+      order_direction: def.order_direction,
+      min_like: def.min_like,
+      min_text: def.min_text,
+    })
+  }
+
   async function navigateSearch(keyword: string) {
-    await commitFilters(computeSearchFilters(keyword))
+    await commitFilters(computeSearchFilters(keyword, extraShelves.value))
   }
 
   async function updateFilters(patch: Partial<NovelFilters>) {
@@ -183,6 +225,7 @@ export function useNovelQueryState() {
     filters,
     activeSection,
     navigateToSection,
+    navigateToShelf,
     navigateSearch,
     updateFilters,
     navigateCardSearch,

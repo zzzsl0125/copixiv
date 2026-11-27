@@ -164,6 +164,8 @@ describe('Phase 1 UI fixes', () => {
           has_epub: 0,
           create_time: null,
           source: 'local',
+          can_sync: false,
+          external_url: null,
           is_favourite: false,
           is_special_follow: false,
           tags: ['favTag', 'badTag'],

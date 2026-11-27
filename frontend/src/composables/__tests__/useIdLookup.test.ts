@@ -25,19 +25,23 @@ function deferred<T>() {
 }
 
 describe('parseIdInput', () => {
-  it('parses whitespace as null, positive safe integers as numbers, and invalid inputs as undefined', () => {
+  it('parses whitespace as null, non-zero safe integers (positive or negative) as numbers, and invalid inputs as undefined', () => {
     expect(parseIdInput('')).toBeNull()
     expect(parseIdInput('   \t\n ')).toBeNull()
 
     expect(parseIdInput('123')).toBe(123)
     expect(parseIdInput(' 42 ')).toBe(42)
+    expect(parseIdInput('-1')).toBe(-1)
+    expect(parseIdInput(' -98765 ')).toBe(-98765)
 
     expect(parseIdInput('0')).toBeUndefined()
-    expect(parseIdInput('-1')).toBeUndefined()
+    expect(parseIdInput('-0')).toBeUndefined()
+    expect(parseIdInput('-')).toBeUndefined()
     expect(parseIdInput('1e3')).toBeUndefined()
     expect(parseIdInput('１２３')).toBeUndefined()
     expect(parseIdInput('abc')).toBeUndefined()
     expect(parseIdInput('99999999999999999')).toBeUndefined()
+    expect(parseIdInput('-99999999999999999')).toBeUndefined()
   })
 })
 
@@ -57,7 +61,7 @@ describe('formatIdLookupHint', () => {
   it('covers all hint branches', () => {
     expect(formatIdLookupHint({ ...base, idNumber: undefined })).toEqual({
       tone: 'error',
-      text: '只能填数字 ID（pixiv 作者 ID）',
+      text: '只能填数字 ID（作者 ID，非零整数）',
     })
 
     expect(formatIdLookupHint({ ...base, currentId: 7, idNumber: null })).toEqual({
@@ -92,7 +96,7 @@ describe('formatIdLookupHint', () => {
 
     expect(formatIdLookupHint({ ...base, idNumber: 9, found: null })).toEqual({
       tone: 'muted',
-      text: '将按此 ID 关联 pixiv 作者',
+      text: '将按此 ID 关联作者',
     })
 
     expect(
@@ -113,7 +117,7 @@ describe('formatIdLookupHint', () => {
       formatIdLookupHint({ ...base, idNumber: 9, found: { name: null, novelCount: 0 } }),
     ).toEqual({
       tone: 'warn',
-      text: '未查到该作者（ID 不存在或 pixiv 暂不可达）；仍可保存，保存时将再次尝试解析',
+      text: '未查到该作者（ID 不存在或来源暂不可达）；仍可保存，保存时将再次尝试解析',
     })
   })
 })
@@ -282,5 +286,21 @@ describe('useIdLookup', () => {
     // Unmounting aborts the second in-flight request
     wrapper.unmount()
     expect(signals[1]!.aborted).toBe(true)
+  })
+
+  it('fetches negative IDs as valid external IDs', async () => {
+    const fetchSpy = vi.fn(async (id: number) => ({ name: `External ${id}`, novelCount: 2 }))
+    const { input, lookup, wrapper } = mountLookup({ fetch: fetchSpy })
+
+    input.value = '-42'
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(ID_LOOKUP_DEBOUNCE_MS)
+    await nextTick()
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    expect(fetchSpy).toHaveBeenCalledWith(-42, expect.any(AbortSignal))
+    expect(lookup.result.value).toEqual({ name: 'External -42', novelCount: 2 })
+
+    wrapper.unmount()
   })
 })

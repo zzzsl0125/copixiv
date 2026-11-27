@@ -2,14 +2,28 @@ export type {
   Novel, NovelFilters, GetNovelsParams, BatchScope, BatchOperation,
   BatchOperationResult, NovelIdsResponse, NovelsByIdsResponse,
   MatchIdsResult, NovelCountResult, NovelListResult, NovelUpdatePayload,
-  AuthorLookup, SeriesLookup, BatchMetadataRequest, BatchMetadataResult,
+  AuthorLookup, SeriesLookup, AuthorSearchItem, SeriesSearchItem, BatchMetadataRequest, BatchMetadataResult,
   OrderBy, SortableOrderBy, OrderDirection, FormatMode,
 } from './novels'
 // 运行时函数（不是类型）：查询参数解析要过它才能进 filters，见 novels.ts 的注释。
 export { isOrderBy, isOrderDirection } from './novels'
 export type { TaskArgumentField, TaskMethod, ScheduledTask, ScheduledTaskCreate, ScheduledTaskUpdate, TaskHistory } from './tasks'
 export type { TagPreference, TagAlias, TagCandidate, TagAliasSuggest, TagAliasSuggestList } from './tags'
-export type { Token, TokenCreate, TokenUpdate } from './tokens'
+export type {
+  SourceItem,
+  SourceManifest,
+  SettingFieldSpec,
+  CredentialKindSpec,
+  CredentialFieldSpec,
+  SourceShelfDef,
+  SourceConfigUpdate,
+  SourceTestResult,
+  SourceCredential,
+  SourceCredentialCreate,
+  SourceCredentialUpdate,
+  SourceFetchRequest,
+  SourceFetchResponse,
+} from './sources'
 export type { SystemConfig, SearchHistory } from './system'
 export type { FailedNovel, FailedNovelListResponse } from './failedNovels'
 export type {

@@ -2,7 +2,8 @@
 import { computed, ref, watch } from 'vue'
 import BaseModal from '../ui/BaseModal.vue'
 import FormField from '../ui/FormField.vue'
-import PixivIdLookupField from './PixivIdLookupField.vue'
+import EntityLookupField from './EntityLookupField.vue'
+import type { EntitySearchOption } from './EntityLookupField.vue'
 import TagChipInput from './TagChipInput.vue'
 import { getApiErrorMessage, novelApi } from '../../api'
 import { useConfirm } from '../../composables'
@@ -39,12 +40,32 @@ const createTime = ref('')
 
 const authorIdNumber = ref<number | null | undefined>(null)
 const seriesIdNumber = ref<number | null | undefined>(null)
-const authorFieldRef = ref<InstanceType<typeof PixivIdLookupField> | null>(null)
-const seriesFieldRef = ref<InstanceType<typeof PixivIdLookupField> | null>(null)
+const authorFieldRef = ref<InstanceType<typeof EntityLookupField> | null>(null)
+const seriesFieldRef = ref<InstanceType<typeof EntityLookupField> | null>(null)
 const tagInputRef = ref<InstanceType<typeof TagChipInput> | null>(null)
 
 const isLocal = computed(() => props.novel?.source === 'local')
-const canSync = computed(() => !!props.novel && !isLocal.value)
+const canSync = computed(() => Boolean(props.novel?.can_sync))
+
+async function searchAuthors(q: string, signal?: AbortSignal): Promise<EntitySearchOption[]> {
+  const items = (await novelApi.searchAuthors?.(q, { signal })) ?? []
+  return items.map((item) => ({
+    id: item.author_id,
+    name: item.author_name ?? null,
+    source: item.source,
+    novelCount: item.novel_count,
+  }))
+}
+
+async function searchSeries(q: string, signal?: AbortSignal): Promise<EntitySearchOption[]> {
+  const items = (await novelApi.searchSeries?.(q, { signal })) ?? []
+  return items.map((item) => ({
+    id: item.series_id,
+    name: item.series_name ?? null,
+    source: item.source,
+    novelCount: item.novel_count,
+  }))
+}
 
 function canEdit(field: keyof NovelUpdatePayload): boolean {
   return props.novel?.editable_fields?.includes(field) ?? false
@@ -92,10 +113,10 @@ const validationError = computed<string | null>(() => {
     if (title.value.trim().length > MAX_TITLE) return `标题过长（最多 ${MAX_TITLE} 字）`
   }
   if (canEdit('series_id') && seriesIdNumber.value === undefined) {
-    return '系列 ID 必须是正整数'
+    return '系列 ID 必须是非零整数'
   }
   if (canEdit('author_id') && authorIdNumber.value === undefined) {
-    return '作者 ID 必须是正整数'
+    return '作者 ID 必须是非零整数'
   }
   if (canEdit('series_index') && indexNumber.value === undefined) {
     return '章节号必须是正整数'
@@ -231,7 +252,7 @@ async function handleDelete() {
           :class="isLocal ? 'bg-amber-100 text-amber-800' : 'bg-gray-100 text-gray-700'"
           data-testid="edit-source-badge"
         >
-          {{ isLocal ? '本地' : 'pixiv' }}
+          {{ isLocal ? '本地' : novel.source }}
         </span>
         <span>#{{ novel.id }}</span>
         <span title="喜爱">❤️ {{ novel.like }}</span>
@@ -253,21 +274,22 @@ async function handleDelete() {
           </template>
         </FormField>
 
-        <PixivIdLookupField
+        <EntityLookupField
           ref="authorFieldRef"
           v-model="authorId"
           entity="作者"
           label="作者 ID"
           :fetch="novelApi.lookupAuthor"
+          :search="searchAuthors"
           :current-id="novel.author_id ?? null"
           :current-name="novel.author_name || '未知'"
           :disabled="!canEdit('author_id')"
           :show-hint="false"
-          placeholder="如 1234567"
+          placeholder="输入名称或数字 ID"
           empty-note="留空 = 不改作者（名字仍来自文件名解析）"
           :unlink-note="authorUnlinkNote"
           input-test-id="edit-author-id"
-          class="w-32 shrink-0"
+          class="w-44 shrink-0"
           @update:id-number="authorIdNumber = $event"
         />
       </div>
@@ -281,17 +303,18 @@ async function handleDelete() {
       </p>
 
       <div class="flex gap-3">
-        <PixivIdLookupField
+        <EntityLookupField
           ref="seriesFieldRef"
           v-model="seriesId"
           entity="系列"
           label="系列 ID"
           :fetch="novelApi.lookupSeries"
+          :search="searchSeries"
           :current-id="novel.series_id ?? null"
           :current-name="novel.series_name || '未知'"
           :disabled="!canEdit('series_id')"
           :show-hint="canEdit('series_id')"
-          placeholder="如 123456"
+          placeholder="输入名称或数字 ID"
           empty-note="留空 = 不改系列"
           :unlink-note="seriesUnlinkNote"
           input-test-id="edit-series-id"

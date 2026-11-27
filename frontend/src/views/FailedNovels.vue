@@ -5,6 +5,7 @@ import { AlertTriangle, ExternalLink, RefreshCw, RotateCcw } from '@lucide/vue'
 import type { FailedNovel, FailedNovelListResponse } from '../types'
 import { FAILED_NOVELS_PAGE_SIZE, failedNovelApi, getApiErrorMessage, queryKeys } from '../api'
 import { useConfirm, useToast } from '../composables'
+import { useSources } from '../composables/useSources'
 import PageHeader from '../components/features/PageHeader.vue'
 import EmptyState from '../components/ui/EmptyState.vue'
 import ErrorAlert from '../components/ui/ErrorAlert.vue'
@@ -15,6 +16,7 @@ defineEmits<{ (e: 'toggle-sidebar'): void }>()
 const toast = useToast()
 const { confirm } = useConfirm()
 const queryClient = useQueryClient()
+const { getBadge } = useSources()
 
 const retryingIds = ref<Set<number>>(new Set())
 const retryingAll = ref(false)
@@ -53,8 +55,27 @@ const loadError = computed(() =>
 )
 
 const failedTimesCutoff = 3 // 与后端 MAX_RETRIES 一致：达到后自动跳过
-const pixivNovelUrl = (id: number) => `https://www.pixiv.net/novel/show.php?id=${id}`
 const anyRetrying = computed(() => retryingAll.value || retryingIds.value.size > 0)
+
+const itemKeyLabel = (item: FailedNovel): string =>
+  item.source_key || (item.novel_id != null ? String(item.novel_id) : String(item.id))
+
+function sourceBadgeForRow(source: string) {
+  const badge = getBadge(source)
+  if (badge) return badge
+  if (source === 'pixiv') {
+    return {
+      label: 'Pixiv',
+      class: 'bg-blue-100 text-blue-800',
+      title: 'Pixiv（source=pixiv）',
+    }
+  }
+  return {
+    label: source.toUpperCase(),
+    class: 'bg-gray-100 text-gray-700',
+    title: `source=${source}`,
+  }
+}
 
 const formatDate = (dateStr?: string | null): string =>
   dateStr ? new Date(dateStr).toLocaleString() : '—'
@@ -64,17 +85,18 @@ function loadMore() {
   void listQuery.fetchNextPage()
 }
 
-async function resetOne(novel: FailedNovel) {
+async function resetOne(item: FailedNovel) {
+  const label = itemKeyLabel(item)
   const confirmed = await confirm({
     title: '重置失败计数',
-    description: `重置 #${novel.novel_id} 的失败计数？记录会保留，下次批量任务会自动重试。`,
+    description: `重置 #${label} 的失败计数？记录会保留，下次批量任务会自动重试。`,
     confirmText: '确认重置',
     variant: 'default',
   })
   if (!confirmed) return
   try {
-    await failedNovelApi.resetCount(novel.novel_id)
-    toast.success(`已重置 #${novel.novel_id} 的失败计数`)
+    await failedNovelApi.resetCount(item.id)
+    toast.success(`已重置 #${label} 的失败计数`)
     queryClient.setQueryData<InfiniteData<FailedNovelListResponse>>(
       queryKeys.failedNovels(),
       (old) => {
@@ -84,7 +106,7 @@ async function resetOne(novel: FailedNovel) {
           pages: old.pages.map((p) => ({
             ...p,
             items: p.items.map((row) =>
-              row.novel_id === novel.novel_id ? { ...row, failed_times: 0 } : row,
+              row.id === item.id ? { ...row, failed_times: 0 } : row,
             ),
           })),
         }
@@ -95,12 +117,13 @@ async function resetOne(novel: FailedNovel) {
   }
 }
 
-async function retryOne(novel: FailedNovel) {
+async function retryOne(item: FailedNovel) {
   if (anyRetrying.value) return
-  retryingIds.value = new Set([novel.novel_id])
+  const label = itemKeyLabel(item)
+  retryingIds.value = new Set([item.id])
   try {
-    const { task_id } = await failedNovelApi.retry([novel.novel_id])
-    toast.success(`已入队重试 #${novel.novel_id}（任务 #${task_id}，可在任务管理查看进度）`)
+    const { task_id } = await failedNovelApi.retry([item.id])
+    toast.success(`已入队重试 #${label}（任务 #${task_id}，可在任务管理查看进度）`)
   } catch (err) {
     toast.error(getApiErrorMessage(err, '入队重试失败'))
   } finally {
@@ -233,19 +256,39 @@ async function resetAll() {
               </tr>
             </tbody>
             <tbody v-else class="bg-white divide-y divide-gray-200">
-              <tr v-for="item in items" :key="item.novel_id" class="hover:bg-gray-50">
+              <tr
+                v-for="item in items"
+                :key="item.id"
+                :data-testid="`failed-row-${item.id}`"
+                class="hover:bg-gray-50"
+              >
                 <td class="px-6 py-4">
-                  <div class="flex items-start gap-2">
+                  <div class="flex items-start gap-2 flex-wrap">
+                    <span
+                      class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold shrink-0 mt-0.5"
+                      :class="sourceBadgeForRow(item.source).class"
+                      :title="sourceBadgeForRow(item.source).title"
+                      :data-testid="`failed-source-badge-${item.id}`"
+                    >
+                      {{ sourceBadgeForRow(item.source).label }}
+                    </span>
                     <a
-                      :href="pixivNovelUrl(item.novel_id)"
+                      v-if="item.external_url"
+                      :href="item.external_url"
                       target="_blank"
                       rel="noopener noreferrer"
                       class="inline-flex items-center text-sm font-medium text-blue-600 hover:text-blue-800 shrink-0"
-                      :title="`#${item.novel_id} · 在 Pixiv 打开`"
+                      :title="`#${itemKeyLabel(item)} · 在原站打开`"
                     >
-                      #{{ item.novel_id }}
+                      #{{ itemKeyLabel(item) }}
                       <ExternalLink class="ml-1 h-3.5 w-3.5" />
                     </a>
+                    <span
+                      v-else
+                      class="inline-flex items-center text-sm font-medium text-gray-600 shrink-0"
+                    >
+                      #{{ itemKeyLabel(item) }}
+                    </span>
                     <span class="text-sm text-gray-800 break-all" :title="item.title ?? undefined">
                       {{ item.title || '（无标题记录）' }}
                     </span>
@@ -273,16 +316,18 @@ async function resetAll() {
                     <button
                       class="inline-flex items-center px-2.5 py-1 text-xs font-medium rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                       :disabled="anyRetrying"
+                      :data-testid="`failed-retry-${item.id}`"
                       @click="retryOne(item)"
                     >
                       <RefreshCw
                         class="mr-1 h-3.5 w-3.5"
-                        :class="{ 'animate-spin': retryingIds.has(item.novel_id) }"
+                        :class="{ 'animate-spin': retryingIds.has(item.id) }"
                       />
                       重试
                     </button>
                     <button
                       class="inline-flex items-center px-2.5 py-1 text-xs font-medium rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 cursor-pointer"
+                      :data-testid="`failed-reset-${item.id}`"
                       @click="resetOne(item)"
                     >
                       <RotateCcw class="mr-1 h-3.5 w-3.5" />

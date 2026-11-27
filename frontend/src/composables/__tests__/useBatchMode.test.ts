@@ -59,6 +59,7 @@ function makeNovel(id: number, overrides: Partial<Novel> = {}): Novel {
     has_epub: 0,
     create_time: null,
     source: 'pixiv',
+    can_sync: false,
     is_favourite: false,
     is_special_follow: false,
     tags: [],
@@ -108,7 +109,7 @@ describe('useBatchMode (Vue Query & selected collection view)', () => {
 
     expect(apiMocks.countNovels).toHaveBeenCalledWith(
       {
-        keyword: undefined,
+        keyword: 'source:pixiv;',
         min_like: 0,
         min_text: 0,
         exclude_blocked: undefined,

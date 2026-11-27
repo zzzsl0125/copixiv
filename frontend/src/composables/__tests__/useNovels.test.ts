@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { focusManager, onlineManager } from '@tanstack/vue-query'
+import { focusManager, onlineManager, QueryClient } from '@tanstack/vue-query'
 import type { Novel, NovelListResult } from '../../types'
-import { SECTIONS } from '../../config'
+import type { SourceShelfDef } from '../../types/sources'
+import { excludeBlockedOverride, SECTIONS } from '../../config'
 import { flushPromises, mountWithQuery } from '../../test-utils/queryWrapper'
 
 const mocks = vi.hoisted(() => ({
   getNovels: vi.fn<() => Promise<NovelListResult>>(),
+  listSources: vi.fn(),
 }))
 
 vi.mock('../../api', async (importOriginal) => {
@@ -16,10 +18,15 @@ vi.mock('../../api', async (importOriginal) => {
       ...actual.novelApi,
       getNovels: mocks.getNovels,
     },
+    sourceApi: {
+      ...actual.sourceApi,
+      list: mocks.listSources,
+    },
   }
 })
 
 import { buildNovelQuery, computeSearchFilters, parseNovelQuery, useNovels } from '../index'
+import { queryKeys } from '../../api'
 
 function makeNovel(id: number, overrides: Partial<Novel> = {}): Novel {
   return {
@@ -36,6 +43,8 @@ function makeNovel(id: number, overrides: Partial<Novel> = {}): Novel {
     has_epub: 0,
     create_time: null,
     source: 'pixiv',
+    can_sync: true,
+    external_url: `https://www.pixiv.net/novel/show.php?id=${id}`,
     is_favourite: false,
     is_special_follow: false,
     tags: [],
@@ -47,6 +56,7 @@ function makeNovel(id: number, overrides: Partial<Novel> = {}): Novel {
 describe('useNovelQueryState & useNovels', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mocks.listSources.mockResolvedValue([])
   })
 
   it('canonicalizes route query parameters and ignores invalid enums', () => {
@@ -95,10 +105,30 @@ describe('useNovelQueryState & useNovels', () => {
     expect(parseNovelQuery({ keyword: '百合' })).toEqual(computeSearchFilters('百合'))
   })
 
-  it('computes search ordering across shelf, id, series, author, and free search', () => {
+  it('computes search ordering across shelf, id, series, author, source, and free search', () => {
     expect(computeSearchFilters('source:local;')).toEqual({
       keyword: 'source:local;',
       order_by: 'id',
+      order_direction: 'DESC',
+      min_like: 0,
+      min_text: 0,
+    })
+    expect(computeSearchFilters('source:pixiv;')).toEqual({
+      keyword: 'source:pixiv;',
+      order_by: 'id',
+      order_direction: 'DESC',
+      min_like: 0,
+      min_text: 0,
+    })
+    expect(computeSearchFilters('source:esj;')).toEqual({
+      keyword: 'source:esj;',
+      order_by: 'id',
+      order_direction: 'DESC',
+      min_like: 0,
+      min_text: 0,
+    })
+    expect(computeSearchFilters('source:esj; fantasy')).toMatchObject({
+      order_by: 'like',
       order_direction: 'DESC',
       min_like: 0,
       min_text: 0,
@@ -113,12 +143,45 @@ describe('useNovelQueryState & useNovels', () => {
       order_by: 'id',
       order_direction: 'DESC',
     })
+    expect(computeSearchFilters('-1234567')).toMatchObject({
+      order_by: 'id',
+      order_direction: 'DESC',
+    })
     expect(computeSearchFilters('sci-fi')).toMatchObject({
       order_by: 'like',
       order_direction: 'DESC',
       min_like: 0,
       min_text: 0,
     })
+
+    const customShelf: SourceShelfDef = {
+      section_id: 'custom',
+      label: 'Custom',
+      keyword: 'custom_tag:vip;',
+      min_like: 100,
+      min_text: 500,
+      order_by: 'create_time',
+      order_direction: 'ASC',
+      icon: 'book',
+      intake_action: 'none',
+      intake_placeholder: '',
+      intake_button_text: '',
+    }
+    expect(computeSearchFilters('custom_tag:vip;', [customShelf])).toEqual({
+      keyword: 'custom_tag:vip;',
+      order_by: 'create_time',
+      order_direction: 'ASC',
+      min_like: 100,
+      min_text: 500,
+    })
+
+    expect(excludeBlockedOverride('')).toBeUndefined()
+    expect(excludeBlockedOverride('novels')).toBeUndefined()
+    expect(excludeBlockedOverride('source:pixiv;')).toBe(false)
+    expect(excludeBlockedOverride('source:esj;')).toBe(false)
+    expect(excludeBlockedOverride('source:local;')).toBe(false)
+    expect(excludeBlockedOverride('source:esj; fantasy')).toBeUndefined()
+    expect(excludeBlockedOverride('custom_tag:vip;', [customShelf])).toBe(false)
   })
 
   it('keeps order_by=random staleTime=Infinity and never refetches on focus or reconnect (§7.5)', async () => {
@@ -134,10 +197,20 @@ describe('useNovelQueryState & useNovels', () => {
         has_excluded: false,
       })
 
+    const invalidateSpy = vi.spyOn(QueryClient.prototype, 'invalidateQueries')
     const { result, queryClient, wrapper } = await mountWithQuery(() => useNovels())
     await flushPromises()
 
     expect(mocks.getNovels).toHaveBeenCalledTimes(1)
+    expect(mocks.getNovels).toHaveBeenCalledWith(
+      expect.objectContaining({
+        keyword: 'source:pixiv;',
+        exclude_blocked: undefined,
+      }),
+      expect.any(AbortSignal),
+    )
+    expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: queryKeys.searchHistory() })
+    invalidateSpy.mockRestore()
     expect(result.novels.value.map((n) => n.id)).toEqual([1])
     expect(result.noMoreData.value).toBe(false)
 
@@ -175,6 +248,61 @@ describe('useNovelQueryState & useNovels', () => {
     expect(mocks.getNovels).toHaveBeenCalledTimes(2)
 
     wrapper.unmount()
+  })
+
+  it('sends free search keyword across all sources and shelf keyword with exclude_blocked=false', async () => {
+    const invalidateSpy = vi.spyOn(QueryClient.prototype, 'invalidateQueries')
+    mocks.getNovels.mockResolvedValue({
+      novels: [makeNovel(5)],
+      cursor: null,
+      has_excluded: false,
+    })
+
+    const searchMount = await mountWithQuery(() => useNovels(), {
+      initialRoute: '/?keyword=fantasy',
+    })
+    await flushPromises()
+
+    expect(mocks.getNovels).toHaveBeenCalledWith(
+      expect.objectContaining({
+        keyword: 'fantasy',
+        order_by: 'like',
+        order_direction: 'DESC',
+        min_like: 0,
+        min_text: 0,
+        exclude_blocked: undefined,
+      }),
+      expect.any(AbortSignal),
+    )
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: queryKeys.searchHistory() })
+    invalidateSpy.mockRestore()
+    searchMount.wrapper.unmount()
+
+    vi.clearAllMocks()
+    mocks.listSources.mockResolvedValue([])
+    mocks.getNovels.mockResolvedValue({
+      novels: [makeNovel(-1, { source: 'esj' })],
+      cursor: null,
+      has_excluded: false,
+    })
+
+    const shelfMount = await mountWithQuery(() => useNovels(), {
+      initialRoute: '/?keyword=source%3Aesj%3B',
+    })
+    await flushPromises()
+
+    expect(mocks.getNovels).toHaveBeenCalledWith(
+      expect.objectContaining({
+        keyword: 'source:esj;',
+        order_by: 'id',
+        order_direction: 'DESC',
+        min_like: 0,
+        min_text: 0,
+        exclude_blocked: false,
+      }),
+      expect.any(AbortSignal),
+    )
+    shelfMount.wrapper.unmount()
   })
 
   it('passes only_blocked=true when onlyBlocked option is enabled', async () => {

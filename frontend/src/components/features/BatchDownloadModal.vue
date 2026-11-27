@@ -223,6 +223,7 @@ async function handleConfirm() {
           <li><code class="bg-gray-100 px-1 rounded">{date}</code> 创建日期</li>
           <li><code class="bg-gray-100 px-1 rounded">{series_name}</code> 系列名</li>
           <li><code class="bg-gray-100 px-1 rounded">{series_index}</code> 系列序号</li>
+          <li><code class="bg-gray-100 px-1 rounded">{source}</code> 数据源</li>
         </ul>
       </div>
     </div>

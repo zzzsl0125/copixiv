@@ -18,9 +18,9 @@ export const failedNovelApi = {
   },
 
   /** 重置单条失败记录计数（记录保留，解封后下次批量任务自动重试）。 */
-  async resetCount(novelId: number): Promise<void> {
-    const res = await apiClient.POST('/api/failed-novels/{novel_id}/reset-count', {
-      params: { path: { novel_id: novelId } },
+  async resetCount(failedId: number): Promise<void> {
+    const res = await apiClient.POST('/api/failed-novels/{failed_id}/reset-count', {
+      params: { path: { failed_id: failedId } },
     })
     unwrapVoid(res, '重置失败')
   },
@@ -32,9 +32,9 @@ export const failedNovelApi = {
   },
 
   /** 入队后台重试任务（任务管理页可见进度）。 */
-  async retry(novelIds: number[]): Promise<{ task_id: number; matched: number }> {
+  async retry(ids: number[]): Promise<{ task_id: number; matched: number }> {
     const res = await apiClient.POST('/api/failed-novels/retry', {
-      body: { novel_ids: novelIds },
+      body: { ids },
     })
     return unwrap(res, '入队重试失败') as { task_id: number; matched: number }
   },

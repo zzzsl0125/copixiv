@@ -2,7 +2,10 @@ import type { GetNovelsParams } from '../types'
 
 export const queryKeys = {
   systemConfig: () => ['system', 'config'] as const,
-  tokens: () => ['tokens'] as const,
+  sources: () => ['sources'] as const,
+  sourceCredentials: (source: string) => ['sources', source, 'credentials'] as const,
+  authorSearch: (q: string) => ['novels', 'author', 'search', q] as const,
+  seriesSearch: (q: string) => ['novels', 'series', 'search', q] as const,
   tagPreferences: () => ['tag-preferences'] as const,
   tagAliases: () => ['tag-aliases'] as const,
   searchHistory: () => ['search-history'] as const,

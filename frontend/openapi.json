@@ -41,6 +41,41 @@
         "title": "AuthorLookupResponse",
         "type": "object"
       },
+      "AuthorSearchItem": {
+        "description": "Author search result item (``GET /api/novels/author/search``).",
+        "properties": {
+          "author_id": {
+            "title": "Author Id",
+            "type": "integer"
+          },
+          "author_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author Name"
+          },
+          "novel_count": {
+            "default": 0,
+            "title": "Novel Count",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "author_id",
+          "source"
+        ],
+        "title": "AuthorSearchItem",
+        "type": "object"
+      },
       "BatchExportPreviewRequest": {
         "description": "Live preview of the ZIP entry path for selected novels.",
         "properties": {
@@ -338,6 +373,108 @@
         "title": "Body_upload_novels_api_library_uploads_post",
         "type": "object"
       },
+      "CredentialFieldSpecSchema": {
+        "description": "Schema describing one secret or metadata field for a source credential.",
+        "properties": {
+          "default": {
+            "title": "Default"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "field_type": {
+            "enum": [
+              "string",
+              "secret",
+              "boolean"
+            ],
+            "title": "Field Type",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "placeholder": {
+            "default": "",
+            "title": "Placeholder",
+            "type": "string"
+          },
+          "required": {
+            "default": false,
+            "title": "Required",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "key",
+          "label",
+          "field_type"
+        ],
+        "title": "CredentialFieldSpecSchema",
+        "type": "object"
+      },
+      "CredentialKindSpecSchema": {
+        "description": "Schema describing one credential kind supported by a source.",
+        "properties": {
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "meta_fields": {
+            "items": {
+              "$ref": "#/components/schemas/CredentialFieldSpecSchema"
+            },
+            "title": "Meta Fields",
+            "type": "array"
+          },
+          "secret_fields": {
+            "items": {
+              "$ref": "#/components/schemas/CredentialFieldSpecSchema"
+            },
+            "title": "Secret Fields",
+            "type": "array"
+          },
+          "supports_reorder": {
+            "default": false,
+            "title": "Supports Reorder",
+            "type": "boolean"
+          },
+          "unique_meta_flags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unique Meta Flags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "label"
+        ],
+        "title": "CredentialKindSpecSchema",
+        "type": "object"
+      },
+      "EpubPolicy": {
+        "description": "How EPUB reconciliation validates novels belonging to a source.",
+        "enum": [
+          "container_only",
+          "strict_placeholders",
+          "best_effort_external"
+        ],
+        "title": "EpubPolicy",
+        "type": "string"
+      },
       "EpubStatus": {
         "description": "EPUB conversion status for a novel.\n\n``NO`` and ``NO_IMAGES`` are different facts, and conflating them cost\nthis project five weeks of invisible breakage (2026-09 追溯):\n\n* ``NO`` (0) — **unclassified**.  A legacy value, and the column default.\n  It carries no claim: the row may or may not need an EPUB, and only the\n  text file can settle it.  The reconciler re-examines these rows so they\n  eventually reach a terminal state.\n* ``NO_IMAGES`` (3) — **terminal: nothing to build**.  Means *no EPUB will\n  ever be produced for this row*, for either of two reasons: the body has\n  no image placeholder to embed, **or** the placeholders' images are gone\n  for good (author deleted them / the URLs are dead, confirmed by the\n  stale-image rule).  The reconciler never re-reads the text of a row in\n  this state.\n* ``MISSING_SOURCE`` (4) — **terminal: no local text**.  ``novel.path`` is\n  set but the text file is not on disk (and no renamed copy exists).  The\n  row can never be *built from* anything local, so it must not sit in\n  ``NO``/``PENDING`` pretending work is pending.  It is recoverable only\n  by a re-download, which the UI must offer explicitly.\n\nHistorically ``0`` meant \"no images\" *and* \"don't look at me\" at once\n(the reconciler filtered on ``has_epub > 0``), so rows demoted by the\nstale-image rule — or clobbered to 0 by every metadata refresh — could\nnever be repaired.  Splitting the two meanings is the point; ``4`` exists\nfor the same reason (one more fact that must not hide behind ``0``).",
         "enum": [
@@ -364,6 +501,17 @@
             ],
             "title": "Error Message"
           },
+          "external_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "External Url"
+          },
           "failed_times": {
             "default": 1,
             "title": "Failed Times",
@@ -380,6 +528,10 @@
             ],
             "title": "Failure Type"
           },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
           "last_failed_at": {
             "anyOf": [
               {
@@ -393,8 +545,25 @@
             "title": "Last Failed At"
           },
           "novel_id": {
-            "title": "Novel Id",
-            "type": "integer"
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Novel Id"
+          },
+          "source": {
+            "default": "pixiv",
+            "title": "Source",
+            "type": "string"
+          },
+          "source_key": {
+            "default": "",
+            "title": "Source Key",
+            "type": "string"
           },
           "title": {
             "anyOf": [
@@ -409,7 +578,7 @@
           }
         },
         "required": [
-          "novel_id"
+          "id"
         ],
         "title": "FailedNovelItem",
         "type": "object"
@@ -447,6 +616,13 @@
       },
       "FailedNovelRetryRequest": {
         "properties": {
+          "ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Ids",
+            "type": "array"
+          },
           "novel_ids": {
             "items": {
               "type": "integer"
@@ -455,9 +631,6 @@
             "type": "array"
           }
         },
-        "required": [
-          "novel_ids"
-        ],
         "title": "FailedNovelRetryRequest",
         "type": "object"
       },
@@ -574,6 +747,11 @@
             ],
             "title": "Author Name"
           },
+          "can_sync": {
+            "default": false,
+            "title": "Can Sync",
+            "type": "boolean"
+          },
           "create_time": {
             "anyOf": [
               {
@@ -594,6 +772,17 @@
             "readOnly": true,
             "title": "Editable Fields",
             "type": "array"
+          },
+          "external_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "External Url"
           },
           "has_epub": {
             "$ref": "#/components/schemas/EpubStatus",
@@ -652,8 +841,9 @@
             "title": "Series Name"
           },
           "source": {
-            "$ref": "#/components/schemas/NovelSource",
-            "default": "pixiv"
+            "default": "pixiv",
+            "title": "Source",
+            "type": "string"
           },
           "tags": {
             "default": [],
@@ -759,15 +949,6 @@
         ],
         "title": "NovelListResponse",
         "type": "object"
-      },
-      "NovelSource": {
-        "description": "Origin of a novel row in ``novel.source``.",
-        "enum": [
-          "pixiv",
-          "local"
-        ],
-        "title": "NovelSource",
-        "type": "string"
       },
       "NovelUpdateRequest": {
         "additionalProperties": false,
@@ -1148,6 +1329,151 @@
         "title": "SeriesLookupResponse",
         "type": "object"
       },
+      "SeriesSearchItem": {
+        "description": "Series search result item (``GET /api/novels/series/search``).",
+        "properties": {
+          "author_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author Id"
+          },
+          "novel_count": {
+            "default": 0,
+            "title": "Novel Count",
+            "type": "integer"
+          },
+          "series_id": {
+            "title": "Series Id",
+            "type": "integer"
+          },
+          "series_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Series Name"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "series_id",
+          "source"
+        ],
+        "title": "SeriesSearchItem",
+        "type": "object"
+      },
+      "SettingFieldOptionSchema": {
+        "description": "Select option entry rendered in source settings UI.",
+        "properties": {
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "label"
+        ],
+        "title": "SettingFieldOptionSchema",
+        "type": "object"
+      },
+      "SettingFieldSpecSchema": {
+        "description": "Schema describing one configurable setting for a source.",
+        "properties": {
+          "default": {
+            "title": "Default"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "field_type": {
+            "enum": [
+              "string",
+              "number",
+              "boolean",
+              "select",
+              "key_value"
+            ],
+            "title": "Field Type",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "max_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Value"
+          },
+          "min_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Value"
+          },
+          "options": {
+            "items": {
+              "$ref": "#/components/schemas/SettingFieldOptionSchema"
+            },
+            "title": "Options",
+            "type": "array"
+          },
+          "visible_when": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Visible When"
+          }
+        },
+        "required": [
+          "key",
+          "label",
+          "field_type"
+        ],
+        "title": "SettingFieldSpecSchema",
+        "type": "object"
+      },
       "SortIdsRequest": {
         "description": "Order an explicit id list by a novel column — 「查看已选」排序.",
         "properties": {
@@ -1184,6 +1510,469 @@
         ],
         "title": "SortableOrderBy",
         "type": "string"
+      },
+      "SourceConfigUpdateRequest": {
+        "additionalProperties": false,
+        "description": "Request payload for ``PUT /api/sources/{source}/config``.",
+        "properties": {
+          "config": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Config"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          }
+        },
+        "title": "SourceConfigUpdateRequest",
+        "type": "object"
+      },
+      "SourceCredentialCreateRequest": {
+        "description": "Request payload for ``POST /api/sources/{source}/credentials``.",
+        "properties": {
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
+          },
+          "meta": {
+            "additionalProperties": true,
+            "title": "Meta",
+            "type": "object"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "secret": {
+            "additionalProperties": true,
+            "title": "Secret",
+            "type": "object"
+          },
+          "valid": {
+            "default": true,
+            "title": "Valid",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "SourceCredentialCreateRequest",
+        "type": "object"
+      },
+      "SourceCredentialResponse": {
+        "description": "Credential representation returned by credential CRUD endpoints (secrets masked).",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "meta": {
+            "additionalProperties": true,
+            "title": "Meta",
+            "type": "object"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "secret": {
+            "additionalProperties": true,
+            "title": "Secret",
+            "type": "object"
+          },
+          "sort_index": {
+            "title": "Sort Index",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "valid": {
+            "title": "Valid",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "source",
+          "name",
+          "kind",
+          "secret",
+          "valid",
+          "sort_index",
+          "meta"
+        ],
+        "title": "SourceCredentialResponse",
+        "type": "object"
+      },
+      "SourceCredentialUpdateRequest": {
+        "description": "Request payload for ``PUT /api/sources/{source}/credentials/{cred_id}``.",
+        "properties": {
+          "meta": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Meta"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "secret": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secret"
+          },
+          "valid": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid"
+          }
+        },
+        "title": "SourceCredentialUpdateRequest",
+        "type": "object"
+      },
+      "SourceFetchRequest": {
+        "description": "Request payload for ``POST /api/sources/fetch``.",
+        "properties": {
+          "force": {
+            "default": false,
+            "title": "Force",
+            "type": "boolean"
+          },
+          "refs": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Refs",
+            "type": "array"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          }
+        },
+        "required": [
+          "refs"
+        ],
+        "title": "SourceFetchRequest",
+        "type": "object"
+      },
+      "SourceFetchResponse": {
+        "description": "Response payload for ``POST /api/sources/fetch``.",
+        "properties": {
+          "ref_count": {
+            "title": "Ref Count",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "task_id": {
+            "title": "Task Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "task_id",
+          "source",
+          "ref_count"
+        ],
+        "title": "SourceFetchResponse",
+        "type": "object"
+      },
+      "SourceItemResponse": {
+        "description": "Summary item returned by ``GET /api/sources`` and ``PUT /api/sources/{source}/config``.",
+        "properties": {
+          "config": {
+            "additionalProperties": true,
+            "title": "Config",
+            "type": "object"
+          },
+          "credential_count": {
+            "default": 0,
+            "title": "Credential Count",
+            "type": "integer"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "manifest": {
+            "$ref": "#/components/schemas/SourceManifestSchema"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "valid_credential_count": {
+            "default": 0,
+            "title": "Valid Credential Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "source",
+          "enabled",
+          "config",
+          "manifest"
+        ],
+        "title": "SourceItemResponse",
+        "type": "object"
+      },
+      "SourceManifestSchema": {
+        "description": "Static capability and UI manifest for a registered source plugin.",
+        "properties": {
+          "allow_proxy_config": {
+            "default": true,
+            "title": "Allow Proxy Config",
+            "type": "boolean"
+          },
+          "badge_class": {
+            "default": "",
+            "title": "Badge Class",
+            "type": "string"
+          },
+          "badge_label": {
+            "default": "",
+            "title": "Badge Label",
+            "type": "string"
+          },
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "credential_kinds": {
+            "items": {
+              "$ref": "#/components/schemas/CredentialKindSpecSchema"
+            },
+            "title": "Credential Kinds",
+            "type": "array"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "editable_fields": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Editable Fields",
+            "type": "array"
+          },
+          "enabled_by_default": {
+            "default": true,
+            "title": "Enabled By Default",
+            "type": "boolean"
+          },
+          "epub_policy": {
+            "$ref": "#/components/schemas/EpubPolicy",
+            "default": "container_only"
+          },
+          "settings_schema": {
+            "items": {
+              "$ref": "#/components/schemas/SettingFieldSpecSchema"
+            },
+            "title": "Settings Schema",
+            "type": "array"
+          },
+          "shelf": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceShelfDefSchema"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "display_name"
+        ],
+        "title": "SourceManifestSchema",
+        "type": "object"
+      },
+      "SourceShelfDefSchema": {
+        "description": "Sidebar shelf and intake definition advertised by a source.",
+        "properties": {
+          "icon": {
+            "default": "book",
+            "title": "Icon",
+            "type": "string"
+          },
+          "intake_action": {
+            "default": "none",
+            "enum": [
+              "none",
+              "file_upload",
+              "ref_fetch"
+            ],
+            "title": "Intake Action",
+            "type": "string"
+          },
+          "intake_button_text": {
+            "default": "",
+            "title": "Intake Button Text",
+            "type": "string"
+          },
+          "intake_placeholder": {
+            "default": "",
+            "title": "Intake Placeholder",
+            "type": "string"
+          },
+          "keyword": {
+            "title": "Keyword",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "min_like": {
+            "default": 0,
+            "title": "Min Like",
+            "type": "integer"
+          },
+          "min_text": {
+            "default": 0,
+            "title": "Min Text",
+            "type": "integer"
+          },
+          "order_by": {
+            "default": "id",
+            "title": "Order By",
+            "type": "string"
+          },
+          "order_direction": {
+            "default": "DESC",
+            "title": "Order Direction",
+            "type": "string"
+          },
+          "section_id": {
+            "title": "Section Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "section_id",
+          "label",
+          "keyword"
+        ],
+        "title": "SourceShelfDefSchema",
+        "type": "object"
+      },
+      "SourceTestResponse": {
+        "description": "Response payload for ``POST /api/sources/{source}/test``.",
+        "properties": {
+          "account_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Summary"
+          },
+          "latency_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latency Ms"
+          },
+          "message": {
+            "default": "",
+            "title": "Message",
+            "type": "string"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "title": "SourceTestResponse",
+        "type": "object"
       },
       "SystemConfigResponse": {
         "properties": {
@@ -1666,138 +2455,6 @@
         "title": "TaskMethod",
         "type": "object"
       },
-      "TokenBase": {
-        "properties": {
-          "is_follow": {
-            "default": false,
-            "title": "Is Follow",
-            "type": "boolean"
-          },
-          "name": {
-            "title": "Name",
-            "type": "string"
-          },
-          "premium": {
-            "default": false,
-            "title": "Premium",
-            "type": "boolean"
-          },
-          "token": {
-            "title": "Token",
-            "type": "string"
-          },
-          "valid": {
-            "default": true,
-            "title": "Valid",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "name",
-          "token"
-        ],
-        "title": "TokenBase",
-        "type": "object"
-      },
-      "TokenResponse": {
-        "properties": {
-          "id": {
-            "title": "Id",
-            "type": "integer"
-          },
-          "is_follow": {
-            "default": false,
-            "title": "Is Follow",
-            "type": "boolean"
-          },
-          "name": {
-            "title": "Name",
-            "type": "string"
-          },
-          "premium": {
-            "default": false,
-            "title": "Premium",
-            "type": "boolean"
-          },
-          "token": {
-            "title": "Token",
-            "type": "string"
-          },
-          "valid": {
-            "default": true,
-            "title": "Valid",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "name",
-          "token",
-          "id"
-        ],
-        "title": "TokenResponse",
-        "type": "object"
-      },
-      "TokenUpdate": {
-        "properties": {
-          "is_follow": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Is Follow"
-          },
-          "name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Name"
-          },
-          "premium": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Premium"
-          },
-          "token": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Token"
-          },
-          "valid": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Valid"
-          }
-        },
-        "title": "TokenUpdate",
-        "type": "object"
-      },
       "UploadResponse": {
         "properties": {
           "created": {
@@ -2062,7 +2719,7 @@
     },
     "/api/failed-novels/retry": {
       "post": {
-        "description": "Enqueue a background ``failed_retry`` task for the given ids.",
+        "description": "Enqueue a background ``failed_retry`` task for the given failure records or novel ids.",
         "operationId": "retry_failed_novels_api_failed_novels_retry_post",
         "requestBody": {
           "content": {
@@ -2134,17 +2791,17 @@
         ]
       }
     },
-    "/api/failed-novels/{novel_id}/reset-count": {
+    "/api/failed-novels/{failed_id}/reset-count": {
       "post": {
         "description": "Reset one record's failure count to 0 — the record stays.\n\nPreferred over deletion: the history row (title / error / first-seen\ninfo) remains visible in the 「失败记录」 view while the novel is\nunblocked for automatic retry.",
-        "operationId": "reset_failed_novel_count_api_failed_novels__novel_id__reset_count_post",
+        "operationId": "reset_failed_novel_count_api_failed_novels__failed_id__reset_count_post",
         "parameters": [
           {
             "in": "path",
-            "name": "novel_id",
+            "name": "failed_id",
             "required": true,
             "schema": {
-              "title": "Novel Id",
+              "title": "Failed Id",
               "type": "integer"
             }
           }
@@ -2374,6 +3031,87 @@
           }
         ],
         "summary": "Get Novels",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
+    "/api/novels/author/search": {
+      "get": {
+        "description": "Search known authors by exact ID or name substring, optionally filtered by source.",
+        "operationId": "search_authors_api_novels_author_search_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AuthorSearchItem"
+                  },
+                  "title": "Response Search Authors Api Novels Author Search Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Search Authors",
         "tags": [
           "novels"
         ]
@@ -3021,6 +3759,87 @@
         ]
       }
     },
+    "/api/novels/series/search": {
+      "get": {
+        "description": "Search known series by exact ID or name substring, optionally filtered by source.",
+        "operationId": "search_series_api_novels_series_search_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SeriesSearchItem"
+                  },
+                  "title": "Response Search Series Api Novels Series Search Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Search Series",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
     "/api/novels/series/{series_id}": {
       "get": {
         "description": "系列 ID → 系列名预览（编辑器「系列」一栏的即时反馈）。\n\n与作者预览同构（见 ``lookup_author``）：只读、不写库，``unknown`` **不是\n错误**——id 才是身份，编辑器照样允许保存。名字的来源链更长一点：``series``\n行 → 同系列的 novel 行 → pixiv ``novel_series``（前两步都是本地查询）。",
@@ -3311,7 +4130,7 @@
     },
     "/api/novels/{novel_id}/sync": {
       "post": {
-        "description": "按 id 从 pixiv 重抓这一本的元数据并落库（编辑器的「同步」）。\n\n修的是\"手改会与来源打架\"那类错配：pixiv 书的 ``title`` / ``author_id`` /\n``series_id`` 都是只读（``field_policy.py``），错配之后的出口就是这里 ——\n把来源值拉回来（docs/NOVEL_EDIT_DESIGN.md §4.3 的单本版）。\n\n**无请求体**：动作的输入只有路径上的 id。响应与 PATCH 同形状（更新后的完整\n``NovelBase``），前端同样原地替换卡片。本地书 → 400（没有来源可恢复）；\npixiv 上已不存在 / 受限（webview 返回空）→ 404。\n\n依赖用 ``UowDep`` 而**不是** ``get_write_uow``：抓取必须在写事务\n之外，写事务由用例里的 ``run_write_transaction`` 自己开。",
+        "description": "按 id 从来源重抓这一本的元数据并落库（编辑器的「同步」）。\n\n修的是\"手改会与来源打架\"那类错配：pixiv 书的 ``title`` / ``author_id`` /\n``series_id`` 都是只读（``field_policy.py``），错配之后的出口就是这里 ——\n把来源值拉回来（docs/NOVEL_EDIT_DESIGN.md §4.3 的单本版）。\n\n**无请求体**：动作的输入只有路径上的 id。响应与 PATCH 同形状（更新后的完整\n``NovelBase``），前端同样原地替换卡片。本地书或未启用来源 → 400；\npixiv 上已不存在 / 受限（webview 返回空）→ 404。\n\n依赖用 ``UowDep`` 而**不是** ``get_write_uow``：抓取必须在写事务\n之外，写事务由用例里的 ``run_write_transaction`` 自己开。",
         "operationId": "sync_novel_api_novels__novel_id__sync_post",
         "parameters": [
           {
@@ -3477,6 +4296,473 @@
         "summary": "Delete Search History",
         "tags": [
           "search_history"
+        ]
+      }
+    },
+    "/api/sources": {
+      "get": {
+        "description": "List all registered sources with runtime configs, manifests, and credential counts.",
+        "operationId": "list_sources_api_sources_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SourceItemResponse"
+                  },
+                  "title": "Response List Sources Api Sources Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "List Sources",
+        "tags": [
+          "sources"
+        ]
+      }
+    },
+    "/api/sources/fetch": {
+      "post": {
+        "description": "Validate source references and enqueue a ``source_fetch`` background task.",
+        "operationId": "fetch_by_refs_api_sources_fetch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceFetchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceFetchResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Fetch By Refs",
+        "tags": [
+          "sources"
+        ]
+      }
+    },
+    "/api/sources/{source}/config": {
+      "put": {
+        "description": "Update a source's enabled flag or settings and hot-reload its runtime.",
+        "operationId": "update_source_config_api_sources__source__config_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source",
+            "required": true,
+            "schema": {
+              "title": "Source",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceConfigUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceItemResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Update Source Config",
+        "tags": [
+          "sources"
+        ]
+      }
+    },
+    "/api/sources/{source}/credentials": {
+      "get": {
+        "description": "List masked credentials configured for *source*.",
+        "operationId": "list_source_credentials_api_sources__source__credentials_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source",
+            "required": true,
+            "schema": {
+              "title": "Source",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SourceCredentialResponse"
+                  },
+                  "title": "Response List Source Credentials Api Sources  Source  Credentials Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "List Source Credentials",
+        "tags": [
+          "sources"
+        ]
+      },
+      "post": {
+        "description": "Create a new credential for *source* and hot-reload its runtime.",
+        "operationId": "create_source_credential_api_sources__source__credentials_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source",
+            "required": true,
+            "schema": {
+              "title": "Source",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceCredentialCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceCredentialResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Create Source Credential",
+        "tags": [
+          "sources"
+        ]
+      }
+    },
+    "/api/sources/{source}/credentials/reorder": {
+      "post": {
+        "description": "Reorder credential priority for *source* without triggering runtime reload.",
+        "operationId": "reorder_source_credentials_api_sources__source__credentials_reorder_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source",
+            "required": true,
+            "schema": {
+              "title": "Source",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "type": "integer"
+                },
+                "title": "Ids",
+                "type": "array"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Reorder Source Credentials",
+        "tags": [
+          "sources"
+        ]
+      }
+    },
+    "/api/sources/{source}/credentials/{cred_id}": {
+      "delete": {
+        "description": "Delete a credential from *source* and hot-reload its runtime.",
+        "operationId": "delete_source_credential_api_sources__source__credentials__cred_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source",
+            "required": true,
+            "schema": {
+              "title": "Source",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "cred_id",
+            "required": true,
+            "schema": {
+              "title": "Cred Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Delete Source Credential",
+        "tags": [
+          "sources"
+        ]
+      },
+      "put": {
+        "description": "Update an existing credential for *source* and hot-reload its runtime.",
+        "operationId": "update_source_credential_api_sources__source__credentials__cred_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source",
+            "required": true,
+            "schema": {
+              "title": "Source",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "cred_id",
+            "required": true,
+            "schema": {
+              "title": "Cred Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceCredentialUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceCredentialResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Update Source Credential",
+        "tags": [
+          "sources"
+        ]
+      }
+    },
+    "/api/sources/{source}/test": {
+      "post": {
+        "description": "Run an active connectivity check against *source*.",
+        "operationId": "test_source_connection_api_sources__source__test_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source",
+            "required": true,
+            "schema": {
+              "title": "Source",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceTestResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Test Source Connection",
+        "tags": [
+          "sources"
         ]
       }
     },
@@ -4406,223 +5692,6 @@
         "summary": "Run Scheduled Task",
         "tags": [
           "tasks"
-        ]
-      }
-    },
-    "/api/tokens": {
-      "get": {
-        "operationId": "get_tokens_api_tokens_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/TokenResponse"
-                  },
-                  "title": "Response Get Tokens Api Tokens Get",
-                  "type": "array"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "security": [
-          {
-            "APIKeyHeader": []
-          }
-        ],
-        "summary": "Get Tokens",
-        "tags": [
-          "tokens"
-        ]
-      },
-      "post": {
-        "operationId": "create_token_api_tokens_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/TokenBase"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TokenResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "APIKeyHeader": []
-          }
-        ],
-        "summary": "Create Token",
-        "tags": [
-          "tokens"
-        ]
-      }
-    },
-    "/api/tokens/reorder": {
-      "post": {
-        "operationId": "reorder_tokens_api_tokens_reorder_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "items": {
-                  "type": "integer"
-                },
-                "title": "Ids",
-                "type": "array"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "APIKeyHeader": []
-          }
-        ],
-        "summary": "Reorder Tokens",
-        "tags": [
-          "tokens"
-        ]
-      }
-    },
-    "/api/tokens/{token_id}": {
-      "delete": {
-        "operationId": "delete_token_api_tokens__token_id__delete",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "token_id",
-            "required": true,
-            "schema": {
-              "title": "Token Id",
-              "type": "integer"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "APIKeyHeader": []
-          }
-        ],
-        "summary": "Delete Token",
-        "tags": [
-          "tokens"
-        ]
-      },
-      "put": {
-        "operationId": "update_token_api_tokens__token_id__put",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "token_id",
-            "required": true,
-            "schema": {
-              "title": "Token Id",
-              "type": "integer"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/TokenUpdate"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TokenResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "APIKeyHeader": []
-          }
-        ],
-        "summary": "Update Token",
-        "tags": [
-          "tokens"
         ]
       }
     }

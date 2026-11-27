@@ -19,6 +19,7 @@ import type {
   SeriesLookup,
   SortableOrderBy,
 } from '../types'
+import type { AuthorSearchItem, SeriesSearchItem } from '../types/novels'
 
 export const novelApi = {
   async getNovels(params: GetNovelsParams, signal?: AbortSignal): Promise<NovelListResult> {
@@ -91,12 +92,46 @@ export const novelApi = {
     return unwrap(res, '查询作者信息失败')
   },
 
+  async searchAuthors(
+    q: string,
+    options?: { source?: string; limit?: number; signal?: AbortSignal },
+  ): Promise<AuthorSearchItem[]> {
+    const res = await apiClient.GET('/api/novels/author/search', {
+      params: {
+        query: {
+          q,
+          source: options?.source,
+          limit: options?.limit,
+        },
+      },
+      signal: options?.signal,
+    })
+    return unwrap(res, '搜索作者失败')
+  },
+
   async lookupSeries(seriesId: number, signal?: AbortSignal): Promise<SeriesLookup> {
     const res = await apiClient.GET('/api/novels/series/{series_id}', {
       params: { path: { series_id: seriesId } },
       signal,
     })
     return unwrap(res, '查询系列信息失败')
+  },
+
+  async searchSeries(
+    q: string,
+    options?: { source?: string; limit?: number; signal?: AbortSignal },
+  ): Promise<SeriesSearchItem[]> {
+    const res = await apiClient.GET('/api/novels/series/search', {
+      params: {
+        query: {
+          q,
+          source: options?.source,
+          limit: options?.limit,
+        },
+      },
+      signal: options?.signal,
+    })
+    return unwrap(res, '搜索系列失败')
   },
 
   downloadUrl(novelId: number, format: 'txt' | 'epub' = 'txt'): string {
