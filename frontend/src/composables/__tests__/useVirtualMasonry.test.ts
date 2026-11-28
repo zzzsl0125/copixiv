@@ -148,4 +148,102 @@ describe('useVirtualMasonry (@tanstack/vue-virtual)', () => {
     measureSpy.mockRestore()
     wrapper.unmount()
   })
+
+  it('uses measured lane assignment to pack subsequent cards into the shortest lane', async () => {
+    const items = ref(Array.from({ length: 5 }, (_, i) => ({ id: i + 1 })))
+    let api!: ReturnType<typeof useVirtualMasonry<{ id: number }>>
+
+    const Host = defineComponent({
+      setup() {
+        api = useVirtualMasonry(items, {
+          estimateSize: 200,
+          overscan: 4,
+          getItemKey: (item) => item.id,
+        })
+        return () => h('div', { ref: api.containerRef })
+      },
+    })
+
+    const wrapper = mount(Host)
+    await nextTick()
+
+    expect(api.columnCount.value).toBe(3)
+    expect(api.virtualizer.value.options.laneAssignmentMode).toBe('measured')
+
+    // Measure first row: lane 0 is much taller than lanes 1 and 2
+    api.virtualizer.value.resizeItem(0, 700)
+    api.virtualizer.value.resizeItem(1, 200)
+    api.virtualizer.value.resizeItem(2, 200)
+    api.virtualizer.value.resizeItem(3, 200)
+    api.virtualizer.value.resizeItem(4, 200)
+    await nextTick()
+
+    const byIndex = new Map(api.virtualItems.value.map((v) => [v.index, v]))
+    expect(byIndex.get(0)?.lane).toBe(0)
+    expect(byIndex.get(1)?.lane).toBe(1)
+    expect(byIndex.get(2)?.lane).toBe(2)
+    // Both item 3 and item 4 must pack into shorter lanes 1 and 2 instead of round-robin lane 0
+    expect(byIndex.get(3)?.lane).toBe(1)
+    expect(byIndex.get(4)?.lane).toBe(2)
+
+    wrapper.unmount()
+  })
+
+  it('supports item-aware estimateSize callback and clears lane cache only when prefix changes or items shrink', async () => {
+    const items = ref([
+      { id: 1, weight: 3 },
+      { id: 2, weight: 1 },
+      { id: 3, weight: 1 },
+      { id: 4, weight: 1 },
+    ])
+    const estimator = vi.fn((item: { id: number; weight: number }, _index: number, colW: number) => {
+      expect(colW).toBeGreaterThan(0)
+      return item.weight * 200
+    })
+    let api!: ReturnType<typeof useVirtualMasonry<{ id: number; weight: number }>>
+
+    const Host = defineComponent({
+      setup() {
+        api = useVirtualMasonry(items, {
+          estimateSize: estimator,
+          getItemKey: (item) => item.id,
+        })
+        return () => h('div', { ref: api.containerRef })
+      },
+    })
+
+    const wrapper = mount(Host)
+    await nextTick()
+
+    expect(estimator).toHaveBeenCalled()
+    // Item 0 estimated at 600px, items 1 and 2 at 200px, so item 3 lands in shortest lane (lane 1)
+    const initialByIdx = new Map(api.virtualItems.value.map((v) => [v.index, v]))
+    expect(initialByIdx.get(0)?.size).toBe(600)
+    expect(initialByIdx.get(3)?.lane).toBe(1)
+
+    const measureSpy = vi.spyOn(api.virtualizer.value, 'measure')
+
+    // Pagination append preserves existing prefix keys -> no full re-measure
+    items.value = [...items.value, { id: 5, weight: 1 }]
+    await nextTick()
+    expect(measureSpy).not.toHaveBeenCalled()
+
+    // In-place patch with identical keys -> no full re-measure
+    items.value = items.value.map((item) => ({ ...item, weight: item.weight + 1 }))
+    await nextTick()
+    expect(measureSpy).not.toHaveBeenCalled()
+
+    // Replacing the list (e.g. new search / filter) -> calls measure() to drop stale laneAssignments
+    items.value = Array.from({ length: 5 }, (_, i) => ({ id: i + 100, weight: 1 }))
+    await nextTick()
+    expect(measureSpy).toHaveBeenCalledTimes(1)
+
+    // Shrinking / deleting an item -> calls measure()
+    items.value = items.value.slice(1)
+    await nextTick()
+    expect(measureSpy).toHaveBeenCalledTimes(2)
+
+    measureSpy.mockRestore()
+    wrapper.unmount()
+  })
 })

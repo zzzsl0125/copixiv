@@ -83,7 +83,7 @@ sudo systemctl enable --now copixiv-pg.service copixiv.service
 2. 在 **侧边栏 - 任务管理** 内运行抓取任务或通过数据源书架抓取页按 ID / URL 抓书；本地 TXT / EPUB 可在本地书架的 **上传** 入口直接入库。
 3. **系列折叠与章节钻取**：
    - 默认检索视图中，同一系列（`series_id IS NOT NULL`）只展示 1 张书卡（标题优先显示系列名、喜爱/浏览取峰值、字数累加、标签取并集、`has_epub` 按已完成状态聚合）。
-   - 点击卡片内的 `系列：{系列名}（共 N 章）` 可跳转至 `series_id:<id>;` 章节视图，按 `series_index` 升序查看与单独管理该系列全部章节。
+   - 点击卡片内的 `系列：{系列名}` 可跳转至 `series_id:<id>;` 章节视图，按 `series_index` 升序查看与单独管理该系列全部章节。
    - 对系列书卡点击下载或批量导出开启 `merge_series` 时，服务端会在下载/导出阶段按需即时合成整本 `.txt` 或带目录/封面/插图的 EPUB3；**磁盘上各章节仍保持独立的原子文件**，互不覆盖。
 4. **多数据源磁盘目录规则**（`download/` 下按数据源平等分目录）：
    - Pixiv 散篇（`series_id IS NULL`）：`download/pixiv/{4位分片}/{安全标题}_{novel_id}.{txt,epub}`

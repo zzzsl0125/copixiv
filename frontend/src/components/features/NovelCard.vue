@@ -182,7 +182,7 @@ const getTagClass = (tag: string) => {
           @click="handleSeriesClick"
         >
           <template v-if="isSeriesCard">
-            {{ novel.series_name || novel.title || `系列 #${novel.series_id}` }}（共 {{ novel.chapter_count ?? 1 }} 章）
+            {{ novel.series_name || novel.title || `系列 #${novel.series_id}` }}
           </template>
           <template v-else>
             {{ novel.series_name || `系列 #${novel.series_id}` }}<template v-if="novel.series_index"> #{{ novel.series_index }}</template>

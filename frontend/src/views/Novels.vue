@@ -143,6 +143,16 @@ watch(
   },
 )
 
+function estimateNovelCardHeight(novel: Novel, _index: number, colWidth: number): number {
+  const innerW = Math.max(200, colWidth - 40)
+  const titleLines = Math.max(1, Math.ceil(((novel.title?.length ?? 0) * 16) / innerW))
+  const seriesH = novel.series_name || novel.series_id ? 24 : 0
+  const tagCount = novel.tags?.length ?? 0
+  const pillsPerRow = Math.max(1, Math.floor((innerW + 4) / 76))
+  const tagsH = tagCount > 0 ? Math.ceil(tagCount / pillsPerRow) * 24 - 4 : 0
+  return 91 + titleLines * 28 + 4 + seriesH + 32 + tagsH
+}
+
 const {
   columnCount,
   virtualItems,
@@ -153,6 +163,7 @@ const {
 } = useVirtualMasonry<Novel>(displayNovels, {
   containerRef: masonryContainerRef,
   headerRef: stickyHeaderRef,
+  estimateSize: estimateNovelCardHeight,
   getItemKey: (novel) => novel.id,
 })
 

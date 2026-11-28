@@ -92,11 +92,12 @@ describe('Series folded cards & modal behavior', () => {
     expect(seriesWrapper.get('[data-testid="badge-series"]').text()).toBe('系列')
     expect(seriesWrapper.get('[data-testid="badge-epub"]').text()).toBe('EPUB')
     expect(seriesWrapper.text()).toContain('系列：')
-    expect(seriesWrapper.text()).toContain('魔法物语（共 3 章）')
+    expect(seriesWrapper.text()).toContain('魔法物语')
+    expect(seriesWrapper.text()).not.toContain('共 3 章')
 
     const clickableSeries = seriesWrapper
       .findAll('span')
-      .find((s) => s.text() === '魔法物语（共 3 章）')
+      .find((s) => s.text() === '魔法物语')
     expect(clickableSeries).toBeTruthy()
     await clickableSeries!.trigger('click')
     expect(seriesWrapper.emitted('search')).toEqual([['series', 900]])

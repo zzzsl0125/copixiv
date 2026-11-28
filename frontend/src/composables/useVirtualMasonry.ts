@@ -30,8 +30,11 @@ export type VirtualItemKey = VirtualItem['key']
 export interface UseVirtualMasonryOptions<T> {
   /** Column / row gap in pixels (default 24). */
   gap?: number
-  /** Initial card height estimate before measurement (default 260). */
-  estimateSize?: number
+  /**
+   * Initial card height estimate (or per-item estimator) before DOM
+   * measurement settles (default 260).
+   */
+  estimateSize?: number | ((item: T, index: number, columnWidth: number) => number)
   /** Overscan items per lane outside the viewport (default 6). */
   overscan?: number
   /** Optional grid container element ref (auto-created when omitted). */
@@ -60,7 +63,7 @@ export function useVirtualMasonry<T>(
   options: UseVirtualMasonryOptions<T> = {},
 ) {
   const gap = options.gap ?? MASONRY_GAP_PX
-  const estimateSize = options.estimateSize ?? MASONRY_ESTIMATE_HEIGHT
+  const estimateSizeOpt = options.estimateSize ?? MASONRY_ESTIMATE_HEIGHT
   const overscan = options.overscan ?? 6
   const getKey = options.getItemKey ?? defaultItemKey
 
@@ -116,9 +119,18 @@ export function useVirtualMasonry<T>(
 
   const virtualizerOptions = computed(() => ({
     count: items.value.length,
-    estimateSize: () => estimateSize,
+    estimateSize: (index: number): number => {
+      if (typeof estimateSizeOpt === 'function') {
+        const item = items.value[index]
+        return item !== undefined
+          ? Math.max(60, Math.round(estimateSizeOpt(item, index, columnWidth.value)))
+          : MASONRY_ESTIMATE_HEIGHT
+      }
+      return estimateSizeOpt
+    },
     overscan,
     lanes: columnCount.value,
+    laneAssignmentMode: 'measured' as const,
     gap,
     scrollMargin: scrollMargin.value,
     getItemKey: (index: number): VirtualItemKey => {
@@ -140,6 +152,7 @@ export function useVirtualMasonry<T>(
     if (
       inst.options.count !== opts.count ||
       inst.options.lanes !== opts.lanes ||
+      inst.options.laneAssignmentMode !== opts.laneAssignmentMode ||
       inst.options.scrollMargin !== opts.scrollMargin
     ) {
       inst.setOptions({
@@ -179,6 +192,33 @@ export function useVirtualMasonry<T>(
   }
 
   const debouncedMeasure = useDebounceFn(measure, 100)
+
+  // Clear index-keyed laneAssignments on filter/search replacement or removal,
+  // while keeping measured caches intact during infinite-scroll appends and
+  // in-place metadata updates.
+  let prevKeys: VirtualItemKey[] = items.value.map((item, i) => getKey(item, i))
+
+  watch(items, (nextItems) => {
+    const nextLen = nextItems.length
+    const prevLen = prevKeys.length
+    let isAppendOrSame = nextLen >= prevLen
+    if (isAppendOrSame) {
+      for (let i = 0; i < prevLen; i++) {
+        if (getKey(nextItems[i]!, i) !== prevKeys[i]) {
+          isAppendOrSame = false
+          break
+        }
+      }
+    }
+    if (isAppendOrSame) {
+      for (let i = prevLen; i < nextLen; i++) {
+        prevKeys.push(getKey(nextItems[i]!, i))
+      }
+      return
+    }
+    prevKeys = nextItems.map((item, i) => getKey(item, i))
+    virtualizer.value.measure()
+  })
 
   watch(columnCount, () => {
     void nextTick(measure)
