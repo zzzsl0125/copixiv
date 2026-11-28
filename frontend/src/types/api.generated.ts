@@ -2364,6 +2364,8 @@ export interface components {
             description?: string | null;
             /** Name */
             name: string;
+            /** Source */
+            source?: string | null;
         };
         /** UploadResponse */
         UploadResponse: {

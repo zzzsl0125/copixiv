@@ -25,7 +25,6 @@ from copixiv.features.failures.repo import FailedNovelRepository
 from copixiv.features.novels.ingest import persist_novels
 from copixiv.features.novels.ingest.asset_pipeline import NovelAssetPipeline
 from copixiv.features.novels.use_cases.discovery import fetch_special_follow_novels, retry_failed_novels
-from copixiv.features.novels.use_cases.refetch_missing import refetch_missing_novels
 from copixiv.features.sources.entity_resolver import EntityResolver
 from copixiv.features.sources.service import SourceService
 from copixiv.features.tags.repo import SQLAlchemyTagRepository
@@ -170,6 +169,7 @@ def test_list_sources_returns_seeded_manifests_and_credential_counts(
             "min_interval",
             "cooling_duration",
             "max_concurrency",
+            "task_timeout_sec",
         }
         assert len(pixiv_manifest["credential_kinds"]) == 1
         assert pixiv_manifest["credential_kinds"][0]["kind"] == "refresh_token"
@@ -519,19 +519,7 @@ def test_disable_pixiv_source_allows_offline_ops_and_blocks_network_sync_and_tas
                 )
             )
 
-        # refetch_missing_novels & fix_series_index raise ValidationError when Pixiv is disabled
-        with pytest.raises(ValidationError, match="已禁用"):
-            asyncio.run(
-                refetch_missing_novels(
-                    apply=True,
-                    uow=SqlUnitOfWork(committed_session_factory),
-                    client=app.state.client,
-                    file_storage=app.state.file_storage,
-                    image_downloader=None,
-                    source_service=app.state.source_service,
-                )
-            )
-
+        # fix_series_index raises ValidationError when Pixiv is disabled
         with pytest.raises(ValidationError, match="已禁用"):
             asyncio.run(
                 fix_series_index(

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import math
 import time
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
@@ -179,6 +181,38 @@ class TaskHistoryRecorder:
             logger.exception("Failed to recover stale task history rows.")
 
 
+def _resolve_source_timeout(
+    source_service: Any,
+    sources: Sequence[str],
+    default_timeout: float,
+) -> float | None:
+    """Resolve effective task timeout from source runtime configs (``<= 0`` means unlimited)."""
+    if source_service is None or not sources:
+        return default_timeout
+
+    resolved: list[float] = []
+    for raw_source in dict.fromkeys(s.strip() for s in sources if isinstance(s, str) and s.strip()):
+        try:
+            runtime = source_service.get_runtime_config(raw_source)
+        except Exception:  # noqa: BLE001
+            logger.exception("读取数据源 {} 运行配置失败，回退默认超时", raw_source)
+            continue
+        raw_val = runtime.values.get("task_timeout_sec")
+        if raw_val is None or isinstance(raw_val, bool):
+            continue
+        try:
+            timeout_val = float(raw_val)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(timeout_val):
+            continue
+        if timeout_val <= 0:
+            return None
+        resolved.append(timeout_val)
+
+    return max(resolved) if resolved else default_timeout
+
+
 class TaskExecutor:
     """Executes task functions with context injection and a timeout."""
 
@@ -226,13 +260,16 @@ class TaskExecutor:
         status: str = "running"
         error_msg: str | None = None
         result_val: Any = None
+        effective_timeout: float | None = spec.timeout if spec.timeout is not None else self.TIMEOUT_SECONDS
 
         await recorder.update(task_id, "running")
 
         with capture_logs(task_id=task_id) as get_logs:
             try:
                 ctx = self._build_context(task_id)
-                result_val = await self._execute(spec, params, ctx)
+                args_obj = spec.args_model.model_validate(params) if spec.args_model is not None else None
+                effective_timeout = await self._resolve_timeout(spec, args_obj, ctx)
+                result_val = await self._run_with_timeout(spec, args_obj, ctx, effective_timeout)
                 status = "success"
                 logger.info(
                     "Task '{}' (id={}) completed successfully.",
@@ -242,8 +279,11 @@ class TaskExecutor:
 
             except TimeoutError:
                 status = "failed"
-                effective_timeout = spec.timeout if spec.timeout is not None else self.TIMEOUT_SECONDS
-                error_msg = f"Task timed out after {effective_timeout:g}s"
+                error_msg = (
+                    f"Task timed out after {effective_timeout:g}s"
+                    if effective_timeout is not None
+                    else "Task timed out"
+                )
                 logger.error("Task '{}' (id={}) timed out.", name, task_id)
             except asyncio.CancelledError:
                 duration = time.time() - start_time
@@ -325,13 +365,39 @@ class TaskExecutor:
             http_manager=self._deps.get("http_manager"),
         )
 
+    async def _resolve_timeout(
+        self,
+        spec: TaskSpec,
+        args_obj: Any,
+        ctx: TaskContext,
+    ) -> float | None:
+        if spec.timeout is not None:
+            return spec.timeout if spec.timeout > 0 else None
+        if spec.timeout_sources is not None:
+            raw_sources = spec.timeout_sources(args_obj, ctx)
+            sources = await raw_sources if inspect.isawaitable(raw_sources) else raw_sources
+            return _resolve_source_timeout(ctx.source_service, sources, self.TIMEOUT_SECONDS)
+        if spec.source is not None:
+            return _resolve_source_timeout(ctx.source_service, (spec.source,), self.TIMEOUT_SECONDS)
+        return self.TIMEOUT_SECONDS
+
+    async def _run_with_timeout(
+        self,
+        spec: TaskSpec,
+        args_obj: Any,
+        ctx: TaskContext,
+        timeout: float | None,
+    ) -> Any:
+        coro = spec.func(ctx=ctx) if args_obj is None else spec.func(args_obj, ctx=ctx)
+        if timeout is None:
+            return await coro
+        return await asyncio.wait_for(coro, timeout=timeout)
+
     async def _execute(self, spec: TaskSpec, params: dict, ctx: TaskContext) -> Any:
         """Validate params against the args model and run the function."""
         args_obj = spec.args_model.model_validate(params) if spec.args_model is not None else None
-
-        coro = spec.func(ctx=ctx) if args_obj is None else spec.func(args_obj, ctx=ctx)
-        timeout = spec.timeout if spec.timeout is not None else self.TIMEOUT_SECONDS
-        return await asyncio.wait_for(coro, timeout=timeout)
+        timeout = await self._resolve_timeout(spec, args_obj, ctx)
+        return await self._run_with_timeout(spec, args_obj, ctx, timeout)
 
     @staticmethod
     def _normalize_result(result_val: Any) -> TaskResult:

@@ -229,3 +229,20 @@ class FailedNovelRepository:
             .order_by(models.FailedNovel.id)
         )
         return list(self.session.execute(stmt).scalars().all())
+
+    def get_retryable_rows(
+        self,
+        *,
+        source: str | None = None,
+        limit: int | None = None,
+        max_retries: int | None = None,
+    ) -> list[models.FailedNovel]:
+        """Return failure records eligible for automatic retry (``failed_times < max_retries``)."""
+        threshold = self._max_retries if max_retries is None else max_retries
+        stmt = select(models.FailedNovel).where(models.FailedNovel.failed_times < threshold)
+        if source:
+            stmt = stmt.where(models.FailedNovel.source == source)
+        stmt = stmt.order_by(models.FailedNovel.id.asc())
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        return list(self.session.execute(stmt).scalars().all())

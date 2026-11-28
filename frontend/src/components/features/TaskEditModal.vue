@@ -30,15 +30,15 @@ const formState = ref({
   is_enabled: true,
 })
 
-let methodsLoaded = false
+const methodsLoaded = ref(false)
 let methodsLoadingPromise: Promise<void> | null = null
 
 const ensureMethodsLoaded = async () => {
-  if (methodsLoaded || methodsLoadingPromise) return methodsLoadingPromise
+  if (methodsLoaded.value || methodsLoadingPromise) return methodsLoadingPromise
   methodsLoadingPromise = (async () => {
     try {
       availableMethods.value = await taskApi.getTaskMethods()
-      methodsLoaded = true
+      methodsLoaded.value = true
     } catch (err: unknown) {
       toast.error(getApiErrorMessage(err, '任务方法加载失败'))
     } finally {
@@ -47,6 +47,53 @@ const ensureMethodsLoaded = async () => {
   })()
   return methodsLoadingPromise
 }
+
+const SOURCE_LABELS: Record<string, string> = {
+  pixiv: 'Pixiv',
+  esj: 'ESJZone',
+  local: '本地',
+}
+
+const formatSourceScope = (source?: string | null): string => {
+  if (!source) return '通用'
+  return SOURCE_LABELS[source] ?? source.toUpperCase()
+}
+
+interface MethodGroup {
+  key: string
+  label: string
+  methods: TaskMethod[]
+}
+
+const groupedMethods = computed<MethodGroup[]>(() => {
+  const common: TaskMethod[] = []
+  const bySource = new Map<string, TaskMethod[]>()
+  for (const method of availableMethods.value) {
+    const src = method.source ?? ''
+    if (!src) {
+      common.push(method)
+      continue
+    }
+    const bucket = bySource.get(src)
+    if (bucket) {
+      bucket.push(method)
+    } else {
+      bySource.set(src, [method])
+    }
+  }
+  const groups: MethodGroup[] = []
+  if (common.length > 0) {
+    groups.push({ key: 'common', label: '通用任务', methods: common })
+  }
+  for (const [src, methods] of bySource.entries()) {
+    groups.push({
+      key: src,
+      label: `${formatSourceScope(src)} 专用`,
+      methods,
+    })
+  }
+  return groups
+})
 
 const selectedMethod = computed(() =>
   availableMethods.value.find((m) => m.name === formState.value.task),
@@ -183,13 +230,40 @@ const handleSave = () => {
         class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm bg-white"
       >
         <option value="" disabled>选择一个任务方法</option>
-        <option v-for="method in availableMethods" :key="method.name" :value="method.name">
-          {{ method.name }}
+        <option v-if="formState.task && !selectedMethod" :value="formState.task" disabled>
+          {{ formState.task }}（已移除）
         </option>
+        <optgroup v-for="group in groupedMethods" :key="group.key" :label="group.label">
+          <option v-for="method in group.methods" :key="method.name" :value="method.name">
+            {{ method.name }}
+          </option>
+        </optgroup>
       </select>
-      <p v-if="formState.task" class="mt-1 text-xs text-gray-500">
-        {{ selectedMethod?.description || '无描述' }}
-      </p>
+      <div v-if="formState.task" class="mt-1.5 flex items-center gap-2 text-xs text-gray-500">
+        <span
+          v-if="selectedMethod"
+          :class="
+            selectedMethod.source
+              ? 'bg-blue-50 text-blue-700 border-blue-200'
+              : 'bg-gray-100 text-gray-700 border-gray-200'
+          "
+          class="inline-flex items-center px-2 py-0.5 rounded border font-medium shrink-0"
+        >
+          {{ selectedMethod.source ? `${formatSourceScope(selectedMethod.source)} 专用` : '通用' }}
+        </span>
+        <span
+          v-else-if="methodsLoaded"
+          class="inline-flex items-center px-2 py-0.5 rounded border font-medium shrink-0 bg-amber-50 text-amber-700 border-amber-200"
+        >
+          已移除
+        </span>
+        <span>
+          {{
+            selectedMethod?.description ||
+            (methodsLoaded && !selectedMethod ? '该方法已从任务目录移除' : '无描述')
+          }}
+        </span>
+      </div>
     </div>
 
     <div

@@ -8,6 +8,7 @@ const props = defineProps<{
   tasks: ScheduledTask[]
   loading: boolean
   runningIds?: ReadonlySet<number>
+  methodSourceMap?: ReadonlyMap<string, string | null>
 }>()
 
 const emit = defineEmits<{
@@ -26,6 +27,28 @@ const columns: TableColumn[] = [
 ]
 
 const isRunning = (task: ScheduledTask) => props.runningIds?.has(task.id) ?? false
+
+const SOURCE_LABELS: Record<string, string> = {
+  pixiv: 'Pixiv',
+  esj: 'ESJZone',
+  local: '本地',
+}
+
+const methodScopeBadge = (taskName: string): { label: string; classes: string } | null => {
+  const map = props.methodSourceMap
+  if (!map || map.size === 0) return null
+  if (!map.has(taskName)) {
+    return { label: '已移除', classes: 'bg-amber-50 text-amber-700 border-amber-200' }
+  }
+  const src = map.get(taskName)
+  if (!src) {
+    return { label: '通用', classes: 'bg-gray-100 text-gray-700 border-gray-200' }
+  }
+  return {
+    label: SOURCE_LABELS[src] ?? src.toUpperCase(),
+    classes: 'bg-blue-50 text-blue-700 border-blue-200',
+  }
+}
 </script>
 
 <template>
@@ -39,7 +62,16 @@ const isRunning = (task: ScheduledTask) => props.runningIds?.has(task.id) ?? fal
     >
       <template #name="{ item: task }">
         <div class="text-sm font-medium text-gray-900">{{ task.name }}</div>
-        <div class="text-xs text-gray-500 font-mono mt-1">{{ task.task }}</div>
+        <div class="flex items-center gap-2 mt-1">
+          <span class="text-xs text-gray-500 font-mono">{{ task.task }}</span>
+          <span
+            v-if="methodScopeBadge(task.task)"
+            :class="methodScopeBadge(task.task)!.classes"
+            class="px-1.5 py-0.5 text-[11px] leading-none font-medium rounded border"
+          >
+            {{ methodScopeBadge(task.task)!.label }}
+          </span>
+        </div>
       </template>
       <template #cron="{ item: task }">
         <div class="text-sm font-medium text-gray-900" :title="task.cron">

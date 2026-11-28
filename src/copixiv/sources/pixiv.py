@@ -44,6 +44,8 @@ from copixiv.sources.base import BaseSourcePlugin
 from copixiv.sources.http import SourceHttpManager
 
 _PIXIV_PREFIX_RE = re.compile(r"^pixiv:(\d+)$", re.IGNORECASE)
+_PIXIV_SERIES_PREFIX_RE = re.compile(r"^pixiv:series:(\d+)$", re.IGNORECASE)
+_PIXIV_SERIES_PATH_RE = re.compile(r"^(?:/en)?/novel/series/(\d+)/?$", re.IGNORECASE)
 _DIGITS_RE = re.compile(r"^\d+$")
 _PIXIV_HOSTS = frozenset({"pixiv.net", "www.pixiv.net"})
 
@@ -59,6 +61,17 @@ def _pixiv_novel_ref(novel_id: int) -> ParsedSourceRef:
     )
 
 
+def _pixiv_series_ref(series_id: int) -> ParsedSourceRef:
+    key = str(series_id)
+    return ParsedSourceRef(
+        source=SOURCE_PIXIV,
+        kind="book",
+        series_key=key,
+        chapter_key=None,
+        normalized_ref=f"https://www.pixiv.net/novel/series/{key}",
+    )
+
+
 class PixivSourcePlugin(BaseSourcePlugin):
     """Source plugin for Pixiv novels, wrapping ``AccountPool`` and ``PixivClient``."""
 
@@ -70,6 +83,7 @@ class PixivSourcePlugin(BaseSourcePlugin):
         default_min_interval: float = 2.0,
         default_cooling_duration: float = 120.0,
         default_max_concurrency: int = 5,
+        default_task_timeout: int = 1800,
     ) -> None:
         self._http_manager = http_manager
         self._account_pool = account_pool
@@ -77,6 +91,7 @@ class PixivSourcePlugin(BaseSourcePlugin):
         self._default_min_interval = default_min_interval
         self._default_cooling_duration = default_cooling_duration
         self._default_max_concurrency = default_max_concurrency
+        self._default_task_timeout = default_task_timeout
 
         self.manifest = SourceManifest(
             source=SOURCE_PIXIV,
@@ -107,7 +122,7 @@ class PixivSourcePlugin(BaseSourcePlugin):
                 order_direction="DESC",
                 icon="sparkles",
                 intake_action="ref_fetch",
-                intake_placeholder="粘贴 Pixiv 小说链接或作品 ID（如 12345678）",
+                intake_placeholder="粘贴 Pixiv 小说/系列链接或作品 ID（如 12345678）",
                 intake_button_text="抓取",
             ),
             settings_schema=(
@@ -154,6 +169,15 @@ class PixivSourcePlugin(BaseSourcePlugin):
                     min_value=1.0,
                     max_value=20.0,
                 ),
+                SettingFieldSpec(
+                    key="task_timeout_sec",
+                    label="单次抓取任务超时（秒）",
+                    field_type="number",
+                    default=self._default_task_timeout,
+                    min_value=0,
+                    max_value=86400,
+                    description="限制单次抓取任务的最长运行时间（0 表示不限制，默认 1800 秒以控制风控风险）",
+                ),
             ),
             credential_kinds=(
                 CredentialKindSpec(
@@ -188,12 +212,17 @@ class PixivSourcePlugin(BaseSourcePlugin):
         )
 
     def parse_ref(self, raw: str, *, allow_bare_id: bool = False) -> ParsedSourceRef | None:
-        """Parse a Pixiv novel URL, ``pixiv:<id>`` ref, or bare ID when allowed."""
+        """Parse a Pixiv novel/series URL, ``pixiv:<id>`` / ``pixiv:series:<id>`` ref, or bare ID."""
         if not raw:
             return None
         cleaned = raw.strip()
         if not cleaned:
             return None
+
+        series_prefix_match = _PIXIV_SERIES_PREFIX_RE.match(cleaned)
+        if series_prefix_match:
+            series_id = int(series_prefix_match.group(1))
+            return _pixiv_series_ref(series_id) if series_id > 0 else None
 
         prefix_match = _PIXIV_PREFIX_RE.match(cleaned)
         if prefix_match:
@@ -205,16 +234,17 @@ class PixivSourcePlugin(BaseSourcePlugin):
             return _pixiv_novel_ref(novel_id) if novel_id > 0 else None
 
         parsed = urlparse(cleaned)
-        if (
-            parsed.scheme in ("http", "https")
-            and parsed.netloc.lower() in _PIXIV_HOSTS
-            and parsed.path.rstrip("/") == "/novel/show.php"
-        ):
-            for candidate in parse_qs(parsed.query).get("id", ()):
-                if _DIGITS_RE.match(candidate):
-                    novel_id = int(candidate)
-                    if novel_id > 0:
-                        return _pixiv_novel_ref(novel_id)
+        if parsed.scheme in ("http", "https") and parsed.netloc.lower() in _PIXIV_HOSTS:
+            if parsed.path.rstrip("/") == "/novel/show.php":
+                for candidate in parse_qs(parsed.query).get("id", ()):
+                    if _DIGITS_RE.match(candidate):
+                        novel_id = int(candidate)
+                        if novel_id > 0:
+                            return _pixiv_novel_ref(novel_id)
+            series_match = _PIXIV_SERIES_PATH_RE.match(parsed.path)
+            if series_match:
+                series_id = int(series_match.group(1))
+                return _pixiv_series_ref(series_id) if series_id > 0 else None
 
         return None
 

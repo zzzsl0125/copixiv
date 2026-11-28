@@ -26,6 +26,7 @@ from copixiv.core.naming import NovelNamingTemplate
 from copixiv.db import delta as engine_delta
 from copixiv.db import models
 from copixiv.db.uow import SqlUnitOfWork
+from copixiv.features.failures.repo import MAX_RETRIES, FailedNovelRepository
 from copixiv.features.novels.ingest import BookChapterIngestor, BookIngestOutcome, persist_novels
 from copixiv.features.novels.ingest.asset_pipeline import NovelAssetPipeline
 from copixiv.features.novels.use_cases.batch_edit_metadata import batch_edit_metadata
@@ -34,6 +35,15 @@ from copixiv.features.novels.use_cases.discovery import retry_failed_novels
 from copixiv.features.series.repo import SQLAlchemySeriesRepository
 from copixiv.features.sources.entity_resolver import EntityResolver
 from copixiv.features.sources.service import SourceService
+from copixiv.pixiv.models import (
+    NovelListResponse,
+    PixivNovelInfo,
+    PixivNovelRating,
+    PixivSeries,
+    PixivTag,
+    PixivUser,
+    WebviewNovel,
+)
 from copixiv.query_engine import sync as qe_sync
 from copixiv.sources import LocalSourcePlugin, PixivSourcePlugin, SourceHttpManager, SourceRegistry
 from copixiv.sources.esj import EsjSourcePlugin
@@ -41,8 +51,9 @@ from copixiv.storage.epub import state as epub_state
 from copixiv.storage.epub.builder import EpubBuilder
 from copixiv.storage.file_storage import FileStorage
 from copixiv.tasks.batch import BatchExportArgs, batch_export
-from copixiv.tasks.executor import TaskContext
+from copixiv.tasks.executor import TaskContext, TaskHistoryRecorder
 from copixiv.tasks.maintenance.series import FixSeriesIndexArgs, fix_series_index
+from copixiv.tasks.novels import FailedRetryArgs, _failed_retry_timeout_sources, failed_retry
 from copixiv.tasks.sources import SourceFetchArgs, source_fetch
 
 
@@ -1652,3 +1663,527 @@ def test_delete_esj_and_local_files_and_source_naming_template_batch_export(
     with committed_session_factory() as session:
         assert session.get(models.Novel, -101) is None
         assert session.get(models.Novel, 103) is not None
+
+
+@pytest.mark.asyncio
+async def test_esj_chunked_ingest_progress_resumability_and_source_timeout(
+    committed_session_factory,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """ESJ chunked book ingest flushes incrementally, resumes after cancel, and honors source timeout."""
+    from copixiv.tasks import registry as task_registry
+    from copixiv.tasks.executor import TaskExecutor, TaskHistoryRecorder
+
+    uow = SqlUnitOfWork(committed_session_factory)
+    http_manager, _registry, source_service, storage, pipeline, ingestor = _make_ingestor_stack(
+        committed_session_factory,
+        tmp_path,
+    )
+    source_service.update_config(
+        uow,
+        SOURCE_ESJ,
+        enabled=True,
+        config={"request_interval_sec": 0.0, "download_images": False},
+    )
+
+    outline_300 = _book_outline_html(
+        book_id="300",
+        title="長篇分批測試書",
+        author_name="原創作者甲",
+        genre="原創",
+        cover_path="",
+        chapters=(
+            ("/forum/300/3001.html", "第一章", False),
+            ("/forum/300/3002.html", "第二章", False),
+            ("/forum/300/3003.html", "第三章", False),
+            ("/forum/300/3004.html", "第四章", False),
+            ("/forum/300/3005.html", "第五章", False),
+        ),
+    )
+
+    observed_mid_keys: set[str] = set()
+    progress_updates: list[str] = []
+
+    async def _collect_progress(msg: str) -> None:
+        progress_updates.append(msg)
+
+    def _on_ch3(_request: httpx.Request) -> httpx.Response:
+        with committed_session_factory() as session:
+            keys = set(
+                session.execute(select(models.Novel.source_key).where(models.Novel.source == SOURCE_ESJ))
+                .scalars()
+                .all()
+            )
+            observed_mid_keys.update(keys)
+        return httpx.Response(
+            200,
+            text=_chapter_html(title="第三章", paragraphs=["第三章正文"], poster_uid="", poster_name=""),
+        )
+
+    def _on_ch5_cancel(_request: httpx.Request) -> httpx.Response:
+        raise asyncio.CancelledError()
+
+    try:
+        # Run 1: batch_size=2, interrupted by CancelledError on chapter 5
+        with respx.mock(assert_all_called=False) as mock:
+            mock.get("https://www.esjzone.cc/detail/300.html").mock(
+                return_value=httpx.Response(200, text=outline_300)
+            )
+            mock.get("https://www.esjzone.cc/forum/300/3001.html").mock(
+                return_value=httpx.Response(
+                    200,
+                    text=_chapter_html(
+                        title="第一章", paragraphs=["第一章正文"], poster_uid="777", poster_name="原創作者甲"
+                    ),
+                )
+            )
+            mock.get("https://www.esjzone.cc/forum/300/3002.html").mock(
+                return_value=httpx.Response(
+                    200,
+                    text=_chapter_html(
+                        title="第二章", paragraphs=["第二章正文"], poster_uid="777", poster_name="原創作者甲"
+                    ),
+                )
+            )
+            mock.get("https://www.esjzone.cc/forum/300/3003.html").mock(side_effect=_on_ch3)
+            mock.get("https://www.esjzone.cc/forum/300/3004.html").mock(
+                return_value=httpx.Response(
+                    200,
+                    text=_chapter_html(
+                        title="第四章", paragraphs=["第四章正文"], poster_uid="", poster_name=""
+                    ),
+                )
+            )
+            mock.get("https://www.esjzone.cc/forum/300/3005.html").mock(side_effect=_on_ch5_cancel)
+
+            with pytest.raises(asyncio.CancelledError):
+                await ingestor.ingest_book(
+                    SOURCE_ESJ,
+                    "300",
+                    force=False,
+                    batch_size=2,
+                    on_progress=_collect_progress,
+                )
+
+        # Batch 1 (chapters 1..2) was already flushed before chapter 3 was requested
+        assert observed_mid_keys == {"300/3001", "300/3002"}
+        # Both batch 1 & batch 2 survived cancellation; series author stayed pinned to uid:777
+        with committed_session_factory() as session:
+            persisted = {
+                n.source_key: n
+                for n in session.execute(
+                    select(models.Novel).where(models.Novel.source == SOURCE_ESJ)
+                ).scalars()
+            }
+            assert set(persisted) == {"300/3001", "300/3002", "300/3003", "300/3004"}
+            for row in persisted.values():
+                assert row.path is not None
+                assert Path(row.path).is_file()
+            series = session.execute(
+                select(models.Series).where(models.Series.source == SOURCE_ESJ)
+            ).scalar_one()
+            series_author = session.get(models.Author, series.author_id)
+            assert series_author is not None
+            assert series_author.source_key == "uid:777"
+
+        assert any("0/5 章" in msg for msg in progress_updates)
+        assert any("已入库 2 章" in msg for msg in progress_updates)
+        assert any("已入库 4 章" in msg for msg in progress_updates)
+
+        # Run 2: resume with force=False -> skips 3001..3004 and fetches only chapter 3005
+        resumed_progress: list[str] = []
+
+        async def _collect_resumed(msg: str) -> None:
+            resumed_progress.append(msg)
+
+        with respx.mock(assert_all_called=True) as mock:
+            mock.get("https://www.esjzone.cc/detail/300.html").mock(
+                return_value=httpx.Response(200, text=outline_300)
+            )
+            mock.get("https://www.esjzone.cc/forum/300/3005.html").mock(
+                return_value=httpx.Response(
+                    200,
+                    text=_chapter_html(
+                        title="第五章", paragraphs=["第五章正文"], poster_uid="", poster_name=""
+                    ),
+                )
+            )
+            resumed_out = await ingestor.ingest_book(
+                SOURCE_ESJ,
+                "300",
+                force=False,
+                batch_size=2,
+                on_progress=_collect_resumed,
+            )
+
+        assert resumed_out.new_count == 1
+        assert resumed_out.skipped_existing == 4
+        assert resumed_out.new_titles == ["第五章"]
+        assert any("1/1 章（已入库 1 章）" in msg for msg in resumed_progress)
+    finally:
+        await pipeline.aclose()
+        await http_manager.aclose()
+
+    # Verify source_fetch forwards ctx.report_progress and honors per-source task_timeout_sec in TaskExecutor
+    app = make_test_app(committed_session_factory, tmp_path / "exec_app")
+    with TestClient(app, base_url="http://localhost") as client:
+        assert (
+            client.put(
+                "/api/sources/esj/config",
+                json={
+                    "enabled": True,
+                    "config": {"request_interval_sec": 0.0, "download_images": False, "task_timeout_sec": 5},
+                },
+            ).status_code
+            == 200
+        )
+
+        task_registry.discover_tasks()
+        spec = task_registry.get_spec("source_fetch")
+        assert spec is not None
+        recorder = TaskHistoryRecorder(committed_session_factory)
+        executor = TaskExecutor(
+            committed_session_factory,
+            deps={
+                "client": app.state.client,
+                "file_storage": app.state.file_storage,
+                "image_downloader": app.state.image_downloader,
+                "source_registry": app.state.source_registry,
+                "source_service": app.state.source_service,
+                "http_manager": app.state.http_manager,
+            },
+        )
+
+        # 1) source_fetch forwards progress to task_history.progress
+        outline_301 = _book_outline_html(
+            book_id="301",
+            title="進度回寫書",
+            author_name="作者301",
+            genre="原創",
+            cover_path="",
+            chapters=(("/forum/301/3101.html", "第一章", False),),
+        )
+        ok_params = {"refs": ["https://www.esjzone.cc/detail/301.html"], "force": False, "source": SOURCE_ESJ}
+        tid_ok = recorder.enqueue("source_fetch", ok_params, "source_fetch")
+        with respx.mock(assert_all_called=True) as mock:
+            mock.get("https://www.esjzone.cc/detail/301.html").mock(
+                return_value=httpx.Response(200, text=outline_301)
+            )
+            mock.get("https://www.esjzone.cc/forum/301/3101.html").mock(
+                return_value=httpx.Response(
+                    200,
+                    text=_chapter_html(title="第一章", paragraphs=["正文"]),
+                )
+            )
+            await executor.run_and_record(spec, ok_params, tid_ok, recorder=recorder, notifier=None)
+
+        with committed_session_factory() as session:
+            row_ok = session.get(models.TaskHistory, tid_ok)
+            assert row_ok is not None
+            assert row_ok.status == "success"
+            assert isinstance(row_ok.progress, str)
+            assert "進度回寫書" in row_ok.progress
+
+        # 2) ESJ task_timeout_sec is enforced by TaskExecutor
+        assert (
+            client.put(
+                "/api/sources/esj/config",
+                json={"config": {"task_timeout_sec": 0.05}},
+            ).status_code
+            == 200
+        )
+
+        async def _slow_outline(*_a, **_kw):
+            await asyncio.sleep(5)
+
+        esj_plugin = app.state.source_registry.get(SOURCE_ESJ)
+        assert esj_plugin is not None
+        monkeypatch.setattr(esj_plugin, "fetch_book_outline", _slow_outline)
+
+        tid_timeout = recorder.enqueue("source_fetch", ok_params, "source_fetch")
+        await executor.run_and_record(spec, ok_params, tid_timeout, recorder=recorder, notifier=None)
+
+        with committed_session_factory() as session:
+            row_timeout = session.get(models.TaskHistory, tid_timeout)
+            assert row_timeout is not None
+            assert row_timeout.status == "failed"
+            assert row_timeout.result is not None
+            assert row_timeout.result["summary"] == "Task timed out after 0.05s"
+
+
+@pytest.mark.asyncio
+async def test_source_fetch_pixiv_series_url_and_incremental_skip(
+    committed_session_factory,
+    tmp_path: Path,
+):
+    """``POST /api/sources/fetch`` accepts Pixiv series URLs and ``source_fetch`` ingests/skips chapters."""
+    app = make_test_app(committed_session_factory, tmp_path)
+    with TestClient(app, base_url="http://localhost") as client:
+        res = client.post(
+            "/api/sources/fetch",
+            json={"refs": ["https://www.pixiv.net/novel/series/5501"]},
+        )
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["source"] == SOURCE_PIXIV
+        assert body["ref_count"] == 1
+        task_id = body["task_id"]
+
+        with committed_session_factory() as session:
+            task_row = session.get(models.TaskHistory, task_id)
+            assert task_row is not None
+            assert task_row.task_func == "source_fetch"
+            assert task_row.arguments == {
+                "source": SOURCE_PIXIV,
+                "refs": ["https://www.pixiv.net/novel/series/5501"],
+                "force": False,
+            }
+
+        fake_pixiv = FakePixivClient()
+        fake_pixiv.series_responses[5501] = NovelListResponse(
+            series=PixivSeries(id=5501, title="Pixiv系列抓測試"),
+            novels=[
+                PixivNovelInfo(
+                    id=55011,
+                    title="第一章",
+                    user=PixivUser(id=7701, name="系列作者"),
+                    series=PixivSeries(id=5501, title="Pixiv系列抓測試"),
+                    tags=[PixivTag(name="幻想")],
+                    text_length=200,
+                    total_bookmarks=10,
+                    total_view=100,
+                ),
+                PixivNovelInfo(
+                    id=55012,
+                    title="第二章",
+                    user=PixivUser(id=7701, name="系列作者"),
+                    series=PixivSeries(id=5501, title="Pixiv系列抓測試"),
+                    tags=[PixivTag(name="幻想")],
+                    text_length=300,
+                    total_bookmarks=20,
+                    total_view=200,
+                ),
+            ],
+        )
+        fake_pixiv.webview_responses[55011] = WebviewNovel(
+            id=55011,
+            title="第一章",
+            user_id=7701,
+            text="第一章正文内容",
+            series_id=5501,
+            series_title="Pixiv系列抓測試",
+            tags=["幻想"],
+            rating=PixivNovelRating(bookmark=10, view=100),
+        )
+        fake_pixiv.webview_responses[55012] = WebviewNovel(
+            id=55012,
+            title="第二章",
+            user_id=7701,
+            text="第二章正文内容",
+            series_id=5501,
+            series_title="Pixiv系列抓測試",
+            tags=["幻想"],
+            rating=PixivNovelRating(bookmark=20, view=200),
+        )
+        fake_pixiv.user_detail_responses[7701] = {"user": {"id": 7701, "name": "系列作者"}}
+
+        ctx = TaskContext(
+            uow=SqlUnitOfWork(committed_session_factory),
+            session_factory=committed_session_factory,
+            client=fake_pixiv,  # type: ignore[arg-type]
+            file_storage=app.state.file_storage,
+            image_downloader=app.state.image_downloader,
+            source_registry=app.state.source_registry,
+            source_service=app.state.source_service,
+            task_id=task_id,
+        )
+
+        first_res = await source_fetch(
+            SourceFetchArgs(refs=["https://www.pixiv.net/novel/series/5501"]),
+            ctx,
+        )
+        assert "新增 2 本小说" in first_res.summary
+        assert set(first_res.new_novel_titles) == {"第一章", "第二章"}
+
+        with committed_session_factory() as session:
+            series_row = session.get(models.Series, 5501)
+            assert series_row is not None
+            assert series_row.series_name == "Pixiv系列抓測試"
+            ch1 = session.get(models.Novel, 55011)
+            ch2 = session.get(models.Novel, 55012)
+            assert ch1 is not None
+            assert ch1.series_index == 1
+            assert ch2 is not None
+            assert ch2.series_index == 2
+            hist = session.get(models.TaskHistory, task_id)
+            assert hist is not None
+            assert isinstance(hist.progress, str)
+            assert "5501" in hist.progress
+
+        # Second non-force run skips existing chapters without failing
+        second_res = await source_fetch(
+            SourceFetchArgs(refs=["https://www.pixiv.net/novel/series/5501"], force=False),
+            ctx,
+        )
+        assert second_res.new_novel_titles == []
+        assert "新增 0 本小说" in second_res.summary
+        assert "跳过已有 2 章" in second_res.summary
+
+
+@pytest.mark.asyncio
+async def test_failed_retry_auto_ledger_source_limit_progress_and_timeout_sources(
+    committed_session_factory,
+    tmp_path: Path,
+):
+    """``failed_retry`` with empty ``ids`` retries retryable rows, honors source/limit, and reports progress."""
+    app = make_test_app(committed_session_factory, tmp_path)
+    with TestClient(app, base_url="http://localhost") as client:
+        assert (
+            client.put(
+                "/api/sources/esj/config",
+                json={"enabled": True, "config": {"request_interval_sec": 0.0, "download_images": False}},
+            ).status_code
+            == 200
+        )
+
+        with committed_session_factory() as session:
+            repo = FailedNovelRepository(session)
+            # Row 1: ESJ retryable
+            repo.record(
+                None,
+                "download",
+                "timeout",
+                title="第一章",
+                source=SOURCE_ESJ,
+                source_key="401/4101",
+                extra={"book_id": "401", "chapter_id": "4101"},
+            )
+            # Row 2: ESJ retryable
+            repo.record(
+                None,
+                "download",
+                "timeout",
+                title="第二章",
+                source=SOURCE_ESJ,
+                source_key="401/4102",
+                extra={"book_id": "401", "chapter_id": "4102"},
+            )
+            # Row 3: ESJ exhausted (failed_times == MAX_RETRIES -> skipped by auto-ledger)
+            for _ in range(MAX_RETRIES):
+                repo.record(
+                    None,
+                    "download",
+                    "gone",
+                    title="已放棄章",
+                    source=SOURCE_ESJ,
+                    source_key="401/4103",
+                    extra={"book_id": "401", "chapter_id": "4103"},
+                )
+            # Row 4: Pixiv retryable
+            repo.record(
+                9401,
+                "download",
+                "network",
+                title="Pixiv失敗章",
+                source=SOURCE_PIXIV,
+                source_key="9401",
+            )
+            session.commit()
+
+        fake_pixiv = FakePixivClient()
+        fake_pixiv.webview_responses[9401] = _make_pixiv_webview(
+            9401,
+            title="Pixiv重試成功",
+            author_id=94001,
+        )
+        fake_pixiv.user_detail_responses[94001] = {"user": {"id": 94001, "name": "Pixiv作者"}}
+
+        recorder = TaskHistoryRecorder(committed_session_factory)
+        tid1 = recorder.enqueue("failed_retry", {"source": SOURCE_ESJ, "limit": 1}, "failed_retry")
+        ctx = TaskContext(
+            uow=SqlUnitOfWork(committed_session_factory),
+            session_factory=committed_session_factory,
+            client=fake_pixiv,  # type: ignore[arg-type]
+            file_storage=app.state.file_storage,
+            image_downloader=app.state.image_downloader,
+            source_registry=app.state.source_registry,
+            source_service=app.state.source_service,
+            task_id=tid1,
+        )
+
+        # Dynamic timeout_sources resolution for auto-ledger modes
+        assert await _failed_retry_timeout_sources(FailedRetryArgs(), ctx) == (SOURCE_ESJ, SOURCE_PIXIV)
+        assert await _failed_retry_timeout_sources(FailedRetryArgs(source=SOURCE_PIXIV), ctx) == (
+            SOURCE_PIXIV,
+        )
+        assert await _failed_retry_timeout_sources(FailedRetryArgs(limit=1), ctx) == (SOURCE_ESJ,)
+
+        outline_401 = _book_outline_html(
+            book_id="401",
+            title="重試測試書",
+            author_name="作者401",
+            genre="原創",
+            cover_path="",
+            chapters=(
+                ("/forum/401/4101.html", "第一章", False),
+                ("/forum/401/4102.html", "第二章", False),
+                ("/forum/401/4103.html", "已放棄章", False),
+            ),
+        )
+
+        # 1) Auto-ledger filtered by source=esj, limit=1 -> retries only 401/4101
+        with respx.mock(assert_all_called=True) as mock:
+            mock.get("https://www.esjzone.cc/detail/401.html").mock(
+                return_value=httpx.Response(200, text=outline_401)
+            )
+            mock.get("https://www.esjzone.cc/forum/401/4101.html").mock(
+                return_value=httpx.Response(200, text=_chapter_html(title="第一章", paragraphs=["章1正文"]))
+            )
+            res_esj_one = await failed_retry(
+                FailedRetryArgs(source=SOURCE_ESJ, limit=1),
+                ctx,
+            )
+
+        assert "成功 1/1" in res_esj_one.summary
+        with committed_session_factory() as session:
+            hist1 = session.get(models.TaskHistory, tid1)
+            assert hist1 is not None
+            assert isinstance(hist1.progress, str)
+            assert "esj" in hist1.progress
+            remaining_keys = set(session.execute(select(models.FailedNovel.source_key)).scalars().all())
+            assert remaining_keys == {"401/4102", "401/4103", "9401"}
+
+        # 2) Auto-ledger with empty source & no limit -> retries remaining retryables (401/4102 + 9401), skips 401/4103
+        tid2 = recorder.enqueue("failed_retry", {}, "failed_retry")
+        ctx_all = TaskContext(
+            uow=SqlUnitOfWork(committed_session_factory),
+            session_factory=committed_session_factory,
+            client=fake_pixiv,  # type: ignore[arg-type]
+            file_storage=app.state.file_storage,
+            image_downloader=app.state.image_downloader,
+            source_registry=app.state.source_registry,
+            source_service=app.state.source_service,
+            task_id=tid2,
+        )
+        with respx.mock(assert_all_called=True) as mock:
+            mock.get("https://www.esjzone.cc/detail/401.html").mock(
+                return_value=httpx.Response(200, text=outline_401)
+            )
+            mock.get("https://www.esjzone.cc/forum/401/4102.html").mock(
+                return_value=httpx.Response(200, text=_chapter_html(title="第二章", paragraphs=["章2正文"]))
+            )
+            res_all = await failed_retry(FailedRetryArgs(), ctx_all)
+
+        assert "成功 2/2" in res_all.summary
+        with committed_session_factory() as session:
+            hist2 = session.get(models.TaskHistory, tid2)
+            assert hist2 is not None
+            assert isinstance(hist2.progress, str)
+            remaining_rows = session.execute(select(models.FailedNovel)).scalars().all()
+            assert len(remaining_rows) == 1
+            assert remaining_rows[0].source_key == "401/4103"
+
+        # 3) No retryable rows left -> graceful summary
+        res_empty = await failed_retry(FailedRetryArgs(), ctx_all)
+        assert res_empty.summary == "没有可重试的失败记录"

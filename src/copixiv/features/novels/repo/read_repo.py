@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import and_, any_, exists, func, or_, select
+from sqlalchemy import any_, func, or_, select
 from sqlalchemy.orm import Session
 
 from copixiv.core.exceptions import ValidationError
@@ -1095,56 +1095,3 @@ class SQLAlchemyNovelReadRepository:
         if after_id is not None:
             stmt = stmt.where(models.Novel.id > after_id)
         return list(self.session.execute(stmt.order_by(models.Novel.id).limit(limit)).fetchall())
-
-    def count_missing_source(self) -> int:
-        """Count Pixiv novels currently marked ``MISSING_SOURCE``."""
-        return int(
-            self.session.execute(
-                select(func.count())
-                .select_from(models.Novel)
-                .where(
-                    models.Novel.has_epub == EpubStatus.MISSING_SOURCE,
-                    models.Novel.source == SOURCE_PIXIV,
-                    models.Novel.id > 0,
-                )
-            ).scalar()
-            or 0
-        )
-
-    def find_refetch_candidates(
-        self,
-        *,
-        limit: int | None,
-        max_retries: int,
-        skip_ids: set[int] | None = None,
-        skip_cutoff: datetime | None = None,
-    ) -> list[int]:
-        """Return Pixiv novel IDs with ``MISSING_SOURCE`` not excluded by failures."""
-        skip_cond = models.FailedNovel.failed_times >= max_retries
-        if skip_cutoff is not None:
-            skip_cond = or_(
-                skip_cond,
-                and_(
-                    models.FailedNovel.last_failed_at.isnot(None),
-                    models.FailedNovel.last_failed_at >= skip_cutoff,
-                ),
-            )
-
-        failed_skip_exists = exists().where(
-            models.FailedNovel.novel_id == models.Novel.id,
-            models.FailedNovel.source == SOURCE_PIXIV,
-            skip_cond,
-        )
-
-        stmt = select(models.Novel.id).where(
-            models.Novel.has_epub == EpubStatus.MISSING_SOURCE,
-            models.Novel.source == SOURCE_PIXIV,
-            models.Novel.id > 0,
-            ~failed_skip_exists,
-        )
-        if skip_ids:
-            stmt = stmt.where(models.Novel.id.not_in(skip_ids))
-        stmt = stmt.order_by(models.Novel.id)
-        if limit is not None:
-            stmt = stmt.limit(limit)
-        return [int(nid) for nid in self.session.execute(stmt).scalars().all()]

@@ -114,6 +114,7 @@ class TaskArgumentField(BaseModel):
 class TaskMethod(BaseModel):
     name: str
     description: str | None = None
+    source: str | None = None
     arguments: list[TaskArgumentField] = []
 
 

@@ -476,3 +476,92 @@ async def test_register_lane_timeout_and_notify_false(monkeypatch: pytest.Monkey
     await executor.run_and_record(spec, {}, 99, recorder=recorder, notifier=notifier)  # type: ignore[arg-type]
     assert [s for _, s, _ in recorder.updates] == ["running", "failed"]
     assert notifier.calls == []
+
+
+@pytest.mark.asyncio
+async def test_task_executor_per_source_timeout_and_unlimited_override(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from copixiv.core.sources import SourceRuntimeConfig
+
+    timeouts: dict[str, float] = {"pixiv": 0.01, "esj": 0.02}
+
+    class _FakeSourceService:
+        def get_runtime_config(self, source: str) -> SourceRuntimeConfig:
+            return SourceRuntimeConfig.from_values(
+                source,
+                True,
+                {"task_timeout_sec": timeouts[source]},
+            )
+
+    async def _sleep_task(ctx: TaskContext):
+        del ctx
+        await asyncio.sleep(0.05)
+        return TaskResult(summary="ok")
+
+    async def _long_sleep_task(ctx: TaskContext):
+        del ctx
+        await asyncio.sleep(5)
+        return TaskResult(summary="ok")
+
+    recorder = _FakeRecorder()
+    notifier = _FakeNotifier()
+    executor = TaskExecutor(session_factory=lambda: None, deps={"source_service": _FakeSourceService()})
+
+    # 1. Positive per-source timeout -> fails with resolved duration
+    spec_esj = registry.TaskSpec(name="esj_slow", description="", func=_long_sleep_task, source="esj")
+    await executor.run_and_record(spec_esj, {}, 101, recorder=recorder, notifier=notifier)  # type: ignore[arg-type]
+    assert [s for _, s, _ in recorder.updates] == ["running", "failed"]
+    assert notifier.calls[-1]["error"] == "Task timed out after 0.02s"
+
+    # 2. Zero means unlimited even if executor.TIMEOUT_SECONDS is small
+    monkeypatch.setattr(executor, "TIMEOUT_SECONDS", 0.01)
+    timeouts["esj"] = 0
+    recorder.updates.clear()
+    spec_unlim = registry.TaskSpec(name="esj_unlim", description="", func=_sleep_task, source="esj")
+    await executor.run_and_record(spec_unlim, {}, 102, recorder=recorder, notifier=notifier)  # type: ignore[arg-type]
+    assert [s for _, s, _ in recorder.updates] == ["running", "success"]
+
+    # 3. Multi-source timeout_sources picks max positive timeout, and 0 (unlimited) wins
+    timeouts["esj"] = 0.5
+    recorder.updates.clear()
+    spec_multi = registry.TaskSpec(
+        name="multi",
+        description="",
+        func=_sleep_task,
+        timeout_sources=lambda _args, _ctx: ("pixiv", "esj"),
+    )
+    await executor.run_and_record(spec_multi, {}, 103, recorder=recorder, notifier=notifier)  # type: ignore[arg-type]
+    assert [s for _, s, _ in recorder.updates] == ["running", "success"]
+
+    timeouts["esj"] = 0
+    recorder.updates.clear()
+    await executor.run_and_record(spec_multi, {}, 104, recorder=recorder, notifier=notifier)  # type: ignore[arg-type]
+    assert [s for _, s, _ in recorder.updates] == ["running", "success"]
+
+    # 4. Explicit spec.timeout takes precedence over per-source config
+    timeouts["esj"] = 10.0
+    recorder.updates.clear()
+    spec_explicit = registry.TaskSpec(
+        name="explicit",
+        description="",
+        func=_long_sleep_task,
+        source="esj",
+        timeout=0.02,
+    )
+    await executor.run_and_record(spec_explicit, {}, 105, recorder=recorder, notifier=notifier)  # type: ignore[arg-type]
+    assert [s for _, s, _ in recorder.updates] == ["running", "failed"]
+    assert notifier.calls[-1]["error"] == "Task timed out after 0.02s"
+
+
+def test_describe_tasks_exposes_source_and_excludes_retired_tasks():
+    described = {m["name"]: m for m in registry.describe_tasks()}
+
+    assert "novel_fetch" not in described
+    assert "refetch_missing_source" not in described
+
+    assert described["source_fetch"]["source"] is None
+    assert described["failed_retry"]["source"] is None
+    assert described["check_epub"]["source"] is None
+    assert described["novel_follow"]["source"] == "pixiv"
+    assert described["fix_series_index"]["source"] == "pixiv"

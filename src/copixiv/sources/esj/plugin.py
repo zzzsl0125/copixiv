@@ -50,9 +50,11 @@ class EsjSourcePlugin(BaseSourcePlugin):
         client: EsjClient | None = None,
         *,
         default_request_interval: float = 1.0,
+        default_task_timeout: int = 7200,
     ) -> None:
         self._http_manager = http_manager
         self._default_request_interval = max(0.0, float(default_request_interval))
+        self._default_task_timeout = default_task_timeout
         self._client = client or EsjClient(
             http_manager=http_manager,
             default_request_interval=self._default_request_interval,
@@ -136,6 +138,15 @@ class EsjSourcePlugin(BaseSourcePlugin):
                     label="下载正文插图与封面",
                     field_type="boolean",
                     default=True,
+                ),
+                SettingFieldSpec(
+                    key="task_timeout_sec",
+                    label="单次抓取任务超时（秒）",
+                    field_type="number",
+                    default=self._default_task_timeout,
+                    min_value=0,
+                    max_value=86400,
+                    description="限制单次抓取任务的最长运行时间（0 表示不限制，长篇连载建议设为 7200 或 0）",
                 ),
             ),
             credential_kinds=(

@@ -31,6 +31,7 @@ class FixSeriesIndexArgs(BaseModel):
     args=FixSeriesIndexArgs,
     lane="general",
     notify=False,
+    source=SOURCE_PIXIV,
 )
 async def fix_series_index(
     args: FixSeriesIndexArgs,

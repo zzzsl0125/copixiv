@@ -315,6 +315,85 @@ async def test_prune_orphan_files_protects_legacy_paths_and_handles_negative_loc
 
 
 @pytest.mark.asyncio
+async def test_prune_orphan_files_cleans_empty_dirs_while_protecting_sources_and_fresh_dirs(
+    uow: SqlUnitOfWork,
+    tmp_path: Path,
+):
+    from copixiv.sources import LocalSourcePlugin, PixivSourcePlugin, SourceRegistry
+    from copixiv.sources.esj import EsjSourcePlugin
+
+    pixiv_dir = tmp_path / "pixiv"
+    pixiv_old_series = pixiv_dir / "old_series_1"
+    esj_dir = tmp_path / "esj"
+    esj_old_empty = esj_dir / "old_empty_book"
+    esj_fresh_empty = esj_dir / "fresh_empty_book"
+    local_dir = tmp_path / "local"
+    legacy_dir = tmp_path / "0000"
+    legacy_orphan_sub = legacy_dir / "sub_orphan"
+    legacy_kept_sub = legacy_dir / "sub_kept"
+
+    for d in (
+        pixiv_old_series,
+        esj_old_empty,
+        esj_fresh_empty,
+        local_dir,
+        legacy_orphan_sub,
+        legacy_kept_sub,
+    ):
+        d.mkdir(parents=True)
+
+    old_orphan_1 = pixiv_old_series / "orphan_100.txt"
+    old_orphan_1.write_text("orphan 1", encoding="utf-8")
+    old_orphan_2 = legacy_orphan_sub / "orphan_200.txt"
+    old_orphan_2.write_text("orphan 2", encoding="utf-8")
+    unmanaged = legacy_kept_sub / "notes.txt"
+    unmanaged.write_text("keep", encoding="utf-8")
+
+    old_ts = time.time() - 10 * 86400
+    for p in (
+        old_orphan_1,
+        old_orphan_2,
+        unmanaged,
+        pixiv_old_series,
+        esj_old_empty,
+        local_dir,
+        legacy_orphan_sub,
+    ):
+        os.utime(p, (old_ts, old_ts))
+
+    registry = SourceRegistry([PixivSourcePlugin(), LocalSourcePlugin(), EsjSourcePlugin()])
+    ctx = TaskContext(
+        uow=uow,
+        file_storage=FileStorage(str(tmp_path)),
+        source_registry=registry,
+    )
+
+    dry_res = await prune_orphan_files(PruneOrphanFilesArgs(apply=False, min_age_days=7), ctx)
+    assert "空目录" in dry_res.summary
+    assert old_orphan_1.exists()
+    assert pixiv_old_series.is_dir()
+    assert esj_old_empty.is_dir()
+
+    apply_res = await prune_orphan_files(PruneOrphanFilesArgs(apply=True, min_age_days=7), ctx)
+    assert "空目录" in apply_res.summary
+
+    assert not old_orphan_1.exists()
+    assert not old_orphan_2.exists()
+    assert not pixiv_old_series.exists()
+    assert not esj_old_empty.exists()
+    assert not legacy_orphan_sub.exists()
+
+    # Top-level source dirs, fresh empty dirs, and dirs with unmanaged files survive
+    assert pixiv_dir.is_dir()
+    assert esj_dir.is_dir()
+    assert esj_fresh_empty.is_dir()
+    assert local_dir.is_dir()
+    assert legacy_dir.is_dir()
+    assert legacy_kept_sub.is_dir()
+    assert unmanaged.is_file()
+
+
+@pytest.mark.asyncio
 async def test_fix_series_index_skips_roster_absent_series_and_respects_max_series(
     uow: SqlUnitOfWork,
     fake_pixiv_client,
@@ -634,47 +713,16 @@ def test_batch_export_preview_uses_highest_id_limit_1(
 
 
 @pytest.mark.asyncio
-async def test_refetch_missing_and_retry_failed_chunk_batches(
+async def test_retry_failed_chunk_batches(
     uow: SqlUnitOfWork,
     fake_pixiv_client,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    from copixiv.core.models import EpubStatus
     from copixiv.features.novels.ingest import IngestOutcome
     from copixiv.features.novels.use_cases import discovery as discovery_mod
-    from copixiv.features.novels.use_cases import refetch_missing as refetch_mod
 
-    with uow.begin():
-        persist_novels(
-            uow,
-            [
-                build_novel(
-                    id=i, title=f"N{i}", author_id=1, author_name="A", has_epub=EpubStatus.MISSING_SOURCE
-                )
-                for i in range(1, 56)
-            ],
-        )
-
-    refetch_calls: list[list[int]] = []
-
-    async def _fake_refetch_ingest(*, ids, force, **_kwargs):
-        refetch_calls.append(list(ids))
-        assert force is True
-        return IngestOutcome(titles=[f"N{i}" for i in ids], rewritten_ids=set(ids))
-
-    monkeypatch.setattr(refetch_mod, "ingest", _fake_refetch_ingest)
     storage = FileStorage(str(tmp_path))
-    res_refetch = await refetch_mod.refetch_missing_novels(
-        apply=True,
-        uow=uow,
-        client=fake_pixiv_client,
-        file_storage=storage,
-        image_downloader=None,
-    )
-    assert [len(c) for c in refetch_calls] == [50, 5]
-    assert "成功 55/55 本" in res_refetch.summary
-
     retry_calls: list[list[int]] = []
 
     async def _fake_retry_ingest(*, ids, force, **_kwargs):

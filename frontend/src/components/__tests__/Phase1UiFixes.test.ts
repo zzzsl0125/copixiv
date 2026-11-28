@@ -84,10 +84,10 @@ describe('Phase 1 UI fixes', () => {
 
     const task: ScheduledTask = {
       id: 1,
-      name: '抓单篇',
-      task: 'novel_fetch',
+      name: '抓作者',
+      task: 'author_fetch',
       cron: '*/5 * * * *',
-      params: { id: 987654 },
+      params: { author_id: 987654 },
       is_enabled: true,
       sort_index: 0,
     }
@@ -111,19 +111,20 @@ describe('Phase 1 UI fixes', () => {
     expect(inputs.some((i) => (i.element as HTMLInputElement).value === '*/5 * * * *')).toBe(true)
     expect(wrapper.html()).not.toContain('NaN')
 
-    // Now resolve getTaskMethods asynchronously -> saved param id=987654 must NOT be wiped
+    // Now resolve getTaskMethods asynchronously -> saved param author_id=987654 must NOT be wiped
     resolveMethods([
       {
-        name: 'novel_fetch',
-        description: '抓取单本小说',
+        name: 'author_fetch',
+        description: '抓取指定作者的全部作品',
+        source: 'pixiv',
         arguments: [
           {
-            name: 'id',
+            name: 'author_id',
             type: 'integer',
             required: true,
             nullable: false,
             default: null,
-            description: '小说 ID',
+            description: '作者 ID',
           },
         ],
       },
@@ -131,15 +132,15 @@ describe('Phase 1 UI fixes', () => {
     await flushPromises()
     await nextTick()
 
-    expect(wrapper.text()).toContain('小说 ID')
+    expect(wrapper.text()).toContain('作者 ID')
 
     await wrapper.get('form').trigger('submit')
     const emitted = wrapper.emitted('save')
     expect(emitted).toBeTruthy()
     expect(emitted![0][0]).toMatchObject({
-      task: 'novel_fetch',
+      task: 'author_fetch',
       cron: '*/5 * * * *',
-      params: { id: 987654 },
+      params: { author_id: 987654 },
     })
   })
 

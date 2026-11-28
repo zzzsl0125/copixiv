@@ -145,6 +145,7 @@ def test_esj_manifest_and_protocol_conformance():
         "request_interval_sec",
         "chapter_passwords",
         "download_images",
+        "task_timeout_sec",
     ]
     assert [c.kind for c in m.credential_kinds] == ["cookie", "password"]
 
@@ -160,6 +161,7 @@ def test_esj_validate_config_and_build_external_url():
         "request_interval_sec": 1.0,
         "chapter_passwords": {},
         "download_images": True,
+        "task_timeout_sec": 7200,
     }
 
     custom = plugin.validate_config(

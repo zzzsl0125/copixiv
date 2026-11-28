@@ -8,7 +8,7 @@ Contains all pure business orchestration previously embedded inside
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -61,46 +61,6 @@ def _batch_summary(prefix: str, out: Any) -> str:
     if failed:
         summary += f"，失败 {failed} 本"
     return summary
-
-
-async def fetch_single_novel(
-    novel_id: int,
-    *,
-    redownload: bool = True,
-    session_factory: Any,
-    client: PixivClient | None,
-    file_storage: Any,
-    image_downloader: Any,
-    source_registry: Any | None = None,
-    source_service: Any | None = None,
-) -> TaskResult:
-    """Download and persist a single novel by ID."""
-    del source_registry
-    _ensure_pixiv_enabled(source_service)
-    out = await ingest(
-        ids=[novel_id],
-        force=redownload,
-        session_factory=session_factory,
-        client=client,
-        file_storage=file_storage,
-        image_downloader=image_downloader,
-    )
-    title = out.titles[0] if out.titles else None
-    if out.failed:
-        summary = f"小说 #{novel_id} 获取失败"
-    elif out.new_count and title:
-        summary = f"下载完成: {title}"
-    elif out.rewritten_ids and title:
-        summary = f"已更新: {title}"
-    elif title is None:
-        summary = f"小说 #{novel_id} 获取失败（未取到内容）"
-    else:
-        summary = "已存在，跳过"
-    return TaskResult(
-        summary=summary,
-        new_novel_titles=(out.titles if out.new_count else []),
-        failed_ids=([novel_id] if out.failed or title is None else []),
-    )
 
 
 async def fetch_follow_feed(
@@ -455,6 +415,9 @@ async def retry_failed_novels(
     novel_ids: list[int] | None = None,
     *,
     ids: list[int] | None = None,
+    source: str | None = None,
+    limit: int | None = None,
+    on_progress: Callable[[str], Awaitable[None]] | None = None,
     session_factory: Any,
     client: PixivClient | None,
     file_storage: Any,
@@ -473,6 +436,9 @@ async def retry_failed_novels(
         failed_ids: list[int] = []
         for i in range(0, len(target_ids), _RETRY_BATCH_SIZE):
             chunk = target_ids[i : i + _RETRY_BATCH_SIZE]
+            if on_progress is not None:
+                done = min(i + _RETRY_BATCH_SIZE, len(target_ids))
+                await on_progress(f"重试 Pixiv 小说 {done}/{len(target_ids)}…")
             out = await ingest(
                 ids=chunk,
                 force=True,
@@ -491,26 +457,44 @@ async def retry_failed_novels(
             failed_ids=failed_ids,
         )
 
+    normalized_source = source.strip() if isinstance(source, str) and source.strip() else None
     failed_row_ids = list(dict.fromkeys(ids or []))
-    if not failed_row_ids:
-        return TaskResult(summary="重试列表为空", new_novel_titles=[])
-
     uow = SqlUnitOfWork(session_factory)
-    row_tuples: list[tuple[int, str, str, int | None, dict[str, Any] | None]] = await read_transaction(
-        uow,
-        lambda uw: [
-            (
-                r.id,
-                r.source,
-                r.source_key,
-                r.novel_id,
-                dict(r.extra) if r.extra is not None else None,
-            )
-            for r in FailedNovelRepository(uw.session).get_by_ids(failed_row_ids)
-        ],
-    )
-    if not row_tuples:
-        return TaskResult(summary="重试列表为空", new_novel_titles=[])
+    if failed_row_ids:
+        row_tuples: list[tuple[int, str, str, int | None, dict[str, Any] | None]] = await read_transaction(
+            uow,
+            lambda uw: [
+                (
+                    r.id,
+                    r.source,
+                    r.source_key,
+                    r.novel_id,
+                    dict(r.extra) if r.extra is not None else None,
+                )
+                for r in FailedNovelRepository(uw.session).get_by_ids(failed_row_ids)
+            ],
+        )
+        if not row_tuples:
+            return TaskResult(summary="重试列表为空", new_novel_titles=[])
+    else:
+        row_tuples = await read_transaction(
+            uow,
+            lambda uw: [
+                (
+                    r.id,
+                    r.source,
+                    r.source_key,
+                    r.novel_id,
+                    dict(r.extra) if r.extra is not None else None,
+                )
+                for r in FailedNovelRepository(uw.session).get_retryable_rows(
+                    source=normalized_source,
+                    limit=limit,
+                )
+            ],
+        )
+        if not row_tuples:
+            return TaskResult(summary="没有可重试的失败记录", new_novel_titles=[])
 
     registry = _resolve_registry(source_registry, source_service) or SourceRegistry(
         [PixivSourcePlugin(), LocalSourcePlugin()]
@@ -549,6 +533,9 @@ async def retry_failed_novels(
     failed_ids = []
     for i in range(0, len(pixiv_ids), _RETRY_BATCH_SIZE):
         chunk = pixiv_ids[i : i + _RETRY_BATCH_SIZE]
+        if on_progress is not None:
+            done = min(i + _RETRY_BATCH_SIZE, len(pixiv_ids))
+            await on_progress(f"重试 Pixiv 失败记录 {done}/{len(pixiv_ids)}…")
         out = await ingest(
             ids=chunk,
             force=True,
@@ -573,7 +560,7 @@ async def retry_failed_novels(
             source_service=source_service,
         )
         for src, raw_rows in external_batches:
-            ext_out = await ingestor.retry_failures(src, raw_rows)
+            ext_out = await ingestor.retry_failures(src, raw_rows, on_progress=on_progress)
             new_titles.extend(ext_out.new_titles)
             failed_ids.extend(ext_out.failed_ids)
             ext_attempted += len(raw_rows)
@@ -603,7 +590,6 @@ __all__ = [
     "fetch_follow_feed",
     "fetch_ranking_novels",
     "fetch_search_novels",
-    "fetch_single_novel",
     "fetch_special_follow_novels",
     "retry_failed_novels",
 ]

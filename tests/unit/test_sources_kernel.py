@@ -560,42 +560,106 @@ async def test_source_http_manager_strip_cookies_and_lifecycle_closing():
 
 
 @pytest.mark.parametrize(
-    ("raw", "allow_bare_id", "expected_id"),
+    (
+        "raw",
+        "allow_bare_id",
+        "expected_kind",
+        "expected_series_key",
+        "expected_chapter_key",
+        "expected_normalized_ref",
+    ),
     [
-        ("https://www.pixiv.net/novel/show.php?id=12345", False, "12345"),
-        ("http://pixiv.net/novel/show.php?id=99&lang=ja", False, "99"),
-        ("https://www.pixiv.net/novel/show.php/?id=555", False, "555"),
-        ("pixiv:42", False, "42"),
-        ("  PIXIV:42  ", False, "42"),
-        ("12345", False, None),
-        ("12345", True, "12345"),
-        ("", True, None),
-        ("   ", True, None),
-        ("0", True, None),
-        ("pixiv:0", True, None),
-        ("https://www.pixiv.net/novel/show.php?id=0", True, None),
-        ("-5", True, None),
-        ("pixiv:abc", False, None),
-        ("https://www.pixiv.net/artworks/12345", False, None),
-        ("https://www.pixiv.net/novel/series/12345", False, None),
-        ("https://www.pixiv.net/novel/show.php", False, None),
-        ("https://www.pixiv.net/novel/show.php?id=abc", False, None),
-        ("https://evil-pixiv.net/novel/show.php?id=12345", False, None),
-        ("ftp://www.pixiv.net/novel/show.php?id=12345", False, None),
+        (
+            "https://www.pixiv.net/novel/show.php?id=12345",
+            False,
+            "chapter",
+            "",
+            "12345",
+            "https://www.pixiv.net/novel/show.php?id=12345",
+        ),
+        (
+            "http://pixiv.net/novel/show.php?id=99&lang=ja",
+            False,
+            "chapter",
+            "",
+            "99",
+            "https://www.pixiv.net/novel/show.php?id=99",
+        ),
+        (
+            "https://www.pixiv.net/novel/show.php/?id=555",
+            False,
+            "chapter",
+            "",
+            "555",
+            "https://www.pixiv.net/novel/show.php?id=555",
+        ),
+        ("pixiv:42", False, "chapter", "", "42", "https://www.pixiv.net/novel/show.php?id=42"),
+        ("  PIXIV:42  ", False, "chapter", "", "42", "https://www.pixiv.net/novel/show.php?id=42"),
+        (
+            "https://www.pixiv.net/novel/series/12345",
+            False,
+            "book",
+            "12345",
+            None,
+            "https://www.pixiv.net/novel/series/12345",
+        ),
+        (
+            "http://pixiv.net/novel/series/12345/?page=2",
+            False,
+            "book",
+            "12345",
+            None,
+            "https://www.pixiv.net/novel/series/12345",
+        ),
+        (
+            "https://www.pixiv.net/en/novel/series/678",
+            False,
+            "book",
+            "678",
+            None,
+            "https://www.pixiv.net/novel/series/678",
+        ),
+        ("pixiv:series:321", False, "book", "321", None, "https://www.pixiv.net/novel/series/321"),
+        ("  PIXIV:SERIES:321  ", False, "book", "321", None, "https://www.pixiv.net/novel/series/321"),
+        ("12345", False, None, None, None, None),
+        ("12345", True, "chapter", "", "12345", "https://www.pixiv.net/novel/show.php?id=12345"),
+        ("", True, None, None, None, None),
+        ("   ", True, None, None, None, None),
+        ("0", True, None, None, None, None),
+        ("pixiv:0", True, None, None, None, None),
+        ("pixiv:series:0", True, None, None, None, None),
+        ("https://www.pixiv.net/novel/series/0", False, None, None, None, None),
+        ("https://www.pixiv.net/novel/series/abc", False, None, None, None, None),
+        ("https://www.pixiv.net/novel/show.php?id=0", True, None, None, None, None),
+        ("-5", True, None, None, None, None),
+        ("pixiv:abc", False, None, None, None, None),
+        ("https://www.pixiv.net/artworks/12345", False, None, None, None, None),
+        ("https://www.pixiv.net/novel/show.php", False, None, None, None, None),
+        ("https://www.pixiv.net/novel/show.php?id=abc", False, None, None, None, None),
+        ("https://evil-pixiv.net/novel/show.php?id=12345", False, None, None, None, None),
+        ("https://evil-pixiv.net/novel/series/12345", False, None, None, None, None),
+        ("ftp://www.pixiv.net/novel/show.php?id=12345", False, None, None, None, None),
     ],
 )
-def test_pixiv_source_plugin_parse_ref(raw: str, allow_bare_id: bool, expected_id: str | None):
+def test_pixiv_source_plugin_parse_ref(
+    raw: str,
+    allow_bare_id: bool,
+    expected_kind: str | None,
+    expected_series_key: str | None,
+    expected_chapter_key: str | None,
+    expected_normalized_ref: str | None,
+):
     plugin = PixivSourcePlugin()
     parsed = plugin.parse_ref(raw, allow_bare_id=allow_bare_id)
-    if expected_id is None:
+    if expected_kind is None:
         assert parsed is None
     else:
         assert parsed == ParsedSourceRef(
             source=SOURCE_PIXIV,
-            kind="chapter",
-            series_key="",
-            chapter_key=expected_id,
-            normalized_ref=f"https://www.pixiv.net/novel/show.php?id={expected_id}",
+            kind=cast(Any, expected_kind),
+            series_key=expected_series_key or "",
+            chapter_key=expected_chapter_key,
+            normalized_ref=expected_normalized_ref or "",
         )
 
 

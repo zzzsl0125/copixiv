@@ -12,7 +12,6 @@ from pydantic import BaseModel
 from copixiv.core.models import EpubStatus, TaskResult
 from copixiv.db import models
 from copixiv.db.uow import SqlUnitOfWork
-from copixiv.features.novels.use_cases.refetch_missing import find_refetch_candidates
 from copixiv.storage.file_storage import FileStorage
 from copixiv.tasks import registry
 from copixiv.tasks.batch import BatchExportArgs, batch_export
@@ -131,87 +130,27 @@ async def test_task_manager_recovers_stale_runs_both_lanes_and_records_invalid_r
 
 
 @pytest.mark.asyncio
-async def test_refetch_pre_limit_and_batch_export_progress(
+async def test_batch_export_progress(
     committed_session_factory,
     tmp_path: Path,
 ):
     now = datetime.now(UTC)
 
-    # 1. refetch._candidates must filter failed rows BEFORE applying LIMIT
-    #    (3 skipped rows with ids 1..3 + 1 eligible row with id 4 -> limit=1 returns [4], not [])
-    with committed_session_factory() as session:
-        session.add_all(
-            [
-                models.Novel(
-                    id=1,
-                    title="S1",
-                    path=str(tmp_path / "1.txt"),
-                    has_epub=EpubStatus.MISSING_SOURCE,
-                    source="pixiv",
-                    source_key="1",
-                ),
-                models.Novel(
-                    id=2,
-                    title="S2",
-                    path=str(tmp_path / "2.txt"),
-                    has_epub=EpubStatus.MISSING_SOURCE,
-                    source="pixiv",
-                    source_key="2",
-                ),
-                models.Novel(
-                    id=3,
-                    title="S3",
-                    path=str(tmp_path / "3.txt"),
-                    has_epub=EpubStatus.MISSING_SOURCE,
-                    source="pixiv",
-                    source_key="3",
-                ),
-                models.Novel(
-                    id=4,
-                    title="OK4",
-                    path=str(tmp_path / "4.txt"),
-                    has_epub=EpubStatus.MISSING_SOURCE,
-                    source="pixiv",
-                    source_key="4",
-                ),
-                models.FailedNovel(
-                    source="pixiv",
-                    source_key="1",
-                    novel_id=1,
-                    error_message="dead",
-                    failed_times=3,
-                    last_failed_at=now,
-                ),
-                models.FailedNovel(
-                    source="pixiv",
-                    source_key="2",
-                    novel_id=2,
-                    error_message="dead",
-                    failed_times=3,
-                    last_failed_at=now,
-                ),
-                models.FailedNovel(
-                    source="pixiv",
-                    source_key="3",
-                    novel_id=3,
-                    error_message="recent",
-                    failed_times=1,
-                    last_failed_at=now,
-                ),
-            ]
-        )
-        session.commit()
-
-    with committed_session_factory() as session:
-        assert find_refetch_candidates(session, limit=1, skip_cutoff=now.replace(year=2020)) == [4]
-
-    # 2. batch_export reports progress via isolated child UoW & writes export zip
     storage = FileStorage(str(tmp_path))
     p_ok = tmp_path / "0000" / "OK4_4.txt"
     p_ok.parent.mkdir(parents=True, exist_ok=True)
     p_ok.write_text("hello export", encoding="utf-8")
     with committed_session_factory() as session:
-        session.get(models.Novel, 4).path = str(p_ok)
+        session.add(
+            models.Novel(
+                id=4,
+                title="OK4",
+                path=str(p_ok),
+                has_epub=EpubStatus.NO_IMAGES,
+                source="pixiv",
+                source_key="4",
+            )
+        )
         th_export = models.TaskHistory(name="exp", task_func="batch_export", status="running", start_time=now)
         session.add(th_export)
         session.commit()

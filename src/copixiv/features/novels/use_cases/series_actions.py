@@ -6,7 +6,7 @@ from typing import Any, cast
 
 from sqlalchemy import update
 
-from copixiv.core.draft import NovelInfoLike
+from copixiv.core.draft import NovelInfoLike, safe_get
 from copixiv.core.exceptions import NotFoundError, ValidationError
 from copixiv.core.models import SOURCE_PIXIV, UNKNOWN_AUTHOR
 from copixiv.core.models import author_id as _author_id
@@ -20,7 +20,7 @@ from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 from copixiv.features.authors.service import lookup_author_profile
 from copixiv.features.novels import field_policy
 from copixiv.features.novels.ingest.book_chapter import BookChapterIngestor
-from copixiv.features.novels.ingest.pipeline import ingest
+from copixiv.features.novels.ingest.pipeline import IngestOutcome, ingest
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.features.novels.schemas import NovelBase
 from copixiv.features.novels.use_cases.batch_operations import delete_novel_paths
@@ -171,6 +171,44 @@ async def update_series_metadata(
     return await run_write_transaction(uow, _commit)
 
 
+async def ingest_pixiv_series(
+    series_id: int,
+    *,
+    force: bool = False,
+    session_factory: Any,
+    client: PixivClient | None,
+    file_storage: Any,
+    image_downloader: Any,
+) -> tuple[IngestOutcome, int] | None:
+    """Fetch a Pixiv series roster, ingest chapters, and persist its series title."""
+    if client is None:
+        raise ValidationError("Pixiv 客户端未配置，无法同步")
+    if series_id <= 0:
+        raise ValidationError("本地或外部系列不支持 Pixiv 同步")
+
+    resp = await client.novel_series(series_id, fetch_all=True)
+    raw_novels = safe_get(resp, "novels", []) or []
+    if not raw_novels:
+        return None
+
+    out = await ingest(
+        cast(list[NovelInfoLike], raw_novels),
+        force=force,
+        session_factory=session_factory,
+        client=client,
+        file_storage=file_storage,
+        image_downloader=image_downloader,
+    )
+    series_title = safe_get(resp, "series.title", None) or safe_get(raw_novels[0], "series.title", None)
+    if isinstance(series_title, str) and series_title.strip() and session_factory is not None:
+        cleaned_title = series_title.strip()
+        await run_write_transaction(
+            SqlUnitOfWork(session_factory),
+            lambda tx: SQLAlchemySeriesRepository(tx.session).update_series_name(series_id, cleaned_title),
+        )
+    return out, len(raw_novels)
+
+
 async def sync_series(
     series_id: int,
     *,
@@ -222,32 +260,15 @@ async def sync_series(
         )
         await ingestor.ingest_book(source, str(source_key))
     else:
-        if client is None:
-            raise ValidationError("Pixiv 客户端未配置，无法同步")
-        if series_id <= 0:
-            raise ValidationError("本地或外部系列不支持 Pixiv 同步")
-        resp = await client.novel_series(series_id, fetch_all=True)
-        if not resp.novels:
-            raise NotFoundError(f"系列 #{series_id} 在 pixiv 上不存在或没有章节")
-        await ingest(
-            cast(list[NovelInfoLike], resp.novels),
+        result = await ingest_pixiv_series(
+            series_id,
             session_factory=uow.session_factory,
             client=client,
             file_storage=storage,
             image_downloader=image_downloader,
         )
-        series_title = getattr(resp.series, "title", None) or (
-            getattr(resp.novels[0].series, "title", None)
-            if resp.novels and getattr(resp.novels[0], "series", None)
-            else None
-        )
-        if isinstance(series_title, str) and series_title.strip():
-            await run_write_transaction(
-                uow,
-                lambda tx: SQLAlchemySeriesRepository(tx.session).update_series_name(
-                    series_id, series_title.strip()
-                ),
-            )
+        if result is None:
+            raise NotFoundError(f"系列 #{series_id} 在 pixiv 上不存在或没有章节")
 
     card = await read_transaction(
         uow,

@@ -9,14 +9,16 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from copixiv.core import naming as formats
-from copixiv.core.models import TaskResult
+from copixiv.core.models import SOURCE_LOCAL, SOURCE_PIXIV, TaskResult
 from copixiv.db.tx import read_transaction
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.log import logger
 from copixiv.storage.orphan_cleanup import (
     EXPORT_FILE_PREFIX,
+    collect_empty_dirs,
     collect_orphan_files,
     extract_managed_novel_id,
+    remove_empty_dirs,
     unlink_files,
 )
 from copixiv.tasks.executor import TaskContext
@@ -76,13 +78,37 @@ async def prune_orphan_files(
         args.min_age_days,
         now,
     )
+    protected_top_dirs = {SOURCE_PIXIV, SOURCE_LOCAL}
+    if ctx.source_registry is not None:
+        protected_top_dirs.update(formats.source_subdir(s) for s in ctx.source_registry.sources())
+
+    empty_dirs = await asyncio.to_thread(
+        collect_empty_dirs,
+        root,
+        protected_top_dirs=protected_top_dirs,
+        min_age_days=args.min_age_days,
+        now=now,
+        assumed_deleted=[path for path, _size in orphans],
+    )
     total_bytes = sum(size for _path, size in orphans)
     size_mb = total_bytes / (1024 * 1024)
 
-    if not orphans:
+    if not orphans and not empty_dirs:
         return TaskResult(summary=(f"孤儿文件清理: 没有可回收的文件（{len(id_paths)} 本书全部有主）"))
 
     if not args.apply:
+        if empty_dirs:
+            logger.info(
+                f"prune_orphan_files: 试运行，可回收 {len(orphans)} 个文件 "
+                f"{size_mb:.1f} MB，可清理 {len(empty_dirs)} 个空目录（加 apply=true 才真正删除）"
+            )
+            return TaskResult(
+                summary=(
+                    f"孤儿文件清理（试运行）: 可回收 {len(orphans)} 个文件、"
+                    f"{size_mb:.1f} MB，可清理 {len(empty_dirs)} 个空目录；未删除任何文件或目录"
+                    "（设 apply=true 执行）"
+                )
+            )
         logger.info(
             f"prune_orphan_files: 试运行，可回收 {len(orphans)} 个文件 "
             f"{size_mb:.1f} MB（加 apply=true 才真正删除）"
@@ -99,16 +125,22 @@ async def prune_orphan_files(
         unlink_files,
         orphans,
     )
+    removed_dirs = await asyncio.to_thread(
+        remove_empty_dirs,
+        empty_dirs,
+        root=root,
+        protected_top_dirs=protected_top_dirs,
+    )
     logger.info(
-        f"prune_orphan_files: 删除 {deleted}/{len(orphans)} 个孤儿文件，释放 {freed / (1024 * 1024):.1f} MB"
+        f"prune_orphan_files: 删除 {deleted}/{len(orphans)} 个孤儿文件，"
+        f"释放 {freed / (1024 * 1024):.1f} MB，清理 {removed_dirs}/{len(empty_dirs)} 个空目录"
     )
-    return TaskResult(
-        summary=(
-            f"孤儿文件清理: 删除 {deleted} 个文件、"
-            f"释放 {freed / (1024 * 1024):.1f} MB"
-            + (f"（{len(orphans) - deleted} 个删除失败，见日志）" if deleted < len(orphans) else "")
-        )
-    )
+    summary = f"孤儿文件清理: 删除 {deleted} 个文件、释放 {freed / (1024 * 1024):.1f} MB"
+    if removed_dirs:
+        summary += f"，清理 {removed_dirs} 个空目录"
+    if deleted < len(orphans):
+        summary += f"（{len(orphans) - deleted} 个删除失败，见日志）"
+    return TaskResult(summary=summary)
 
 
 __all__ = [

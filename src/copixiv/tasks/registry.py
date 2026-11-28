@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import types
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
@@ -35,6 +35,8 @@ class TaskSpec:
     lane: TaskLane = "general"
     timeout: float | None = None
     notify: bool = True
+    source: str | None = None
+    timeout_sources: Callable[[Any, Any], Sequence[str] | Awaitable[Sequence[str]]] | None = None
 
 
 _registry: dict[str, TaskSpec] = {}
@@ -48,6 +50,8 @@ def register(
     lane: TaskLane = "general",
     timeout: float | None = None,
     notify: bool = True,
+    source: str | None = None,
+    timeout_sources: Callable[[Any, Any], Sequence[str] | Awaitable[Sequence[str]]] | None = None,
 ) -> Callable:
     """Register an async task function under *name* with a declarative manifest."""
 
@@ -66,6 +70,8 @@ def register(
             lane=lane,
             timeout=timeout,
             notify=notify,
+            source=source,
+            timeout_sources=timeout_sources,
         )
         return func
 
@@ -147,6 +153,7 @@ def describe_tasks() -> list[dict[str, Any]]:
             {
                 "name": spec.name,
                 "description": spec.description,
+                "source": spec.source,
                 "arguments": _describe_args_model(spec.args_model) if spec.args_model is not None else [],
             }
         )

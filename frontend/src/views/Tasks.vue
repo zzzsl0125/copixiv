@@ -26,6 +26,20 @@ const scheduledQuery = useQuery({
   queryFn: ({ signal }) => taskApi.getScheduledTasks(signal),
 })
 
+const methodsQuery = useQuery({
+  queryKey: queryKeys.tasksMethods(),
+  queryFn: ({ signal }) => taskApi.getTaskMethods(signal),
+  staleTime: Number.POSITIVE_INFINITY,
+})
+
+const methodSourceMap = computed(() => {
+  const map = new Map<string, string | null>()
+  for (const method of methodsQuery.data.value ?? []) {
+    map.set(method.name, method.source ?? null)
+  }
+  return map
+})
+
 const historyPageSize = 50
 const historyQuery = useInfiniteQuery({
   queryKey: queryKeys.tasksHistory(),
@@ -218,6 +232,7 @@ const reorderTasks = async (newTasks: ScheduledTask[]) => {
           :tasks="tasks"
           :loading="loadingTasks"
           :running-ids="runningIds"
+          :method-source-map="methodSourceMap"
           @edit="openModal"
           @delete="deleteTask"
           @toggle="toggleTask"

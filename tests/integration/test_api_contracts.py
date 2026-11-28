@@ -144,9 +144,9 @@ def test_scheduled_tasks_clear_params_on_func_change_and_tolerate_legacy_cron(
             "/api/tasks/scheduled",
             json={
                 "name": "switch_test",
-                "task": "novel_fetch",
+                "task": "source_fetch",
                 "cron": "0 3 * * *",
-                "params": {"id": 12345},
+                "params": {"refs": ["pixiv:12345"]},
                 "is_enabled": False,
             },
         )
@@ -324,7 +324,7 @@ def test_task_cancellation_and_uniform_204_deletes(db_session_factory, tmp_path:
     with uow.begin():
         pending = models.TaskHistory(
             name="pending_test",
-            task_func="novel_fetch",
+            task_func="source_fetch",
             status="pending",
             start_time=datetime.now(UTC),
         )
@@ -353,8 +353,12 @@ def test_task_cancellation_and_uniform_204_deletes(db_session_factory, tmp_path:
         methods_res = client.get("/api/tasks/methods")
         assert methods_res.status_code == 200
         methods_by_name = {m["name"]: m for m in methods_res.json()}
-        assert "novel_fetch" in methods_by_name
-        assert isinstance(methods_by_name["novel_fetch"]["arguments"], list)
+        assert "novel_fetch" not in methods_by_name
+        assert "refetch_missing_source" not in methods_by_name
+        assert "source_fetch" in methods_by_name
+        assert isinstance(methods_by_name["source_fetch"]["arguments"], list)
+        assert methods_by_name["source_fetch"]["source"] is None
+        assert methods_by_name["novel_follow"]["source"] == "pixiv"
         assert methods_by_name["check_epub"]["arguments"] == []
 
         cancelled = client.post(f"/api/tasks/history/{pending_id}/cancel")

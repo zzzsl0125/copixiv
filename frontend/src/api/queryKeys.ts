@@ -10,6 +10,7 @@ export const queryKeys = {
   tagAliases: () => ['tag-aliases'] as const,
   searchHistory: () => ['search-history'] as const,
   tasksScheduled: () => ['tasks', 'scheduled'] as const,
+  tasksMethods: () => ['tasks', 'methods'] as const,
   tasksHistory: () => ['tasks', 'history'] as const,
   failedNovels: () => ['failed-novels'] as const,
   novelsAll: () => ['novels'] as const,

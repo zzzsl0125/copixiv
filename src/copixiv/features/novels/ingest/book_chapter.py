@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -176,6 +177,23 @@ def _resolve_book_author(
     return _resolve_author_attribution(outline, None)
 
 
+def _merge_sticky_book_author(
+    current: tuple[str, str] | None,
+    outline: ExternalBookOutline,
+    batch_items: Sequence[_FetchedChapterItem],
+) -> tuple[str, str]:
+    """Preserve a resolved ``uid:`` book author across incremental chapter flushes."""
+    candidate = _resolve_book_author(outline, batch_items)
+    if current is None:
+        return candidate
+    if not current[0].startswith("uid:") and candidate[0].startswith("uid:"):
+        return candidate
+    return current
+
+
+DEFAULT_BOOK_BATCH_SIZE = 25
+
+
 def _extract_retry_target(item: Any) -> _RetryTarget:
     """Normalise a ``FailedNovel`` object, tuple ``(id, key, nid, extra)``, or mapping."""
     row_id: int | None = None
@@ -256,6 +274,8 @@ def _unlink_paths(paths: Sequence[Path]) -> None:
 
 class BookChapterIngestor:
     """Ingest, sync, and retry pipeline for multi-chapter book/chapter external sources."""
+
+    DEFAULT_BATCH_SIZE = DEFAULT_BOOK_BATCH_SIZE
 
     def __init__(
         self,
@@ -350,6 +370,8 @@ class BookChapterIngestor:
         book_key: str,
         *,
         force: bool = False,
+        batch_size: int = DEFAULT_BOOK_BATCH_SIZE,
+        on_progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> BookIngestOutcome:
         """Fetch an external book outline and all non-external chapters needing ingest."""
         plugin = self._require_plugin(source, capability=SourceCapability.FETCH_BY_REF)
@@ -409,12 +431,66 @@ class BookChapterIngestor:
             elif existing is not None:
                 metadata_updates.append((entry, existing))
 
-        fetched_items: list[_FetchedChapterItem] = []
-        failed_with_ids: list[tuple[int, str]] = []
-        failed_keys: list[tuple[str, str]] = []
-        aborted_challenge: EsjChallengeError | None = None
+        effective_batch_size = max(1, int(batch_size))
+        book_label = (outline.series.title or "").strip() or book_key
+        total_to_fetch = len(to_fetch)
+        logger.info(
+            f"开始抓取 {source} 书本《{book_label}》({book_key}): "
+            f"共 {len(non_external_entries)} 章，待抓取 {total_to_fetch} 章，"
+            f"跳过已有 {len(metadata_updates)} 章，跳过外链 {skipped_external} 条"
+        )
 
-        for entry in to_fetch:
+        fetched_buffer: list[_FetchedChapterItem] = []
+        all_titles: list[str] = []
+        all_new_titles: list[str] = []
+        all_author_ids: set[int] = set()
+        all_failed_with_ids: list[tuple[int, str]] = []
+        all_failed_keys: list[tuple[str, str]] = []
+        all_rewritten_ids: set[int] = set()
+        total_new_count = 0
+        persisted_count = 0
+        metadata_applied = False
+        sticky_book_author: tuple[str, str] | None = None
+        aborted_challenge: EsjChallengeError | None = None
+        last_progress_at = time.monotonic()
+
+        if on_progress is not None and total_to_fetch > 0:
+            await on_progress(f"正在抓取《{book_label}》：0/{total_to_fetch} 章")
+            last_progress_at = time.monotonic()
+
+        async def _flush_batch(batch_items: list[_FetchedChapterItem]) -> None:
+            nonlocal metadata_applied, persisted_count, sticky_book_author, total_new_count
+            pending_meta = metadata_updates if not metadata_applied else []
+            if not batch_items and not pending_meta:
+                return
+            sticky_book_author = _merge_sticky_book_author(sticky_book_author, outline, batch_items)
+            batch_res = await self._persist_and_process_chapters(
+                uow,
+                source=source,
+                book_key=book_key,
+                outline=outline,
+                fetched_items=batch_items,
+                metadata_updates=pending_meta,
+                force=force,
+                use_body_diff=False,
+                book_author_override=sticky_book_author,
+            )
+            metadata_applied = True
+            all_titles.extend(batch_res.titles)
+            all_new_titles.extend(batch_res.new_titles)
+            all_author_ids.update(batch_res.new_author_ids)
+            all_failed_with_ids.extend(batch_res.failed_with_ids)
+            all_failed_keys.extend(batch_res.failed_keys)
+            all_rewritten_ids.update(batch_res.rewritten_ids)
+            total_new_count += batch_res.new_count
+            persisted_count += len(batch_items)
+            if batch_items:
+                logger.info(
+                    f"抓取 {source} 书本《{book_label}》({book_key}) 分批落库: "
+                    f"本批 {len(batch_items)} 章（累计 {persisted_count}/{total_to_fetch} 章，新增 {total_new_count} 本）"
+                )
+
+        for idx, entry in enumerate(to_fetch, start=1):
             ch_book_key, ch_id = _split_chapter_key(entry.source_key, book_key)
             try:
                 chapter = await _invoke_fetch_chapter(
@@ -446,45 +522,55 @@ class BookChapterIngestor:
                     chapter_id=ch_id,
                     series_index=entry.series_index,
                 )
-                failed_keys.append((entry.source_key, reason))
+                all_failed_keys.append((entry.source_key, reason))
                 if known_id is not None:
-                    failed_with_ids.append((known_id, reason))
-                continue
-
-            fetched_items.append(
-                _FetchedChapterItem(
-                    source_key=entry.source_key,
-                    chapter_key=ch_id,
-                    series_index=entry.series_index,
-                    chapter=chapter,
-                    fallback_title=entry.title,
+                    all_failed_with_ids.append((known_id, reason))
+            else:
+                fetched_buffer.append(
+                    _FetchedChapterItem(
+                        source_key=entry.source_key,
+                        chapter_key=ch_id,
+                        series_index=entry.series_index,
+                        chapter=chapter,
+                        fallback_title=entry.title,
+                    )
                 )
-            )
 
-        batch_res = await self._persist_and_process_chapters(
-            uow,
-            source=source,
-            book_key=book_key,
-            outline=outline,
-            fetched_items=fetched_items,
-            metadata_updates=metadata_updates,
-            force=force,
-            use_body_diff=False,
-        )
+            flushed = False
+            if len(fetched_buffer) >= effective_batch_size:
+                batch = list(fetched_buffer)
+                fetched_buffer.clear()
+                await _flush_batch(batch)
+                flushed = True
+
+            if on_progress is not None and (flushed or time.monotonic() - last_progress_at >= 3.0):
+                await on_progress(
+                    f"正在抓取《{book_label}》：{idx}/{total_to_fetch} 章（已入库 {persisted_count} 章）"
+                )
+                last_progress_at = time.monotonic()
+
+        if fetched_buffer or not metadata_applied:
+            remaining = list(fetched_buffer)
+            fetched_buffer.clear()
+            await _flush_batch(remaining)
+            if on_progress is not None and total_to_fetch > 0 and remaining and aborted_challenge is None:
+                await on_progress(
+                    f"正在抓取《{book_label}》：{total_to_fetch}/{total_to_fetch} 章（已入库 {persisted_count} 章）"
+                )
 
         if aborted_challenge is not None:
             raise aborted_challenge
 
         return BookIngestOutcome(
-            titles=batch_res.titles,
-            new_titles=batch_res.new_titles,
-            new_author_ids=batch_res.new_author_ids,
-            failed=failed_with_ids + batch_res.failed_with_ids,
-            new_count=batch_res.new_count,
-            rewritten_ids=batch_res.rewritten_ids,
+            titles=all_titles,
+            new_titles=all_new_titles,
+            new_author_ids=all_author_ids,
+            failed=all_failed_with_ids,
+            new_count=total_new_count,
+            rewritten_ids=all_rewritten_ids,
             skipped_external=skipped_external,
             skipped_existing=len(metadata_updates),
-            failed_keys=failed_keys + batch_res.failed_keys,
+            failed_keys=all_failed_keys,
         )
 
     async def ingest_chapter(
@@ -787,6 +873,9 @@ class BookChapterIngestor:
         self,
         source: str,
         items: Sequence[Any],
+        *,
+        batch_size: int = DEFAULT_BOOK_BATCH_SIZE,
+        on_progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> BookIngestOutcome:
         """Retry failed chapters/books grouped by ``book_id`` to share outline requests."""
         if not items:
@@ -795,6 +884,7 @@ class BookChapterIngestor:
         plugin = self._require_plugin(source, capability=SourceCapability.RETRY_FAILURE)
         uow = SqlUnitOfWork(self._session_factory)
         runtime, creds = await self._load_runtime_and_creds(source, uow)
+        effective_batch_size = max(1, int(batch_size))
 
         targets = [_extract_retry_target(item) for item in items]
         book_level_targets: list[_RetryTarget] = []
@@ -826,7 +916,13 @@ class BookChapterIngestor:
         for target in book_level_targets:
             assert target.book_id is not None
             try:
-                out = await self.ingest_book(source, target.book_id, force=True)
+                out = await self.ingest_book(
+                    source,
+                    target.book_id,
+                    force=True,
+                    batch_size=effective_batch_size,
+                    on_progress=on_progress,
+                )
             except EsjChallengeError:
                 raise
             except Exception as exc:
@@ -844,6 +940,14 @@ class BookChapterIngestor:
             total_new_count += out.new_count
 
         aborted_challenge: EsjChallengeError | None = None
+        total_retry_chapters = sum(len(g) for g in grouped_chapters.values())
+        processed_chapters = 0
+        persisted_chapters = 0
+        last_progress_at = time.monotonic()
+
+        if on_progress is not None and total_retry_chapters > 0:
+            await on_progress(f"正在重试 {source} 失败章节：0/{total_retry_chapters}")
+            last_progress_at = time.monotonic()
 
         for book_id, group in grouped_chapters.items():
             try:
@@ -875,10 +979,53 @@ class BookChapterIngestor:
                     all_failed_keys.append((s_key, reason))
                     if target.novel_id is not None:
                         all_failed_ids.append((target.novel_id, reason))
+                processed_chapters += len(group)
+                if (
+                    on_progress is not None
+                    and total_retry_chapters > 0
+                    and time.monotonic() - last_progress_at >= 3.0
+                ):
+                    await on_progress(
+                        f"正在重试 {source} 失败章节：{processed_chapters}/{total_retry_chapters}（已恢复 {persisted_chapters} 章）"
+                    )
+                    last_progress_at = time.monotonic()
                 continue
 
             entry_by_key = {e.source_key: e for e in outline.chapter_entries if not e.is_external_link}
-            fetched_items: list[_FetchedChapterItem] = []
+            fetched_buffer: list[_FetchedChapterItem] = []
+            sticky_book_author: tuple[str, str] | None = None
+
+            async def _flush_retry_batch(
+                batch_items: list[_FetchedChapterItem],
+                *,
+                target_book_id: str = book_id,
+                target_outline: ExternalBookOutline = outline,
+            ) -> None:
+                nonlocal persisted_chapters, sticky_book_author, total_new_count
+                if not batch_items:
+                    return
+                sticky_book_author = _merge_sticky_book_author(
+                    sticky_book_author, target_outline, batch_items
+                )
+                batch_res = await self._persist_and_process_chapters(
+                    uow,
+                    source=source,
+                    book_key=target_book_id,
+                    outline=target_outline,
+                    fetched_items=batch_items,
+                    metadata_updates=[],
+                    force=True,
+                    use_body_diff=False,
+                    book_author_override=sticky_book_author,
+                )
+                all_titles.extend(batch_res.titles)
+                all_new_titles.extend(batch_res.new_titles)
+                all_author_ids.update(batch_res.new_author_ids)
+                all_failed_ids.extend(batch_res.failed_with_ids)
+                all_failed_keys.extend(batch_res.failed_keys)
+                all_rewritten_ids.update(batch_res.rewritten_ids)
+                total_new_count += batch_res.new_count
+                persisted_chapters += len(batch_items)
 
             for target in group:
                 assert target.chapter_id is not None
@@ -919,37 +1066,48 @@ class BookChapterIngestor:
                     all_failed_keys.append((s_key, reason))
                     if target.novel_id is not None:
                         all_failed_ids.append((target.novel_id, reason))
-                    continue
-
-                effective_index = chapter.series_index if chapter.series_index is not None else series_index
-                fetched_items.append(
-                    _FetchedChapterItem(
-                        source_key=s_key,
-                        chapter_key=target.chapter_id,
-                        series_index=effective_index,
-                        chapter=chapter,
-                        fallback_title=fallback_title,
+                else:
+                    effective_index = (
+                        chapter.series_index if chapter.series_index is not None else series_index
                     )
-                )
+                    fetched_buffer.append(
+                        _FetchedChapterItem(
+                            source_key=s_key,
+                            chapter_key=target.chapter_id,
+                            series_index=effective_index,
+                            chapter=chapter,
+                            fallback_title=fallback_title,
+                        )
+                    )
 
-            if fetched_items:
-                batch_res = await self._persist_and_process_chapters(
-                    uow,
-                    source=source,
-                    book_key=book_id,
-                    outline=outline,
-                    fetched_items=fetched_items,
-                    metadata_updates=[],
-                    force=True,
-                    use_body_diff=False,
-                )
-                all_titles.extend(batch_res.titles)
-                all_new_titles.extend(batch_res.new_titles)
-                all_author_ids.update(batch_res.new_author_ids)
-                all_failed_ids.extend(batch_res.failed_with_ids)
-                all_failed_keys.extend(batch_res.failed_keys)
-                all_rewritten_ids.update(batch_res.rewritten_ids)
-                total_new_count += batch_res.new_count
+                processed_chapters += 1
+                flushed = False
+                if len(fetched_buffer) >= effective_batch_size:
+                    batch = list(fetched_buffer)
+                    fetched_buffer.clear()
+                    await _flush_retry_batch(batch)
+                    flushed = True
+
+                if on_progress is not None and (flushed or time.monotonic() - last_progress_at >= 3.0):
+                    await on_progress(
+                        f"正在重试 {source} 失败章节：{processed_chapters}/{total_retry_chapters}（已恢复 {persisted_chapters} 章）"
+                    )
+                    last_progress_at = time.monotonic()
+
+            if fetched_buffer:
+                remaining = list(fetched_buffer)
+                fetched_buffer.clear()
+                await _flush_retry_batch(remaining)
+                if (
+                    on_progress is not None
+                    and total_retry_chapters > 0
+                    and remaining
+                    and aborted_challenge is None
+                ):
+                    await on_progress(
+                        f"正在重试 {source} 失败章节：{processed_chapters}/{total_retry_chapters}（已恢复 {persisted_chapters} 章）"
+                    )
+                    last_progress_at = time.monotonic()
 
             if aborted_challenge is not None:
                 break
@@ -994,6 +1152,7 @@ class BookChapterIngestor:
         metadata_updates: list[tuple[ExternalChapterEntry, _ExistingChapterRow]],
         force: bool,
         use_body_diff: bool,
+        book_author_override: tuple[str, str] | None = None,
     ) -> _PersistBatchResult:
         """Persist fetched chapters + metadata updates in a short write tx, then run assets."""
         if not fetched_items and not metadata_updates:
@@ -1034,6 +1193,7 @@ class BookChapterIngestor:
                 force=force,
                 use_body_diff=use_body_diff,
                 local_texts=local_texts,
+                book_author_override=book_author_override,
             ),
         )
 
@@ -1149,6 +1309,7 @@ class BookChapterIngestor:
         force: bool,
         use_body_diff: bool,
         local_texts: dict[str, str | None],
+        book_author_override: tuple[str, str] | None = None,
     ) -> tuple[list[NovelDraft], set[int], list[str], int]:
         """Short synchronous write callback: resolve entities, write files, upsert, refresh metadata."""
         session = tx.session
@@ -1158,7 +1319,11 @@ class BookChapterIngestor:
         tag_resolver = TagAliasResolver(session)
 
         # 1. Determine unique authors and resolve in deterministic key order.
-        book_author_key, book_author_name = _resolve_book_author(outline, fetched_items)
+        book_author_key, book_author_name = (
+            book_author_override
+            if book_author_override is not None
+            else _resolve_book_author(outline, fetched_items)
+        )
         author_pairs: dict[str, str] = {book_author_key: book_author_name}
         item_author_keys: list[str] = []
         for item in fetched_items:

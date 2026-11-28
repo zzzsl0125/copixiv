@@ -10,6 +10,7 @@ from copixiv.core.exceptions import ValidationError
 from copixiv.core.models import SOURCE_PIXIV, TaskResult
 from copixiv.core.sources import ParsedSourceRef, SourceCapability
 from copixiv.features.novels.ingest import BookChapterIngestor, BookIngestOutcome, ingest
+from copixiv.features.novels.use_cases.series_actions import ingest_pixiv_series
 from copixiv.log import logger
 from copixiv.sources.esj.client import EsjChallengeError
 from copixiv.sources.local import LocalSourcePlugin
@@ -72,11 +73,25 @@ def _format_summary(
     return "按引用抓取: " + "，".join(parts)
 
 
+def _source_fetch_timeout_sources(args: SourceFetchArgs, ctx: TaskContext) -> tuple[str, ...]:
+    raw_refs = [r.strip() for r in args.refs if isinstance(r, str) and r.strip()]
+    registry = _resolve_registry(ctx)
+    sources: list[str] = []
+    for raw in raw_refs:
+        parsed = registry.parse_ref(raw, preferred_source=args.source)
+        if parsed is not None and parsed.source not in sources:
+            sources.append(parsed.source)
+    if not sources and args.source and registry.get(args.source) is not None:
+        sources.append(args.source)
+    return tuple(sources)
+
+
 @register(
     "source_fetch",
-    description="从指定或自动识别的数据源抓取书本/章节",
+    description="从指定或自动识别的数据源抓取书本/系列/章节",
     args=SourceFetchArgs,
     lane="fetch",
+    timeout_sources=_source_fetch_timeout_sources,
 )
 async def source_fetch(args: SourceFetchArgs, ctx: TaskContext) -> TaskResult:
     """Parse refs across sources and fetch books/chapters via the matching ingestor."""
@@ -108,18 +123,23 @@ async def source_fetch(args: SourceFetchArgs, ctx: TaskContext) -> TaskResult:
             summary=f"按引用抓取: 全部 {len(invalid_refs)} 条引用无法识别",
         )
 
-    pixiv_ids: list[int] = []
+    pixiv_novel_ids: list[int] = []
+    pixiv_series_ids: list[int] = []
     external_refs: list[ParsedSourceRef] = []
     for parsed in parsed_refs:
         if parsed.source == SOURCE_PIXIV:
-            raw_id = parsed.chapter_key or parsed.series_key
+            is_series = parsed.kind == "book"
+            raw_id = parsed.series_key if is_series else (parsed.chapter_key or parsed.series_key)
             try:
                 nid = int(raw_id)
             except (TypeError, ValueError):
                 invalid_refs.append(parsed.normalized_ref or raw_id)
                 continue
             if nid > 0:
-                pixiv_ids.append(nid)
+                if is_series:
+                    pixiv_series_ids.append(nid)
+                else:
+                    pixiv_novel_ids.append(nid)
             else:
                 invalid_refs.append(parsed.normalized_ref or raw_id)
         else:
@@ -133,10 +153,10 @@ async def source_fetch(args: SourceFetchArgs, ctx: TaskContext) -> TaskResult:
     skipped_external = 0
     skipped_existing = 0
 
-    if pixiv_ids:
-        pixiv_ids = list(dict.fromkeys(pixiv_ids))
+    if pixiv_novel_ids:
+        pixiv_novel_ids = list(dict.fromkeys(pixiv_novel_ids))
         pixiv_out = await ingest(
-            ids=pixiv_ids,
+            ids=pixiv_novel_ids,
             force=args.force,
             session_factory=ctx.session_factory,
             client=ctx.client,
@@ -148,6 +168,42 @@ async def source_fetch(args: SourceFetchArgs, ctx: TaskContext) -> TaskResult:
         new_count += pixiv_out.new_count
         fetched_count += len(pixiv_out.titles)
         failed_count += len(pixiv_out.failed_ids)
+
+    if pixiv_series_ids:
+        for sid in list(dict.fromkeys(pixiv_series_ids)):
+            await ctx.report_progress(f"抓取 Pixiv 系列 #{sid}…")
+            try:
+                series_res = await ingest_pixiv_series(
+                    sid,
+                    force=args.force,
+                    session_factory=ctx.session_factory,
+                    client=ctx.client,
+                    file_storage=ctx.file_storage,
+                    image_downloader=ctx.image_downloader,
+                )
+            except (asyncio.CancelledError, ValidationError):
+                raise
+            except Exception as exc:
+                logger.warning(f"source_fetch: 抓取 Pixiv 系列 #{sid} 失败: {exc}")
+                failed_count += 1
+                continue
+
+            if series_res is None:
+                logger.warning(f"source_fetch: Pixiv 系列 #{sid} 不存在或没有章节")
+                failed_count += 1
+                continue
+
+            series_out, total_in_series = series_res
+            new_novel_titles.extend(series_out.new_titles)
+            failed_ids.extend(series_out.failed_ids)
+            new_count += series_out.new_count
+            fetched_count += len(series_out.titles)
+            failed_count += len(series_out.failed_ids)
+            if not args.force:
+                skipped_existing += max(
+                    total_in_series - len(series_out.titles) - len(series_out.failed_ids),
+                    0,
+                )
 
     if external_refs:
         ingestor = BookChapterIngestor(
@@ -164,6 +220,7 @@ async def source_fetch(args: SourceFetchArgs, ctx: TaskContext) -> TaskResult:
                         parsed.source,
                         parsed.series_key,
                         force=args.force,
+                        on_progress=ctx.report_progress,
                     )
                 else:
                     ext_out = await ingestor.ingest_chapter(
