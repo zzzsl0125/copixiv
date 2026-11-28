@@ -478,6 +478,62 @@ export interface paths {
         get: operations["lookup_series_api_novels_series__series_id__get"];
         put?: never;
         post?: never;
+        /** Delete Series */
+        delete: operations["delete_series_api_novels_series__series_id__delete"];
+        options?: never;
+        head?: never;
+        /** Update Series Metadata */
+        patch: operations["update_series_metadata_api_novels_series__series_id__patch"];
+        trace?: never;
+    };
+    "/api/novels/series/{series_id}/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download Series
+         * @description Synthesize and stream a merged TXT/EPUB3 archive for a folded series.
+         */
+        get: operations["download_series_api_novels_series__series_id__download_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/novels/series/{series_id}/favourite": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Toggle Series Favourite */
+        post: operations["toggle_series_favourite_api_novels_series__series_id__favourite_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/novels/series/{series_id}/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Sync Series */
+        post: operations["sync_series_api_novels_series__series_id__sync_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1146,6 +1202,11 @@ export interface components {
         BatchExportPreviewRequest: {
             /** @default txt */
             format_mode: components["schemas"]["FormatMode"];
+            /**
+             * Merge Series
+             * @default false
+             */
+            merge_series: boolean;
             /** Naming Template */
             naming_template?: string | null;
             /** Novel Ids */
@@ -1163,6 +1224,11 @@ export interface components {
         BatchExportRequest: {
             /** @default txt */
             format_mode: components["schemas"]["FormatMode"];
+            /**
+             * Merge Series
+             * @default false
+             */
+            merge_series: boolean;
             /** Naming Template */
             naming_template?: string | null;
             /** Novel Ids */
@@ -1204,6 +1270,11 @@ export interface components {
             apply: boolean;
             /** Author Id */
             author_id?: number | null;
+            /**
+             * Expand Series
+             * @default false
+             */
+            expand_series: boolean;
             scope: components["schemas"]["BatchScope"];
             /** Series Id */
             series_id?: number | null;
@@ -1229,6 +1300,11 @@ export interface components {
         };
         /** BatchOperationRequest */
         BatchOperationRequest: {
+            /**
+             * Expand Series
+             * @default false
+             */
+            expand_series: boolean;
             /**
              * Operation
              * @enum {string}
@@ -1479,6 +1555,11 @@ export interface components {
              * @default false
              */
             can_sync: boolean;
+            /**
+             * Chapter Count
+             * @default 1
+             */
+            chapter_count: number;
             /** Create Time */
             create_time?: string | null;
             /**
@@ -1505,6 +1586,11 @@ export interface components {
              * @default false
              */
             is_favourite: boolean;
+            /**
+             * Is Series
+             * @default false
+             */
+            is_series: boolean;
             /**
              * Is Special Follow
              * @default false
@@ -1779,6 +1865,18 @@ export interface components {
             series_name?: string | null;
             /** Source */
             source: string;
+        };
+        /**
+         * SeriesUpdateRequest
+         * @description 系列卡片元数据编辑的部分更新体（``PATCH /api/novels/series/{series_id}``）。
+         */
+        SeriesUpdateRequest: {
+            /** Author Id */
+            author_id?: number | null;
+            /** Tags */
+            tags?: string[] | null;
+            /** Title */
+            title?: string | null;
         };
         /**
          * SettingFieldOptionSchema
@@ -3008,6 +3106,163 @@ export interface operations {
             };
         };
     };
+    delete_series_api_novels_series__series_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                series_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_series_metadata_api_novels_series__series_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                series_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SeriesUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NovelBase"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    download_series_api_novels_series__series_id__download_get: {
+        parameters: {
+            query?: {
+                format?: "txt" | "epub" | "prefer_epub";
+            };
+            header?: never;
+            path: {
+                series_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    toggle_series_favourite_api_novels_series__series_id__favourite_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                series_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    sync_series_api_novels_series__series_id__sync_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                series_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NovelBase"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     sort_novel_ids_api_novels_sort_ids_post: {
         parameters: {
             query?: never;
@@ -3108,7 +3363,7 @@ export interface operations {
     download_novel_api_novels__novel_id__download_get: {
         parameters: {
             query?: {
-                format?: components["schemas"]["FormatMode"];
+                format?: "txt" | "epub" | "prefer_epub";
             };
             header?: never;
             path: {

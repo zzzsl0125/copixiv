@@ -47,6 +47,8 @@ function makeNovel(id: number, overrides: Partial<Novel> = {}): Novel {
     external_url: `https://www.pixiv.net/novel/show.php?id=${id}`,
     is_favourite: false,
     is_special_follow: false,
+    is_series: false,
+    chapter_count: 1,
     tags: [],
     editable_fields: [],
     ...overrides,
@@ -204,7 +206,7 @@ describe('useNovelQueryState & useNovels', () => {
     expect(mocks.getNovels).toHaveBeenCalledTimes(1)
     expect(mocks.getNovels).toHaveBeenCalledWith(
       expect.objectContaining({
-        keyword: 'source:pixiv;',
+        keyword: '',
         exclude_blocked: undefined,
       }),
       expect.any(AbortSignal),

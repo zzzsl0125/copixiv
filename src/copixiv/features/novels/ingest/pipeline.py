@@ -19,7 +19,9 @@ pass the fields they need (``session_factory``, ``client``,
 """
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 from copixiv.core.draft import NovelDraft, NovelInfoLike, build_from_novel_info
 from copixiv.core.models import SOURCE_PIXIV, EpubStatus
@@ -48,6 +50,7 @@ async def _download_novels(
     force: bool = False,
     stored_paths: dict[int, str] | None = None,
     asset_batch: AssetBatch | None = None,
+    series_dirs: Mapping[int, Path] | None = None,
 ) -> tuple[list[NovelDraft], list[tuple[int, str]]]:
     """Download novels via webview concurrently.
 
@@ -81,6 +84,7 @@ async def _download_novels(
             force,
             stored_path=(stored_paths or {}).get(nid),
             asset_batch=asset_batch,
+            series_dirs=series_dirs,
         )
         if data is None:
             logger.warning(f"下载: #{nid} webview 返回空")
@@ -324,6 +328,7 @@ class _RoundPlan:
     missing_index_ids: frozenset[int]
     download_ids: list[int]
     stored_paths: dict[int, str]
+    series_paths: dict[int, list[str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -368,7 +373,14 @@ def _plan_round(
             force=force,
             failed_repo=FailedNovelRepository(uow.session),
         )
-        return _RoundPlan(existing_meta, missing_index_ids, download_ids, stored_paths)
+        need_set = set(download_ids)
+        series_ids = {
+            int(n.series.id)
+            for n in novels
+            if n.id in need_set and n.series is not None and getattr(n.series, "id", None)
+        }
+        series_paths = SQLAlchemyNovelRepository(uow.session).get_series_paths(series_ids)
+        return _RoundPlan(existing_meta, missing_index_ids, download_ids, stored_paths, series_paths)
 
     download_ids = list(dict.fromkeys(ids or []))
     stored_paths = {}
@@ -416,6 +428,7 @@ async def _download_round(
     force: bool,
     stored_paths: dict[int, str],
     asset_batch: AssetBatch | None = None,
+    series_dirs: Mapping[int, Path] | None = None,
 ) -> tuple[list[NovelDraft], list[tuple[int, str]]]:
     """Download phase —— 并发网络 / 文件 I/O，**不碰数据库**。
 
@@ -442,6 +455,7 @@ async def _download_round(
         force=force,
         stored_paths=stored_paths,
         asset_batch=asset_batch,
+        series_dirs=series_dirs,
     )
 
 
@@ -548,6 +562,11 @@ async def ingest(
     )
 
     asset_batch = image_downloader.new_batch() if image_downloader is not None else None
+    series_dirs: dict[int, Path] = {}
+    if file_storage is not None and plan.series_paths:
+        for sid, spaths in plan.series_paths.items():
+            if existing_dir := file_storage.find_existing_series_dir(spaths, SOURCE_PIXIV):
+                series_dirs[sid] = existing_dir
 
     downloaded, failed_records = await _download_round(
         plan.download_ids,
@@ -557,6 +576,7 @@ async def ingest(
         force=force,
         stored_paths=plan.stored_paths,
         asset_batch=asset_batch,
+        series_dirs=series_dirs,
     )
 
     existing_meta, downloaded = await _resolve_round_indices(

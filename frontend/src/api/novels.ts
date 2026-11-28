@@ -17,6 +17,7 @@ import type {
   NovelUpdatePayload,
   OrderDirection,
   SeriesLookup,
+  SeriesUpdatePayload,
   SortableOrderBy,
 } from '../types'
 import type { AuthorSearchItem, SeriesSearchItem } from '../types/novels'
@@ -134,8 +135,41 @@ export const novelApi = {
     return unwrap(res, '搜索系列失败')
   },
 
-  downloadUrl(novelId: number, format: 'txt' | 'epub' = 'txt'): string {
+  downloadUrl(novelId: number, format: 'txt' | 'epub' | 'prefer_epub' = 'txt'): string {
     return buildApiUrl(`/novels/${novelId}/download?format=${format}`)
+  },
+
+  seriesDownloadUrl(seriesId: number, format: 'txt' | 'epub' | 'prefer_epub' = 'txt'): string {
+    return buildApiUrl(`/novels/series/${seriesId}/download?format=${format}`)
+  },
+
+  async toggleSeriesFavourite(seriesId: number): Promise<void> {
+    const res = await apiClient.POST('/api/novels/series/{series_id}/favourite', {
+      params: { path: { series_id: seriesId } },
+    })
+    unwrapVoid(res, '操作系列收藏失败')
+  },
+
+  async updateSeries(seriesId: number, payload: SeriesUpdatePayload): Promise<Novel> {
+    const res = await apiClient.PATCH('/api/novels/series/{series_id}', {
+      params: { path: { series_id: seriesId } },
+      body: payload,
+    })
+    return unwrap(res, '保存系列信息失败')
+  },
+
+  async syncSeries(seriesId: number): Promise<Novel> {
+    const res = await apiClient.POST('/api/novels/series/{series_id}/sync', {
+      params: { path: { series_id: seriesId } },
+    })
+    return unwrap(res, '同步系列元数据失败')
+  },
+
+  async deleteSeries(seriesId: number): Promise<void> {
+    const res = await apiClient.DELETE('/api/novels/series/{series_id}', {
+      params: { path: { series_id: seriesId } },
+    })
+    unwrapVoid(res, '删除系列失败')
   },
 
   async countNovels(params: GetNovelsParams, signal?: AbortSignal): Promise<NovelCountResult> {
@@ -157,12 +191,14 @@ export const novelApi = {
     operation: BatchOperation
     scope: BatchScope
     tags?: string[]
+    expand_series?: boolean
   }): Promise<BatchOperationResult> {
     const res = await apiClient.POST('/api/novels/batch', {
       body: {
         operation: params.operation,
         scope: params.scope,
         tags: params.tags ?? [],
+        expand_series: params.expand_series ?? false,
       },
     })
     return unwrap(res, '批量操作失败')
@@ -235,6 +271,7 @@ export const novelApi = {
       novel_ids: number[]
       format_mode?: FormatMode
       naming_template?: string
+      merge_series?: boolean
     },
     signal?: AbortSignal,
   ): Promise<{ path: string | null }> {
@@ -243,6 +280,7 @@ export const novelApi = {
         novel_ids: params.novel_ids,
         format_mode: params.format_mode ?? 'txt',
         naming_template: params.naming_template,
+        merge_series: params.merge_series ?? false,
       },
       signal,
     })
@@ -254,6 +292,7 @@ export const novelApi = {
     format_mode?: FormatMode
     zip_name?: string
     naming_template?: string
+    merge_series?: boolean
   }): Promise<{ task_id: number; matched: number }> {
     const res = await apiClient.POST('/api/novels/batch-export', {
       body: {
@@ -261,6 +300,7 @@ export const novelApi = {
         format_mode: params.format_mode ?? 'txt',
         zip_name: params.zip_name,
         naming_template: params.naming_template,
+        merge_series: params.merge_series ?? false,
       },
     })
     return unwrap(res, '提交导出任务失败')

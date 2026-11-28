@@ -20,9 +20,11 @@ from copixiv.core.search import (
     QuerySpec,
     normalize_search_segments,
 )
+from copixiv.core.snapshot_types import SlimNovelRecord
+from copixiv.core.time import datetime_to_us, us_to_datetime
 from copixiv.db import models
 from copixiv.db.delta import SESSION_ENGINE_KEY, detach_engine_runtime, get_attached_engine
-from copixiv.db.novel_snapshot import PgSnapshotStore
+from copixiv.db.novel_snapshot import PgSnapshotStore, fold_series_rows
 from copixiv.db.uow import SqlUnitOfWork
 from copixiv.features.authors.repo import SQLAlchemyAuthorRepository
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
@@ -72,7 +74,7 @@ def _seed_dataset(session_factory) -> None:
         ),
         NovelDraft(
             id=-150,
-            title="Local Upload",
+            title="Local Alpha Ñ Upload",
             author_id=20,
             author_name="AuthorTwenty",
             path="p/neg150.txt",
@@ -114,14 +116,41 @@ def _seed_dataset(session_factory) -> None:
         )
 
 
+def _slim_to_oracle_dict(rec: SlimNovelRecord, *, is_series: bool) -> dict[str, Any]:
+    return {
+        "id": rec.id,
+        "title": rec.title,
+        "author_id": rec.author_id,
+        "author_name": rec.author_name,
+        "series_id": rec.series_id,
+        "series_name": rec.series_name,
+        "series_index": rec.series_index,
+        "text": rec.text,
+        "like": rec.like,
+        "view": rec.view,
+        "has_epub": rec.has_epub,
+        "create_time": us_to_datetime(rec.create_time_us),
+        "source": rec.source,
+        "is_favourite": rec.is_favourite,
+        "is_special_follow": rec.is_special_follow,
+        "tags": list(rec.tags),
+        "is_series": is_series,
+        "chapter_count": rec.chapter_count,
+    }
+
+
 def _load_db_truth(session) -> tuple[list[dict[str, Any]], set[str], bool]:
-    sf_authors = set(
-        session.execute(
-            select(models.Author.author_id).where(models.Author.is_special_follow == True)  # noqa: E712
-        )
-        .scalars()
-        .all()
-    )
+    author_rows = session.execute(
+        select(models.Author.author_id, models.Author.author_name, models.Author.is_special_follow)
+    ).all()
+    sf_authors = {int(aid) for aid, _, sf in author_rows if sf}
+    author_names = {int(aid): aname for aid, aname, _ in author_rows}
+
+    series_rows = session.execute(
+        select(models.Series.series_id, models.Series.series_name, models.Series.author_id)
+    ).all()
+    series_meta = {int(sid): (sname, aid) for sid, sname, aid in series_rows}
+
     blocked = set(
         session.execute(
             select(models.TagPreference.tag).where(
@@ -137,29 +166,49 @@ def _load_db_truth(session) -> tuple[list[dict[str, Any]], set[str], bool]:
     exclude_default = setting != "false" if setting is not None else True
 
     novels = session.execute(select(models.Novel)).scalars().all()
-    rows: list[dict[str, Any]] = []
+    standalone_rows: list[dict[str, Any]] = []
+    grouped: dict[int, list[SlimNovelRecord]] = {}
     for n in novels:
-        rows.append(
-            {
-                "id": int(n.id),
-                "title": n.title,
-                "author_id": n.author_id,
-                "author_name": n.author_name,
-                "series_id": n.series_id,
-                "series_name": n.series_name,
-                "series_index": n.series_index,
-                "text": int(n.text),
-                "like": int(n.like),
-                "view": int(n.view),
-                "has_epub": int(n.has_epub),
-                "create_time": n.create_time,
-                "source": n.source,
-                "is_favourite": bool(n.is_favourite),
-                "is_special_follow": (n.author_id in sf_authors) if n.author_id is not None else False,
-                "tags": list(n.tags or []),
-            }
+        rec = SlimNovelRecord(
+            int(n.id),
+            n.title,
+            n.author_id,
+            n.author_name,
+            n.series_id,
+            n.series_name,
+            n.series_index,
+            int(n.text),
+            int(n.like),
+            int(n.view),
+            int(n.has_epub),
+            datetime_to_us(n.create_time),
+            n.source,
+            bool(n.is_favourite),
+            (n.author_id in sf_authors) if n.author_id is not None else False,
+            list(n.tags or []),
+            1,
         )
-    return rows, blocked, exclude_default
+        if n.series_id is None:
+            standalone_rows.append(_slim_to_oracle_dict(rec, is_series=False))
+        else:
+            grouped.setdefault(int(n.series_id), []).append(rec)
+
+    folded_rows: list[dict[str, Any]] = list(standalone_rows)
+    for sid, chapters in sorted(grouped.items()):
+        sname, s_aid = series_meta.get(sid, (None, None))
+        s_aname = author_names.get(s_aid) if s_aid is not None else None
+        s_sf = (s_aid in sf_authors) if s_aid is not None else None
+        folded = fold_series_rows(
+            sid,
+            chapters,
+            series_name=sname,
+            series_author_id=s_aid,
+            series_author_name=s_aname,
+            series_author_sf=s_sf,
+        )
+        folded_rows.append(_slim_to_oracle_dict(folded, is_series=True))
+
+    return folded_rows, blocked, exclude_default
 
 
 def _oracle_filter(
@@ -281,6 +330,8 @@ def _assert_db_oracle_parity(session_factory, engine, specs: list[QuerySpec]) ->
             "is_favourite",
             "tags",
             "is_special_follow",
+            "is_series",
+            "chapter_count",
         )
         by_id = {r["id"]: r for r in rows}
 
@@ -356,9 +407,34 @@ def test_parity_across_filters_sorts_and_nulls(db_session_factory):
         QuerySpec(conditions=[("tags", "原神")], order_by="like"),
         QuerySpec(conditions=[("source", "local")], order_by="id"),
         QuerySpec(min_like=300, min_text=2000, exclude_blocked_tags=False),
-        QuerySpec(exclude_ids=[101]),
+        QuerySpec(exclude_ids=[102]),
     ]
     _assert_db_oracle_parity(db_session_factory, engine, specs)
+
+    # Explicit series_id query drills down to PostgreSQL chapter rows ordered by series_index
+    with db_session_factory() as session:
+        repo = SQLAlchemyNovelRepository(session, query_engine=engine)
+        drill_all = repo.get_novels(
+            QuerySpec(
+                conditions=[("series_id", "1")],
+                order_by="id",
+                order_direction="ASC",
+                exclude_blocked_tags=False,
+            )
+        )
+        assert [n.id for n in drill_all["novels"]] == [102, 101]
+        assert all(n.is_series is False and n.chapter_count == 1 for n in drill_all["novels"])
+
+        drill_vis = repo.get_novels(QuerySpec(conditions=[("series_id", "1")], order_by="id"))
+        assert [n.id for n in drill_vis["novels"]] == [101]
+        assert repo.count_novels(QuerySpec(conditions=[("series_id", "1")])).value == 1
+        assert repo.has_excluded_novels(QuerySpec(conditions=[("series_id", "1")])) is True
+
+        # Non-representative chapter id:101 redirects to folded series rep 102
+        redirect = repo.get_novels(QuerySpec(conditions=[("id", "101")], exclude_blocked_tags=False))
+        assert [n.id for n in redirect["novels"]] == [102]
+        assert redirect["novels"][0].is_series is True
+        assert redirect["novels"][0].chapter_count == 2
 
 
 def test_delta_sync_all_write_paths_and_rollback_isolation(db_session_factory):
@@ -404,15 +480,20 @@ def test_delta_sync_all_write_paths_and_rollback_isolation(db_session_factory):
         nrepo.update_metadata_many([-150], {"series_id": 1, "series_name": "SeriesOne"})
     _assert_db_oracle_parity(db_session_factory, engine, probe_specs)
 
-    # 4. update_author_name + apply_alias_retroactively
+    # 4. update_author_name + update_series_name + apply_alias_retroactively
     uow = SqlUnitOfWork(db_session_factory)
     with uow.begin():
         SQLAlchemyAuthorRepository(uow.session).update_author_name(10, "RenamedAuthor")
+        SQLAlchemySeriesRepository(uow.session).update_series_name(1, "RenamedSeriesOne")
         SQLAlchemyTagRepository(uow.session).apply_alias_retroactively(
             "legacy_alias_src",
             "canonical_tag",
         )
-    _assert_db_oracle_parity(db_session_factory, engine, probe_specs)
+    _assert_db_oracle_parity(
+        db_session_factory,
+        engine,
+        [*probe_specs, QuerySpec(conditions=[("keyword", "RenamedSeriesOne")])],
+    )
 
     # 5. System setting & tag preference toggles
     uow = SqlUnitOfWork(db_session_factory)

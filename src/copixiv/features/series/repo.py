@@ -69,14 +69,17 @@ class SQLAlchemySeriesRepository:
 
     def update_series_name(self, series_id: int, name: str) -> None:
         """Write ``series.series_name`` if distinct from the current value."""
-        self.session.execute(
+        updated = self.session.execute(
             update(models.Series)
             .where(
                 models.Series.series_id == series_id,
                 models.Series.series_name.is_distinct_from(name),
             )
             .values(series_name=name)
-        )
+            .returning(models.Series.series_id)
+        ).scalar_one_or_none()
+        if updated is not None:
+            engine_delta.record_series_dirty(self.session, [series_id])
 
     def update_series_indices(self, updates: Mapping[int, int | None]) -> None:
         """Update ``series_index`` in bulk by primary key for existing novels."""

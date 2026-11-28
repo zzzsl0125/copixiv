@@ -62,6 +62,8 @@ function makeNovel(id: number, overrides: Partial<Novel> = {}): Novel {
     can_sync: false,
     is_favourite: false,
     is_special_follow: false,
+    is_series: false,
+    chapter_count: 1,
     tags: [],
     editable_fields: [],
     ...overrides,
@@ -109,7 +111,7 @@ describe('useBatchMode (Vue Query & selected collection view)', () => {
 
     expect(apiMocks.countNovels).toHaveBeenCalledWith(
       {
-        keyword: 'source:pixiv;',
+        keyword: '',
         min_like: 0,
         min_text: 0,
         exclude_blocked: undefined,

@@ -99,6 +99,7 @@ describe('BatchTagModal & BatchDownloadModal', () => {
         novel_ids: [101, 102, 103],
         format_mode: 'txt',
         naming_template: '{title}',
+        merge_series: false,
       },
       expect.any(AbortSignal),
     )
@@ -114,6 +115,7 @@ describe('BatchTagModal & BatchDownloadModal', () => {
       format_mode: 'txt',
       zip_name: '批量导出',
       naming_template: '{title}',
+      merge_series: false,
     })
     expect(wrapper.emitted('task-submitted')).toEqual([[{ task_id: 42, matched: 3 }]])
     expect(wrapper.emitted('close')).toEqual([[]])

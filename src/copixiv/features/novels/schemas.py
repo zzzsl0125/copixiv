@@ -58,6 +58,8 @@ class NovelBase(BaseModel):
     source: str = SOURCE_PIXIV
     external_url: str | None = None
     can_sync: bool = False
+    is_series: bool = False
+    chapter_count: int = 1
     model_config = ConfigDict(from_attributes=True)
 
     # Coerce int columns from DB into proper types
@@ -172,6 +174,22 @@ class NovelUpdateRequest(BaseModel):
         return _reject_bool_id(value)
 
 
+class SeriesUpdateRequest(BaseModel):
+    """系列卡片元数据编辑的部分更新体（``PATCH /api/novels/series/{series_id}``）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = None
+    author_id: int | None = None
+    tags: list[str] | None = None
+
+    @field_validator("author_id", mode="before")
+    @classmethod
+    def _reject_bool_ids(cls, value):
+        """``true`` / ``false`` 不是 id —— 规则见 :func:`_reject_bool_id`."""
+        return _reject_bool_id(value)
+
+
 # ---------------------------------------------------------------------------
 # Query filters
 # ---------------------------------------------------------------------------
@@ -211,6 +229,7 @@ class BatchOperationRequest(BaseModel):
     operation: Literal["delete", "add_tags", "remove_tags"]
     scope: BatchScope
     tags: list[str] = []
+    expand_series: bool = False
 
 
 class BatchOperationResponse(BaseModel):
@@ -244,6 +263,7 @@ class BatchMetadataRequest(BaseModel):
     series_id: int | None = None
     # 预演（默认）：只算数不写库，用户先看到"几本会改、几本会跳过"再确认。
     apply: bool = False
+    expand_series: bool = False
 
     @field_validator("author_id", "series_id", mode="before")
     @classmethod
@@ -315,6 +335,7 @@ class BatchExportPreviewRequest(BaseModel):
     novel_ids: list[int]
     format_mode: FormatMode = FormatMode.TXT
     naming_template: str | None = None
+    merge_series: bool = False
 
 
 class BatchExportPreviewResponse(BaseModel):
@@ -328,6 +349,7 @@ class BatchExportRequest(BaseModel):
     format_mode: FormatMode = FormatMode.TXT
     zip_name: str | None = None
     naming_template: str | None = None
+    merge_series: bool = False
 
 
 class BatchExportResponse(BaseModel):
@@ -355,5 +377,6 @@ __all__ = [
     "NovelsByIdsRequest",
     "NovelsByIdsResponse",
     "NovelUpdateRequest",
+    "SeriesUpdateRequest",
     "SortIdsRequest",
 ]

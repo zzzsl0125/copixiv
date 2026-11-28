@@ -10,6 +10,7 @@ const props = defineProps<{
   operation: Exclude<BatchOperation, 'delete'>
   scope: BatchScope | null
   scopeLabel: string
+  expandSeries?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -58,6 +59,7 @@ async function handleConfirm() {
       operation: props.operation,
       scope: props.scope,
       tags: parsedTags.value,
+      ...(props.expandSeries !== undefined ? { expand_series: props.expandSeries } : {}),
     })
     emit('success', result)
     emit('close')

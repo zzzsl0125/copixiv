@@ -168,6 +168,8 @@ describe('Phase 1 UI fixes', () => {
           external_url: null,
           is_favourite: false,
           is_special_follow: false,
+          is_series: false,
+          chapter_count: 1,
           tags: ['favTag', 'badTag'],
           editable_fields: ['title', 'author_id', 'series_id', 'series_index', 'tags', 'create_time'],
         },

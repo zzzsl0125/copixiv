@@ -25,6 +25,7 @@ pub struct EngineState {
     pub views: Vec<i32>,
     pub texts: Vec<i32>,
     pub has_epub: Vec<u8>,
+    pub chapter_counts: Vec<i32>,
     pub create_time_us: Vec<i64>,
     pub author_id: Vec<i64>,
     pub series_id: Vec<i64>,
@@ -96,6 +97,7 @@ impl EngineState {
             views: Vec::with_capacity(docs),
             texts: Vec::with_capacity(docs),
             has_epub: Vec::with_capacity(docs),
+            chapter_counts: Vec::with_capacity(docs),
             create_time_us: Vec::with_capacity(docs),
             author_id: Vec::with_capacity(docs),
             series_id: Vec::with_capacity(docs),
@@ -202,6 +204,7 @@ impl EngineState {
         self.views.shrink_to_fit();
         self.texts.shrink_to_fit();
         self.has_epub.shrink_to_fit();
+        self.chapter_counts.shrink_to_fit();
         self.create_time_us.shrink_to_fit();
         self.author_id.shrink_to_fit();
         self.series_id.shrink_to_fit();
@@ -226,6 +229,7 @@ impl EngineState {
             + self.views.capacity() * 4
             + self.texts.capacity() * 4
             + self.has_epub.capacity()
+            + self.chapter_counts.capacity() * 4
             + self.create_time_us.capacity() * 8
             + self.author_id.capacity() * 8
             + self.series_id.capacity() * 8

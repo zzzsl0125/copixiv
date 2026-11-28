@@ -42,6 +42,7 @@ const {
   noMoreData,
   filters,
   hasExcluded,
+  isSeriesDrilldown,
   handleSearch,
   handleLoadMore: loadMoreNovels,
   handleCardSearch,
@@ -245,11 +246,26 @@ const applyNovelStateChange = (payload: NovelStateChange, authorId?: number) => 
 }
 
 const handleDownloadNovel = (novel: Novel) => {
-  downloadUrl(novelApi.downloadUrl(novel.id, novel.has_epub === 2 ? 'epub' : 'txt'))
+  const fmt = novel.has_epub === 2 ? 'epub' : 'txt'
+  if (novel.is_series && novel.series_id != null) {
+    downloadUrl(novelApi.seriesDownloadUrl(novel.series_id, fmt))
+    return
+  }
+  downloadUrl(novelApi.downloadUrl(novel.id, fmt))
 }
 
 const handleToggleFavourite = async (novel: Novel) => {
   try {
+    if (novel.is_series && novel.series_id != null) {
+      await novelApi.toggleSeriesFavourite(novel.series_id)
+      applyNovelStateChange({
+        id: novel.id,
+        field: 'is_favourite',
+        value: !novel.is_favourite,
+        seriesId: novel.series_id,
+      })
+      return
+    }
     await novelApi.toggleFavourite(novel.id)
     applyNovelStateChange({
       id: novel.id,
@@ -279,19 +295,29 @@ const handleToggleFollow = async (novel: Novel) => {
 }
 
 const handleNovelUpdated = (updated: Novel) => {
-  if (editingNovel.value?.id === updated.id) editingNovel.value = updated
+  if (
+    editingNovel.value &&
+    (editingNovel.value.id === updated.id ||
+      (editingNovel.value.is_series &&
+        updated.is_series &&
+        editingNovel.value.series_id != null &&
+        editingNovel.value.series_id === updated.series_id))
+  ) {
+    editingNovel.value = updated
+  }
   patchNovelInCache(updated)
   patchSelectedNovel(updated)
   void nextTick().then(measure)
 }
 
 const handleNovelDeleted = (novelId: number) => {
-  removeNovelFromCache(novelId)
+  const deletedSeriesId = editingNovel.value?.is_series ? editingNovel.value.series_id : null
+  removeNovelFromCache(novelId, deletedSeriesId)
   removeBatchCard(novelId)
   if (activeCardId.value === novelId) activeCardId.value = null
   if (editingNovel.value?.id === novelId) editingNovel.value = null
   void nextTick().then(measure)
-  toast.success('已删除小说')
+  toast.success(deletedSeriesId != null ? '已删除系列' : '已删除小说')
 }
 </script>
 
@@ -431,6 +457,8 @@ const handleNovelDeleted = (novelId: number) => {
       :upload-open="isUploadModalOpen"
       :batch-scope="batchScope"
       :scope-label="scopeLabel"
+      :expand-series="!isSeriesDrilldown"
+      :merge-series="!isSeriesDrilldown"
       @close-delete="deleteOpen = false"
       @close-tag="tagModalOpen = false"
       @close-batch-edit="batchEditOpen = false"

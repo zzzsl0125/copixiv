@@ -45,6 +45,7 @@ impl EngineState {
         self.views.push(0);
         self.texts.push(0);
         self.has_epub.push(0);
+        self.chapter_counts.push(1);
         self.create_time_us.push(0);
         self.author_id.push(0);
         self.series_id.push(0);
@@ -150,6 +151,7 @@ impl EngineState {
         self.views[idx] = Self::clamp_i32(row.view);
         self.texts[idx] = Self::clamp_i32(row.text);
         self.has_epub[idx] = Self::clamp_u8(row.has_epub);
+        self.chapter_counts[idx] = row.chapter_count.max(1);
 
         match row.create_time_us {
             Some(us) => self.create_time_us[idx] = us,
@@ -342,6 +344,27 @@ impl EngineState {
         tags_affected
     }
 
+    pub fn delete_series_ids(&mut self, series_ids: &[i64]) -> bool {
+        if series_ids.is_empty() {
+            return false;
+        }
+        let mut victim_ids: Vec<i64> = Vec::new();
+        for &sid in series_ids {
+            if let Some(&handle) = self.series_postings.get(&sid) {
+                let bm = handle.to_bitmap(&self.postings_slab);
+                for doc in bm.iter() {
+                    if self.alive.contains(doc) {
+                        victim_ids.push(self.doc_ids[doc as usize]);
+                    }
+                }
+            }
+        }
+        if victim_ids.is_empty() {
+            return false;
+        }
+        self.delete_ids(&victim_ids)
+    }
+
     pub fn upsert_batch(&mut self, rows: Vec<NovelRecord>) -> bool {
         if rows.is_empty() {
             return false;
@@ -358,6 +381,8 @@ impl EngineState {
             }
         }
 
+        let mut tags_changed = false;
+
         let mut dirty_mask = 0u8;
         for row in &dedup {
             if let Some(&doc) = self.id_to_doc.get(&row.id) {
@@ -371,7 +396,6 @@ impl EngineState {
             self.invalidate_hot_tracks(dirty_mask);
         }
 
-        let mut tags_changed = false;
         let mut old_tags_scratch: SmallVec<[u32; 16]> = SmallVec::new();
         let mut bigram_scratch = Vec::with_capacity(256);
         let mut tag_ids_scratch = Vec::with_capacity(32);
@@ -418,9 +442,11 @@ impl EngineState {
         self.recompute_blocked_bitmap();
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_delta(
         &mut self,
         delete_ids: &[i64],
+        delete_series_ids: &[i64],
         upsert_rows: Vec<NovelRecord>,
         blocked_tags: Option<Vec<String>>,
         exclude_blocked_default: Option<bool>,
@@ -429,6 +455,9 @@ impl EngineState {
     ) {
         let mut tags_dirty = false;
         if !delete_ids.is_empty() && self.delete_ids(delete_ids) {
+            tags_dirty = true;
+        }
+        if !delete_series_ids.is_empty() && self.delete_series_ids(delete_series_ids) {
             tags_dirty = true;
         }
         if !upsert_rows.is_empty() && self.upsert_batch(upsert_rows) {
@@ -483,6 +512,7 @@ mod tests {
             is_favourite: false,
             is_special_follow: false,
             tags: tags.into_iter().map(str::to_string).collect(),
+            chapter_count: 1,
         }
     }
 
@@ -522,6 +552,7 @@ mod tests {
         assert_eq!(actual.is_favourite, expected.is_favourite);
         assert_eq!(actual.is_special_follow, expected.is_special_follow);
         assert_eq!(actual.tags, expected.tags);
+        assert_eq!(actual.chapter_count, expected.chapter_count);
     }
 
     fn collect_abs_id_pages(
@@ -713,6 +744,7 @@ mod tests {
         // Upsert with mixed-case blocked tag must also be blocked.
         engine.apply_delta(
             &[],
+            &[],
             vec![novel(5, vec!["gAy"]), novel(6, vec!["clean"])],
             None,
             None,
@@ -723,6 +755,7 @@ mod tests {
 
         // Updating blocked tags with uppercase must match lowercase novel tags.
         engine.apply_delta(
+            &[],
             &[],
             vec![novel(7, vec!["ntr"])],
             Some(vec!["NTR".into()]),
@@ -883,6 +916,7 @@ mod tests {
 
         engine.apply_delta(
             &[],
+            &[],
             vec![r_neg45.clone(), r_neg55.clone(), r_neg15_mod.clone()],
             None,
             None,
@@ -900,6 +934,7 @@ mod tests {
 
         engine.apply_delta(
             &[-35, -45, -35],
+            &[],
             vec![r_neg25_cleared.clone()],
             Some(vec!["BLOCKED_NEG".into()]),
             None,
@@ -923,6 +958,7 @@ mod tests {
 
         engine.apply_delta(
             &[-55],
+            &[],
             vec![r_neg65.clone()],
             None,
             None,
@@ -937,5 +973,44 @@ mod tests {
             }
         }
         assert_query_parity(&engine, &expected, &["BLOCKED_NEG"], &probe_ids);
+    }
+
+    #[test]
+    fn series_rep_replacement_and_delete_series_ids_clean_up_stale_docs() {
+        let mut s1_initial = sourced_novel(-10, "esj", Some(-1), Some(-100), vec!["magic"]);
+        s1_initial.chapter_count = 2;
+        let mut b = StagingBuilder::new(4);
+        b.push_batch(vec![s1_initial]);
+        let engine = NovelIndex::new();
+        engine.swap_state(b.finalize(vec![], true, vec![]));
+
+        // Replace representative ID (-10 -> -11) for series -100 while incrementing chapter_count.
+        let mut s1_new_rep =
+            sourced_novel(-11, "esj", Some(-1), Some(-100), vec!["magic", "action"]);
+        s1_new_rep.chapter_count = 3;
+        engine.apply_delta(&[], &[-100], vec![s1_new_rep], None, None, &[], None);
+
+        let rows = engine
+            .query_novel_rows(
+                &QueryFilter::default(),
+                SortAxis::Numeric(NumericField::AbsId),
+                true,
+                10,
+                None,
+            )
+            .unwrap()
+            .0;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, -11);
+        assert_eq!(rows[0].chapter_count, 3);
+        assert!(engine.get_novel_rows_by_ids(&[-10]).is_empty());
+
+        // Delete entire series via delete_series_ids.
+        engine.apply_delta(&[], &[-100], vec![], None, None, &[], None);
+        assert_eq!(
+            engine.count_novels(&QueryFilter::default(), 100),
+            (0, false)
+        );
+        assert!(engine.get_novel_rows_by_ids(&[-11]).is_empty());
     }
 }

@@ -1,6 +1,6 @@
 # copixiv
 
-抓取、检索、管理与导出 Pixiv 中文小说。
+抓取、检索、管理与导出多数据源中文小说（内置 Pixiv、ESJ Zone 与本地上传）。
 
 ## 技术栈
 
@@ -9,8 +9,8 @@
 | 后端 | Python 3.12+，FastAPI + SQLAlchemy 2.0 + `pydantic-settings` + `tenacity` + Alembic + Loguru |
 | 检索引擎 | Rust (`crates/copixiv_rs`，PyO3 + `lasso` + `roaring` + `memchr` + `rayon` + `parking_lot`) |
 | 前端 | Vue 3 + Vite + TypeScript + Tailwind CSS v4 + `@tanstack/vue-query` + `@tanstack/vue-virtual` + `reka-ui`（`frontend/package.json`） |
-| 数据库 | 标准 PostgreSQL 16（无需 `pg_bigm`，Alembic 迁移 `0001_baseline .. 0006_drop_tag_table`；`BIGINT` / `timestamptz` / `JSONB` / `TEXT[]`） |
-| Pixiv 客户端 | 原生异步 `httpx` 客户端 + Pydantic v2 DTO（`pixiv/`，含统一 `Retry-After` / `tenacity` 重试与账号池调度） |
+| 数据库 | 标准 PostgreSQL 16（无需 `pg_bigm`，Alembic 迁移 `0001_baseline .. 0007_multi_source_foundation`；`BIGINT` / `timestamptz` / `JSONB` / `TEXT[]`） |
+| 数据源客户端 | 插件化 `SourceRegistry`（`sources/`）：原生异步 `httpx` Pixiv 客户端 + ESJ Zone 整书/章节抓取 + 本地 TXT/EPUB 入库 |
 | 服务端口 | `9000`（生产由后端同进程托管 `frontend/dist`，Vite 开发代理转发 `/api` → `9000`） |
 
 ---
@@ -77,26 +77,35 @@ sudo systemctl enable --now copixiv-pg.service copixiv.service
 
 ---
 
-## 小说入库
+## 小说入库、系列折叠与磁盘组织
 
-1. 在 **侧边栏 - 账号管理** 内添加可用的 Pixiv 账号。
-2. 在 **侧边栏 - 任务管理** 内配置或运行抓取任务；本地 TXT / EPUB 可在 **我的上传** 中直接上传。
+1. 在 **侧边栏 - 数据源管理**（`/sources`）启用数据源（如 Pixiv、ESJ Zone）并配置凭据 / 镜像域名。
+2. 在 **侧边栏 - 任务管理** 内运行抓取任务或通过数据源书架抓取页按 ID / URL 抓书；本地 TXT / EPUB 可在本地书架的 **上传** 入口直接入库。
+3. **系列折叠与章节钻取**：
+   - 默认检索视图中，同一系列（`series_id IS NOT NULL`）只展示 1 张书卡（标题优先显示系列名、喜爱/浏览取峰值、字数累加、标签取并集、`has_epub` 按已完成状态聚合）。
+   - 点击卡片内的 `系列：{系列名}（共 N 章）` 可跳转至 `series_id:<id>;` 章节视图，按 `series_index` 升序查看与单独管理该系列全部章节。
+   - 对系列书卡点击下载或批量导出开启 `merge_series` 时，服务端会在下载/导出阶段按需即时合成整本 `.txt` 或带目录/封面/插图的 EPUB3；**磁盘上各章节仍保持独立的原子文件**，互不覆盖。
+4. **多数据源磁盘目录规则**（`download/` 下按数据源平等分目录）：
+   - Pixiv 散篇（`series_id IS NULL`）：`download/pixiv/{4位分片}/{安全标题}_{novel_id}.{txt,epub}`
+   - 非 Pixiv 散篇（如 `local`）：`download/{source}/{安全标题}_{novel_id}.{txt,epub}`
+   - 任意数据源系列章节（`pixiv` / `esj` / `local`）：`download/{source}/{系列名}_{series_key}/{0001}_{章节名}_{novel_id}.{txt,epub}`（无序号时省略 `0001_` 前缀；已在库系列复用既有目录防重命名分裂）
 
 ## API
 
 | 前缀 | 路由模块 | 说明 |
 |---|---|---|
-| `/api/novels` | `features/novels/routes/`（`novel` / `query` / `batch` / `downloads`） | 列表、计数、按 ID 批量卡片（`by-ids`）、排序/范围辅助（`sort-ids` / `match-ids` / `ids`）、单本/导出包下载、收藏、单本编辑/同步/删除、批量操作、批量元数据编辑与异步打包导出 |
-| `/api/novels/author` | `features/authors/api.py` | 特别关注开关、作者 ID 预览 |
-| `/api/novels/series` | `features/series/api.py` | 系列 ID 预览 |
+| `/api/novels` | `features/novels/routes/`（`novel` / `query` / `batch` / `downloads` / `series_actions`） | 列表（含系列折叠与 `series_id:` 章节钻取）、计数、按 ID 批量卡片（`by-ids`）、排序/范围辅助、单篇与整本系列按需合并下载、收藏/编辑/同步/删除（单篇及整本系列）、批量操作（支持 `expand_series`）与异步打包导出（支持 `merge_series`） |
+| `/api/novels/author` | `features/authors/api.py` | 特别关注开关、作者名称/ID 搜索（`search`）、作者 ID 预览 |
+| `/api/novels/series` | `features/series/api.py` | 系列名称/ID 搜索（`search`）、系列 ID 预览 |
+| `/api/sources` | `features/sources/api.py` | 多数据源清单、配置热更新、凭据 CRUD、连接测试与按书ID/URL即时抓取 |
 | `/api/library` | `features/library/api.py` | 本地 TXT / EPUB 上传与入库 |
 | `/api/tasks` | `tasks/api.py` | 任务方法、定时任务管理、立即运行、任务取消与执行历史 |
 | `/api/system` | `features/system/api.py` | 系统配置（含 `exclude_blocked_tag_novels` / `batch_download_naming`） |
 | `/api/tag-preferences` | `features/tags/preferences.py` | 标签偏好（喜爱 / 厌恶）与排序 |
 | `/api/tag-aliases` | `features/tags/aliases.py` | 标签别名映射与基于 Rust 惰性 `TagIndex` 的相似标签建议 |
 | `/api/search-history` | `features/search_history.py` | 搜索历史 |
-| `/api/tokens` | `features/accounts.py` | Pixiv 刷新令牌管理 |
-| `/api/failed-novels` | `features/failures/api.py` | 失败台账查看、清除、重置计数与重试 |
+| `/api/tokens` | `features/accounts.py` | Pixiv 刷新令牌兼容端点（主管理入口已迁移至 `/api/sources`） |
+| `/api/failed-novels` | `features/failures/api.py` | 失败台账查看（多源 `novel_id` 可空模型）、清除、重置计数与重试 |
 
 OpenAPI 契约由 `src/copixiv/export_openapi.py`（`python -m copixiv.export_openapi`）导出为 `frontend/openapi.json`，再通过 `npm --prefix frontend run codegen` 生成 `frontend/src/types/api.generated.ts`。
 
@@ -123,13 +132,13 @@ crates/copixiv_rs 为 PyO3 原生检索扩展，由 query_engine 适配层封装
 
 ### 数据库、检索引擎与后台任务
 
-- **PostgreSQL 持久化真源**：`db/models.py` 定义全部 12 张表（`author` / `series` / `novel` / `tag_preference` / `setting` / `tag_alias` / `scheduled_task` / `task_history` / `token` / `failed_novel` / `series_dead_letter` / `search_history`；`0006_drop_tag_table` 已移除冗余 `tag` 表及其触发器），`db/pg_objects.py` 定义唯一真源序列与表级 autovacuum 参数，由 Alembic 迁移链（`0001_baseline .. 0006_drop_tag_table`）管理（可用 `alembic check` 校验 ORM 与迁移一致）。写入采用 PG MVCC 多写者 + `lock_timeout='5s'` + `ON CONFLICT` upsert + `db/tx.py::run_write_transaction`（针对 `55P03` / `40P01` / `40001` 退避重试）。
+- **PostgreSQL 持久化真源**：`db/models.py` 定义全部 13 张表（`author` / `series` / `novel` / `tag_preference` / `setting` / `tag_alias` / `scheduled_task` / `task_history` / `failed_novel` / `series_dead_letter` / `search_history` / `source_config` / `source_credential`），`db/pg_objects.py` 定义唯一真源序列（含外源负 ID 序列）、约束与表级 autovacuum 参数，由 Alembic 迁移链（`0001_baseline .. 0007_multi_source_foundation`）管理（可用 `alembic check` 校验 ORM 与迁移一致）。写入采用 PG MVCC 多写者 + `lock_timeout='5s'` + `ON CONFLICT` upsert + `db/tx.py::run_write_transaction`（针对 `55P03` / `40P01` / `40001` 退避重试）。
 - **Rust 进程内检索引擎（`copixiv_rs`）**：
-  - 启动时由 `db/novel_snapshot.py::PgSnapshotStore` 在 `REPEATABLE READ READ ONLY` 快照下流式投影窄列构建内存索引；所有写事务通过 `session_factory` 原生 SQLAlchemy 事件（`after_flush` / `after_commit` / `after_rollback`）收集 `PendingEngineDelta`，提交后再原子调用 `apply_delta(...)` 增量同步，回滚绝不污染内存。
-  - 内部按 `engine` / `storage` / `interner` / `postings` / `text_index` / `tag_index` / `tracks` / `mutation` / `query` / `hydrate` / `staging` 模块化拆分；`TagIndex` 按需惰性构建并随标签与别名变更维护，支持小说全文/多维检索、真随机分页（`splitmix64`）与标签子串/相似度别名推荐，列表查询与 `/by-ids` 直出卡片对象。
+  - 启动时由 `db/novel_snapshot.py::PgSnapshotStore` 在 `REPEATABLE READ READ ONLY` 快照下将独立作品与按 `series_id` 折叠聚合后的系列书流式投影为窄列内存索引；所有写事务通过 `session_factory` 原生 SQLAlchemy 事件（`after_flush` / `after_commit` / `after_rollback`）收集 `PendingEngineDelta`（含 `series_ids` 脏集），提交后再原子调用 `apply_delta(..., delete_series_ids=...)` 增量重聚合同步，回滚绝不污染内存。
+  - 内部按 `engine` / `storage` / `interner` / `postings` / `text_index` / `tag_index` / `tracks` / `mutation` / `query` / `hydrate` / `staging` 模块化拆分；`TagIndex` 按需惰性构建并随标签与别名变更维护，支持小说全文/多维检索、真随机分页（`splitmix64`）与标签子串/相似度别名推荐，列表查询与 `/by-ids` 直出卡片对象；显式 `series_id:` 检索直接钻取 PostgreSQL 章节视图。
 - **后台任务内核（`tasks/`）**：
   - `registry.py`（`@register(lane, timeout, notify)` 与独立 `TaskContext::report_progress`）+ `executor.py` + `cron.py`（`croniter`）+ `manager.py`（双 lane `asyncio.Event` 与任务取消追踪）。
-  - 业务任务覆盖抓取与作者删除（`tasks/novels.py`）、统一异步批量导出（`tasks/batch.py::batch_export`）与维护巡检（`tasks/maintenance/`：`backup` / `epub` / `files` / `refetch` / `series`；已退役 `sync_empty_name` 与 `prune_task_history`）。
+  - 业务任务覆盖抓取与作者删除（`tasks/novels.py`）、通用数据源任务（`tasks/sources.py::source_fetch`）、统一异步批量导出（`tasks/batch.py::batch_export`，支持 `merge_series` 按需合成整本系列）与维护巡检（`tasks/maintenance/`：`backup` / `epub` / `files` / `refetch` / `series`）。
 - **前端状态组织（`frontend/src/`）**：
   - `App.vue` 仅提供壳层容器并挂载 `useProvideNovelShellState()`；小说列表筛选、虚拟瀑布流与统一批量状态机 `useBatchMode` 收口于 `views/Novels.vue` 与 `composables/`。
 
@@ -149,15 +158,16 @@ src/copixiv/
 ├── deps.py             # FastAPI DI 依赖（get_uow / get_task_manager / API Key 等）
 ├── log.py              # Loguru 日志配置与有界环形缓冲区
 ├── export_openapi.py   # 无 DB/网络依赖导出 OpenAPI schema
-├── core/               # 纯 Python：models / draft / naming / search / text / time / snapshot_types / exceptions
+├── core/               # 纯 Python：models / sources / draft / naming / search / text / time / snapshot_types / exceptions
 ├── db/                 # PG 适配：models / engine / uow / tx / pg_objects / backup / base / delta / novel_snapshot
 ├── query_engine/       # 进程内引擎适配层：port / adapter / sync
 ├── pixiv/              # 原生异步 httpx Pixiv 协议层：client / http / models / account / accounts / errors
-├── storage/            # 本地存储：file_storage / image_downloader / encoding / orphan_cleanup / zip / atomic / assets / epub/
+├── sources/            # 多数据源插件适配层：base / http / registry / pixiv / local / esj/
+├── storage/            # 本地存储：file_storage / image_downloader / encoding / orphan_cleanup / zip / atomic / assets / epub/（含 series_builder）
 ├── notify/             # 通知适配：telegram
-├── tasks/              # registry / executor / cron / manager / history_repo / schemas / api / novels / batch / maintenance/
-└── features/           # accounts.py / search_history.py / authors/ / failures/ / library/ / novels/ / series/ / system/ / tags/
-alembic/                # 数据库迁移 (0001_baseline .. 0006_drop_tag_table)
+├── tasks/              # registry / executor / cron / manager / history_repo / schemas / api / novels / sources / batch / maintenance/
+└── features/           # accounts.py / search_history.py / authors/ / failures/ / library/ / novels/ / series/ / sources/ / system/ / tags/
+alembic/                # 数据库迁移 (0001_baseline .. 0007_multi_source_foundation)
 deploy/                 # systemd 单元文件 (copixiv.service + copixiv-pg.service)
 docs/                   # MODULARITY.md、REFACTOR_PLAN.md、设计文档与性能分析
 frontend/               # Vue 3 + TypeScript + Tailwind CSS v4 + Vue Query + reka-ui 前端

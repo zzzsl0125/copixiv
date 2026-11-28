@@ -58,9 +58,11 @@ impl NovelIndex {
         *guard = next;
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_delta(
         &self,
         delete_ids: &[i64],
+        delete_series_ids: &[i64],
         upsert_rows: Vec<NovelRecord>,
         blocked_tags: Option<Vec<String>>,
         exclude_blocked_default: Option<bool>,
@@ -69,6 +71,7 @@ impl NovelIndex {
     ) {
         self.inner.write().apply_delta(
             delete_ids,
+            delete_series_ids,
             upsert_rows,
             blocked_tags,
             exclude_blocked_default,
@@ -236,6 +239,7 @@ mod tests {
             is_favourite: false,
             is_special_follow: false,
             tags: tags.into_iter().map(str::to_string).collect(),
+            chapter_count: 1,
         }
     }
 
@@ -464,7 +468,7 @@ mod tests {
 
         let f = QueryFilter::default();
         assert_eq!(engine.count_novels(&f, 5000), (0, false));
-        engine.apply_delta(&[], vec![], Some(vec![]), None, &[], None);
+        engine.apply_delta(&[], &[], vec![], Some(vec![]), None, &[], None);
         assert_eq!(engine.count_novels(&f, 5000), (35, false));
 
         // Early stop and binary-search count on clean Like track
@@ -489,7 +493,7 @@ mod tests {
         assert_eq!(asc_min_like, vec![20, 21, 22]);
 
         // Deleting duplicate IDs must not push duplicate slots into free_docs
-        engine.apply_delta(&[2, 2, 2], vec![], None, None, &[], None);
+        engine.apply_delta(&[2, 2, 2], &[], vec![], None, None, &[], None);
         assert_eq!(engine.inner.read().free_docs.len(), 1);
         assert!(engine.inner.read().tracks_dirty[HotTrack::Like as usize]);
 
@@ -502,7 +506,7 @@ mod tests {
         // Mutation on non-hot field keeps HotTrack::Like clean!
         let mut r3 = sample_row(3, "NonHotEdit", vec!["T2"]);
         r3.is_favourite = true;
-        engine.apply_delta(&[], vec![r3], None, None, &[], None);
+        engine.apply_delta(&[], &[], vec![r3], None, None, &[], None);
         assert!(!engine.inner.read().tracks_dirty[HotTrack::Like as usize]);
 
         // Exhaustive random walk collects remaining 34 IDs cleanly
@@ -545,7 +549,7 @@ mod tests {
         // Force HotTrack::Like dirty via a novel like mutation
         let mut r2_mod = sample_row(2, "Beta", vec!["other"]);
         r2_mod.like = 99999;
-        engine.apply_delta(&[], vec![r2_mod], None, None, &[], None);
+        engine.apply_delta(&[], &[], vec![r2_mod], None, None, &[], None);
         assert!(engine.inner.read().tracks_dirty[HotTrack::Like as usize]);
 
         // Small candidate set queries Like without rebuilding track
@@ -568,7 +572,7 @@ mod tests {
 
         // Atomic delta syncs novel tags and derives TagIndex lazily on demand
         let row4 = sample_row(4, "Four", vec!["unique_small_v2"]);
-        engine.apply_delta(&[], vec![row4], None, None, &[], None);
+        engine.apply_delta(&[], &[], vec![row4], None, None, &[], None);
         let (items, _) = engine.suggest_tag_aliases(5, 0, Some("unique_small"));
         assert!(!engine.inner.read().tag_index.dirty);
         assert_eq!(items.len(), 1);
@@ -579,6 +583,7 @@ mod tests {
 
         // Alias update refreshes exclusions without rebuilding TagIndex when tags didn't change
         engine.apply_delta(
+            &[],
             &[],
             vec![],
             None,
@@ -981,7 +986,7 @@ mod tests {
         // 4) Dirty AbsId track: insert -80 (esj, "multi") and delete 100, then verify both
         //    filtered (dirty top-k path) and unfiltered (triggers lazy AbsId track rebuild).
         let row_neg80 = custom_row(-80, "esj", Some(-800), None, "N-80", vec!["multi"]);
-        engine.apply_delta(&[100], vec![row_neg80], None, None, &[], None);
+        engine.apply_delta(&[100], &[], vec![row_neg80], None, None, &[], None);
         assert!(engine.inner.read().tracks_dirty[HotTrack::AbsId as usize]);
 
         assert_eq!(

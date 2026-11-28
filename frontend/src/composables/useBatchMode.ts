@@ -30,7 +30,7 @@ export function useBatchMode(
   const selectAllLoading = ref(false)
 
   const extraShelves = computed(() => shelves.value.map((entry) => entry.shelf))
-  const effectiveKeyword = computed(() => filters.value.keyword.trim() || 'source:pixiv;')
+  const effectiveKeyword = computed(() => filters.value.keyword.trim())
   const excludeBlocked = () => excludeBlockedOverride(filters.value.keyword, extraShelves.value)
 
   const countParams = computed(() => ({
@@ -356,13 +356,27 @@ export function useBatchMode(
 
   /** 元数据编辑保存后原地替换已选视图里的那一本（不重取）。 */
   function patchSelectedNovel(updated: Novel) {
-    const index = selectedNovels.value.findIndex((novel) => novel.id === updated.id)
+    const index = selectedNovels.value.findIndex(
+      (novel) =>
+        novel.id === updated.id ||
+        Boolean(
+          updated.is_series &&
+            updated.series_id != null &&
+            novel.is_series &&
+            novel.series_id === updated.series_id,
+        ),
+    )
     if (index >= 0) selectedNovels.value[index] = updated
   }
 
   /** Toggle a novel's state field (or author-wide special follow) in active selected view. */
   function patchSelectedNovelState(
-    payload: { id: number; field: 'is_favourite' | 'is_special_follow'; value: boolean },
+    payload: {
+      id: number
+      field: 'is_favourite' | 'is_special_follow'
+      value: boolean
+      seriesId?: number | null
+    },
     authorId?: number,
   ) {
     for (const novel of selectedNovels.value) {
@@ -370,6 +384,13 @@ export function useBatchMode(
         if (novel.author_id === authorId) {
           novel.is_special_follow = payload.value
         }
+      } else if (
+        payload.field === 'is_favourite' &&
+        payload.seriesId != null &&
+        novel.is_series &&
+        novel.series_id === payload.seriesId
+      ) {
+        novel.is_favourite = payload.value
       } else if (novel.id === payload.id) {
         novel[payload.field] = payload.value
       }

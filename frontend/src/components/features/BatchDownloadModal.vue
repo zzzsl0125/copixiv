@@ -10,6 +10,7 @@ import { useSystem } from '../../composables'
 const props = defineProps<{
   isOpen: boolean
   novelIds: number[]
+  mergeSeries?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -52,6 +53,7 @@ async function fetchPreview() {
         novel_ids: props.novelIds,
         format_mode: formatMode.value,
         naming_template: namingTemplate.value || undefined,
+        ...(props.mergeSeries !== undefined ? { merge_series: props.mergeSeries } : {}),
       },
       controller.signal,
     )
@@ -114,6 +116,7 @@ async function handleConfirm() {
       format_mode: formatMode.value,
       zip_name: zipName.value.trim() || undefined,
       naming_template: namingTemplate.value || undefined,
+      ...(props.mergeSeries !== undefined ? { merge_series: props.mergeSeries } : {}),
     })
     emit('task-submitted', res)
     emit('close')
@@ -145,6 +148,7 @@ async function handleConfirm() {
     </div>
     <p class="text-xs bg-blue-50 border border-blue-200 text-blue-700 rounded-md px-3 py-2">
       将作为后台任务打包——提交后可关闭页面，进度与下载入口在「任务管理」页。
+      <template v-if="mergeSeries">系列作品将按整本合并导出。</template>
     </p>
     <div v-if="totalCount > 0" class="space-y-3">
       <div>

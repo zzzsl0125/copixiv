@@ -85,15 +85,15 @@ def test_safe_filename_and_build_path_respect_name_max_utf8():
     long_cjk_title = "星辰大海的彼端" * 40  # > 800 UTF-8 bytes
     novel_id = 123456789
     built = Path(build_path(novel_id, long_cjk_title, download_dir="dl"))
-    assert built.parent == Path("dl/1234")
+    assert built.parent == Path("dl/pixiv/1234")
     # Worst-case sibling EPUB filename must fit within NAME_MAX (255 bytes)
     epub_name = formats.sibling_path(built, formats.EPUB).name
     assert len(epub_name.encode("utf-8")) <= 255
     assert built.name.endswith(f"_{novel_id}.txt")
 
-    # Small IDs go into 0000 shard
+    # Small IDs go into pixiv/0000 shard
     small_built = Path(build_path(123, "Title", download_dir="dl"))
-    assert small_built.parent == Path("dl/0000")
+    assert small_built.parent == Path("dl/pixiv/0000")
 
     # Negative local IDs go into local/ shard and match FileStorage.local_novel_path
     from copixiv.storage.file_storage import FileStorage
@@ -243,11 +243,91 @@ def test_build_path_multi_source_and_naming_template_source(tmp_path: Path):
     local_path = Path(build_path(-5, "Local书名", download_dir="dl", source="local"))
     assert local_path == Path("dl/local/Local书名_-5.txt")
 
-    # source="pixiv" and source=None preserve ID-based sharding
+    # source=None routes negative IDs to local/, positive to pixiv/0000/; source="pixiv" routes to pixiv/
+    assert Path(build_path(-5, "T", download_dir="dl", source=None)).parent == Path("dl/local")
+    assert Path(build_path(-5, "T", download_dir="dl", source="pixiv")).parent == Path("dl/pixiv/0000")
     for src in (None, "pixiv"):
-        assert Path(build_path(-5, "T", download_dir="dl", source=src)).parent == Path("dl/local")
-        assert Path(build_path(123, "T", download_dir="dl", source=src)).parent == Path("dl/0000")
-        assert Path(build_path(12345678, "T", download_dir="dl", source=src)).parent == Path("dl/1234")
+        assert Path(build_path(123, "T", download_dir="dl", source=src)).parent == Path("dl/pixiv/0000")
+        assert Path(build_path(12345678, "T", download_dir="dl", source=src)).parent == Path("dl/pixiv/1234")
+
+    # Multi-source series layout: {download_dir}/{source}/{series}_{key}/{0001}_{title}_{id}.ext
+    pixiv_series = Path(
+        build_path(
+            999,
+            "序章",
+            download_dir="dl",
+            source="pixiv",
+            series_id=777,
+            series_name="魔法纪元",
+            series_index=1,
+        )
+    )
+    assert pixiv_series == Path("dl/pixiv/魔法纪元_777/0001_序章_999.txt")
+
+    pixiv_series_noindex = Path(
+        build_path(
+            1000,
+            "番外",
+            download_dir="dl",
+            source="pixiv",
+            series_id=777,
+            series_name="魔法纪元",
+            series_index=None,
+        )
+    )
+    assert pixiv_series_noindex == Path("dl/pixiv/魔法纪元_777/番外_1000.txt")
+
+    esj_series = Path(
+        build_path(
+            -42,
+            "第一章",
+            download_dir="dl",
+            source="esj",
+            series_id=-10,
+            series_name="異世界",
+            series_key="100",
+            series_index=2,
+        )
+    )
+    assert esj_series == Path("dl/esj/異世界_100/0002_第一章_-42.txt")
+
+    reused_dir = Path("dl/esj/固定目录_100")
+    assert Path(
+        build_path(
+            -43,
+            "第二章",
+            download_dir="dl",
+            source="esj",
+            series_id=-10,
+            series_index=3,
+            series_dir=reused_dir,
+        )
+    ) == Path("dl/esj/固定目录_100/0003_第二章_-43.txt")
+
+    # Series directory detection ignores 4-digit Pixiv shards and flat source root; deletion cleans nested empty dirs
+    from copixiv.core.naming import source_subdir
+    from copixiv.storage.file_storage import FileStorage
+
+    assert source_subdir("../bad") == ".._bad" or ".." not in source_subdir("bad")
+    dl_root = tmp_path / "dl_layout"
+    fs = FileStorage(str(dl_root))
+    assert fs.find_existing_series_dir([str(dl_root / "pixiv" / "0001" / "Solo_1.txt")], "pixiv") is None
+    assert fs.find_existing_series_dir([str(dl_root / "esj" / "Flat_1.txt")], "esj") is None
+    found_dir = fs.find_existing_series_dir(
+        [str(dl_root / "pixiv" / "旧名_777" / "0001_Cap_1.txt")],
+        "pixiv",
+    )
+    assert found_dir == (dl_root / "pixiv" / "旧名_777").resolve()
+
+    nested = dl_root / "esj" / "Book_100"
+    nested.mkdir(parents=True)
+    ch_txt = nested / "0001_Ch1_-1.txt"
+    ch_txt.write_text("hello", encoding="utf-8")
+    fs.delete_novel_files(str(ch_txt))
+    assert not ch_txt.exists()
+    assert not nested.exists()
+    assert not (dl_root / "esj").exists()
+    assert dl_root.exists()
 
     # Traversal attempts cannot escape download_dir
     base = tmp_path / "dl"

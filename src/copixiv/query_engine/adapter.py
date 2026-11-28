@@ -89,6 +89,7 @@ class RustNovelQueryEngine:
         self,
         *,
         delete_ids: Sequence[int] = (),
+        delete_series_ids: Sequence[int] = (),
         upsert_rows: Iterable[SlimNovelRecord] = (),
         blocked_tags: Sequence[str] | None = None,
         exclude_blocked_default: bool | None = None,
@@ -97,6 +98,7 @@ class RustNovelQueryEngine:
     ) -> None:
         self._rs.apply_delta(
             delete_ids=list(delete_ids),
+            delete_series_ids=list(delete_series_ids),
             upsert_rows=list(upsert_rows),
             blocked_tags=list(blocked_tags) if blocked_tags is not None else None,
             exclude_blocked_default=exclude_blocked_default,

@@ -32,6 +32,7 @@ class PendingEngineDelta:
     """Dirty entity identifiers / invalidation flags accumulated in one transaction."""
 
     novel_ids: set[int] = field(default_factory=set)
+    series_ids: set[int] = field(default_factory=set)
     author_ids: set[int] = field(default_factory=set)
     aliases_dirty: bool = False
     blocked_tags_dirty: bool = False
@@ -40,6 +41,7 @@ class PendingEngineDelta:
     def is_empty(self) -> bool:
         return (
             not self.novel_ids
+            and not self.series_ids
             and not self.author_ids
             and not self.aliases_dirty
             and not self.blocked_tags_dirty
@@ -157,6 +159,16 @@ def _collect_flushed_orm_deltas(session: Session) -> None:
             if isinstance(obj, models.Novel):
                 if obj.id is not None:
                     pending.novel_ids.add(int(obj.id))
+                if obj.series_id is not None:
+                    pending.series_ids.add(int(obj.series_id))
+                if bucket_name == "dirty":
+                    series_hist = sa_inspect(obj).attrs.series_id.history
+                    for old_sid in (*series_hist.added, *series_hist.unchanged, *series_hist.deleted):
+                        if old_sid is not None:
+                            pending.series_ids.add(int(old_sid))
+            elif isinstance(obj, models.Series):
+                if obj.series_id is not None:
+                    pending.series_ids.add(int(obj.series_id))
             elif isinstance(obj, models.Author):
                 if obj.author_id is not None:
                     if bucket_name in ("new", "deleted"):
@@ -194,6 +206,12 @@ def record_novel_upserts(session: Session | None, novel_ids: Iterable[int]) -> N
 
 
 record_novel_deletes = record_novel_upserts
+
+
+def record_series_dirty(session: Session | None, series_ids: Iterable[int | None]) -> None:
+    pending = get_or_create_pending_delta(session)
+    if pending is not None:
+        pending.series_ids.update(int(sid) for sid in series_ids if sid is not None)
 
 
 def record_authors_dirty(session: Session | None, author_ids: Iterable[int]) -> None:
@@ -243,5 +261,6 @@ __all__ = [
     "record_exclude_setting_dirty",
     "record_novel_deletes",
     "record_novel_upserts",
+    "record_series_dirty",
     "sync_engine_if_needed",
 ]

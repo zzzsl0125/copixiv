@@ -616,23 +616,56 @@ class BookChapterIngestor:
 
         def _read_target(
             uw: SqlUnitOfWork,
-        ) -> tuple[str, str | None, str | None, int | None, str | None] | None:
+        ) -> (
+            tuple[str, str | None, str | None, int | None, str | None, int | None, str | None, list[str]]
+            | None
+        ):
             row = uw.session.get(models.Novel, novel_id)
             if row is None:
                 return None
+            series_key: str | None = None
+            sibling_paths: list[str] = []
+            if row.series_id is not None:
+                series_key = uw.session.execute(
+                    select(models.Series.source_key).where(models.Series.series_id == row.series_id)
+                ).scalar_one_or_none()
+                sibling_paths = [
+                    p
+                    for p in uw.session.execute(
+                        select(models.Novel.path).where(
+                            models.Novel.series_id == row.series_id,
+                            models.Novel.path.isnot(None),
+                        )
+                    )
+                    .scalars()
+                    .all()
+                    if p
+                ]
             return (
                 str(row.source),
                 row.source_key,
                 row.path,
                 row.series_id,
                 row.series_name,
+                row.series_index,
+                series_key,
+                sibling_paths,
             )
 
         target = await read_transaction(uow, _read_target)
         if target is None:
             raise NotFoundError(f"Novel {novel_id} not found")
 
-        novel_source, source_key, stored_path, _existing_series_id, _existing_series_name = target
+        (
+            novel_source,
+            source_key,
+            stored_path,
+            existing_series_id,
+            existing_series_name,
+            existing_series_index,
+            existing_series_key,
+            sibling_paths,
+        ) = target
         plugin = self._require_plugin(novel_source, capability=SourceCapability.SYNC_NOVEL)
         if not source_key:
             raise ValidationError(f"小说 #{novel_id} 缺少来源标识 source_key，无法同步")
@@ -649,6 +682,11 @@ class BookChapterIngestor:
             if self._file_storage is None:
                 raise RuntimeError("FileStorage is required for sync_chapter")
             anchor = self._file_storage.adopt_anchor(stored_path)
+            series_dir = (
+                self._file_storage.find_existing_series_dir(sibling_paths, novel_source)
+                if anchor is None and existing_series_id is not None
+                else None
+            )
             saved_path = await asyncio.to_thread(
                 self._file_storage.save_novel_text,
                 novel_id,
@@ -656,6 +694,13 @@ class BookChapterIngestor:
                 chapter.content,
                 anchor=anchor,
                 source=novel_source,
+                series_id=existing_series_id,
+                series_name=existing_series_name,
+                series_key=existing_series_key,
+                series_index=(
+                    chapter.series_index if chapter.series_index is not None else existing_series_index
+                ),
+                series_dir=series_dir,
             )
 
         def _persist_sync(tx: SqlUnitOfWork) -> None:
@@ -1165,6 +1210,22 @@ class BookChapterIngestor:
         if fetched_items and self._file_storage is None:
             raise RuntimeError("FileStorage is required when persisting fetched chapters")
 
+        series_dir: Path | None = None
+        if fetched_items and self._file_storage is not None:
+            series_sibling_paths = [
+                p
+                for p in session.execute(
+                    select(models.Novel.path).where(
+                        models.Novel.series_id == series_id,
+                        models.Novel.path.isnot(None),
+                    )
+                )
+                .scalars()
+                .all()
+                if p
+            ]
+            series_dir = self._file_storage.find_existing_series_dir(series_sibling_paths, source)
+
         created_files: list[Path] = []
         drafts: list[NovelDraft] = []
         force_groups: dict[tuple[str, ...], list[NovelDraft]] = {}
@@ -1199,7 +1260,16 @@ class BookChapterIngestor:
                     target_path = (
                         Path(anchor)
                         if anchor
-                        else self._file_storage.novel_text_path(novel_id, title, source=source)
+                        else self._file_storage.novel_text_path(
+                            novel_id,
+                            title,
+                            source=source,
+                            series_id=series_id,
+                            series_name=series_name,
+                            series_key=series_key,
+                            series_index=item.series_index,
+                            series_dir=series_dir,
+                        )
                     )
                     existed_before = target_path.exists()
                     saved_path = self._file_storage.save_novel_text(
@@ -1208,12 +1278,29 @@ class BookChapterIngestor:
                         item.chapter.content,
                         anchor=anchor,
                         source=source,
+                        series_id=series_id,
+                        series_name=series_name,
+                        series_key=series_key,
+                        series_index=item.series_index,
+                        series_dir=series_dir,
                     )
                     if not existed_before:
                         created_files.append(saved_path)
+                    if anchor is None and series_dir is None:
+                        series_dir = saved_path.parent
                 else:
                     saved_path = Path(
-                        anchor or self._file_storage.novel_text_path(novel_id, title, source=source)
+                        anchor
+                        or self._file_storage.novel_text_path(
+                            novel_id,
+                            title,
+                            source=source,
+                            series_id=series_id,
+                            series_name=series_name,
+                            series_key=series_key,
+                            series_index=item.series_index,
+                            series_dir=series_dir,
+                        )
                     )
 
                 has_images = bool(item.chapter.images) or has_image_placeholders(item.chapter.content)

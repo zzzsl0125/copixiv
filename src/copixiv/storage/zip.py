@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import posixpath
+import tempfile
 import zipfile
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -13,9 +16,31 @@ from copixiv.core.models import EpubStatus
 from copixiv.core.naming import DEFAULT_NAMING_TEMPLATE, NovelNamingTemplate
 from copixiv.log import logger
 from copixiv.storage.atomic import atomic_write, resolve_within_root
+from copixiv.storage.epub.series_builder import SeriesBookSpec, write_series_epub, write_series_txt
 
 # Progress callback fires every N processed files.
 _PROGRESS_EVERY = 500
+
+
+@dataclass(slots=True)
+class SeriesExportEntry:
+    """Folded series export descriptor consumed by :func:`build_batch_zip_to_file`."""
+
+    spec: SeriesBookSpec
+    id: int
+    title: str
+    author_id: int | None = None
+    author_name: str | None = None
+    like: int = 0
+    view: int = 0
+    text: int = 0
+    create_time: datetime | None = None
+    has_epub: EpubStatus = EpubStatus.NO
+    source: str = "pixiv"
+    # Intentionally cleared for NovelNamingTemplate so default templates yield
+    # ``{author_name}/{title}_{id}.ext`` rather than nested ``{series}/{title}``.
+    series_name: str | None = field(default=None, init=False)
+    series_index: int | None = field(default=None, init=False)
 
 
 def _sanitize_arcname(arcname: str) -> str:
@@ -65,40 +90,60 @@ def _write_zip_entries(
     progress: Callable[[int, int], None] | None,
     resolved_root: Path | None,
 ) -> tuple[int, list[str]]:
-    """Write matching novel files into an open :class:`zipfile.ZipFile`."""
+    """Write matching novel files and synthesized series files into an open :class:`zipfile.ZipFile`."""
     added_count = 0
     missing_ids: list[str] = []
 
-    for index, novel in enumerate(novels, start=1):
-        novel_id = novel.id
-        novel_path_str = novel.path
+    with tempfile.TemporaryDirectory(prefix="copixiv-zip-series-") as tmp_dir:
+        tmp_dir_path = Path(tmp_dir)
+        for index, item in enumerate(novels, start=1):
+            actual_fmt = formats.preferred_format(
+                format_mode,
+                epub_ready=item.has_epub == EpubStatus.DONE,
+            )
 
-        actual_fmt = formats.preferred_format(
-            format_mode,
-            epub_ready=novel.has_epub == EpubStatus.DONE,
-        )
-
-        if not novel_path_str:
-            missing_ids.append(str(novel_id))
-        else:
-            file_path = formats.sibling_path(Path(novel_path_str), actual_fmt)
-            if not _is_within_root(file_path, resolved_root):
-                logger.warning(
-                    "拒绝打包 download 根之外的文件: novel={} path={}",
-                    novel_id,
-                    file_path,
-                )
-                missing_ids.append(str(novel_id))
-            elif not file_path.is_file():
-                missing_ids.append(str(novel_id))
+            if isinstance(item, SeriesExportEntry):
+                series_out = tmp_dir_path / f"series_{index}_{item.id}{formats.suffix_for(actual_fmt)}"
+                try:
+                    if actual_fmt == formats.EPUB:
+                        write_series_epub(item.spec, series_out, download_root=resolved_root)
+                    else:
+                        write_series_txt(item.spec, series_out, download_root=resolved_root)
+                except FileNotFoundError:
+                    missing_ids.append(f"series:{item.id}")
+                else:
+                    arcname = _format_arcname(item, actual_fmt, template)
+                    compress_type = zipfile.ZIP_STORED if actual_fmt == formats.EPUB else zipfile.ZIP_DEFLATED
+                    zf.write(str(series_out), arcname, compress_type=compress_type)
+                    series_out.unlink(missing_ok=True)
+                    added_count += 1
             else:
-                arcname = _format_arcname(novel, actual_fmt, template)
-                compress_type = zipfile.ZIP_STORED if actual_fmt == formats.EPUB else zipfile.ZIP_DEFLATED
-                zf.write(str(file_path), arcname, compress_type=compress_type)
-                added_count += 1
+                novel_id = item.id
+                novel_path_str = item.path
 
-        if progress is not None and index % _PROGRESS_EVERY == 0:
-            progress(index, len(novels))
+                if not novel_path_str:
+                    missing_ids.append(str(novel_id))
+                else:
+                    file_path = formats.sibling_path(Path(novel_path_str), actual_fmt)
+                    if not _is_within_root(file_path, resolved_root):
+                        logger.warning(
+                            "拒绝打包 download 根之外的文件: novel={} path={}",
+                            novel_id,
+                            file_path,
+                        )
+                        missing_ids.append(str(novel_id))
+                    elif not file_path.is_file():
+                        missing_ids.append(str(novel_id))
+                    else:
+                        arcname = _format_arcname(item, actual_fmt, template)
+                        compress_type = (
+                            zipfile.ZIP_STORED if actual_fmt == formats.EPUB else zipfile.ZIP_DEFLATED
+                        )
+                        zf.write(str(file_path), arcname, compress_type=compress_type)
+                        added_count += 1
+
+            if progress is not None and index % _PROGRESS_EVERY == 0:
+                progress(index, len(novels))
 
     return added_count, missing_ids
 

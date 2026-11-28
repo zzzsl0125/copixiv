@@ -16,7 +16,10 @@ export function useNovels(options?: { onlyBlocked?: MaybeRefOrGetter<boolean> })
 
   const onlyBlocked = computed(() => Boolean(toValue(options?.onlyBlocked)))
   const extraShelves = computed(() => shelves.value.map((entry) => entry.shelf))
-  const effectiveKeyword = computed(() => filters.value.keyword.trim() || 'source:pixiv;')
+  const effectiveKeyword = computed(() => filters.value.keyword.trim())
+  const isSeriesDrilldown = computed(() =>
+    /(?:^|[;\s])series_id\s*:/i.test(filters.value.keyword),
+  )
 
   const listParams = computed(() => ({
     keyword: effectiveKeyword.value,
@@ -75,6 +78,16 @@ export function useNovels(options?: { onlyBlocked?: MaybeRefOrGetter<boolean> })
 
   const invalidateNovels = () => queryClient.invalidateQueries({ queryKey: queryKeys.novelsAll() })
 
+  function matchesNovelCard(n: Novel, target: Novel): boolean {
+    if (n.id === target.id) return true
+    return Boolean(
+      target.is_series &&
+        target.series_id != null &&
+        n.is_series &&
+        n.series_id === target.series_id,
+    )
+  }
+
   function patchNovelInCache(updated: Novel) {
     queryClient.setQueriesData<InfiniteData<NovelListResult>>(
       { queryKey: ['novels', 'list'] },
@@ -84,7 +97,7 @@ export function useNovels(options?: { onlyBlocked?: MaybeRefOrGetter<boolean> })
           ...old,
           pages: old.pages.map((page) => ({
             ...page,
-            novels: page.novels.map((n) => (n.id === updated.id ? updated : n)),
+            novels: page.novels.map((n) => (matchesNovelCard(n, updated) ? updated : n)),
           })),
         }
       },
@@ -92,7 +105,12 @@ export function useNovels(options?: { onlyBlocked?: MaybeRefOrGetter<boolean> })
   }
 
   function patchNovelStateInCache(
-    payload: { id: number; field: 'is_favourite' | 'is_special_follow'; value: boolean },
+    payload: {
+      id: number
+      field: 'is_favourite' | 'is_special_follow'
+      value: boolean
+      seriesId?: number | null
+    },
     authorId?: number,
   ) {
     queryClient.setQueriesData<InfiniteData<NovelListResult>>(
@@ -107,6 +125,11 @@ export function useNovels(options?: { onlyBlocked?: MaybeRefOrGetter<boolean> })
               if (payload.field === 'is_special_follow' && authorId !== undefined) {
                 return n.author_id === authorId ? { ...n, is_special_follow: payload.value } : n
               }
+              if (payload.field === 'is_favourite' && payload.seriesId != null) {
+                return n.id === payload.id || (n.is_series && n.series_id === payload.seriesId)
+                  ? { ...n, is_favourite: payload.value }
+                  : n
+              }
               return n.id === payload.id ? { ...n, [payload.field]: payload.value } : n
             }),
           })),
@@ -115,7 +138,7 @@ export function useNovels(options?: { onlyBlocked?: MaybeRefOrGetter<boolean> })
     )
   }
 
-  function removeNovelFromCache(novelId: number) {
+  function removeNovelFromCache(novelId: number, seriesId?: number | null) {
     queryClient.setQueriesData<InfiniteData<NovelListResult>>(
       { queryKey: ['novels', 'list'] },
       (old) => {
@@ -124,7 +147,9 @@ export function useNovels(options?: { onlyBlocked?: MaybeRefOrGetter<boolean> })
           ...old,
           pages: old.pages.map((page) => ({
             ...page,
-            novels: page.novels.filter((n) => n.id !== novelId),
+            novels: page.novels.filter(
+              (n) => n.id !== novelId && !(seriesId != null && n.is_series && n.series_id === seriesId),
+            ),
           })),
         }
       },
@@ -143,6 +168,7 @@ export function useNovels(options?: { onlyBlocked?: MaybeRefOrGetter<boolean> })
     filters,
     activeSection,
     hasExcluded,
+    isSeriesDrilldown,
     handleSearch,
     handleLoadMore,
     handleCardSearch: navigateCardSearch,

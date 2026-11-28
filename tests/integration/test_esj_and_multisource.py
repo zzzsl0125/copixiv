@@ -383,11 +383,12 @@ async def test_book_chapter_ingestor_ingest_book_end_to_end_and_idempotent_refre
             assert n3.has_epub == EpubStatus.NO_IMAGES
 
             esj_dir = Path(storage.download_dir) / "esj"
+            book_dir = esj_dir / "異世界冒險錄_100"
             for row in (n1, n2, n3):
                 assert row.path is not None
                 txt_path = Path(row.path)
-                assert txt_path.parent == esj_dir
-                assert txt_path.name == f"{row.title}_{row.id}.txt"
+                assert txt_path.parent == book_dir
+                assert txt_path.name == f"{row.series_index:04d}_{row.title}_{row.id}.txt"
                 assert txt_path.is_file()
 
             epub_1 = Path(n1.path).with_suffix(".epub")
@@ -405,8 +406,8 @@ async def test_book_chapter_ingestor_ingest_book_end_to_end_and_idempotent_refre
                 assert "[uploadedimage:" not in xhtml
 
             # Temporary downloaded images were cleaned up after EPUB packaging.
-            assert not list(esj_dir.glob("*_c_cover.*"))
-            assert not list(esj_dir.glob("*_u_*"))
+            assert not list(book_dir.glob("*_c_cover.*"))
+            assert not list(book_dir.glob("*_u_*"))
 
             # All-failed-image chapter 100/1003 is NOT recorded as a failure; only 100/1004 is.
             failures = session.execute(select(models.FailedNovel)).scalars().all()
@@ -981,7 +982,9 @@ def test_cross_source_novel_hydration_and_dynamic_esj_base_url(
     with TestClient(app, base_url="http://localhost") as client:
         assert client.put("/api/sources/esj/config", json={"enabled": True}).status_code == 200
 
-        def _assert_hydration(expected_esj_url: str, *, expected_esj_sync: bool) -> None:
+        def _assert_hydration(
+            expected_series_url: str, expected_chapter_url: str, *, expected_esj_sync: bool
+        ) -> None:
             list_res = client.get("/api/novels", params={"order_by": "id", "per_page": 20})
             assert list_res.status_code == 200
             by_id_list = {item["id"]: item for item in list_res.json()["novels"]}
@@ -994,7 +997,8 @@ def test_cross_source_novel_hydration_and_dynamic_esj_base_url(
             for mapping in (by_id_list, by_id_cards):
                 esj_item = mapping[esj_nid]
                 assert esj_item["source"] == SOURCE_ESJ
-                assert esj_item["external_url"] == expected_esj_url
+                assert esj_item["is_series"] is True
+                assert esj_item["external_url"] == expected_series_url
                 assert esj_item["can_sync"] is expected_esj_sync
 
                 pixiv_item = mapping[5002]
@@ -1007,7 +1011,22 @@ def test_cross_source_novel_hydration_and_dynamic_esj_base_url(
                 assert local_item["external_url"] is None
                 assert local_item["can_sync"] is False
 
-        _assert_hydration("https://www.esjzone.cc/forum/500/5001.html", expected_esj_sync=True)
+            drill_res = client.get(
+                "/api/novels",
+                params={"keyword": f"series_id:{esj_sid};", "order_by": "id", "order_direction": "ASC"},
+            )
+            assert drill_res.status_code == 200
+            drill_items = drill_res.json()["novels"]
+            assert len(drill_items) == 1
+            assert drill_items[0]["is_series"] is False
+            assert drill_items[0]["external_url"] == expected_chapter_url
+            assert drill_items[0]["can_sync"] is expected_esj_sync
+
+        _assert_hydration(
+            "https://www.esjzone.cc/detail/500.html",
+            "https://www.esjzone.cc/forum/500/5001.html",
+            expected_esj_sync=True,
+        )
 
         # Spy on Rust engine rebuild / delta sync to verify base_url switch needs zero engine rebuild.
         engine_calls: list[str] = []
@@ -1038,7 +1057,11 @@ def test_cross_source_novel_hydration_and_dynamic_esj_base_url(
         assert upd.status_code == 200
         assert upd.json()["config"]["base_url"] == "https://www.esjzone.one"
 
-        _assert_hydration("https://www.esjzone.one/forum/500/5001.html", expected_esj_sync=True)
+        _assert_hydration(
+            "https://www.esjzone.one/detail/500.html",
+            "https://www.esjzone.one/forum/500/5001.html",
+            expected_esj_sync=True,
+        )
         assert engine_calls == []
         assert app.state.query_engine is engine_instance
 
@@ -1050,7 +1073,11 @@ def test_cross_source_novel_hydration_and_dynamic_esj_base_url(
         esj_only = client.get("/api/novels", params={"keyword": "source:esj;", "order_by": "id"})
         assert esj_only.status_code == 200
         assert [n["id"] for n in esj_only.json()["novels"]] == [esj_nid]
-        _assert_hydration("https://www.esjzone.one/forum/500/5001.html", expected_esj_sync=False)
+        _assert_hydration(
+            "https://www.esjzone.one/detail/500.html",
+            "https://www.esjzone.one/forum/500/5001.html",
+            expected_esj_sync=False,
+        )
 
         sync_blocked = client.post(f"/api/novels/{esj_nid}/sync")
         assert sync_blocked.status_code == 400

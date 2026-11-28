@@ -37,6 +37,7 @@ impl EngineState {
             .iter()
             .map(|&tid| self.tag_interner.get_str(tid).to_owned())
             .collect();
+        let chapter_count = self.chapter_counts[idx];
         NovelRecord {
             id,
             title,
@@ -54,6 +55,7 @@ impl EngineState {
             is_favourite,
             is_special_follow,
             tags,
+            chapter_count,
         }
     }
 

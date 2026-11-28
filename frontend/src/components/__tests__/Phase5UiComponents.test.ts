@@ -31,6 +31,8 @@ function makeSampleNovel(overrides: Partial<Novel> = {}): Novel {
     has_epub: 1,
     is_favourite: false,
     is_special_follow: false,
+    is_series: false,
+    chapter_count: 1,
     can_sync: true,
     source: 'pixiv',
     editable_fields: ['tags'],

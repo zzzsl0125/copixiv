@@ -23,6 +23,7 @@ pub struct NovelRecord {
     pub is_favourite: bool,
     pub is_special_follow: bool,
     pub tags: Vec<String>,
+    pub chapter_count: i32,
 }
 
 /// Tag suggestion candidate returned by `NovelQueryEngine.suggest_tag_aliases`.

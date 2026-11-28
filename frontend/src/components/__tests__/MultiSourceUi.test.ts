@@ -216,6 +216,8 @@ function makeNovel(overrides: Partial<Novel> = {}): Novel {
     external_url: 'https://www.esjzone.cc/forum/100/1004.html',
     is_favourite: false,
     is_special_follow: false,
+    is_series: false,
+    chapter_count: 1,
     tags: ['奇幻'],
     editable_fields: ['series_index', 'tags', 'create_time'],
     ...overrides,

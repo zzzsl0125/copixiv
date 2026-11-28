@@ -144,7 +144,19 @@ def build_novel(
         title=title,
         author_id=author_id,
         author_name=author_name,
-        path=build_path(id, title, download_dir) if path is None else path,
+        path=(
+            build_path(
+                id,
+                title,
+                download_dir,
+                source=source,
+                series_id=series_id,
+                series_name=series_name,
+                series_index=series_index,
+            )
+            if path is None
+            else path
+        ),
         like=like,
         view=view,
         text=text,

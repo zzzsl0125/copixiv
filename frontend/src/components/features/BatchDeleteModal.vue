@@ -10,6 +10,7 @@ const props = defineProps<{
   isOpen: boolean
   scope: BatchScope | null
   scopeLabel: string
+  expandSeries?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -34,6 +35,7 @@ async function handleConfirm() {
     const result = await novelApi.batchOperation({
       operation: 'delete',
       scope: props.scope,
+      ...(props.expandSeries !== undefined ? { expand_series: props.expandSeries } : {}),
     })
     emit('success', result)
     emit('close')

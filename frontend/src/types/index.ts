@@ -1,7 +1,7 @@
 export type {
   Novel, NovelFilters, GetNovelsParams, BatchScope, BatchOperation,
   BatchOperationResult, NovelIdsResponse, NovelsByIdsResponse,
-  MatchIdsResult, NovelCountResult, NovelListResult, NovelUpdatePayload,
+  MatchIdsResult, NovelCountResult, NovelListResult, NovelUpdatePayload, SeriesUpdatePayload,
   AuthorLookup, SeriesLookup, AuthorSearchItem, SeriesSearchItem, BatchMetadataRequest, BatchMetadataResult,
   OrderBy, SortableOrderBy, OrderDirection, FormatMode,
 } from './novels'

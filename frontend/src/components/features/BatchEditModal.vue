@@ -10,6 +10,7 @@ const props = defineProps<{
   isOpen: boolean
   scope: BatchScope | null
   scopeLabel: string
+  expandSeries?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -118,7 +119,11 @@ async function runPreview() {
   }
   previewLoading.value = true
   try {
-    const result = await novelApi.batchMetadata({ scope, apply: false })
+    const result = await novelApi.batchMetadata({
+      scope,
+      apply: false,
+      expand_series: props.expandSeries ?? false,
+    })
     if (seq !== previewSeq) return
     preview.value = result
   } catch {
@@ -132,7 +137,11 @@ async function runPreview() {
 function buildPayload(apply: boolean): BatchMetadataRequest | null {
   const scope = props.scope
   if (!scope) return null
-  const payload: BatchMetadataRequest = { scope, apply }
+  const payload: BatchMetadataRequest = {
+    scope,
+    apply,
+    expand_series: props.expandSeries ?? false,
+  }
   if (unlinkAuthor.value) payload.author_id = null
   else if (authorIdNumber.value != null) payload.author_id = authorIdNumber.value
   if (unlinkSeries.value) payload.series_id = null

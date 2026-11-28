@@ -31,12 +31,17 @@ fn extract_rows(rows: &Bound<'_, PyAny>) -> PyResult<Vec<NovelRecord>> {
     for item in rows.try_iter()? {
         let obj = item?;
         let tup = obj.downcast_into::<PyTuple>()?;
-        if tup.len() != 16 {
+        if tup.len() != 16 && tup.len() != 17 {
             return Err(PyValueError::new_err(format!(
-                "Expected 16-tuple novel row, got len={}",
+                "Expected 16- or 17-tuple novel row, got len={}",
                 tup.len()
             )));
         }
+        let chapter_count = if tup.len() == 17 {
+            tup.get_borrowed_item(16)?.extract()?
+        } else {
+            1
+        };
         out.push(NovelRecord {
             id: tup.get_borrowed_item(0)?.extract()?,
             title: tup.get_borrowed_item(1)?.extract()?,
@@ -54,6 +59,7 @@ fn extract_rows(rows: &Bound<'_, PyAny>) -> PyResult<Vec<NovelRecord>> {
             is_favourite: tup.get_borrowed_item(13)?.extract()?,
             is_special_follow: tup.get_borrowed_item(14)?.extract()?,
             tags: tup.get_borrowed_item(15)?.extract()?,
+            chapter_count,
         });
     }
     Ok(out)
@@ -215,6 +221,7 @@ impl PyNovelQueryEngine {
 
     #[pyo3(signature = (
         delete_ids = vec![],
+        delete_series_ids = vec![],
         upsert_rows = None,
         blocked_tags = None,
         exclude_blocked_default = None,
@@ -226,6 +233,7 @@ impl PyNovelQueryEngine {
         &self,
         py: Python<'_>,
         delete_ids: Vec<i64>,
+        delete_series_ids: Vec<i64>,
         upsert_rows: Option<&Bound<'_, PyAny>>,
         blocked_tags: Option<Vec<String>>,
         exclude_blocked_default: Option<bool>,
@@ -239,6 +247,7 @@ impl PyNovelQueryEngine {
         py.allow_threads(|| {
             self.index.apply_delta(
                 &delete_ids,
+                &delete_series_ids,
                 parsed_rows,
                 blocked_tags,
                 exclude_blocked_default,

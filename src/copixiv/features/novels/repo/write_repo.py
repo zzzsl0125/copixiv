@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, cast
 
 from sqlalchemy import and_, any_, func, or_, select, tuple_, update
@@ -192,6 +193,33 @@ class SQLAlchemyNovelWriteRepository:
         series = {sid for _, sid in rows if sid is not None}
         return authors, series
 
+    def _cleanup_failed_novels(
+        self,
+        novel_ids: list[int],
+        source_key_pairs: list[tuple[str, str]],
+    ) -> None:
+        if not novel_ids and not source_key_pairs:
+            return
+        if len(source_key_pairs) <= 5000:
+            cond: Any = models.FailedNovel.novel_id == any_(cast(Any, novel_ids))
+            if source_key_pairs:
+                cond = or_(
+                    cond,
+                    tuple_(models.FailedNovel.source, models.FailedNovel.source_key).in_(source_key_pairs),
+                )
+            self.session.execute(_delete(models.FailedNovel).where(cond))
+        else:
+            self.session.execute(
+                _delete(models.FailedNovel).where(models.FailedNovel.novel_id == any_(cast(Any, novel_ids)))
+            )
+            for i in range(0, len(source_key_pairs), 5000):
+                pair_chunk = source_key_pairs[i : i + 5000]
+                self.session.execute(
+                    _delete(models.FailedNovel).where(
+                        tuple_(models.FailedNovel.source, models.FailedNovel.source_key).in_(pair_chunk)
+                    )
+                )
+
     def delete(self, novel_id: int) -> tuple[bool, str | None]:
         """Delete a novel row and clean its ``failed_novel`` ledger entries.
 
@@ -200,11 +228,16 @@ class SQLAlchemyNovelWriteRepository:
         row = self.session.execute(
             _delete(models.Novel)
             .where(models.Novel.id == novel_id)
-            .returning(models.Novel.path, models.Novel.source, models.Novel.source_key)
+            .returning(
+                models.Novel.path,
+                models.Novel.source,
+                models.Novel.source_key,
+                models.Novel.series_id,
+            )
         ).one_or_none()
         if row is None:
             return False, None
-        cond = models.FailedNovel.novel_id == novel_id
+        cond: Any = models.FailedNovel.novel_id == novel_id
         if row.source and row.source_key:
             cond = or_(
                 cond,
@@ -215,6 +248,8 @@ class SQLAlchemyNovelWriteRepository:
             )
         self.session.execute(_delete(models.FailedNovel).where(cond))
         engine_delta.record_novel_deletes(self.session, [novel_id])
+        if row.series_id is not None:
+            engine_delta.record_series_dirty(self.session, [row.series_id])
         self.session.flush()
         return True, row.path
 
@@ -228,6 +263,79 @@ class SQLAlchemyNovelWriteRepository:
         if result is None:
             raise NotFoundError(f"Novel {novel_id} not found")
         engine_delta.record_novel_upserts(self.session, [novel_id])
+
+    def toggle_series_favourite(self, series_id: int) -> bool:
+        """Toggle favourite state for every chapter in *series_id*.
+
+        If any chapter is currently favourited, sets all chapters to ``False``;
+        otherwise sets all chapters to ``True``. Returns the new boolean state.
+        """
+        rows = self.session.execute(
+            select(models.Novel.id, models.Novel.is_favourite).where(models.Novel.series_id == series_id)
+        ).all()
+        if not rows:
+            raise NotFoundError(f"Series {series_id} not found")
+        target = not any(bool(fav) for _, fav in rows)
+        self.session.execute(
+            update(models.Novel).where(models.Novel.series_id == series_id).values(is_favourite=target)
+        )
+        engine_delta.record_series_dirty(self.session, [series_id])
+        self.session.flush()
+        return target
+
+    def delete_series(self, series_id: int) -> tuple[int, list[str]]:
+        """Delete all chapters + series row for *series_id*; return ``(deleted_count, stored_paths)``."""
+        rows = self.session.execute(
+            _delete(models.Novel)
+            .where(models.Novel.series_id == series_id)
+            .returning(
+                models.Novel.id,
+                models.Novel.path,
+                models.Novel.source,
+                models.Novel.source_key,
+            )
+        ).all()
+        deleted_ids = [int(row.id) for row in rows]
+        source_key_pairs = [(row.source, row.source_key) for row in rows if row.source and row.source_key]
+        self._cleanup_failed_novels(deleted_ids, source_key_pairs)
+        self.session.execute(_delete(models.Series).where(models.Series.series_id == series_id))
+        if deleted_ids:
+            engine_delta.record_novel_deletes(self.session, deleted_ids)
+        engine_delta.record_series_dirty(self.session, [series_id])
+        self.session.flush()
+        paths = [row.path for row in rows if row.path]
+        return len(deleted_ids), paths
+
+    def expand_series_ids(self, novel_ids: Sequence[int]) -> list[int]:
+        """Expand *novel_ids* to include all sibling chapters of any represented series."""
+        unique_ids = sorted({int(nid) for nid in novel_ids})
+        if not unique_ids:
+            return []
+        series_ids = [
+            int(sid)
+            for sid in self.session.execute(
+                select(models.Novel.series_id)
+                .where(
+                    models.Novel.id == any_(cast(Any, unique_ids)),
+                    models.Novel.series_id.isnot(None),
+                )
+                .distinct()
+            )
+            .scalars()
+            .all()
+            if sid is not None
+        ]
+        if not series_ids:
+            return unique_ids
+        chapter_ids = [
+            int(nid)
+            for nid in self.session.execute(
+                select(models.Novel.id).where(models.Novel.series_id.in_(series_ids))
+            )
+            .scalars()
+            .all()
+        ]
+        return sorted(set(unique_ids) | set(chapter_ids))
 
     def update_has_epub_status(self, novel_ids: list[int], status: EpubStatus) -> None:
         if not novel_ids:
@@ -255,31 +363,22 @@ class SQLAlchemyNovelWriteRepository:
         rows = self.session.execute(
             _delete(models.Novel)
             .where(models.Novel.id == any_(cast(Any, novel_ids)))
-            .returning(models.Novel.id, models.Novel.path, models.Novel.source, models.Novel.source_key)
+            .returning(
+                models.Novel.id,
+                models.Novel.path,
+                models.Novel.source,
+                models.Novel.source_key,
+                models.Novel.series_id,
+            )
         ).all()
         deleted_ids = [row.id for row in rows]
+        deleted_series_ids = {int(row.series_id) for row in rows if row.series_id is not None}
         source_key_pairs = [(row.source, row.source_key) for row in rows if row.source and row.source_key]
-        if len(source_key_pairs) <= 5000:
-            cond = models.FailedNovel.novel_id == any_(cast(Any, novel_ids))
-            if source_key_pairs:
-                cond = or_(
-                    cond,
-                    tuple_(models.FailedNovel.source, models.FailedNovel.source_key).in_(source_key_pairs),
-                )
-            self.session.execute(_delete(models.FailedNovel).where(cond))
-        else:
-            self.session.execute(
-                _delete(models.FailedNovel).where(models.FailedNovel.novel_id == any_(cast(Any, novel_ids)))
-            )
-            for i in range(0, len(source_key_pairs), 5000):
-                pair_chunk = source_key_pairs[i : i + 5000]
-                self.session.execute(
-                    _delete(models.FailedNovel).where(
-                        tuple_(models.FailedNovel.source, models.FailedNovel.source_key).in_(pair_chunk)
-                    )
-                )
+        self._cleanup_failed_novels(deleted_ids, source_key_pairs)
         if deleted_ids:
             engine_delta.record_novel_deletes(self.session, deleted_ids)
+        if deleted_series_ids:
+            engine_delta.record_series_dirty(self.session, deleted_series_ids)
         self.session.flush()
         paths = [row.path for row in rows if row.path]
         return len(deleted_ids), paths
@@ -351,6 +450,18 @@ class SQLAlchemyNovelWriteRepository:
         if only_where_null is not None:
             conditions.append(getattr(models.Novel, only_where_null).is_(None))
 
+        old_series_ids = {
+            int(sid)
+            for sid in self.session.execute(
+                select(models.Novel.series_id)
+                .where(*conditions, models.Novel.series_id.isnot(None))
+                .distinct()
+            )
+            .scalars()
+            .all()
+            if sid is not None
+        }
+
         changed = list(
             self.session.execute(
                 update(models.Novel).where(*conditions).values(**values).returning(models.Novel.id)
@@ -360,6 +471,11 @@ class SQLAlchemyNovelWriteRepository:
         )
         if changed:
             engine_delta.record_novel_upserts(self.session, changed)
+            dirty_sids = set(old_series_ids)
+            if isinstance(values.get("series_id"), int):
+                dirty_sids.add(int(values["series_id"]))
+            if dirty_sids:
+                engine_delta.record_series_dirty(self.session, dirty_sids)
         return len(changed)
 
     def remove_tags_from_novels(self, novel_ids: list[int], tags: set[str]) -> int:

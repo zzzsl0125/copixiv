@@ -6,7 +6,7 @@ from typing import NamedTuple
 
 
 class SlimNovelRecord(NamedTuple):
-    """16-column slim projection tuple consumed directly by ``copixiv_rs``."""
+    """17-column slim projection tuple consumed directly by ``copixiv_rs``."""
 
     id: int
     title: str
@@ -24,6 +24,7 @@ class SlimNovelRecord(NamedTuple):
     is_favourite: bool
     is_special_follow: bool
     tags: list[str]
+    chapter_count: int = 1
 
 
 __all__ = [

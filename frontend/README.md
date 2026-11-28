@@ -1,6 +1,6 @@
 # Copixiv Frontend
 
-Pixiv 小说管理器前端：Vue 3 + TypeScript + Vite + Tailwind CSS v4。
+多数据源小说管理器前端（Pixiv / ESJ Zone / 本地上传）：Vue 3 + TypeScript + Vite + Tailwind CSS v4。
 
 ## 开发
 
@@ -34,9 +34,11 @@ bash ../scripts/diag_frontend.sh  # 构建 + 伺服诊断
 
 ## 后端契约
 
-- 小说列表：`GET /api/novels/`，响应 `{novels, cursor, has_excluded}`，`is_favourite` / `is_special_follow` / `has_epub` 为整数（`has_epub`：0 无 / 1 生成中 / 2 可用 / 4 缺源文件），`source` 为 `'pixiv' | 'local'`；列表与编辑契约（`NovelBase` / `NovelUpdateRequest` / `EditNovelModal`）不再包含 `caption`
-- 批量辅助：`POST /api/novels/by-ids`（按选中 ID 顺序返回卡片投影）、`POST /api/novels/sort-ids`（支持 `id` / `like` / `view` / `text` / `create_time`）、`POST /api/novels/match-ids` 与 `GET /api/novels/{ids,count}` 均按当前筛选语义支持 `exclude_blocked`
-- Token 列表：`GET /api/tokens/` 返回掩码 token（`****xxxx`），编辑时不要把掩码写回
+- 小说列表：`GET /api/novels`，响应 `{novels, cursor, has_excluded}`；`has_epub` 为枚举整数（0 无 / 1 生成中 / 2 可用 / 3 无图 / 4 缺源文件），`source` 为来源插件标识（如 `'pixiv' | 'esj' | 'local'`），同时携带 `external_url`、`can_sync`、`is_series`、`chapter_count`；默认列表会将同系列小说折叠为 1 张系列卡，点击卡片系列名跳转 `series_id:<id>;` 查看各章明细
+- 系列卡片动作：`GET /api/novels/series/{series_id}/download` 按需即时合并下载（TXT / EPUB3）、`POST /api/novels/series/{series_id}/favourite`、`PATCH /api/novels/series/{series_id}`、`POST /api/novels/series/{series_id}/sync`、`DELETE /api/novels/series/{series_id}`
+- 数据源管理：`/sources` 页通过 `/api/sources` 动态发现已注册插件、编辑配置/凭据及发起即时抓书任务
+- 批量辅助：`POST /api/novels/by-ids`（按选中 ID 顺序返回卡片投影）、`POST /api/novels/sort-ids`（支持 `id` / `like` / `view` / `text` / `create_time`）、`POST /api/novels/match-ids` 与 `GET /api/novels/{ids,count}` 均按当前筛选语义支持 `exclude_blocked`；批量编辑/标签/删除/导出默认启用 `expand_series` / `merge_series`（在章节钻取视图下为 `false`）
+- 凭据列表：`/api/sources/{source}/credentials` 与兼容端点 `GET /api/tokens` 返回掩码凭据（`****xxxx`），编辑时不要把掩码写回
 
 ## 可选 API Key
 

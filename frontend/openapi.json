@@ -83,6 +83,11 @@
             "$ref": "#/components/schemas/FormatMode",
             "default": "txt"
           },
+          "merge_series": {
+            "default": false,
+            "title": "Merge Series",
+            "type": "boolean"
+          },
           "naming_template": {
             "anyOf": [
               {
@@ -134,6 +139,11 @@
           "format_mode": {
             "$ref": "#/components/schemas/FormatMode",
             "default": "txt"
+          },
+          "merge_series": {
+            "default": false,
+            "title": "Merge Series",
+            "type": "boolean"
           },
           "naming_template": {
             "anyOf": [
@@ -209,6 +219,11 @@
             ],
             "title": "Author Id"
           },
+          "expand_series": {
+            "default": false,
+            "title": "Expand Series",
+            "type": "boolean"
+          },
           "scope": {
             "$ref": "#/components/schemas/BatchScope"
           },
@@ -261,6 +276,11 @@
       },
       "BatchOperationRequest": {
         "properties": {
+          "expand_series": {
+            "default": false,
+            "title": "Expand Series",
+            "type": "boolean"
+          },
           "operation": {
             "enum": [
               "delete",
@@ -752,6 +772,11 @@
             "title": "Can Sync",
             "type": "boolean"
           },
+          "chapter_count": {
+            "default": 1,
+            "title": "Chapter Count",
+            "type": "integer"
+          },
           "create_time": {
             "anyOf": [
               {
@@ -795,6 +820,11 @@
           "is_favourite": {
             "default": false,
             "title": "Is Favourite",
+            "type": "boolean"
+          },
+          "is_series": {
+            "default": false,
+            "title": "Is Series",
             "type": "boolean"
           },
           "is_special_follow": {
@@ -1373,6 +1403,50 @@
           "source"
         ],
         "title": "SeriesSearchItem",
+        "type": "object"
+      },
+      "SeriesUpdateRequest": {
+        "additionalProperties": false,
+        "description": "系列卡片元数据编辑的部分更新体（``PATCH /api/novels/series/{series_id}``）。",
+        "properties": {
+          "author_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author Id"
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tags"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "title": "SeriesUpdateRequest",
         "type": "object"
       },
       "SettingFieldOptionSchema": {
@@ -3841,6 +3915,44 @@
       }
     },
     "/api/novels/series/{series_id}": {
+      "delete": {
+        "operationId": "delete_series_api_novels_series__series_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "series_id",
+            "required": true,
+            "schema": {
+              "title": "Series Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Delete Series",
+        "tags": [
+          "novels"
+        ]
+      },
       "get": {
         "description": "系列 ID → 系列名预览（编辑器「系列」一栏的即时反馈）。\n\n与作者预览同构（见 ``lookup_author``）：只读、不写库，``unknown`` **不是\n错误**——id 才是身份，编辑器照样允许保存。名字的来源链更长一点：``series``\n行 → 同系列的 novel 行 → pixiv ``novel_series``（前两步都是本地查询）。",
         "operationId": "lookup_series_api_novels_series__series_id__get",
@@ -3883,6 +3995,212 @@
           }
         ],
         "summary": "Lookup Series",
+        "tags": [
+          "novels"
+        ]
+      },
+      "patch": {
+        "operationId": "update_series_metadata_api_novels_series__series_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "series_id",
+            "required": true,
+            "schema": {
+              "title": "Series Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SeriesUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NovelBase"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Update Series Metadata",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
+    "/api/novels/series/{series_id}/download": {
+      "get": {
+        "description": "Synthesize and stream a merged TXT/EPUB3 archive for a folded series.",
+        "operationId": "download_series_api_novels_series__series_id__download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "series_id",
+            "required": true,
+            "schema": {
+              "title": "Series Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "default": "txt",
+              "enum": [
+                "txt",
+                "epub",
+                "prefer_epub"
+              ],
+              "title": "Format",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          },
+          {
+            "APIKeyQuery": []
+          }
+        ],
+        "summary": "Download Series",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
+    "/api/novels/series/{series_id}/favourite": {
+      "post": {
+        "operationId": "toggle_series_favourite_api_novels_series__series_id__favourite_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "series_id",
+            "required": true,
+            "schema": {
+              "title": "Series Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Toggle Series Favourite",
+        "tags": [
+          "novels"
+        ]
+      }
+    },
+    "/api/novels/series/{series_id}/sync": {
+      "post": {
+        "operationId": "sync_series_api_novels_series__series_id__sync_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "series_id",
+            "required": true,
+            "schema": {
+              "title": "Series Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NovelBase"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Sync Series",
         "tags": [
           "novels"
         ]
@@ -4049,8 +4367,14 @@
             "name": "format",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/FormatMode",
-              "default": "txt"
+              "default": "txt",
+              "enum": [
+                "txt",
+                "epub",
+                "prefer_epub"
+              ],
+              "title": "Format",
+              "type": "string"
             }
           }
         ],

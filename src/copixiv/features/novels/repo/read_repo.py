@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import functools
+import secrets
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -12,11 +14,18 @@ from sqlalchemy.orm import Session
 
 from copixiv.core.exceptions import ValidationError
 from copixiv.core.models import SOURCE_LOCAL, SOURCE_PIXIV, EpubStatus
-from copixiv.core.search import QuerySpec, normalize_search_segments
+from copixiv.core.search import (
+    EXCLUDE_BLOCKED_SETTING_KEY,
+    QuerySpec,
+    normalize_search_segments,
+    resolve_exclude_blocked,
+)
+from copixiv.core.snapshot_types import SlimNovelRecord
 from copixiv.core.sources import SourceCapability, SourceRuntimeConfig
 from copixiv.core.time import datetime_to_us, us_to_datetime
 from copixiv.db import delta as engine_delta
 from copixiv.db import models
+from copixiv.db.novel_snapshot import fold_series_rows
 from copixiv.features.novels import field_policy
 from copixiv.features.novels.schemas import NovelBase
 from copixiv.query_engine.adapter import RustNovelQueryEngine
@@ -131,6 +140,62 @@ def _parse_cursor_val(order_by: str, raw: Any) -> Any:
     return raw
 
 
+_ASCII_LOWER_TRANS = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    "abcdefghijklmnopqrstuvwxyz",
+)
+_MASK64 = (1 << 64) - 1
+
+
+def _ascii_lower(text: str) -> str:
+    return text.translate(_ASCII_LOWER_TRANS)
+
+
+def _splitmix64(x: int) -> int:
+    x = (x + 0x9E37_79B9_7F4A_7C15) & _MASK64
+    x = ((x ^ (x >> 30)) * 0xBF58_476D_1CE4_E5B9) & _MASK64
+    x = ((x ^ (x >> 27)) * 0x94D0_49BB_1331_11EB) & _MASK64
+    return x ^ (x >> 31)
+
+
+def _compare_field_tie(va: Any, aid: int, vb: Any, bid: int, *, descending: bool) -> int:
+    """Compare two sort keys matching Rust's ``CanonNumKey`` NULL and tie-break order."""
+    if (va is None) != (vb is None):
+        if descending:
+            return -1 if va is None else 1
+        return 1 if va is None else -1
+    if va is not None and va != vb:
+        if descending:
+            return -1 if va > vb else 1
+        return -1 if va < vb else 1
+    if aid == bid:
+        return 0
+    if descending:
+        return -1 if aid > bid else 1
+    return -1 if aid < bid else 1
+
+
+def _chapter_id_sort_key(
+    series_index: int | None, novel_id: int, *, descending: bool
+) -> tuple[bool, int, int, int]:
+    """Series chapter order: ``series_index ASC NULLS LAST, abs(id) ASC, id ASC`` (mirrored for DESC)."""
+    idx = int(series_index) if series_index is not None else 0
+    if descending:
+        return (series_index is None, -idx, -abs(novel_id), -novel_id)
+    return (series_index is None, idx, abs(novel_id), novel_id)
+
+
+def _slim_sort_value(obj: Any, order_by: str) -> Any:
+    if order_by == "id":
+        return abs(int(obj.id))
+    if order_by == "create_time":
+        val = getattr(obj, "create_time", None)
+        if val is not None:
+            return datetime_to_us(val)
+        return getattr(obj, "create_time_us", None)
+    return getattr(obj, order_by, None)
+
+
 def _categorize_conditions(conditions) -> tuple[set[str], set[str], dict[str, str]]:
     """Split an ordered condition list into ``(tags, keywords, field_filters)``."""
     tags: set[str] = set()
@@ -148,8 +213,8 @@ def _categorize_conditions(conditions) -> tuple[set[str], set[str], dict[str, st
     return tags, keywords, field_filters
 
 
-def _novel_from_record(rec: copixiv_rs.NovelRecord) -> NovelBase:
-    """Materialize a card-projection :class:`NovelBase` directly from Rust ``NovelRecord``."""
+def _novel_from_record(rec: copixiv_rs.NovelRecord | SlimNovelRecord) -> NovelBase:
+    """Materialize a card-projection :class:`NovelBase` directly from Rust ``NovelRecord`` or ``SlimNovelRecord``."""
     return NovelBase.model_construct(
         id=rec.id,
         title=rec.title,
@@ -169,6 +234,34 @@ def _novel_from_record(rec: copixiv_rs.NovelRecord) -> NovelBase:
         source=str(rec.source),
         external_url=None,
         can_sync=False,
+        is_series=(rec.series_id is not None),
+        chapter_count=int(getattr(rec, "chapter_count", 1)),
+    )
+
+
+def _novel_base_from_orm(obj: models.Novel, *, is_special_follow: bool = False) -> NovelBase:
+    """Convert an ORM ``Novel`` row into an un-folded chapter :class:`NovelBase`."""
+    return NovelBase.model_construct(
+        id=int(obj.id),
+        title=obj.title,
+        author_id=obj.author_id,
+        author_name=obj.author_name,
+        like=int(obj.like),
+        view=int(obj.view),
+        text=int(obj.text),
+        create_time=obj.create_time,
+        has_epub=EpubStatus(obj.has_epub),
+        tags=list(obj.tags) if obj.tags else [],
+        is_favourite=bool(obj.is_favourite),
+        is_special_follow=bool(is_special_follow),
+        series_id=obj.series_id,
+        series_name=obj.series_name,
+        series_index=obj.series_index,
+        source=str(obj.source),
+        external_url=None,
+        can_sync=False,
+        is_series=False,
+        chapter_count=1,
     )
 
 
@@ -212,17 +305,40 @@ def hydrate_novel_links(
         else (source_registry or field_policy._get_registry())
     )
 
-    extra_ids = sorted(
-        {int(novel.id) for novel in novels if str(novel.source) not in (SOURCE_PIXIV, SOURCE_LOCAL)}
+    extra_novel_ids = sorted(
+        {
+            int(novel.id)
+            for novel in novels
+            if not (getattr(novel, "is_series", False) and novel.series_id is not None)
+            and str(novel.source) not in (SOURCE_PIXIV, SOURCE_LOCAL)
+        }
     )
-    source_keys: dict[int, str] = {}
-    if extra_ids:
+    novel_source_keys: dict[int, str] = {}
+    if extra_novel_ids:
         rows = session.execute(
             select(models.Novel.id, models.Novel.source_key).where(
-                models.Novel.id == any_(cast(Any, extra_ids))
+                models.Novel.id == any_(cast(Any, extra_novel_ids))
             )
         ).all()
-        source_keys = {int(nid): str(skey) for nid, skey in rows if skey}
+        novel_source_keys = {int(nid): str(skey) for nid, skey in rows if skey}
+
+    extra_series_ids = sorted(
+        {
+            int(novel.series_id)
+            for novel in novels
+            if getattr(novel, "is_series", False)
+            and novel.series_id is not None
+            and str(novel.source) not in (SOURCE_PIXIV, SOURCE_LOCAL)
+        }
+    )
+    series_source_keys: dict[int, str] = {}
+    if extra_series_ids:
+        srows = session.execute(
+            select(models.Series.series_id, models.Series.source_key).where(
+                models.Series.series_id == any_(cast(Any, extra_series_ids))
+            )
+        ).all()
+        series_source_keys = {int(sid): str(skey) for sid, skey in srows if skey}
 
     runtime_cache: dict[str, SourceRuntimeConfig] = {}
     for novel in novels:
@@ -237,14 +353,24 @@ def hydrate_novel_links(
                 )
         runtime = runtime_cache[src]
 
-        if src == SOURCE_PIXIV:
-            skey: str | None = str(novel.id)
-        elif src == SOURCE_LOCAL:
-            skey = None
+        is_series_card = bool(getattr(novel, "is_series", False) and novel.series_id is not None)
+        if is_series_card and novel.series_id is not None:
+            if src == SOURCE_PIXIV:
+                skey: str | None = str(novel.series_id)
+            elif src == SOURCE_LOCAL:
+                skey = None
+            else:
+                skey = series_source_keys.get(int(novel.series_id))
+            novel.external_url = registry.build_external_url(src, "series", skey, runtime) if skey else None
         else:
-            skey = source_keys.get(int(novel.id))
+            if src == SOURCE_PIXIV:
+                skey = str(novel.id)
+            elif src == SOURCE_LOCAL:
+                skey = None
+            else:
+                skey = novel_source_keys.get(int(novel.id))
+            novel.external_url = registry.build_external_url(src, "novel", skey, runtime) if skey else None
 
-        novel.external_url = registry.build_external_url(src, "novel", skey, runtime) if skey else None
         novel.can_sync = bool(
             registry.has_capability(src, SourceCapability.SYNC_NOVEL)
             and (source_service is None or source_service.is_enabled(src))
@@ -287,13 +413,10 @@ class SQLAlchemyNovelReadRepository:
         engine_delta.sync_engine_if_needed(self.session, eng)
         return eng
 
-    def _compile_engine_query(
-        self,
+    @staticmethod
+    def _parse_spec_conditions(
         spec: QuerySpec,
-        *,
-        count_blocked: bool = False,
-        restrict_ids: list[int] | None = None,
-    ) -> EngineQuery:
+    ) -> tuple[list[str], list[str], list[tuple[str, int]], list[tuple[str, str]], bool, bool]:
         for q_type, _qvalue in spec.conditions:
             if q_type not in _VALID_CONDITION_FIELDS:
                 raise ValidationError(f"Invalid query field: {q_type}")
@@ -318,6 +441,39 @@ class SQLAlchemyNovelReadRepository:
         kw_segments: list[str] = []
         for kw in keywords:
             kw_segments.extend(normalize_search_segments(kw))
+        return list(tags), kw_segments, int_filters, str_filters, only_fav, only_sf
+
+    def _extract_explicit_series_id(self, spec: QuerySpec) -> int | None:
+        _, _, int_filters, _, _, _ = self._parse_spec_conditions(spec)
+        for qtype, val in int_filters:
+            if qtype == "series_id":
+                return val
+        return None
+
+    def _compile_engine_query(
+        self,
+        spec: QuerySpec,
+        *,
+        count_blocked: bool = False,
+        restrict_ids: list[int] | None = None,
+    ) -> EngineQuery:
+        tags, kw_segments, int_filters, str_filters, only_fav, only_sf = self._parse_spec_conditions(spec)
+
+        # Redirect explicit ``id:<non-rep-chapter>`` search to its folded series card.
+        has_series_filter = any(k == "series_id" for k, _ in int_filters)
+        if not has_series_filter and self._query_engine is not None and self._query_engine.ready():
+            redirected: list[tuple[str, int]] = []
+            for k, val in int_filters:
+                if k == "id" and not self._query_engine.get_novel_rows_by_ids([val]):
+                    sid = self.session.execute(
+                        select(models.Novel.series_id).where(models.Novel.id == val)
+                    ).scalar_one_or_none()
+                    if sid is not None:
+                        redirected.append(("series_id", int(sid)))
+                        continue
+                redirected.append((k, val))
+            int_filters = redirected
+
         return EngineQuery(
             tags=tuple(tags),
             keyword_segments=tuple(kw_segments),
@@ -412,6 +568,20 @@ class SQLAlchemyNovelReadRepository:
         )
         return {nid: path for nid, path in self.session.execute(stmt).all() if path}
 
+    def get_series_paths(self, series_ids: set[int]) -> dict[int, list[str]]:
+        """``{series_id: [path, ...]}`` for resolving existing series directories."""
+        if not series_ids:
+            return {}
+        stmt = select(models.Novel.series_id, models.Novel.path).where(
+            models.Novel.series_id.in_(series_ids),
+            models.Novel.path.isnot(None),
+        )
+        grouped: dict[int, list[str]] = {}
+        for sid, path in self.session.execute(stmt).all():
+            if sid is not None and path:
+                grouped.setdefault(int(sid), []).append(path)
+        return grouped
+
     def sort_novel_ids(
         self,
         novel_ids: list[int],
@@ -428,15 +598,265 @@ class SQLAlchemyNovelReadRepository:
         ):
             return list(novel_ids)
         descending = order_direction.upper() == "DESC"
-        return self._require_engine().sort_ids(novel_ids, order_by=order_by, descending=descending)
+        eng = self._require_engine()
+        unique_ids = list(dict.fromkeys(int(nid) for nid in novel_ids))
+        rust_recs = eng.get_novel_rows_by_ids(unique_ids)
+        if len(rust_recs) == len(unique_ids):
+            return eng.sort_ids(novel_ids, order_by=order_by, descending=descending)
+
+        sort_vals: dict[int, Any] = {rec.id: _slim_sort_value(rec, order_by) for rec in rust_recs}
+        missing_ids = [nid for nid in unique_ids if nid not in sort_vals]
+        if missing_ids:
+            cols: dict[str, Any] = {
+                "id": models.Novel.id,
+                "like": models.Novel.like,
+                "view": models.Novel.view,
+                "text": models.Novel.text,
+                "create_time": models.Novel.create_time,
+            }
+            col = cols[order_by]
+            rows = self.session.execute(
+                select(models.Novel.id, col).where(models.Novel.id == any_(cast(Any, missing_ids)))
+            ).all()
+            for nid, raw_val in rows:
+                nid_int = int(nid)
+                if order_by == "id":
+                    sort_vals[nid_int] = abs(nid_int)
+                elif order_by == "create_time":
+                    sort_vals[nid_int] = datetime_to_us(raw_val) if raw_val is not None else None
+                else:
+                    sort_vals[nid_int] = raw_val
+
+        def _cmp_ids(a: int, b: int) -> int:
+            return _compare_field_tie(
+                sort_vals[a],
+                a,
+                sort_vals[b],
+                b,
+                descending=descending,
+            )
+
+        existing = [nid for nid in unique_ids if nid in sort_vals]
+        existing.sort(key=functools.cmp_to_key(_cmp_ids))
+        return existing
+
+    def _query_series_chapters_pg(
+        self,
+        spec: QuerySpec,
+        series_id: int,
+        *,
+        only_blocked: bool = False,
+        restrict_ids: list[int] | None = None,
+    ) -> list[NovelBase]:
+        """Return filtered individual chapter cards for *series_id* directly from PostgreSQL."""
+        tags, kw_segments, int_filters, str_filters, only_fav, only_sf = self._parse_spec_conditions(spec)
+
+        setting_row = self.session.execute(
+            select(models.Setting.value).where(models.Setting.key == EXCLUDE_BLOCKED_SETTING_KEY)
+        ).scalar_one_or_none()
+        exclude_active = resolve_exclude_blocked(spec.exclude_blocked_tags, setting_row)
+        blocked_tags = {
+            str(t)
+            for t in self.session.execute(
+                select(models.TagPreference.tag).where(
+                    models.TagPreference.preference == models.TagPreferenceORM.blocked
+                )
+            )
+            .scalars()
+            .all()
+        }
+
+        if only_blocked and (not exclude_active or not blocked_tags):
+            return []
+
+        stmt = (
+            select(models.Novel, func.coalesce(models.Author.is_special_follow, False))
+            .outerjoin(models.Author, models.Author.author_id == models.Novel.author_id)
+            .where(models.Novel.series_id == series_id)
+        )
+        rows = self.session.execute(stmt).all()
+        restrict_set = set(restrict_ids) if restrict_ids is not None else None
+        exclude_set = set(spec.exclude_ids) if spec.exclude_ids else None
+        low_segments = [_ascii_lower(seg) for seg in dict.fromkeys(kw_segments) if seg]
+
+        matched: list[NovelBase] = []
+        for obj, is_sf in rows:
+            nid = int(obj.id)
+            if restrict_set is not None and nid not in restrict_set:
+                continue
+            if exclude_set is not None and nid in exclude_set:
+                continue
+            if only_fav and not obj.is_favourite:
+                continue
+            if only_sf and not is_sf:
+                continue
+
+            card = _novel_base_from_orm(obj, is_special_follow=bool(is_sf))
+
+            if any(getattr(card, field) != val for field, val in int_filters):
+                continue
+            if any((getattr(card, field) or "") != val for field, val in str_filters):
+                continue
+
+            card_tags = set(card.tags)
+            if tags and not all(t in card_tags for t in tags):
+                continue
+
+            has_blocked = bool(blocked_tags and any(t in blocked_tags for t in card.tags))
+            if only_blocked:
+                if not has_blocked:
+                    continue
+            elif exclude_active and has_blocked:
+                continue
+
+            if spec.min_like is not None and spec.min_like > 0 and card.like < spec.min_like:
+                continue
+            if spec.min_text is not None and spec.min_text > 0 and card.text < spec.min_text:
+                continue
+
+            if low_segments:
+                fields = [
+                    _ascii_lower(card.title),
+                    _ascii_lower(card.author_name or ""),
+                    _ascii_lower(card.series_name or ""),
+                    *(_ascii_lower(t) for t in card.tags),
+                ]
+                if not all(any(seg in f for f in fields) for seg in low_segments):
+                    continue
+
+            matched.append(card)
+        return matched
+
+    def _paginate_series_chapters(
+        self,
+        matched: list[NovelBase],
+        spec: QuerySpec,
+    ) -> dict[str, Any]:
+        order_by = spec.order_by or "id"
+        descending = spec.order_direction.upper() == "DESC"
+        cursor = spec.cursor
+
+        if cursor is not None:
+            if not isinstance(cursor, dict):
+                raise ValidationError("Invalid cursor format")
+            if "id" not in cursor:
+                raise ValidationError("Cursor missing 'id'")
+            cursor_id = _parse_query_int(cursor["id"], "cursor.id")
+        else:
+            cursor_id = None
+
+        if order_by == "random":
+            if cursor is not None and cursor_id is not None:
+                if "seed" not in cursor or "h" not in cursor:
+                    raise ValidationError("Cursor missing 'seed'/'h' for random ordering")
+                try:
+                    seed = int(str(cursor["seed"]), 16)
+                    cursor_pair: tuple[int, int] | None = (int(str(cursor["h"]), 16), cursor_id)
+                except ValueError as exc:
+                    raise ValidationError("Invalid random cursor hex") from exc
+            else:
+                seed = secrets.randbits(64)
+                cursor_pair = None
+            ranked = sorted(
+                ((_splitmix64((c.id & _MASK64) ^ seed), c.id, c) for c in matched),
+                key=lambda item: (item[0], item[1]),
+            )
+            if cursor_pair is not None:
+                ranked = [item for item in ranked if (item[0], item[1]) > cursor_pair]
+            has_more = len(ranked) > spec.per_page
+            page_items = ranked[: spec.per_page]
+            novels = [item[2] for item in page_items]
+            cursor_out: dict[str, Any] | None = None
+            if has_more and page_items:
+                last_h, last_id, _ = page_items[-1]
+                cursor_out = {"seed": f"{seed:016x}", "h": f"{last_h:016x}", "id": last_id}
+            return {"novels": novels, "cursor": cursor_out}
+
+        if order_by == "id":
+            ordered = sorted(
+                matched,
+                key=lambda c: _chapter_id_sort_key(c.series_index, c.id, descending=descending),
+            )
+            if cursor_id is not None and cursor is not None:
+                if "series_index" in cursor:
+                    raw_idx = cursor["series_index"]
+                    cursor_idx = (
+                        _parse_query_int(raw_idx, "cursor.series_index") if raw_idx is not None else None
+                    )
+                else:
+                    matched_by_id = {c.id: c.series_index for c in matched}
+                    if cursor_id in matched_by_id:
+                        cursor_idx = matched_by_id[cursor_id]
+                    else:
+                        cursor_idx = self.session.execute(
+                            select(models.Novel.series_index).where(models.Novel.id == cursor_id)
+                        ).scalar_one_or_none()
+                cursor_key = _chapter_id_sort_key(cursor_idx, cursor_id, descending=descending)
+                ordered = [
+                    c
+                    for c in ordered
+                    if _chapter_id_sort_key(c.series_index, c.id, descending=descending) > cursor_key
+                ]
+            has_more = len(ordered) > spec.per_page
+            novels = ordered[: spec.per_page]
+            cursor_out = None
+            if has_more and novels:
+                last = novels[-1]
+                cursor_out = {"id": last.id, "series_index": last.series_index}
+            return {"novels": novels, "cursor": cursor_out}
+
+        if order_by not in _SORTABLE_NOVEL_FIELDS:
+            raise ValidationError(f"Invalid order_by for cursor pagination: {order_by}")
+
+        def _field_val(c: NovelBase) -> Any:
+            if order_by == "create_time":
+                return datetime_to_us(c.create_time)
+            return getattr(c, order_by, None)
+
+        def _cmp_cards(a: NovelBase, b: NovelBase) -> int:
+            return _compare_field_tie(
+                _field_val(a),
+                a.id,
+                _field_val(b),
+                b.id,
+                descending=descending,
+            )
+
+        ordered = sorted(matched, key=functools.cmp_to_key(_cmp_cards))
+        if cursor_id is not None and cursor is not None:
+            if order_by not in cursor:
+                raise ValidationError(f"Cursor missing '{order_by}'")
+            raw_val = _parse_cursor_val(order_by, cursor[order_by])
+            cval = (
+                (datetime_to_us(raw_val) if raw_val is not None else None)
+                if order_by == "create_time"
+                else raw_val
+            )
+            ordered = [
+                c
+                for c in ordered
+                if _compare_field_tie(_field_val(c), c.id, cval, cursor_id, descending=descending) > 0
+            ]
+        has_more = len(ordered) > spec.per_page
+        novels = ordered[: spec.per_page]
+        cursor_out = None
+        if has_more and novels:
+            last = novels[-1]
+            cursor_out = {"id": last.id, order_by: getattr(last, order_by, None)}
+        return {"novels": novels, "cursor": cursor_out}
 
     def get_novels(self, spec: QuerySpec, *, only_blocked: bool = False) -> dict:
         """Retrieve a paginated, filtered list of novels per *spec*."""
-        eng = self._require_engine()
         if spec.order_by and spec.order_by not in _SORTABLE_NOVEL_FIELDS:
             raise ValidationError(f"Invalid order_by field: {spec.order_by}")
         self._validate_order_direction(spec.order_direction)
 
+        explicit_sid = self._extract_explicit_series_id(spec)
+        if explicit_sid is not None:
+            matched = self._query_series_chapters_pg(spec, explicit_sid, only_blocked=only_blocked)
+            return self._paginate_series_chapters(matched, spec)
+
+        eng = self._require_engine()
         query = self._compile_engine_query(spec, count_blocked=only_blocked)
         order_by = spec.order_by or "id"
         parsed_cursor = self._compile_engine_cursor(spec.cursor, order_by)
@@ -463,18 +883,28 @@ class SQLAlchemyNovelReadRepository:
 
     def count_novels(self, spec: QuerySpec) -> NovelCount:
         """Count VISIBLE novels matching *spec* (bounded)."""
-        eng = self._require_engine()
         self._validate_order_direction(spec.order_direction)
+        explicit_sid = self._extract_explicit_series_id(spec)
+        if explicit_sid is not None:
+            total = len(self._query_series_chapters_pg(spec, explicit_sid))
+            return NovelCount(min(total, COUNT_CAP), truncated=total > COUNT_CAP)
+        eng = self._require_engine()
         res = eng.count_novels(self._compile_engine_query(spec), cap=COUNT_CAP)
         return NovelCount(res.count, truncated=res.truncated)
 
     def has_excluded_novels(self, spec: QuerySpec) -> bool:
         """Whether any novel matching *spec* carries blocked tags."""
+        explicit_sid = self._extract_explicit_series_id(spec)
+        if explicit_sid is not None:
+            return bool(self._query_series_chapters_pg(spec, explicit_sid, only_blocked=True))
         eng = self._require_engine()
         return eng.has_match(self._compile_engine_query(spec, count_blocked=True))
 
     def list_matching_ids(self, spec: QuerySpec) -> list[int]:
         """Return every VISIBLE novel ID matching *spec*, unpaginated."""
+        explicit_sid = self._extract_explicit_series_id(spec)
+        if explicit_sid is not None:
+            return sorted(c.id for c in self._query_series_chapters_pg(spec, explicit_sid))
         eng = self._require_engine()
         return eng.list_matching_ids(self._compile_engine_query(spec))
 
@@ -486,6 +916,11 @@ class SQLAlchemyNovelReadRepository:
         """Return the subset of *novel_ids* matching *spec*."""
         if not novel_ids:
             return []
+        explicit_sid = self._extract_explicit_series_id(spec)
+        if explicit_sid is not None:
+            return sorted(
+                c.id for c in self._query_series_chapters_pg(spec, explicit_sid, restrict_ids=novel_ids)
+            )
         eng = self._require_engine()
         return eng.list_matching_ids(self._compile_engine_query(spec, restrict_ids=novel_ids))
 
@@ -494,7 +929,127 @@ class SQLAlchemyNovelReadRepository:
         if not novel_ids:
             return []
         eng = self._require_engine()
-        return [_novel_from_record(rec) for rec in eng.get_novel_rows_by_ids(novel_ids)]
+        by_id: dict[int, NovelBase] = {
+            rec.id: _novel_from_record(rec) for rec in eng.get_novel_rows_by_ids(novel_ids)
+        }
+        missing_ids = list(dict.fromkeys(int(nid) for nid in novel_ids if int(nid) not in by_id))
+        if missing_ids:
+            rows = self.session.execute(
+                select(models.Novel, func.coalesce(models.Author.is_special_follow, False))
+                .outerjoin(models.Author, models.Author.author_id == models.Novel.author_id)
+                .where(models.Novel.id == any_(cast(Any, missing_ids)))
+            ).all()
+            for obj, is_sf in rows:
+                by_id[int(obj.id)] = _novel_base_from_orm(obj, is_special_follow=bool(is_sf))
+        return [by_id[int(nid)] for nid in novel_ids if int(nid) in by_id]
+
+    def get_series_chapters(self, series_id: int) -> list[StoredNovel]:
+        """Return all chapters of *series_id* ordered by chapter index then ID."""
+        rows = self.session.execute(
+            select(models.Novel, func.coalesce(models.Author.is_special_follow, False))
+            .outerjoin(models.Author, models.Author.author_id == models.Novel.author_id)
+            .where(models.Novel.series_id == series_id)
+            .order_by(
+                models.Novel.series_index.asc().nulls_last(),
+                func.abs(models.Novel.id).asc(),
+                models.Novel.id.asc(),
+            )
+        ).all()
+        return [_novel_from_orm(obj, is_special_follow=bool(is_sf)) for obj, is_sf in rows]
+
+    def get_series_book_bundle(self, series_id: int) -> tuple[dict[str, Any] | None, list[StoredNovel]]:
+        """Return ``(series_meta, ordered_chapters)`` for *series_id*."""
+        srow = self.session.execute(
+            select(models.Series, models.Author.author_name)
+            .outerjoin(models.Author, models.Author.author_id == models.Series.author_id)
+            .where(models.Series.series_id == series_id)
+        ).one_or_none()
+        series_meta: dict[str, Any] | None = None
+        if srow is not None:
+            s_obj, author_name = srow
+            series_meta = {
+                "series_id": int(s_obj.series_id),
+                "series_name": s_obj.series_name,
+                "source": str(s_obj.source),
+                "source_key": str(s_obj.source_key) if s_obj.source_key else None,
+                "author_id": int(s_obj.author_id) if s_obj.author_id is not None else None,
+                "author_name": author_name,
+            }
+        chapters = self.get_series_chapters(series_id)
+        return series_meta, chapters
+
+    def get_folded_series_card(self, series_id: int) -> NovelBase | None:
+        """Return the folded ``NovelBase`` card for *series_id* directly from PostgreSQL."""
+        srow = self.session.execute(
+            select(
+                models.Series.series_name,
+                models.Series.author_id,
+                models.Author.author_name,
+                func.coalesce(models.Author.is_special_follow, False),
+            )
+            .select_from(models.Series)
+            .outerjoin(models.Author, models.Author.author_id == models.Series.author_id)
+            .where(models.Series.series_id == series_id)
+        ).one_or_none()
+
+        rows = self.session.execute(
+            select(
+                models.Novel.id,
+                models.Novel.title,
+                models.Novel.author_id,
+                models.Novel.author_name,
+                models.Novel.series_id,
+                models.Novel.series_name,
+                models.Novel.series_index,
+                models.Novel.text,
+                models.Novel.like,
+                models.Novel.view,
+                models.Novel.has_epub,
+                models.Novel.create_time,
+                models.Novel.source,
+                models.Novel.is_favourite,
+                func.coalesce(models.Author.is_special_follow, False),
+                models.Novel.tags,
+            )
+            .select_from(models.Novel)
+            .outerjoin(models.Author, models.Author.author_id == models.Novel.author_id)
+            .where(models.Novel.series_id == series_id)
+            .order_by(models.Novel.id)
+        ).all()
+        if not rows:
+            return None
+
+        chapter_tuples = [
+            SlimNovelRecord(
+                int(r[0]),
+                r[1],
+                r[2],
+                r[3],
+                r[4],
+                r[5],
+                r[6],
+                int(r[7]),
+                int(r[8]),
+                int(r[9]),
+                int(r[10]),
+                datetime_to_us(r[11]),
+                r[12],
+                bool(r[13]),
+                bool(r[14]),
+                list(r[15]) if r[15] else [],
+                1,
+            )
+            for r in rows
+        ]
+        folded = fold_series_rows(
+            series_id,
+            chapter_tuples,
+            series_name=srow[0] if srow is not None else None,
+            series_author_id=srow[1] if srow is not None else None,
+            series_author_name=srow[2] if srow is not None else None,
+            series_author_sf=bool(srow[3]) if srow is not None else None,
+        )
+        return _novel_from_record(folded)
 
     def get_novels_by_ids(self, novel_ids: list[int]) -> list[StoredNovel]:
         """Return stored novel projections for the given IDs, in the given order."""

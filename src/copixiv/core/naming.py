@@ -86,10 +86,13 @@ def safe_filename(text: str, max_length: int = 240) -> str:
 LOCAL_SUBDIR = "local"
 
 
-def _safe_source_subdir(source: str) -> str:
+def source_subdir(source: str) -> str:
     """Sanitize a source identifier into a single safe subdirectory name."""
     cleaned = _ILLEGAL_CHARS.sub("_", source.strip()).strip(".")
     return cleaned or "external"
+
+
+_safe_source_subdir = source_subdir
 
 
 def build_path(
@@ -99,27 +102,57 @@ def build_path(
     *,
     kind: str = TEXT,
     source: str | None = None,
+    series_id: int | None = None,
+    series_name: str | None = None,
+    series_key: str | None = None,
+    series_index: int | None = None,
+    series_dir: str | Path | None = None,
 ) -> str:
-    """Generate ``{download_dir}/{subdir}/{safe_title}_{novel_id}{ext}`` within NAME_MAX.
+    """Generate a bounded path under *download_dir* matching the multi-source layout.
 
-    When *source* is provided and not ``SOURCE_PIXIV``, files are placed under
-    ``{download_dir}/{safe_source}/``. Otherwise, negative IDs (local uploads)
-    route to ``local/`` and non-negative IDs (Pixiv novels) are sharded by
-    leading digits (``0000`` below 10,000,000).
+    - Series works (``series_id is not None``):
+      ``{download_dir}/{source}/{safe_series_name}_{series_key}/{0001}_{safe_title}_{novel_id}{ext}``
+      (omitting the ``{0001}_`` prefix when ``series_index`` is missing/<=0; reusing
+      *series_dir* directly when provided).
+    - Standalone Pixiv works (``source == "pixiv"`` and ``series_id is None``):
+      ``{download_dir}/pixiv/{4_digit_shard}/{safe_title}_{novel_id}{ext}``.
+    - Standalone non-Pixiv works (``local``, etc.):
+      ``{download_dir}/{safe_source}/{safe_title}_{novel_id}{ext}``.
     """
     id_int = int(novel_id)
     normalized_source = source.strip() if source is not None else ""
-    if normalized_source and normalized_source != SOURCE_PIXIV:
-        subdir = _safe_source_subdir(normalized_source)
-    elif id_int < 0:
-        subdir = LOCAL_SUBDIR
-    elif id_int < 10_000_000:
-        subdir = "0000"
+    if normalized_source:
+        effective_source = source_subdir(normalized_source)
     else:
-        subdir = str(id_int).zfill(8)[:4]
-    reserved = len(f"_{id_int}{SUFFIXES[EPUB]}") + 1
-    filename = f"{safe_filename(title, max_length=254 - reserved)}_{id_int}{suffix_for(kind)}"
-    return str(Path(download_dir) / subdir / filename)
+        effective_source = LOCAL_SUBDIR if id_int < 0 else SOURCE_PIXIV
+
+    index_prefix = (
+        f"{series_index:04d}_"
+        if series_id is not None and series_index is not None and series_index > 0
+        else ""
+    )
+
+    if series_dir is not None:
+        parent = Path(series_dir)
+    elif series_id is not None:
+        raw_key = str(series_key).strip() if series_key else str(series_id)
+        key_str = source_subdir(raw_key)
+        dir_suffix = f"_{key_str}"
+        max_series_bytes = max(1, 240 - len(dir_suffix.encode("utf-8")))
+        folder_name = f"{safe_filename(series_name or title, max_length=max_series_bytes)}{dir_suffix}"
+        parent = Path(download_dir) / effective_source / folder_name
+    elif effective_source == SOURCE_PIXIV:
+        abs_id = abs(id_int)
+        shard = "0000" if abs_id < 10_000_000 else str(abs_id).zfill(8)[:4]
+        parent = Path(download_dir) / SOURCE_PIXIV / shard
+    else:
+        parent = Path(download_dir) / effective_source
+
+    reserved = len(f"{index_prefix}_{id_int}{SUFFIXES[EPUB]}".encode()) + 1
+    filename = (
+        f"{index_prefix}{safe_filename(title, max_length=max(1, 254 - reserved))}_{id_int}{suffix_for(kind)}"
+    )
+    return str(parent / filename)
 
 
 _FULLWIDTH_MAP: dict[int, int] = {
@@ -331,5 +364,6 @@ __all__ = [
     "preferred_format",
     "safe_filename",
     "sibling_path",
+    "source_subdir",
     "suffix_for",
 ]

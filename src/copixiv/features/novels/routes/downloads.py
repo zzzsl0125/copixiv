@@ -2,13 +2,14 @@
 
 import re
 from pathlib import Path
+from typing import Literal
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends
 from fastapi.responses import FileResponse
 
 from copixiv.core.exceptions import NotFoundError
-from copixiv.core.naming import FormatMode, safe_filename
+from copixiv.core.naming import safe_filename
 from copixiv.deps import (
     FileStorageDep,
     TaskManagerDep,
@@ -17,6 +18,7 @@ from copixiv.deps import (
 )
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 from copixiv.features.novels.use_cases.get_novel_file import get_novel_file
+from copixiv.features.novels.use_cases.get_series_file import build_series_download
 
 router = APIRouter(dependencies=[Depends(require_download_api_key)])
 
@@ -54,17 +56,38 @@ def download_export_file(
     )
 
 
+@router.get("/series/{series_id}/download")
+def download_series(
+    series_id: int,
+    background_tasks: BackgroundTasks,
+    file_storage: FileStorageDep,
+    uow: UowDep,
+    format: Literal["txt", "epub", "prefer_epub"] = "txt",
+):
+    """Synthesize and stream a merged TXT/EPUB3 archive for a folded series."""
+    with uow.begin(read_only=True):
+        tmp_path, filename, media_type = build_series_download(
+            series_id,
+            format,
+            novel_repo=SQLAlchemyNovelRepository(uow.session),
+            download_root=file_storage.download_dir,
+        )
+    background_tasks.add_task(tmp_path.unlink, missing_ok=True)
+    headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"}
+    return FileResponse(path=str(tmp_path), media_type=media_type, headers=headers)
+
+
 @router.get("/{novel_id}/download")
 def download_novel(
     novel_id: int,
     file_storage: FileStorageDep,
     uow: UowDep,
-    format: FormatMode = FormatMode.TXT,
+    format: Literal["txt", "epub", "prefer_epub"] = "txt",
 ):
     with uow.begin(read_only=True):
         file_path, media_type = get_novel_file(
             novel_id,
-            format.value,
+            format,
             novel_repo=SQLAlchemyNovelRepository(uow.session),
             download_root=file_storage.download_dir,
         )

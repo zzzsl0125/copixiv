@@ -46,6 +46,9 @@ def batch_operation(
     uow: UowDep,
 ):
     ids = resolve_batch_scope(body.scope.novel_ids)
+    if body.expand_series:
+        with uow.begin(read_only=True):
+            ids = SQLAlchemyNovelRepository(uow.session).expand_series_ids(ids)
     if body.operation == "delete":
         affected = batch_delete(
             ids,
@@ -85,6 +88,11 @@ async def batch_metadata_operation(
     ``batch-metadata`` 当成 ``novel_id``（``batch-export`` 早已是同样的形状）。
     """
     ids = resolve_batch_scope(body.scope.novel_ids)
+    if body.expand_series:
+        ids = await read_transaction(
+            uow,
+            lambda tx: SQLAlchemyNovelRepository(tx.session).expand_series_ids(ids),
+        )
 
     changes = body.model_dump(exclude_unset=True)
     field_changes = {name: changes[name] for name in ("author_id", "series_id") if name in changes}
@@ -116,10 +124,18 @@ async def batch_export_preview(
     if not ids:
         return BatchExportPreviewResponse(path=None)
 
-    novel = await read_transaction(
-        uow,
-        lambda tx: SQLAlchemyNovelRepository(tx.session).get_latest_novel_by_ids(ids),
-    )
+    def _read_preview(tx):
+        repo = SQLAlchemyNovelRepository(tx.session)
+        latest = repo.get_latest_novel_by_ids(ids)
+        if latest is None:
+            return None
+        if body.merge_series and latest.series_id is not None:
+            card = repo.get_folded_series_card(latest.series_id)
+            if card is not None:
+                return card.model_copy(update={"series_name": None, "series_index": None})
+        return latest
+
+    novel = await read_transaction(uow, _read_preview)
     if novel is None:
         return BatchExportPreviewResponse(path=None)
     return BatchExportPreviewResponse(
@@ -153,6 +169,7 @@ def batch_export_task(
             "format_mode": body.format_mode.value,
             "zip_name": body.zip_name,
             "naming_template": naming,
+            "merge_series": body.merge_series,
         },
     )
     return BatchExportResponse(task_id=task_id, matched=len(ids))

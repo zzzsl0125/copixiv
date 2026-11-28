@@ -12,6 +12,8 @@ export type Novel = S['NovelBase']
 export type NovelListResult = S['NovelListResponse']
 /** 单本元数据编辑的可提交字段（`PATCH /api/novels/{id}`，三态见后端 schemas）。 */
 export type NovelUpdatePayload = S['NovelUpdateRequest']
+/** 系列卡片元数据编辑的可提交字段（`PATCH /api/novels/series/{series_id}`）。 */
+export type SeriesUpdatePayload = S['SeriesUpdateRequest']
 
 /** 作者 ID 预览（`GET /api/novels/author/{author_id}`）。 */
 export type AuthorLookup = S['AuthorLookupResponse']

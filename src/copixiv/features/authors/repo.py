@@ -101,6 +101,16 @@ class SQLAlchemyAuthorRepository:
         )
         if changed_ids:
             engine_delta.record_novel_upserts(self.session, changed_ids)
+        owned_series_ids = [
+            int(sid)
+            for sid in self.session.execute(
+                _select(models.Series.series_id).where(models.Series.author_id == author_id)
+            )
+            .scalars()
+            .all()
+        ]
+        if owned_series_ids:
+            engine_delta.record_series_dirty(self.session, owned_series_ids)
         self.session.execute(
             _update(models.Author)
             .where(
@@ -154,6 +164,7 @@ class SQLAlchemyAuthorRepository:
 
         check_series = affected_series_ids | owned_series_ids
         if check_series:
+            engine_delta.record_series_dirty(self.session, check_series)
             non_empty_series = set(
                 self.session.execute(
                     _select(models.Novel.series_id).where(models.Novel.series_id.in_(check_series)).distinct()

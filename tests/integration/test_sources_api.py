@@ -421,10 +421,19 @@ def test_disable_pixiv_source_allows_offline_ops_and_blocks_network_sync_and_tas
         assert dis.status_code == 200
         assert dis.json()["enabled"] is False
 
-        # Offline browsing works
+        # Offline browsing works: list returns folded series rep 1002; series_id drilldown shows both chapters
         list_res = client.get("/api/novels")
         assert list_res.status_code == 200
-        assert {n["id"] for n in list_res.json()["novels"]} >= {1001, 1002}
+        folded_novels = list_res.json()["novels"]
+        assert {n["id"] for n in folded_novels} >= {1002}
+        rep = next(n for n in folded_novels if n["id"] == 1002)
+        assert rep["is_series"] is True
+        assert rep["chapter_count"] == 2
+
+        drill_res = client.get("/api/novels", params={"keyword": "series_id:3001;", "order_by": "id"})
+        assert drill_res.status_code == 200
+        assert {n["id"] for n in drill_res.json()["novels"]} == {1001, 1002}
+        assert all(n["is_series"] is False for n in drill_res.json()["novels"])
 
         by_ids = client.post("/api/novels/by-ids", json={"novel_ids": [1001]})
         assert by_ids.status_code == 200

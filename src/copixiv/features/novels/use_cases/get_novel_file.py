@@ -4,6 +4,7 @@ from pathlib import Path
 
 from copixiv.core import naming as formats
 from copixiv.core.exceptions import NotFoundError
+from copixiv.core.models import EpubStatus
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository
 
 
@@ -35,8 +36,13 @@ def get_novel_file(
     if not path:
         raise NotFoundError(f"Novel {novel_id} has no file path")
 
+    actual_fmt = (
+        formats.preferred_format(fmt, epub_ready=(novel.has_epub == EpubStatus.DONE))
+        if fmt == formats.FormatMode.PREFER_EPUB
+        else fmt
+    )
     root = Path(download_root).resolve()
-    file_path = formats.sibling_path(Path(path), fmt)
+    file_path = formats.sibling_path(Path(path), actual_fmt)
     try:
         resolved = file_path.resolve()
     except OSError as exc:
@@ -46,4 +52,4 @@ def get_novel_file(
     if not resolved.is_file():
         raise NotFoundError(f"File not found for novel {novel_id}")
 
-    return resolved, formats.media_type_for(fmt)
+    return resolved, formats.media_type_for(actual_fmt)

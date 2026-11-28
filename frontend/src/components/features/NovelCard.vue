@@ -8,6 +8,7 @@ export interface NovelStateChange {
   id: number
   field: 'is_favourite' | 'is_special_follow'
   value: boolean
+  seriesId?: number | null
 }
 
 const props = defineProps<{
@@ -31,6 +32,7 @@ const emit = defineEmits<{
 const { getBadge } = useSources()
 
 const showMobileActions = computed(() => props.isActive)
+const isSeriesCard = computed(() => Boolean(props.novel.is_series && props.novel.series_id != null))
 const hasEpubReady = computed(() => props.novel.has_epub === 2)
 const isMissingSource = computed(() => props.novel.has_epub === 4)
 const sourceBadge = computed(() => getBadge(props.novel.source))
@@ -43,6 +45,14 @@ const badges = computed(() => {
       label: sourceBadge.value.label,
       class: sourceBadge.value.class,
       title: sourceBadge.value.title,
+    })
+  }
+  if (isSeriesCard.value) {
+    list.push({
+      key: 'series',
+      label: '系列',
+      class: 'bg-amber-100 text-amber-800',
+      title: '系列作品',
     })
   }
   if (hasEpubReady.value) {
@@ -171,7 +181,12 @@ const getTagClass = (tag: string) => {
           :class="[{ 'cursor-pointer hover:text-blue-600': novel.series_id }, 'wrap-break-word']"
           @click="handleSeriesClick"
         >
-          {{ novel.series_name || `系列 #${novel.series_id}` }}<template v-if="novel.series_index"> #{{ novel.series_index }}</template>
+          <template v-if="isSeriesCard">
+            {{ novel.series_name || novel.title || `系列 #${novel.series_id}` }}（共 {{ novel.chapter_count ?? 1 }} 章）
+          </template>
+          <template v-else>
+            {{ novel.series_name || `系列 #${novel.series_id}` }}<template v-if="novel.series_index"> #{{ novel.series_index }}</template>
+          </template>
         </span>
       </div>
       <div class="text-sm text-gray-500 mb-3 flex items-start">

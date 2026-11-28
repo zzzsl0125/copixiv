@@ -16,7 +16,9 @@ fetch that is two to three orders of magnitude slower — and it only runs for
 novels that are actually re-fetched.
 """
 
+from collections.abc import Mapping
 from dataclasses import replace
+from pathlib import Path
 
 from copixiv.core.draft import NovelDraft, build_from_webview
 from copixiv.core.exceptions import NovelNotFoundError
@@ -36,6 +38,7 @@ async def fetch_novel_and_assets(
     redownload: bool = False,
     stored_path: str | None = None,
     asset_batch: AssetBatch | None = None,
+    series_dirs: Mapping[int, Path] | None = None,
 ) -> NovelDraft | None:
     """Fetch a novel from Pixiv and persist its text + assets.
 
@@ -72,6 +75,25 @@ async def fetch_novel_and_assets(
     data = build_from_webview(resp, file_storage.download_dir)
     if anchor := file_storage.adopt_anchor(stored_path):
         data = replace(data, path=anchor)
+    elif (
+        data.series_id is not None
+        and series_dirs
+        and (reused_dir := series_dirs.get(data.series_id)) is not None
+    ):
+        data = replace(
+            data,
+            path=str(
+                file_storage.novel_text_path(
+                    data.id,
+                    data.title,
+                    source=data.source,
+                    series_id=data.series_id,
+                    series_name=data.series_name,
+                    series_index=data.series_index,
+                    series_dir=reused_dir,
+                )
+            ),
+        )
 
     # Text: write it only when it actually differs from the local copy.
     # ``rewrote`` is the single decision this module makes, and it drives two

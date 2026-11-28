@@ -8,7 +8,7 @@ import TagChipInput from './TagChipInput.vue'
 import { getApiErrorMessage, novelApi } from '../../api'
 import { useConfirm } from '../../composables'
 import { HINT_TONE_CLASSES } from '../../composables/useIdLookup'
-import type { Novel, NovelUpdatePayload } from '../../types'
+import type { Novel, NovelUpdatePayload, SeriesUpdatePayload } from '../../types'
 
 const props = defineProps<{
   isOpen: boolean
@@ -46,6 +46,7 @@ const tagInputRef = ref<InstanceType<typeof TagChipInput> | null>(null)
 
 const isLocal = computed(() => props.novel?.source === 'local')
 const canSync = computed(() => Boolean(props.novel?.can_sync))
+const isSeries = computed(() => Boolean(props.novel?.is_series && props.novel?.series_id != null))
 
 async function searchAuthors(q: string, signal?: AbortSignal): Promise<EntitySearchOption[]> {
   const items = (await novelApi.searchAuthors?.(q, { signal })) ?? []
@@ -80,7 +81,8 @@ const indexNumber = computed<number | null | undefined>(() => {
 })
 
 function loadFrom(novel: Novel | null) {
-  title.value = novel?.title ?? ''
+  title.value =
+    novel?.is_series && novel?.series_name ? novel.series_name : (novel?.title ?? '')
   authorId.value = novel?.author_id != null ? String(novel.author_id) : ''
   seriesId.value = novel?.series_id != null ? String(novel.series_id) : ''
   seriesIndex.value = novel?.series_index != null ? String(novel.series_index) : ''
@@ -112,13 +114,13 @@ const validationError = computed<string | null>(() => {
     if (!title.value.trim()) return '标题不能为空'
     if (title.value.trim().length > MAX_TITLE) return `标题过长（最多 ${MAX_TITLE} 字）`
   }
-  if (canEdit('series_id') && seriesIdNumber.value === undefined) {
+  if (!isSeries.value && canEdit('series_id') && seriesIdNumber.value === undefined) {
     return '系列 ID 必须是非零整数'
   }
   if (canEdit('author_id') && authorIdNumber.value === undefined) {
     return '作者 ID 必须是非零整数'
   }
-  if (canEdit('series_index') && indexNumber.value === undefined) {
+  if (!isSeries.value && canEdit('series_index') && indexNumber.value === undefined) {
     return '章节号必须是正整数'
   }
   if (canEdit('tags') && tags.value.length > MAX_TAGS) return `标签过多（最多 ${MAX_TAGS} 个）`
@@ -127,6 +129,31 @@ const validationError = computed<string | null>(() => {
   }
   return null
 })
+
+function buildSeriesPayload(): SeriesUpdatePayload {
+  const novel = props.novel
+  const payload: SeriesUpdatePayload = {}
+  if (!novel) return payload
+
+  if (canEdit('title')) {
+    const nextTitle = title.value.trim()
+    const prevTitle = novel.series_name || novel.title
+    if (nextTitle !== prevTitle) payload.title = nextTitle
+  }
+
+  if (canEdit('author_id')) {
+    const nextAuthorId = authorIdNumber.value ?? null
+    if (nextAuthorId !== (novel.author_id ?? null)) payload.author_id = nextAuthorId
+  }
+
+  if (canEdit('tags')) {
+    const nextTags = [...tags.value].sort()
+    const prevTags = [...(novel.tags ?? [])].sort()
+    if (nextTags.join('\u0000') !== prevTags.join('\u0000')) payload.tags = tags.value
+  }
+
+  return payload
+}
 
 function buildPayload(): NovelUpdatePayload {
   const novel = props.novel
@@ -170,7 +197,9 @@ function buildPayload(): NovelUpdatePayload {
 }
 
 const hasChanges = computed(
-  () => Object.keys(buildPayload()).length > 0 || (tagInputRef.value?.hasDraft ?? false),
+  () =>
+    Object.keys(isSeries.value ? buildSeriesPayload() : buildPayload()).length > 0 ||
+    (tagInputRef.value?.hasDraft ?? false),
 )
 const confirmDisabled = computed(
   () => !!validationError.value || !hasChanges.value || syncing.value || deleting.value,
@@ -184,7 +213,10 @@ async function handleConfirm() {
 
   loading.value = true
   try {
-    const updated = await novelApi.updateNovel(novel.id, buildPayload())
+    const updated =
+      isSeries.value && novel.series_id != null
+        ? await novelApi.updateSeries(novel.series_id, buildSeriesPayload())
+        : await novelApi.updateNovel(novel.id, buildPayload())
     emit('updated', updated)
     emit('close')
   } catch (err: unknown) {
@@ -200,7 +232,10 @@ async function handleSync() {
 
   syncing.value = true
   try {
-    const updated = await novelApi.syncNovel(novel.id)
+    const updated =
+      isSeries.value && novel.series_id != null
+        ? await novelApi.syncSeries(novel.series_id)
+        : await novelApi.syncNovel(novel.id)
     loadFrom(updated)
     emit('updated', updated)
   } catch (err: unknown) {
@@ -214,17 +249,31 @@ async function handleDelete() {
   const novel = props.novel
   if (!novel || deleting.value || loading.value || syncing.value) return
 
-  const confirmed = await confirm({
-    title: '删除小说',
-    description: `确定要删除小说《${novel.title}》吗？\n删除操作不可撤销：小说记录与本地文件都将被移除。`,
-    confirmText: '确认删除',
-    variant: 'danger',
-  })
+  const seriesMode = isSeries.value && novel.series_id != null
+  const confirmed = await confirm(
+    seriesMode
+      ? {
+          title: '删除系列',
+          description: `确定要删除整个系列《${novel.series_name || novel.title}》（共 ${novel.chapter_count ?? 1} 章）吗？\n删除操作不可撤销：所有章节记录与本地文件都将被移除。`,
+          confirmText: '确认删除',
+          variant: 'danger',
+        }
+      : {
+          title: '删除小说',
+          description: `确定要删除小说《${novel.title}》吗？\n删除操作不可撤销：小说记录与本地文件都将被移除。`,
+          confirmText: '确认删除',
+          variant: 'danger',
+        },
+  )
   if (!confirmed) return
 
   deleting.value = true
   try {
-    await novelApi.deleteNovel(novel.id)
+    if (seriesMode && novel.series_id != null) {
+      await novelApi.deleteSeries(novel.series_id)
+    } else {
+      await novelApi.deleteNovel(novel.id)
+    }
     emit('deleted', novel.id)
     emit('close')
   } catch (err: unknown) {
@@ -238,7 +287,7 @@ async function handleDelete() {
 <template>
   <BaseModal
     :is-open="isOpen"
-    title="编辑书籍信息"
+    :title="isSeries ? '编辑系列信息' : '编辑书籍信息'"
     :loading="loading"
     confirm-text="保存"
     :confirm-disabled="confirmDisabled"
@@ -254,7 +303,11 @@ async function handleDelete() {
         >
           {{ isLocal ? '本地' : novel.source }}
         </span>
-        <span>#{{ novel.id }}</span>
+        <template v-if="isSeries">
+          <span>系列 #{{ novel.series_id }}</span>
+          <span>共 {{ novel.chapter_count ?? 1 }} 章</span>
+        </template>
+        <span v-else>#{{ novel.id }}</span>
         <span title="喜爱">❤️ {{ novel.like }}</span>
         <span title="浏览">👁 {{ novel.view }}</span>
         <span title="字数">📝 {{ novel.text }}</span>
@@ -302,7 +355,7 @@ async function handleDelete() {
         {{ authorFieldRef.hint.text }}
       </p>
 
-      <div class="flex gap-3">
+      <div v-if="!isSeries" class="flex gap-3">
         <EntityLookupField
           ref="seriesFieldRef"
           v-model="seriesId"
@@ -349,7 +402,7 @@ async function handleDelete() {
         tag-remove-test-id-prefix="edit-tag-remove-"
       />
 
-      <FormField label="发布日期">
+      <FormField v-if="!isSeries" label="发布日期">
         <template #default="{ id }">
           <input
             :id="id"

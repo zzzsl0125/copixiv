@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from collections.abc import Iterable
 from pathlib import Path
 
 from copixiv.core import naming as formats
-from copixiv.core.models import SOURCE_LOCAL
+from copixiv.core.models import SOURCE_LOCAL, SOURCE_PIXIV
 from copixiv.log import logger
 from copixiv.storage import assets
 from copixiv.storage.atomic import resolve_within_root, write_text_atomic
+
+_FOUR_DIGIT_SHARD_RE = re.compile(r"^\d{4}$")
 
 
 class FileStorage:
@@ -20,8 +23,58 @@ class FileStorage:
         self.download_dir = download_dir
         self._root = Path(download_dir).resolve()
 
-    def novel_text_path(self, novel_id: int, title: str, source: str | None = None) -> Path:
-        return Path(formats.build_path(novel_id, title, self.download_dir, source=source))
+    def novel_text_path(
+        self,
+        novel_id: int,
+        title: str,
+        source: str | None = None,
+        *,
+        series_id: int | None = None,
+        series_name: str | None = None,
+        series_key: str | None = None,
+        series_index: int | None = None,
+        series_dir: str | Path | None = None,
+    ) -> Path:
+        return Path(
+            formats.build_path(
+                novel_id,
+                title,
+                self.download_dir,
+                source=source,
+                series_id=series_id,
+                series_name=series_name,
+                series_key=series_key,
+                series_index=series_index,
+                series_dir=series_dir,
+            )
+        )
+
+    def find_existing_series_dir(
+        self,
+        sibling_paths: Iterable[str | None],
+        source: str,
+    ) -> Path | None:
+        """Return an existing series directory under ``{root}/{source}/`` among sibling paths."""
+        source_dir_name = formats.source_subdir(source)
+        source_root = (self._root / source_dir_name).resolve()
+        fallback: Path | None = None
+        for raw_path in sibling_paths:
+            if not raw_path:
+                continue
+            resolved = resolve_within_root(Path(raw_path), self._root)
+            if resolved is None:
+                continue
+            parent = resolved.parent
+            if parent.parent != source_root:
+                continue
+            if source_dir_name == SOURCE_PIXIV and _FOUR_DIGIT_SHARD_RE.fullmatch(parent.name):
+                continue
+            candidate = Path(self.download_dir) / parent.relative_to(self._root)
+            if parent.is_dir():
+                return candidate
+            if fallback is None:
+                fallback = candidate
+        return fallback
 
     def adopt_anchor(self, anchor: str | None) -> str | None:
         """Return *anchor* when it is a usable write target, else ``None``.
@@ -86,6 +139,12 @@ class FileStorage:
         content: str,
         anchor: str | Path | None = None,
         source: str | None = None,
+        *,
+        series_id: int | None = None,
+        series_name: str | None = None,
+        series_key: str | None = None,
+        series_index: int | None = None,
+        series_dir: str | Path | None = None,
     ) -> Path:
         """Write novel text to disk. Returns the file path.
 
@@ -98,7 +157,20 @@ class FileStorage:
         comparing against a file that does not exist).  Omitted → derive from
         ``(novel_id, title)``, which is correct only for first-time writes.
         """
-        path = Path(anchor) if anchor else self.novel_text_path(novel_id, title, source=source)
+        path = (
+            Path(anchor)
+            if anchor
+            else self.novel_text_path(
+                novel_id,
+                title,
+                source=source,
+                series_id=series_id,
+                series_name=series_name,
+                series_key=series_key,
+                series_index=series_index,
+                series_dir=series_dir,
+            )
+        )
         write_text_atomic(path, content, root=self._root)
         logger.info(
             f'下载: #{novel_id} "{title}" → {path} ({len(content)} 字符)',
@@ -111,6 +183,12 @@ class FileStorage:
         title: str,
         anchor: str | Path | None = None,
         source: str | None = None,
+        *,
+        series_id: int | None = None,
+        series_name: str | None = None,
+        series_key: str | None = None,
+        series_index: int | None = None,
+        series_dir: str | Path | None = None,
     ) -> str | None:
         """Read the stored text — ``None`` when there is no usable local copy.
 
@@ -122,7 +200,20 @@ class FileStorage:
         *anchor* must match what :meth:`save_novel_text` was given, or the
         comparison reads a different file than the one being written.
         """
-        path = Path(anchor) if anchor else self.novel_text_path(novel_id, title, source=source)
+        path = (
+            Path(anchor)
+            if anchor
+            else self.novel_text_path(
+                novel_id,
+                title,
+                source=source,
+                series_id=series_id,
+                series_name=series_name,
+                series_key=series_key,
+                series_index=series_index,
+                series_dir=series_dir,
+            )
+        )
         try:
             if not path.is_file() or path.stat().st_size == 0:
                 return None
@@ -194,12 +285,15 @@ class FileStorage:
             self._rmdir_if_empty(parent)
 
     def _rmdir_if_empty(self, parent: Path) -> None:
-        if resolve_within_root(parent, self._root) is not None:
+        current = parent.resolve()
+        while current != self._root and resolve_within_root(current, self._root) is not None:
             try:
-                if not any(parent.iterdir()):
-                    parent.rmdir()
+                if any(current.iterdir()):
+                    break
+                current.rmdir()
             except OSError:
-                pass
+                break
+            current = current.parent
 
 
 def _unlink(path: Path) -> None:

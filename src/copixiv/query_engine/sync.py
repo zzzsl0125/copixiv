@@ -73,8 +73,10 @@ def make_post_commit_hook(
                     return
 
                 payload = store.fetch_delta_payload(delta)
+                delete_series_ids = getattr(payload, "delete_series_ids", ())
                 has_changes = bool(
                     payload.delete_ids
+                    or delete_series_ids
                     or payload.upsert_rows
                     or payload.blocked_tags is not None
                     or payload.exclude_blocked_default is not None
@@ -84,6 +86,7 @@ def make_post_commit_hook(
                 if has_changes:
                     engine.apply_delta(
                         delete_ids=payload.delete_ids,
+                        delete_series_ids=delete_series_ids,
                         upsert_rows=payload.upsert_rows,
                         blocked_tags=payload.blocked_tags,
                         exclude_blocked_default=payload.exclude_blocked_default,

@@ -11,17 +11,19 @@ import time
 from concurrent.futures import Future
 from contextlib import suppress
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel
 
 from copixiv.core.exceptions import NotFoundError, ValidationError
-from copixiv.core.models import TaskResult
+from copixiv.core.models import SOURCE_PIXIV, EpubStatus, TaskResult
 from copixiv.db.tx import read_transaction
 from copixiv.features.novels.repo import SQLAlchemyNovelRepository, StoredNovel
 from copixiv.features.novels.use_cases.batch_operations import BATCH_ID_CHUNK_SIZE
 from copixiv.log import logger
+from copixiv.storage.epub.series_builder import SeriesBookSpec, SeriesChapterSource
 from copixiv.storage.orphan_cleanup import EXPORT_FILE_PREFIX
-from copixiv.storage.zip import build_batch_zip_to_file
+from copixiv.storage.zip import SeriesExportEntry, build_batch_zip_to_file
 from copixiv.tasks.executor import TaskContext
 from copixiv.tasks.registry import register
 
@@ -33,6 +35,7 @@ class BatchExportArgs(BaseModel):
     format_mode: str = "txt"
     zip_name: str | None = None
     naming_template: str | None = None
+    merge_series: bool = False
 
 
 _EXPORT_MAX_AGE_SECONDS = 24 * 3600
@@ -80,6 +83,34 @@ async def batch_export(args: BatchExportArgs, ctx: TaskContext) -> TaskResult:
     if not novels:
         raise ValidationError("所选小说均不存在")
 
+    export_items: list[StoredNovel | SeriesExportEntry] = []
+    if args.merge_series:
+        seen_series: set[int] = set()
+        ordered_series_ids: list[int] = []
+        for novel in novels:
+            if novel.series_id is None:
+                export_items.append(novel)
+            elif novel.series_id not in seen_series:
+                seen_series.add(novel.series_id)
+                ordered_series_ids.append(novel.series_id)
+
+        for sid in ordered_series_ids:
+
+            def _read_series(uw, sid: int = sid):
+                return SQLAlchemyNovelRepository(uw.session).get_series_book_bundle(sid)
+
+            series_meta, chapters = await read_transaction(ctx.uow, _read_series)
+            if not chapters:
+                continue
+            export_items.append(_build_series_export_entry(sid, series_meta, chapters))
+        export_items = [*export_items]  # merged books already populated above
+        total = len(export_items)
+    else:
+        export_items = list(novels)
+
+    if not export_items:
+        raise ValidationError("所选小说均不存在")
+
     await ctx.report_progress(f"批量导出进行中：打包中（共 {total} 篇）…")
 
     # Throttled progress: the zip builder (worker thread) fires every 500
@@ -107,7 +138,7 @@ async def batch_export(args: BatchExportArgs, ctx: TaskContext) -> TaskResult:
         try:
             size_bytes, added_count, missing = await asyncio.to_thread(
                 build_batch_zip_to_file,
-                novels,
+                export_items,
                 out_path,
                 args.format_mode,
                 args.naming_template,
@@ -130,6 +161,82 @@ async def batch_export(args: BatchExportArgs, ctx: TaskContext) -> TaskResult:
     if missing:
         summary += f"，缺失文件 {len(missing)} 篇"
     return TaskResult(summary=summary)
+
+
+def _build_series_export_entry(
+    series_id: int,
+    series_meta: dict[str, Any] | None,
+    chapters: list[StoredNovel],
+) -> SeriesExportEntry:
+    rep = max(chapters, key=lambda ch: (abs(ch.id), ch.id))
+    book_title = (
+        ((series_meta or {}).get("series_name") or "").strip()
+        or next((ch.series_name for ch in chapters if ch.series_name), None)
+        or rep.title
+        or f"系列 #{series_id}"
+    )
+    author_id = (
+        (series_meta or {}).get("author_id")
+        if (series_meta or {}).get("author_id") is not None
+        else (
+            rep.author_id
+            if rep.author_id is not None
+            else next((ch.author_id for ch in chapters if ch.author_id is not None), None)
+        )
+    )
+    author_name = (
+        ((series_meta or {}).get("author_name") or "").strip()
+        or rep.author_name
+        or next((ch.author_name for ch in chapters if ch.author_name), None)
+    )
+    source = (series_meta or {}).get("source") or str(rep.source or SOURCE_PIXIV)
+    total_text = sum(max(0, ch.text) for ch in chapters)
+    max_like = max(ch.like for ch in chapters)
+    max_view = max(ch.view for ch in chapters)
+    statuses = [int(ch.has_epub) for ch in chapters]
+    if EpubStatus.DONE in statuses:
+        agg_has_epub = EpubStatus.DONE
+    elif all(s == EpubStatus.MISSING_SOURCE for s in statuses):
+        agg_has_epub = EpubStatus.MISSING_SOURCE
+    elif EpubStatus.PENDING in statuses:
+        agg_has_epub = EpubStatus.PENDING
+    elif all(s == EpubStatus.NO_IMAGES for s in statuses):
+        agg_has_epub = EpubStatus.NO_IMAGES
+    else:
+        agg_has_epub = EpubStatus.NO
+    create_times = [ch.create_time for ch in chapters if ch.create_time is not None]
+    max_ct = max(create_times) if create_times else None
+    chapter_sources = [
+        SeriesChapterSource(
+            novel_id=ch.id,
+            title=ch.title,
+            series_index=ch.series_index,
+            text_path=Path(ch.path),
+            has_epub=int(ch.has_epub),
+        )
+        for ch in chapters
+        if ch.path
+    ]
+    spec = SeriesBookSpec(
+        series_id=series_id,
+        title=book_title,
+        author_name=author_name,
+        source=source,
+        chapters=chapter_sources,
+    )
+    return SeriesExportEntry(
+        spec=spec,
+        id=rep.id,
+        title=book_title,
+        author_id=author_id,
+        author_name=author_name,
+        like=max_like,
+        view=max_view,
+        text=total_text,
+        create_time=max_ct,
+        has_epub=agg_has_epub,
+        source=source,
+    )
 
 
 def _prepare_export_dir(export_dir: Path) -> None:
