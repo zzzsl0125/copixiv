@@ -908,3 +908,82 @@ async def test_esj_on_reload_fetch_novel_for_sync_and_rate_limiting():
             await plugin.fetch_novel_for_sync("bad_key", None, runtime_no_img, ())
     finally:
         await http_manager.aclose()
+
+
+@pytest.mark.asyncio
+async def test_esj_duplicate_cookies_in_jar_avoid_cookie_conflict():
+    http_manager = SourceHttpManager()
+    try:
+        plugin = EsjSourcePlugin(http_manager=http_manager, default_request_interval=0.0)
+        runtime = _make_runtime(base_url="https://www.esjzone.one")
+        cookie_cred = _make_cookie_cred(cookie="ews_key=k1; ews_token=t1; PHPSESSID=old")
+
+        client = http_manager.get_client(SOURCE_ESJ)
+        client.cookies.set("hidden", "root_val", domain="www.esjzone.one", path="/")
+        client.cookies.set("hidden", "dot_val", domain=".esjzone.one", path="/")
+        client.cookies.set("hidden", "forum_val", domain="www.esjzone.one", path="/forum")
+        client.cookies.set("hidden", "cc_val", domain="www.esjzone.cc", path="/")
+        client.cookies.set("PHPSESSID", "new", domain="www.esjzone.one", path="/")
+
+        chapter_html = (
+            "<h2>第一章 測試</h2>"
+            '<div class="single-post-meta"><a href="/my/profile?uid=77">作者</a></div>'
+            '<div class="forum-content"><p>正常正文</p></div>'
+        )
+        profile_html = '<html><a href="/my/profile?uid=777">書友甲</a><a href="/my/logout">登出</a></html>'
+
+        with respx.mock(assert_all_called=True) as mock:
+            chap_route = mock.get("https://www.esjzone.one/forum/100/200.html").mock(
+                return_value=httpx.Response(200, text=chapter_html)
+            )
+            prof_route = mock.get("https://www.esjzone.one/my/profile").mock(
+                return_value=httpx.Response(200, text=profile_html)
+            )
+
+            chapter = await plugin.fetch_chapter("100", "200", runtime, [cookie_cred])
+            assert chapter.title == "第一章 測試"
+            assert chapter.content == "正常正文"
+
+            chap_cookie = chap_route.calls[0].request.headers["cookie"]
+            assert "ews_key=k1" in chap_cookie
+            assert "ews_token=t1" in chap_cookie
+            assert "PHPSESSID=new" in chap_cookie
+            assert "PHPSESSID=old" not in chap_cookie
+            assert "hidden=forum_val" in chap_cookie
+            assert "hidden=root_val" in chap_cookie
+            assert "hidden=dot_val" in chap_cookie
+            assert "cc_val" not in chap_cookie
+
+            res = await plugin.test_connection(runtime, [cookie_cred])
+            assert res.ok is True
+            assert res.account_summary == "書友甲 (uid:777)"
+
+            prof_cookie = prof_route.calls[0].request.headers["cookie"]
+            assert "ews_key=k1" in prof_cookie
+            assert "ews_token=t1" in prof_cookie
+            assert "PHPSESSID=new" in prof_cookie
+            assert "PHPSESSID=old" not in prof_cookie
+            assert "hidden=root_val" in prof_cookie
+            assert "hidden=dot_val" in prof_cookie
+            assert "forum_val" not in prof_cookie
+            assert "cc_val" not in prof_cookie
+    finally:
+        await http_manager.aclose()
+
+
+def test_esj_on_reload_clears_cookies_on_reused_client():
+    http_manager = SourceHttpManager()
+    plugin = EsjSourcePlugin(http_manager=http_manager, default_request_interval=0.0)
+    runtime = _make_runtime(base_url="https://www.esjzone.one")
+
+    plugin.on_reload(runtime, ())
+    first_client = http_manager.get_client(SOURCE_ESJ)
+    first_client.cookies.set("hidden", "v1", domain="www.esjzone.one", path="/")
+    first_client.cookies.set("hidden", "v2", domain=".esjzone.one", path="/")
+    assert len(first_client.cookies.jar) == 2
+
+    # Unchanged runtime reuses the same httpx.AsyncClient, but cookies must still be cleared.
+    plugin.on_reload(runtime, [_make_cookie_cred()])
+    second_client = http_manager.get_client(SOURCE_ESJ)
+    assert second_client is first_client
+    assert len(second_client.cookies.jar) == 0

@@ -117,8 +117,8 @@ def _select_credential(credentials: Sequence[SourceCredentialRecord]) -> SourceC
     return None
 
 
-def _parse_cookie_pairs(cookie_str: str) -> dict[str, str]:
-    pairs: dict[str, str] = {}
+def _parse_cookie_items(cookie_str: str) -> list[tuple[str, str]]:
+    items: list[tuple[str, str]] = []
     for segment in cookie_str.split(";"):
         part = segment.strip()
         if not part or "=" not in part:
@@ -126,8 +126,21 @@ def _parse_cookie_pairs(cookie_str: str) -> dict[str, str]:
         name, _, value = part.partition("=")
         clean_name = name.strip()
         if clean_name:
-            pairs[clean_name] = value.strip()
-    return pairs
+            items.append((clean_name, value.strip()))
+    return items
+
+
+def _parse_cookie_pairs(cookie_str: str) -> dict[str, str]:
+    return dict(_parse_cookie_items(cookie_str))
+
+
+def _extract_client_cookie_items(client: httpx.AsyncClient, request_url: str) -> list[tuple[str, str]]:
+    if not client.cookies.jar:
+        return []
+    probe = httpx.Request("GET", request_url)
+    client.cookies.set_cookie_header(probe)
+    header_val = probe.headers.get("cookie")
+    return _parse_cookie_items(header_val) if header_val else []
 
 
 def _build_request_headers(
@@ -135,6 +148,8 @@ def _build_request_headers(
     client: httpx.AsyncClient,
     cookie_str: str | None,
     extra_headers: Mapping[str, str] | None = None,
+    *,
+    request_url: str | None = None,
 ) -> dict[str, str]:
     headers: dict[str, str] = {
         "User-Agent": _DEFAULT_USER_AGENT,
@@ -143,10 +158,15 @@ def _build_request_headers(
     }
     if cookie_str:
         parsed_cred = _parse_cookie_pairs(cookie_str)
-        client_cookies = dict(client.cookies)
-        merged = {**parsed_cred, **client_cookies}
-        if merged:
-            headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in merged.items())
+        target_url = request_url or f"{base_url}/"
+        client_items = _extract_client_cookie_items(client, target_url)
+        client_names = {name for name, _ in client_items}
+        merged_items = [
+            *((k, v) for k, v in parsed_cred.items() if k not in client_names),
+            *client_items,
+        ]
+        if merged_items:
+            headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in merged_items)
         else:
             headers["Cookie"] = cookie_str.strip()
     if extra_headers:
@@ -219,8 +239,9 @@ class EsjClient:
             self._default_request_interval = max(0.0, float(request_interval_sec))
 
     def reset_session(self) -> None:
-        """Clear cached password-login session markers (e.g. after credential reload)."""
+        """Clear cached password-login session markers and client cookies."""
         self._logged_in_sessions.clear()
+        self._http_manager.clear_cookies(SOURCE_ESJ)
 
     async def aclose(self) -> None:
         """Close the internal ``SourceHttpManager`` if owned by this client."""
@@ -303,7 +324,7 @@ class EsjClient:
             return cred, None
 
         login_url = f"{base_url}/inc/mem_login.php"
-        headers = _build_request_headers(base_url, client, None)
+        headers = _build_request_headers(base_url, client, None, request_url=login_url)
         resp = await self._send(
             client,
             runtime,
@@ -341,7 +362,7 @@ class EsjClient:
         base_url = resolve_esj_base_url(runtime)
         _, cookie_str = await self._ensure_auth(client, base_url, runtime, credentials)
         url = f"{base_url}/detail/{book_id}.html"
-        headers = _build_request_headers(base_url, client, cookie_str)
+        headers = _build_request_headers(base_url, client, cookie_str, request_url=url)
         resp = await self._send(client, runtime, "GET", url, headers=headers)
         return _check_response(resp, url=url)
 
@@ -360,7 +381,7 @@ class EsjClient:
         base_url = resolve_esj_base_url(runtime)
         _, cookie_str = await self._ensure_auth(client, base_url, runtime, credentials)
         chapter_url = f"{base_url}/forum/{book_id}/{chapter_id}.html"
-        headers = _build_request_headers(base_url, client, cookie_str)
+        headers = _build_request_headers(base_url, client, cookie_str, request_url=chapter_url)
 
         resp = await self._send(client, runtime, "GET", chapter_url, headers=headers)
         html = _check_response(resp, url=chapter_url)
@@ -379,7 +400,7 @@ class EsjClient:
             if unlock_token_url
             else f"{base_url}/forum/{chapter_id}/{book_id}.html"
         )
-        token_headers = _build_request_headers(base_url, client, cookie_str)
+        token_headers = _build_request_headers(base_url, client, cookie_str, request_url=token_url)
         token_resp = await self._send(
             client,
             runtime,
@@ -399,6 +420,7 @@ class EsjClient:
             client,
             cookie_str,
             extra_headers={"authorization": token},
+            request_url=pw_url,
         )
         pw_resp = await self._send(
             client,
@@ -410,7 +432,7 @@ class EsjClient:
         )
         _check_response(pw_resp, url=pw_url)
 
-        refetch_headers = _build_request_headers(base_url, client, cookie_str)
+        refetch_headers = _build_request_headers(base_url, client, cookie_str, request_url=chapter_url)
         unlocked_resp = await self._send(client, runtime, "GET", chapter_url, headers=refetch_headers)
         unlocked_html = _check_response(unlocked_resp, url=chapter_url)
         if is_password_challenge_html(unlocked_html):
@@ -431,7 +453,7 @@ class EsjClient:
 
         try:
             cred, cookie_str = await self._ensure_auth(client, base_url, runtime, credentials)
-            headers = _build_request_headers(base_url, client, cookie_str)
+            headers = _build_request_headers(base_url, client, cookie_str, request_url=profile_url)
             resp = await self._send(
                 client,
                 runtime,

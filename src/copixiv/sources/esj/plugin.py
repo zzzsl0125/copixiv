@@ -241,6 +241,7 @@ class EsjSourcePlugin(BaseSourcePlugin):
                 image_headers={"Referer": f"{base_url}/"},
                 strip_cookies=False,
             )
+            manager.clear_cookies(SOURCE_ESJ)
 
     async def fetch_book_outline(
         self,

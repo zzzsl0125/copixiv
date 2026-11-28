@@ -129,6 +129,12 @@ class SourceHttpManager:
             entry = self._entries[source]
         return entry.image_downloader
 
+    def clear_cookies(self, source: str) -> None:
+        """Clear stored cookies on the active client for *source*, if initialized."""
+        entry = self._entries.get(source)
+        if entry is not None:
+            entry.client.cookies.clear()
+
     async def aclose_retired(self) -> None:
         """Close any clients retired during prior ``configure_source`` calls."""
         retired = self._retired
